@@ -28,6 +28,10 @@ struct LaunchParams {
     float*    sample_counts;     // [width * height]
     uint8_t*  srgb_buffer;       // [width * height * 4]
 
+    // Component output buffers (for debug PNGs)
+    float*    nee_direct_buffer;       // [width * height * NUM_LAMBDA]
+    float*    photon_indirect_buffer;  // [width * height * NUM_LAMBDA]
+
     // Image dimensions
     int width;
     int height;
@@ -44,9 +48,11 @@ struct LaunchParams {
     // Rendering parameters
     int    samples_per_pixel;
     int    max_bounces;
+    int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
     int    frame_number;
     int    render_mode;          // one of RENDER_MODE_* constants
     int    is_final_render;      // 0 = debug first-hit, 1 = full path tracing
+    int    nee_light_samples;    // M: number of shadow-ray samples per hitpoint
 
     // Scene geometry (device pointers)
     float3*   vertices;          // [num_tris * 3]

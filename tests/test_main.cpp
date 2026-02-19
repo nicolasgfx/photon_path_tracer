@@ -2827,8 +2827,8 @@ TEST(OptiX, DebugFrameNonZero) {
     RenderConfig cfg;
     cfg.image_width = 8;
     cfg.image_height = 8;
-    cfg.num_photons = 500;
-    cfg.gather_radius = 0.1f;
+    cfg.num_photons = 10000;
+    cfg.gather_radius = 0.15f;
     cfg.caustic_radius = 0.05f;
     cpu_renderer.set_config(cfg);
     cpu_renderer.build_photon_maps();

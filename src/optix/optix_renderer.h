@@ -154,8 +154,19 @@ public:
     /// Launch the full final render (multi-spp, blocking)
     void render_final(const Camera& camera, const RenderConfig& config);
 
+    /// Launch a single sample of full path tracing (progressive)
+    void render_one_spp(const Camera& camera, int frame_number,
+                        int max_bounces = DEFAULT_MAX_BOUNCES);
+
     /// Read back the sRGB buffer from the device
     void download_framebuffer(FrameBuffer& fb) const;
+
+    /// Download component spectral buffers to CPU (for debug PNGs)
+    /// Returns raw spectral data [width*height*NUM_LAMBDA] floats.
+    void download_component_buffers(
+        std::vector<float>& nee_direct,
+        std::vector<float>& photon_indirect,
+        std::vector<float>& sample_counts) const;
 
     /// Trace a single ray and return the hit record (for debug hover)
     HitRecord trace_single_ray(float3 origin, float3 direction) const;
@@ -206,6 +217,10 @@ private:
     DeviceBuffer d_sample_counts_;     // float [W*H]
     DeviceBuffer d_srgb_buffer_;       // uint8 [W*H*4]
 
+    // Component output buffers (for debug PNGs)
+    DeviceBuffer d_nee_direct_buffer_;       // float [W*H*NUM_LAMBDA]
+    DeviceBuffer d_photon_indirect_buffer_;  // float [W*H*NUM_LAMBDA]
+
     // Scene geometry (device)
     DeviceBuffer d_vertices_;
     DeviceBuffer d_normals_;
@@ -253,6 +268,7 @@ private:
     int  height_      = DEFAULT_IMAGE_HEIGHT;
     bool initialised_ = false;
     int  num_emissive_ = 0;
+    float gather_radius_ = DEFAULT_GATHER_RADIUS;
 };
 
 // ---------------------------------------------------------------------
@@ -272,10 +288,16 @@ inline void OptixRenderer::resize(int w, int h) {
     d_sample_counts_.alloc(pixels * sizeof(float));
     d_srgb_buffer_.alloc(pixels * 4 * sizeof(uint8_t));
 
+    // Component buffers
+    d_nee_direct_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
+    d_photon_indirect_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
+
     // Zero the buffers
     CUDA_CHECK(cudaMemset(d_spectrum_buffer_.d_ptr, 0, d_spectrum_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
     CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr,     0, d_srgb_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
 }
 
 /// Zero the accumulation buffers without reallocating (for camera movement)
@@ -286,12 +308,39 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr, 0, d_sample_counts_.bytes));
     if (d_srgb_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr, 0, d_srgb_buffer_.bytes));
+    if (d_nee_direct_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
+    if (d_photon_indirect_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
 }
 
 inline void OptixRenderer::download_framebuffer(FrameBuffer& fb) const {
     fb.resize(width_, height_);
     CUDA_CHECK(cudaMemcpy(fb.srgb.data(), d_srgb_buffer_.d_ptr,
                           fb.srgb.size(), cudaMemcpyDeviceToHost));
+}
+
+inline void OptixRenderer::download_component_buffers(
+    std::vector<float>& nee_direct,
+    std::vector<float>& photon_indirect,
+    std::vector<float>& sample_counts) const
+{
+    size_t pixels = (size_t)width_ * height_;
+    size_t spec_size = pixels * NUM_LAMBDA;
+
+    nee_direct.resize(spec_size);
+    photon_indirect.resize(spec_size);
+    sample_counts.resize(pixels);
+
+    if (d_nee_direct_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemcpy(nee_direct.data(), d_nee_direct_buffer_.d_ptr,
+                              spec_size * sizeof(float), cudaMemcpyDeviceToHost));
+    if (d_photon_indirect_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemcpy(photon_indirect.data(), d_photon_indirect_buffer_.d_ptr,
+                              spec_size * sizeof(float), cudaMemcpyDeviceToHost));
+    if (d_sample_counts_.d_ptr)
+        CUDA_CHECK(cudaMemcpy(sample_counts.data(), d_sample_counts_.d_ptr,
+                              pixels * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
 inline void OptixRenderer::cleanup() {

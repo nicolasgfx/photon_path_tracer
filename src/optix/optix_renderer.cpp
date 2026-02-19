@@ -253,7 +253,7 @@ void OptixRenderer::upload_photon_data(
 
     std::cout << "[OptiX] Uploaded " << global_photons.size()
               << " photons to device\n";
-    (void)gather_radius;
+    gather_radius_ = gather_radius;
 }
 
 // =====================================================================
@@ -341,6 +341,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
 
     lp.num_photons       = num_photons;
     lp.max_bounces       = config.max_bounces;
+    lp.photon_max_bounces = DEBUG_PHOTON_SINGLE_BOUNCE ? 1 : config.max_bounces;
 
     // Emitter data
     lp.emissive_tri_indices = d_emissive_indices_.as<uint32_t>();
@@ -450,11 +451,18 @@ static void fill_common_params(
     const DeviceBuffer& grid_end,
     const DeviceBuffer& emissive_idx, const DeviceBuffer& emissive_cdf,
     int num_emissive, float total_emissive_power,
-    OptixTraversableHandle gas_handle)
+    OptixTraversableHandle gas_handle,
+    float gather_radius,
+    const DeviceBuffer& nee_direct_buf,
+    const DeviceBuffer& photon_indirect_buf)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
     p.srgb_buffer     = const_cast<uint8_t*>(srgb.as<uint8_t>());
+    p.nee_direct_buffer      = nee_direct_buf.d_ptr
+        ? const_cast<float*>(nee_direct_buf.as<float>()) : nullptr;
+    p.photon_indirect_buffer = photon_indirect_buf.d_ptr
+        ? const_cast<float*>(photon_indirect_buf.as<float>()) : nullptr;
     p.width           = w;
     p.height          = h;
 
@@ -491,10 +499,10 @@ static void fill_common_params(
     p.grid_sorted_indices = const_cast<uint32_t*>(grid_sorted.as<uint32_t>());
     p.grid_cell_start     = const_cast<uint32_t*>(grid_start.as<uint32_t>());
     p.grid_cell_end       = const_cast<uint32_t*>(grid_end.as<uint32_t>());
-    p.gather_radius       = DEFAULT_GATHER_RADIUS;
+    p.gather_radius       = gather_radius;
 
     if (grid_sorted.d_ptr) {
-        p.grid_cell_size  = DEFAULT_GATHER_RADIUS * HASHGRID_CELL_FACTOR;
+        p.grid_cell_size  = gather_radius * HASHGRID_CELL_FACTOR;
         p.grid_table_size = (uint32_t)(grid_start.bytes / sizeof(uint32_t));
     }
 
@@ -526,13 +534,16 @@ void OptixRenderer::render_debug_frame(
         d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
-        gas_handle_);
+        gas_handle_,
+        gather_radius_,
+        DeviceBuffer(), DeviceBuffer());
 
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
     lp.frame_number      = frame_number;
     lp.render_mode       = (int)mode;
     lp.is_final_render   = 0;  // DEBUG: first-hit + direct lighting only
+    lp.nee_light_samples = 1;  // debug uses 1 NEE sample
 
     // Upload launch params
     d_launch_params_.alloc(sizeof(LaunchParams));
@@ -540,6 +551,50 @@ void OptixRenderer::render_debug_frame(
                            sizeof(LaunchParams), cudaMemcpyHostToDevice));
 
     // Launch
+    OPTIX_CHECK(optixLaunch(
+        pipeline_,
+        nullptr,
+        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+        sizeof(LaunchParams),
+        &sbt_,
+        width_, height_, 1));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// =====================================================================
+// render_one_spp() -- launch a single sample of full path tracing
+// =====================================================================
+void OptixRenderer::render_one_spp(
+    const Camera& camera, int frame_number, int max_bounces)
+{
+    LaunchParams lp = {};
+    fill_common_params(lp,
+        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+        width_, height_, camera,
+        d_vertices_, d_normals_, d_material_ids_,
+        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_lambda_, d_photon_flux_,
+        d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
+        d_emissive_indices_, d_emissive_cdf_,
+        num_emissive_, 0.f,
+        gas_handle_,
+        gather_radius_,
+        d_nee_direct_buffer_, d_photon_indirect_buffer_);
+
+    lp.samples_per_pixel = 1;
+    lp.max_bounces       = max_bounces;
+    lp.frame_number      = frame_number;
+    lp.render_mode       = RENDER_MODE_FULL;
+    lp.is_final_render   = 1;
+    lp.nee_light_samples = DEFAULT_NEE_LIGHT_SAMPLES;
+
+    d_launch_params_.alloc(sizeof(LaunchParams));
+    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
+
     OPTIX_CHECK(optixLaunch(
         pipeline_,
         nullptr,
@@ -582,13 +637,16 @@ void OptixRenderer::render_final(
             d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
             d_emissive_indices_, d_emissive_cdf_,
             num_emissive_, 0.f,
-            gas_handle_);
+            gas_handle_,
+            gather_radius_,
+            d_nee_direct_buffer_, d_photon_indirect_buffer_);
 
         lp.samples_per_pixel = 1;
         lp.max_bounces       = config.max_bounces;
         lp.frame_number      = s;
         lp.render_mode       = RENDER_MODE_FULL;
         lp.is_final_render   = 1;  // FINAL: full path tracing
+        lp.nee_light_samples = DEFAULT_NEE_LIGHT_SAMPLES;
 
         d_launch_params_.alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,

@@ -55,6 +55,7 @@
 #include <chrono>
 #include <filesystem>
 #include <cstdio>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
@@ -266,6 +267,12 @@ struct AppState {
     bool       render_requested = false;  // R key pressed
     bool       rendering        = false;
 
+    // Progressive final render state
+    int        render_spp_done  = 0;      // samples completed so far
+    int        render_spp_total = 0;      // target spp
+    Camera     render_cam;                // frozen camera for render
+    std::chrono::high_resolution_clock::time_point render_start;
+
     // Camera angles (yaw/pitch in radians)
     float      yaw   = 0.f;     // horizontal angle
     float      pitch = 0.f;     // vertical angle
@@ -325,7 +332,8 @@ static void mouse_button_callback(GLFWwindow* window, int button,
 static void run_interactive(
     OptixRenderer& optix_renderer,
     Camera& camera,
-    const Options& opt)
+    const Options& opt,
+    const Scene& scene)
 {
     if (!glfwInit()) {
         std::cerr << "[GLFW] Failed to initialize\n";
@@ -456,49 +464,310 @@ static void run_interactive(
             g_app.camera_moved = false;
         }
 
-        // Handle "R" key: full path tracing render (uses current camera)
+        // Handle "R" key: start progressive final render
         if (g_app.render_requested && !g_app.rendering) {
             g_app.rendering = true;
-            std::cout << "\n========================================\n";
-            std::cout << "  Final Render (R key)\n";
-            std::cout << "  Camera pos: (" << camera.position.x << ", "
-                      << camera.position.y << ", " << camera.position.z << ")\n";
-            std::cout << "  Look dir:   yaw=" << g_app.yaw * 180.f / PI
-                      << " pitch=" << g_app.pitch * 180.f / PI << " deg\n";
-            std::cout << "  Output:     " << opt.output_file << "\n";
-            std::cout << "========================================\n";
+            g_app.render_spp_done  = 0;
+            g_app.render_spp_total = opt.config.samples_per_pixel;
+            g_app.render_start = std::chrono::high_resolution_clock::now();
+
+            // Freeze camera for the render
+            g_app.render_cam = camera;
+            g_app.render_cam.width  = opt.config.image_width;
+            g_app.render_cam.height = opt.config.image_height;
+            g_app.render_cam.update();
 
             optix_renderer.resize(opt.config.image_width, opt.config.image_height);
 
-            // Update camera for render resolution
-            Camera render_cam = camera;
-            render_cam.width  = opt.config.image_width;
-            render_cam.height = opt.config.image_height;
-            render_cam.update();
+            std::cout << "\n========================================\n";
+            std::cout << "  Progressive Render (R key)\n";
+            std::cout << "  Camera pos: (" << camera.position.x << ", "
+                      << camera.position.y << ", " << camera.position.z << ")\n";
+            std::cout << "  " << opt.config.image_width << "x"
+                      << opt.config.image_height << " @ "
+                      << g_app.render_spp_total << " spp\n";
+            std::cout << "  Output:     " << opt.output_file << "\n";
+            std::cout << "========================================\n";
 
-            optix_renderer.render_final(render_cam, opt.config);
+            // ── Photon debug visualization PNG (before path tracing) ─
+            {
+                const PhotonSoA& photons = optix_renderer.photons();
+                if (photons.size() > 0) {
+                    std::cout << "[Photon Debug] Rendering " << photons.size()
+                              << " photons...\n";
 
-            std::cout << "[Render] Downloading framebuffer...\n";
-            FrameBuffer final_fb;
-            optix_renderer.download_framebuffer(final_fb);
-            write_png(opt.output_file, final_fb);
+                    const int pw = opt.config.image_width;
+                    const int ph = opt.config.image_height;
 
-            // Reset debug view
-            optix_renderer.resize(win_w, win_h);
-            frame = 0;
+                    FrameBuffer photon_fb;
+                    photon_fb.resize(pw, ph);
+                    // Black background
+                    for (int i = 0; i < pw * ph; ++i) {
+                        photon_fb.srgb[i * 4 + 0] = 0;
+                        photon_fb.srgb[i * 4 + 1] = 0;
+                        photon_fb.srgb[i * 4 + 2] = 0;
+                        photon_fb.srgb[i * 4 + 3] = 255;
+                    }
+
+                    float aspect = (float)pw / (float)ph;
+                    float theta  = g_app.render_cam.fov_deg * PI / 180.0f;
+                    float half_h = tanf(theta * 0.5f);
+                    float half_w = half_h * aspect;
+                    const int DOT_RADIUS = 1;
+
+                    for (size_t i = 0; i < photons.size(); i += DEBUG_PHOTON_STRIDE) {
+                        float3 pos = make_f3(photons.pos_x[i],
+                                             photons.pos_y[i],
+                                             photons.pos_z[i]);
+                        float3 to_p = pos - g_app.render_cam.position;
+                        float depth = dot(to_p, g_app.render_cam.w * (-1.f));
+                        if (depth <= 0.f) continue;
+
+                        float u_coord = dot(to_p, g_app.render_cam.u);
+                        float v_coord = dot(to_p, g_app.render_cam.v);
+                        float sx = (u_coord / depth + half_w) / (2.f * half_w);
+                        float sy = (v_coord / depth + half_h) / (2.f * half_h);
+                        int cx = (int)(sx * pw);
+                        int cy = (int)(sy * ph);
+                        if (cx < 0 || cx >= pw || cy < 0 || cy >= ph) continue;
+
+                        Spectrum s = Spectrum::zero();
+                        s.value[photons.lambda_bin[i]] = 3.0f;
+                        float3 rgb = spectrum_to_srgb(s);
+                        uint8_t r = (uint8_t)(fminf(fmaxf(rgb.x, 0.f), 1.f) * 255.f);
+                        uint8_t g = (uint8_t)(fminf(fmaxf(rgb.y, 0.f), 1.f) * 255.f);
+                        uint8_t b = (uint8_t)(fminf(fmaxf(rgb.z, 0.f), 1.f) * 255.f);
+
+                        for (int dy = -DOT_RADIUS; dy <= DOT_RADIUS; ++dy) {
+                            for (int dx = -DOT_RADIUS; dx <= DOT_RADIUS; ++dx) {
+                                int px = cx + dx;
+                                int py = cy + dy;
+                                if (px < 0 || px >= pw || py < 0 || py >= ph) continue;
+                                int idx = py * pw + px;
+                                photon_fb.srgb[idx * 4 + 0] = r;
+                                photon_fb.srgb[idx * 4 + 1] = g;
+                                photon_fb.srgb[idx * 4 + 2] = b;
+                                photon_fb.srgb[idx * 4 + 3] = 255;
+                            }
+                        }
+                    }
+
+                    write_png("output/photon_debug.png", photon_fb);
+                    std::cout << "[Photon Debug] Saved: output/photon_debug.png\n";
+                }
+            }
+
+            // ── 1st-hit NEE debug PNG (no shadows, quick preview) ───
+            {
+                optix_renderer.render_debug_frame(
+                    g_app.render_cam, 0, RenderMode::Full, 1);
+                FrameBuffer nee_fb;
+                optix_renderer.download_framebuffer(nee_fb);
+                write_png("output/out_debug_nee.png", nee_fb);
+                std::cout << "[Debug NEE] Saved: output/out_debug_nee.png\n";
+                // Clear buffers so the progressive render starts clean
+                optix_renderer.clear_buffers();
+            }
+
+            // ── OBJ export: scene mesh + photon point cloud ─────────
+            {
+                const PhotonSoA& photons = optix_renderer.photons();
+                fs::create_directories("output");
+
+                // Count how many photons we'll actually export
+                size_t num_export = 0;
+                for (size_t i = 0; i < photons.size(); i += DEBUG_OBJ_PHOTON_STRIDE)
+                    num_export++;
+
+                // Write MTL file with one material per spectral color band
+                std::string mtl_file = "output/photon_debug.mtl";
+                {
+                    std::ofstream mtl(mtl_file);
+                    mtl.imbue(std::locale::classic());
+                    mtl << std::fixed << std::setprecision(6);
+                    mtl << "# Photon debug materials\n\n";
+                    mtl << "newmtl scene_grey\n";
+                    mtl << "Kd 0.6 0.6 0.6\n\n";
+
+                    for (int bin = 0; bin < NUM_LAMBDA; ++bin) {
+                        Spectrum s = Spectrum::zero();
+                        s.value[bin] = 3.0f;
+                        float3 rgb = spectrum_to_srgb(s);
+                        float r = fminf(fmaxf(rgb.x, 0.f), 1.f);
+                        float g = fminf(fmaxf(rgb.y, 0.f), 1.f);
+                        float b = fminf(fmaxf(rgb.z, 0.f), 1.f);
+                        mtl << "newmtl photon_" << bin << "\n";
+                        mtl << "Kd " << r << " " << g << " " << b << "\n\n";
+                    }
+                }
+
+                // Write OBJ file (using stride to keep file manageable)
+                std::string obj_file = "output/photon_debug.obj";
+                std::ofstream ofs(obj_file);
+                ofs.imbue(std::locale::classic());
+                if (ofs.is_open()) {
+                    ofs << std::fixed << std::setprecision(6);
+                    ofs << "# Photon Path Tracer - scene + photon export\n";
+                    ofs << "# Scene triangles: " << scene.triangles.size() << "\n";
+                    ofs << "# Photons exported: " << num_export
+                        << " (every " << DEBUG_OBJ_PHOTON_STRIDE << "th of "
+                        << photons.size() << ")\n";
+                    ofs << "mtllib photon_debug.mtl\n\n";
+
+                    // Scene vertices
+                    ofs << "# Scene geometry\n";
+                    for (size_t t = 0; t < scene.triangles.size(); ++t) {
+                        const auto& tri = scene.triangles[t];
+                        ofs << "v " << tri.v0.x << " " << tri.v0.y << " " << tri.v0.z << "\n";
+                        ofs << "v " << tri.v1.x << " " << tri.v1.y << " " << tri.v1.z << "\n";
+                        ofs << "v " << tri.v2.x << " " << tri.v2.y << " " << tri.v2.z << "\n";
+                    }
+
+                    // Photon micro-triangles (strided)
+                    constexpr float SZ = 0.002f;
+                    ofs << "\n# Photon micro-triangles\n";
+                    for (size_t i = 0; i < photons.size(); i += DEBUG_OBJ_PHOTON_STRIDE) {
+                        float px = photons.pos_x[i];
+                        float py = photons.pos_y[i];
+                        float pz = photons.pos_z[i];
+                        ofs << "v " << (px - SZ) << " " << (py - SZ * 0.577f) << " " << pz << "\n";
+                        ofs << "v " << (px + SZ) << " " << (py - SZ * 0.577f) << " " << pz << "\n";
+                        ofs << "v " << px        << " " << (py + SZ * 1.155f) << " " << pz << "\n";
+                    }
+
+                    // Scene faces
+                    ofs << "\nusemtl scene_grey\n";
+                    ofs << "g scene_mesh\n";
+                    for (size_t t = 0; t < scene.triangles.size(); ++t) {
+                        size_t base = t * 3 + 1;
+                        ofs << "f " << base << " " << (base+1) << " " << (base+2) << "\n";
+                    }
+
+                    // Photon faces
+                    ofs << "\ng photons\n";
+                    size_t photon_v_base = scene.triangles.size() * 3;
+                    for (int bin = 0; bin < NUM_LAMBDA; ++bin) {
+                        bool header_written = false;
+                        size_t export_idx = 0;
+                        for (size_t i = 0; i < photons.size(); i += DEBUG_OBJ_PHOTON_STRIDE, ++export_idx) {
+                            if (photons.lambda_bin[i] != bin) continue;
+                            if (!header_written) {
+                                ofs << "usemtl photon_" << bin << "\n";
+                                header_written = true;
+                            }
+                            size_t base = photon_v_base + export_idx * 3 + 1;
+                            ofs << "f " << base << " " << (base+1) << " " << (base+2) << "\n";
+                        }
+                    }
+
+                    ofs.flush();
+                    ofs.close();
+                    std::cout << "[OBJ Export] Saved: " << obj_file
+                              << " (" << scene.triangles.size() << " scene tris, "
+                              << num_export << " photon tris)\n";
+                } else {
+                    std::cerr << "[OBJ Export] Failed to open " << obj_file << "\n";
+                }
+            }
 
             g_app.render_requested = false;
-            g_app.rendering = false;
-            std::cout << "========================================\n";
-            std::cout << "  Saved: " << opt.output_file << "\n";
-            std::cout << "========================================\n\n";
         }
 
-        // Progressive OptiX debug frame (first-hit, 1 spp per iteration)
-        optix_renderer.render_debug_frame(
-            camera, frame, g_app.debug.current_mode, 1);
-        optix_renderer.download_framebuffer(display_fb);
-        frame++;
+        // Progressive rendering: one spp per main-loop iteration
+        if (g_app.rendering) {
+            optix_renderer.render_one_spp(
+                g_app.render_cam, g_app.render_spp_done,
+                opt.config.max_bounces);
+            g_app.render_spp_done++;
+
+            // Download and display the progressive result
+            optix_renderer.download_framebuffer(display_fb);
+
+            // Console progress
+            auto t_now = std::chrono::high_resolution_clock::now();
+            double elapsed = std::chrono::duration<double>(t_now - g_app.render_start).count();
+            double eta = (g_app.render_spp_done < g_app.render_spp_total)
+                ? elapsed * (g_app.render_spp_total - g_app.render_spp_done) / g_app.render_spp_done
+                : 0.0;
+            std::printf("\r  [Render] %d/%d spp  %.1fs  ETA %.1fs   ",
+                        g_app.render_spp_done, g_app.render_spp_total,
+                        elapsed, eta);
+            std::fflush(stdout);
+
+            // Check if done
+            if (g_app.render_spp_done >= g_app.render_spp_total) {
+                std::cout << "\n[Render] Done!\n";
+
+                FrameBuffer final_fb;
+                optix_renderer.download_framebuffer(final_fb);
+                write_png(opt.output_file, final_fb);
+
+                // Write component PNGs (NEE direct, Photon indirect, Combined)
+                {
+                    std::vector<float> nee_spec, photon_spec, samp_counts;
+                    optix_renderer.download_component_buffers(
+                        nee_spec, photon_spec, samp_counts);
+
+                    int cw = final_fb.width;
+                    int ch = final_fb.height;
+
+                    // Helper: spectral buffer → sRGB FrameBuffer
+                    auto spectral_to_fb = [&](const std::vector<float>& spec_buf,
+                                              FrameBuffer& fb) {
+                        fb.resize(cw, ch);
+                        for (int y = 0; y < ch; ++y) {
+                            for (int x = 0; x < cw; ++x) {
+                                int px = y * cw + x;
+                                float n = samp_counts[px];
+                                Spectrum avg = Spectrum::zero();
+                                if (n > 0.f) {
+                                    for (int k = 0; k < NUM_LAMBDA; ++k)
+                                        avg.value[k] = spec_buf[px * NUM_LAMBDA + k] / n;
+                                }
+                                float3 rgb = spectrum_to_srgb(avg);
+                                rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
+                                rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
+                                rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
+                                fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
+                                fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
+                                fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
+                                fb.srgb[px * 4 + 3] = 255;
+                            }
+                        }
+                    };
+
+                    FrameBuffer nee_fb, photon_fb, combined_fb;
+
+                    spectral_to_fb(nee_spec, nee_fb);
+                    write_png("output/out_nee_direct.png", nee_fb);
+
+                    spectral_to_fb(photon_spec, photon_fb);
+                    write_png("output/out_photon_indirect.png", photon_fb);
+
+                    // Combined = nee + photon (spectral sum, then convert)
+                    std::vector<float> combined_spec(nee_spec.size());
+                    for (size_t i = 0; i < nee_spec.size(); ++i)
+                        combined_spec[i] = nee_spec[i] + photon_spec[i];
+                    spectral_to_fb(combined_spec, combined_fb);
+                    write_png("output/out_combined.png", combined_fb);
+                }
+
+                // Reset to debug view
+                optix_renderer.resize(win_w, win_h);
+                frame = 0;
+                g_app.rendering = false;
+                std::cout << "========================================\n";
+                std::cout << "  Saved: " << opt.output_file << "\n";
+                std::cout << "  Components: out_nee_direct.png, out_photon_indirect.png, out_combined.png\n";
+                std::cout << "========================================\n\n";
+            }
+        } else {
+            // Normal debug preview (first-hit, 1 spp per iteration)
+            optix_renderer.render_debug_frame(
+                camera, frame, g_app.debug.current_mode, 1);
+            optix_renderer.download_framebuffer(display_fb);
+            frame++;
+        }
 
         // Blit to OpenGL texture
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -623,7 +892,7 @@ int main(int argc, char* argv[]) {
         std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n\n";
 
         // -- Interactive debug window (always) ------------------------
-        run_interactive(optix_renderer, camera, opt);
+        run_interactive(optix_renderer, camera, opt, scene);
 
     } catch (const std::exception& e) {
         std::cerr << "[Fatal] " << e.what() << "\n";

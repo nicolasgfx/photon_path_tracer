@@ -223,6 +223,43 @@ float dev_bsdf_pdf(float3 wi) {
     return fmaxf(0.f, wi.z) * INV_PI;
 }
 
+// == MIS weight (2-way power heuristic, device-side) ==================
+__forceinline__ __device__
+float mis_weight_2_dev(float pdf_a, float pdf_b) {
+    float a2 = pdf_a * pdf_a;
+    float b2 = pdf_b * pdf_b;
+    return a2 / fmaxf(a2 + b2, 1e-30f);
+}
+
+// == Compute light sampling PDF for a direction that hit a light =======
+__forceinline__ __device__
+float dev_light_pdf(uint32_t tri_id, float3 geo_normal, float3 wi, float t) {
+    if (params.num_emissive == 0) return 0.f;
+
+    // Find this triangle in the emissive list
+    float pdf_tri = 0.f;
+    for (int i = 0; i < params.num_emissive; ++i) {
+        if (params.emissive_tri_indices[i] == tri_id) {
+            if (i == 0) pdf_tri = params.emissive_cdf[0];
+            else pdf_tri = params.emissive_cdf[i] - params.emissive_cdf[i - 1];
+            break;
+        }
+    }
+    if (pdf_tri <= 0.f) return 0.f;
+
+    float3 v0 = params.vertices[tri_id * 3 + 0];
+    float3 v1 = params.vertices[tri_id * 3 + 1];
+    float3 v2 = params.vertices[tri_id * 3 + 2];
+    float area = length(cross(v1 - v0, v2 - v0)) * 0.5f;
+    if (area <= 0.f) return 0.f;
+
+    float cos_o = fabsf(dot(wi * (-1.f), geo_normal));
+    if (cos_o <= 0.f) return 0.f;
+
+    float dist2 = t * t;
+    return pdf_tri * (1.f / area) * dist2 / cos_o;
+}
+
 // == Debug render modes ===============================================
 
 __forceinline__ __device__
@@ -320,8 +357,10 @@ Spectrum dev_estimate_photon_density(
                 params.photon_wi_y[idx],
                 params.photon_wi_z[idx]);
 
+            // photon_wi already points away from surface toward light
+            // (stored as -direction in photon tracer) – do NOT negate
             DevONB frame = DevONB::from_normal(normal);
-            float3 wi_local = frame.world_to_local(wi_world * (-1.f));
+            float3 wi_local = frame.world_to_local(wi_world);
 
             Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local);
             float flux = params.photon_flux[idx];
@@ -333,7 +372,7 @@ Spectrum dev_estimate_photon_density(
     }
 
     if (count > 0) {
-        float norm = 1.f / (float)params.num_photons;
+        float norm = 1.5f / (float)params.num_photons; // 1.5 = Epanechnikov kernel correction
         for (int i = 0; i < NUM_LAMBDA; ++i) L.value[i] *= norm;
     }
     return L;
@@ -408,19 +447,17 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
     }
 
     // Diffuse hit: direct lighting via next-event estimation
+    // (no shadow test in debug mode -- always assume light is visible)
     Spectrum L = Spectrum::zero();
     Spectrum Kd = dev_get_Kd(cur_mat);
 
-    // Need at least one emissive triangle for NEE
     if (params.num_emissive > 0) {
-        // Sample a random emissive triangle
         float xi = rng.next_float();
         int local_idx = dev_binary_search_cdf(
             params.emissive_cdf, params.num_emissive, xi);
         if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
         uint32_t light_tri = params.emissive_tri_indices[local_idx];
 
-        // Sample point on the light triangle
         float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
         float3 lv0 = params.vertices[light_tri * 3 + 0];
         float3 lv1 = params.vertices[light_tri * 3 + 1];
@@ -432,7 +469,6 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         float3 light_normal = normalize(cross(le1, le2));
         float  light_area   = length(cross(le1, le2)) * 0.5f;
 
-        // Direction and distance to light
         float3 to_light = light_pos - cur_pos;
         float dist2 = dot(to_light, to_light);
         float dist  = sqrtf(dist2);
@@ -442,11 +478,6 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         float cos_o = -dot(wi, light_normal);
 
         if (cos_i > 0.f && cos_o > 0.f) {
-            // No shadow test in debug first-hit renderer -- always assume
-            // the light is visible for a quick, uniform preview.
-
-            // PDF of this sample: pdf_tri * pdf_pos = (1/num_emissive) * (1/area)
-            // But we use the CDF, so pdf_tri depends on emissive_cdf
             float pdf_tri;
             if (local_idx == 0)
                 pdf_tri = params.emissive_cdf[0];
@@ -460,7 +491,6 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
             uint32_t light_mat = params.material_ids[light_tri];
             Spectrum Le = dev_get_Le(light_mat);
 
-            // L = Le * Kd/pi * cos_i / pdf_solid_angle
             for (int i = 0; i < NUM_LAMBDA; ++i) {
                 L.value[i] = Le.value[i] * Kd.value[i] * INV_PI
                              * cos_i / fmaxf(pdf_solid_angle, 1e-8f);
@@ -472,11 +502,116 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
 }
 
 // =====================================================================
-// FULL PATH TRACING (final render only)
+// NEE DIRECT LIGHTING (with shadow ray)
+// M light samples per hitpoint, averaged.  Reuses the same CDF as
+// photon emission so we have ONE light distribution for the whole
+// renderer (per the spec).
 // =====================================================================
 __forceinline__ __device__
-Spectrum full_path_trace(float3 origin, float3 direction, PCGRng& rng) {
-    Spectrum L_path = Spectrum::zero();
+Spectrum dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
+                        uint32_t mat_id, PCGRng& rng)
+{
+    Spectrum L = Spectrum::zero();
+    if (params.num_emissive <= 0) return L;
+
+    const int M = (params.nee_light_samples > 0)
+                    ? params.nee_light_samples : 1;
+
+    // Build shading frame once (reused for every sample)
+    DevONB frame = DevONB::from_normal(normal);
+
+    for (int s = 0; s < M; ++s) {
+        // Step A — Sample emissive triangle from shared CDF
+        float xi = rng.next_float();
+        int local_idx = dev_binary_search_cdf(
+            params.emissive_cdf, params.num_emissive, xi);
+        if (local_idx >= params.num_emissive)
+            local_idx = params.num_emissive - 1;
+        uint32_t light_tri = params.emissive_tri_indices[local_idx];
+
+        // Step B — Sample uniform point on that triangle
+        float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+        float3 lv0 = params.vertices[light_tri * 3 + 0];
+        float3 lv1 = params.vertices[light_tri * 3 + 1];
+        float3 lv2 = params.vertices[light_tri * 3 + 2];
+        float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
+
+        float3 le1 = lv1 - lv0;
+        float3 le2 = lv2 - lv0;
+        float3 light_normal = normalize(cross(le1, le2));
+        float  light_area   = length(cross(le1, le2)) * 0.5f;
+
+        // Step C — Direction, distance, cosines
+        float3 to_light = light_pos - pos;
+        float dist2 = dot(to_light, to_light);
+        float dist  = sqrtf(dist2);
+        float3 wi   = to_light * (1.f / dist);
+
+        float cos_x = dot(wi, normal);          // cosine at shading point
+        float cos_y = -dot(wi, light_normal);   // cosine at light surface
+
+        if (cos_x <= 0.f || cos_y <= 0.f) continue; // backfacing
+
+        // Step D — Shadow ray visibility test
+        if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
+            continue;
+
+        // Step E — Evaluate emission and BSDF
+        // p_tri from CDF (same distribution as photon emission)
+        float p_tri;
+        if (local_idx == 0)
+            p_tri = params.emissive_cdf[0];
+        else
+            p_tri = params.emissive_cdf[local_idx]
+                  - params.emissive_cdf[local_idx - 1];
+
+        uint32_t light_mat = params.material_ids[light_tri];
+        Spectrum Le = dev_get_Le(light_mat);
+
+        float3 wi_local = frame.world_to_local(wi);
+        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local);
+
+        // Step F — PDF conversion: area → solid angle
+        // p_y_area  = p_tri * (1 / A_tri)
+        // p_wi      = p_y_area * (dist2 / cos_y)
+        float p_y_area = p_tri / light_area;
+        float p_wi     = p_y_area * dist2 / cos_y;
+
+        // Step G — Accumulate  f * Le * cos_x / p_wi
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            L.value[i] += f.value[i] * Le.value[i]
+                          * cos_x / fmaxf(p_wi, 1e-8f);
+        }
+    }
+
+    // Average over M samples
+    if (M > 1) {
+        float inv_M = 1.f / (float)M;
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            L.value[i] *= inv_M;
+    }
+
+    return L;
+}
+
+// =====================================================================
+// FULL PATH TRACING (final render only)
+// Hybrid: NEE (direct) + Photon density estimation (indirect)
+// Returns: combined, nee_direct, photon_indirect components separately
+// =====================================================================
+struct PathTraceResult {
+    Spectrum combined;
+    Spectrum nee_direct;
+    Spectrum photon_indirect;
+};
+
+__forceinline__ __device__
+PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng) {
+    PathTraceResult result;
+    result.combined        = Spectrum::zero();
+    result.nee_direct      = Spectrum::zero();
+    result.photon_indirect = Spectrum::zero();
+
     Spectrum throughput = Spectrum::constant(1.0f);
     bool prev_was_specular = true; // treat camera ray as specular for emission
 
@@ -486,13 +621,14 @@ Spectrum full_path_trace(float3 origin, float3 direction, PCGRng& rng) {
 
         uint32_t mat_id = hit.material_id;
 
-        // Emission: count on camera ray, after specular bounce, or if
-        // we have no emissive triangles (can't do NEE).
+        // Emission: count if camera ray or specular bounce (unoccluded path)
         if (dev_is_emissive(mat_id)) {
-            if (prev_was_specular || params.num_emissive == 0) {
-                L_path += throughput * dev_get_Le(mat_id);
+            if (prev_was_specular) {
+                Spectrum Le_contrib = throughput * dev_get_Le(mat_id);
+                result.combined   += Le_contrib;
+                result.nee_direct += Le_contrib; // attribute to direct
             }
-            break; // light surfaces don't scatter
+            break;
         }
 
         // Specular bounce (mirror)
@@ -511,71 +647,47 @@ Spectrum full_path_trace(float3 origin, float3 direction, PCGRng& rng) {
         float3 wo_local = frame.world_to_local(direction * (-1.f));
         if (wo_local.z <= 0.f) break;
 
-        // -- Direct lighting (NEE) --
-        if (params.num_emissive > 0) {
-            float xi = rng.next_float();
-            int local_idx = dev_binary_search_cdf(
-                params.emissive_cdf, params.num_emissive, xi);
-            if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
-            uint32_t light_tri = params.emissive_tri_indices[local_idx];
-
-            float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
-            float3 lv0 = params.vertices[light_tri * 3 + 0];
-            float3 lv1 = params.vertices[light_tri * 3 + 1];
-            float3 lv2 = params.vertices[light_tri * 3 + 2];
-            float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
-
-            float3 le1 = lv1 - lv0;
-            float3 le2 = lv2 - lv0;
-            float3 light_normal = normalize(cross(le1, le2));
-            float  light_area   = length(cross(le1, le2)) * 0.5f;
-
-            float3 to_light = light_pos - hit.position;
-            float dist2 = dot(to_light, to_light);
-            float dist  = sqrtf(dist2);
-            float3 wi   = to_light * (1.f / dist);
-
-            float cos_i = dot(wi, hit.shading_normal);
-            float cos_o = -dot(wi, light_normal);
-
-            if (cos_i > 0.f && cos_o > 0.f) {
-                bool visible = trace_shadow(
-                    hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON, wi, dist);
-
-                if (visible) {
-                    float pdf_tri;
-                    if (local_idx == 0) pdf_tri = params.emissive_cdf[0];
-                    else pdf_tri = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx-1];
-
-                    float geom = cos_o / dist2;
-                    float pdf_sa = pdf_tri * (1.f / light_area) / geom;
-
-                    float3 wi_local = frame.world_to_local(wi);
-                    Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local);
-                    uint32_t light_mat = params.material_ids[light_tri];
-                    Spectrum Le = dev_get_Le(light_mat);
-
-                    for (int i = 0; i < NUM_LAMBDA; ++i) {
-                        L_path.value[i] += throughput.value[i] * Le.value[i]
-                            * f.value[i] * cos_i / fmaxf(pdf_sa, 1e-8f);
-                    }
-                }
-            }
+        // ── NEE: Direct lighting via shadow ray ──────────────────
+        if (params.render_mode != RENDER_MODE_INDIRECT_ONLY) {
+            Spectrum L_nee = dev_nee_direct(
+                hit.position, hit.shading_normal, wo_local, mat_id, rng);
+            Spectrum nee_contrib = throughput * L_nee;
+            result.combined   += nee_contrib;
+            result.nee_direct += nee_contrib;
         }
 
-        // -- Indirect lighting via photon density estimation --
-        // The photon map encodes multi-bounce indirect illumination.
-        // Gathering nearby photons replaces BSDF continuation bouncing.
-        Spectrum L_photon = dev_estimate_photon_density(
-            hit.position, hit.shading_normal, wo_local, mat_id,
-            params.gather_radius);
-        L_path += throughput * L_photon;
+        // ── Photon density estimation: Indirect only ─────────────
+        if (params.render_mode != RENDER_MODE_DIRECT_ONLY) {
+            Spectrum L_photon = dev_estimate_photon_density(
+                hit.position, hit.shading_normal, wo_local, mat_id,
+                params.gather_radius);
+            Spectrum photon_contrib = throughput * L_photon;
+            result.combined        += photon_contrib;
+            result.photon_indirect += photon_contrib;
+        }
 
-        // Photon map handles all indirect transport -- no further bouncing needed.
-        break;
+        // ── BSDF continuation (multi-bounce) ─────────────────────
+        float3 wi_local = sample_cosine_hemisphere_dev(rng);
+        float cos_theta_b = wi_local.z;
+        if (cos_theta_b <= 0.f) break;
+
+        Spectrum Kd = dev_get_Kd(mat_id);
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            throughput.value[i] *= Kd.value[i];
+        }
+
+        if (bounce >= DEFAULT_MIN_BOUNCES_RR) {
+            float p_rr = fminf(DEFAULT_RR_THRESHOLD, throughput.max_component());
+            if (p_rr <= 0.f) break;
+            if (rng.next_float() >= p_rr) break;
+            throughput *= 1.0f / p_rr;
+        }
+
+        direction = frame.local_to_world(wi_local);
+        origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
     }
 
-    return L_path;
+    return result;
 }
 
 // =====================================================================
@@ -588,6 +700,8 @@ extern "C" __global__ void __raygen__render() {
     int pixel_idx = py * params.width + px;
 
     Spectrum L_accum = Spectrum::zero();
+    Spectrum L_nee_accum = Spectrum::zero();
+    Spectrum L_photon_accum = Spectrum::zero();
 
     for (int s = 0; s < params.samples_per_pixel; ++s) {
         PCGRng rng = PCGRng::seed(
@@ -605,20 +719,31 @@ extern "C" __global__ void __raygen__render() {
             + params.cam_vertical * v
             - params.cam_pos);
 
-        Spectrum L;
         if (params.is_final_render) {
-            L = full_path_trace(origin, direction, rng);
+            PathTraceResult ptr = full_path_trace(origin, direction, rng);
+            L_accum        += ptr.combined;
+            L_nee_accum    += ptr.nee_direct;
+            L_photon_accum += ptr.photon_indirect;
         } else {
-            L = debug_first_hit(origin, direction, rng);
+            Spectrum L = debug_first_hit(origin, direction, rng);
+            L_accum += L;
         }
-
-        L_accum += L;
     }
 
-    // Progressive accumulation
+    // Progressive accumulation (combined)
     for (int i = 0; i < NUM_LAMBDA; ++i)
         params.spectrum_buffer[pixel_idx * NUM_LAMBDA + i] += L_accum.value[i];
     params.sample_counts[pixel_idx] += (float)params.samples_per_pixel;
+
+    // Component accumulation (only during final render)
+    if (params.is_final_render && params.nee_direct_buffer) {
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            params.nee_direct_buffer[pixel_idx * NUM_LAMBDA + i] += L_nee_accum.value[i];
+    }
+    if (params.is_final_render && params.photon_indirect_buffer) {
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            params.photon_indirect_buffer[pixel_idx * NUM_LAMBDA + i] += L_photon_accum.value[i];
+    }
 
     // Tonemap to sRGB
     float n_samples = params.sample_counts[pixel_idx];
@@ -711,7 +836,7 @@ extern "C" __global__ void __raygen__photon_trace() {
     float3 origin    = pos + geo_n * OPTIX_SCENE_EPSILON;
     float3 direction = world_dir;
 
-    for (int bounce = 0; bounce < params.max_bounces; ++bounce) {
+    for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
         if (!hit.hit) break;
 
@@ -721,7 +846,7 @@ extern "C" __global__ void __raygen__photon_trace() {
         if (dev_is_emissive(hit_mat)) break;
 
         // Store photon at diffuse surfaces (skip bounce 0 = direct lighting,
-        // which is handled by NEE in the render pass)
+        // which is handled by NEE in the camera render pass).
         if (!dev_is_specular(hit_mat) && bounce > 0) {
             uint32_t slot = atomicAdd(params.out_photon_count, 1u);
             if (slot < (uint32_t)params.max_stored_photons) {
