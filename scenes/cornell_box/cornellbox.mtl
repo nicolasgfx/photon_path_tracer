@@ -1,0 +1,40 @@
+# Cornell Box materials (generated from subdivision mesh)
+# 13056 triangles, 6 materials
+
+newmtl White
+Kd 0.73 0.73 0.73
+Ka 0.0000 0.0000 0.0000
+Ks 0.0000 0.0000 0.0000
+illum 1
+
+newmtl Red
+Kd 0.63 0.065 0.05
+Ka 0.0000 0.0000 0.0000
+Ks 0.0000 0.0000 0.0000
+illum 1
+
+newmtl Green
+Kd 0.15 0.45 0.09
+Ka 0.0000 0.0000 0.0000
+Ks 0.0000 0.0000 0.0000
+illum 1
+
+newmtl Light
+Kd 0.78 0.78 0.78
+Ka 0.0000 0.0000 0.0000
+Ks 0.0000 0.0000 0.0000
+Ke 18.4 15.6 8
+illum 1
+
+newmtl ShortBox
+Kd 0.73 0.73 0.73
+Ka 0.0000 0.0000 0.0000
+Ks 0.0000 0.0000 0.0000
+illum 1
+
+newmtl TallBox
+Kd 0.73 0.73 0.73
+Ka 0.0000 0.0000 0.0000
+Ks 0.0000 0.0000 0.0000
+illum 1
+

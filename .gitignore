@@ -5,7 +5,9 @@
 *.slo
 *.lo
 *.o
+# Note: *.obj excluded below but scene .obj files are in scenes/
 *.obj
+!scenes/**/*.obj
 
 # Precompiled Headers
 *.gch
@@ -39,3 +41,14 @@
 
 # debug information files
 *.dwo
+
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# Renderer output
+*.ppm
+*.png
+*.hdr
+*.exr

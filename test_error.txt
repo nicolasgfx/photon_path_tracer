@@ -1,0 +1,174 @@
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-153876-keya4f71d959b6b6ec453cfa1cecd5bc6e0-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :     6
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   183
+	instruction(s) in entry functions    :  6192
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][2][PIPELINE] Only single gas graphs are enabled but "maxTraversableGraphDepth"  is not 1
+[OptiX] Error 7001 at D:\Dev\photon_path_tracer\photon_path_tracer\src\optix\optix_renderer.cpp:770
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-153876-keya4f71d959b6b6ec453cfa1cecd5bc6e0-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :     6
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   183
+	instruction(s) in entry functions    :  6192
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][2][PIPELINE] Only single gas graphs are enabled but "maxTraversableGraphDepth"  is not 1
+[OptiX] Error 7001 at D:\Dev\photon_path_tracer\photon_path_tracer\src\optix\optix_renderer.cpp:770
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-153876-keya4f71d959b6b6ec453cfa1cecd5bc6e0-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :     6
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   183
+	instruction(s) in entry functions    :  6192
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][2][PIPELINE] Only single gas graphs are enabled but "maxTraversableGraphDepth"  is not 1
+[OptiX] Error 7001 at D:\Dev\photon_path_tracer\photon_path_tracer\src\optix\optix_renderer.cpp:770
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-153876-keya4f71d959b6b6ec453cfa1cecd5bc6e0-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :     6
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   183
+	instruction(s) in entry functions    :  6192
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][2][PIPELINE] Only single gas graphs are enabled but "maxTraversableGraphDepth"  is not 1
+[OptiX] Error 7001 at D:\Dev\photon_path_tracer\photon_path_tracer\src\optix\optix_renderer.cpp:770
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-153876-keya4f71d959b6b6ec453cfa1cecd5bc6e0-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :     6
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   183
+	instruction(s) in entry functions    :  6192
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][2][PIPELINE] Only single gas graphs are enabled but "maxTraversableGraphDepth"  is not 1
+[OptiX] Error 7001 at D:\Dev\photon_path_tracer\photon_path_tracer\src\optix\optix_renderer.cpp:770
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-153876-keya4f71d959b6b6ec453cfa1cecd5bc6e0-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :     6
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   183
+	instruction(s) in entry functions    :  6192
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][2][PIPELINE] Only single gas graphs are enabled but "maxTraversableGraphDepth"  is not 1
+[OptiX] Error 7001 at D:\Dev\photon_path_tracer\photon_path_tracer\src\optix\optix_renderer.cpp:770
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-153876-keya4f71d959b6b6ec453cfa1cecd5bc6e0-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :     6
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   183
+	instruction(s) in entry functions    :  6192
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][2][PIPELINE] Only single gas graphs are enabled but "maxTraversableGraphDepth"  is not 1
+[OptiX] Error 7001 at D:\Dev\photon_path_tracer\photon_path_tracer\src\optix\optix_renderer.cpp:770
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "3.5 MiB"

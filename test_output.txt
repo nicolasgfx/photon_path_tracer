@@ -1,0 +1,510 @@
+[==========] Running 152 tests from 25 test suites.
+[----------] Global test environment set-up.
+[----------] 10 tests from VectorMath
+[ RUN      ] VectorMath.Addition
+[       OK ] VectorMath.Addition
+[ RUN      ] VectorMath.Subtraction
+[       OK ] VectorMath.Subtraction
+[ RUN      ] VectorMath.ScalarMultiply
+[       OK ] VectorMath.ScalarMultiply
+[ RUN      ] VectorMath.DotProduct
+[       OK ] VectorMath.DotProduct
+[ RUN      ] VectorMath.CrossProduct
+[       OK ] VectorMath.CrossProduct
+[ RUN      ] VectorMath.Length
+[       OK ] VectorMath.Length
+[ RUN      ] VectorMath.Normalize
+[       OK ] VectorMath.Normalize
+[ RUN      ] VectorMath.Negation
+[       OK ] VectorMath.Negation
+[ RUN      ] VectorMath.PlusEquals
+[       OK ] VectorMath.PlusEquals
+[ RUN      ] VectorMath.FminFmax
+[       OK ] VectorMath.FminFmax
+[----------] 4 tests from ONB
+[ RUN      ] ONB.FromUpNormal
+[       OK ] ONB.FromUpNormal
+[ RUN      ] ONB.FromArbitraryNormal
+[       OK ] ONB.FromArbitraryNormal
+[ RUN      ] ONB.RoundTripLocalWorld
+[       OK ] ONB.RoundTripLocalWorld
+[ RUN      ] ONB.NormalMapsToLocalZ
+[       OK ] ONB.NormalMapsToLocalZ
+[----------] 19 tests from Spectrum
+[ RUN      ] Spectrum.ZeroAndConstant
+[       OK ] Spectrum.ZeroAndConstant
+[ RUN      ] Spectrum.Arithmetic
+[       OK ] Spectrum.Arithmetic
+[ RUN      ] Spectrum.PlusEqualsAndTimesEquals
+[       OK ] Spectrum.PlusEqualsAndTimesEquals
+[ RUN      ] Spectrum.SumAndMax
+[       OK ] Spectrum.SumAndMax
+[ RUN      ] Spectrum.LambdaOfBin
+[       OK ] Spectrum.LambdaOfBin
+[ RUN      ] Spectrum.CIE_Y_PeakNear555nm
+[       OK ] Spectrum.CIE_Y_PeakNear555nm
+[ RUN      ] Spectrum.CIE_NonNegativeInVisibleRange
+[       OK ] Spectrum.CIE_NonNegativeInVisibleRange
+[ RUN      ] Spectrum.WhiteSpectrumToSRGB
+[       OK ] Spectrum.WhiteSpectrumToSRGB
+[ RUN      ] Spectrum.ZeroSpectrumToBlack
+[       OK ] Spectrum.ZeroSpectrumToBlack
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_Red
+[       OK ] Spectrum.RGBToSpectrumReflectance_Red
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_Green
+[       OK ] Spectrum.RGBToSpectrumReflectance_Green
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_Blue
+[       OK ] Spectrum.RGBToSpectrumReflectance_Blue
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_NonNegative
+[       OK ] Spectrum.RGBToSpectrumReflectance_NonNegative
+[ RUN      ] Spectrum.BlackbodyPositive
+[       OK ] Spectrum.BlackbodyPositive
+[ RUN      ] Spectrum.BlackbodyPeakWavelength
+[       OK ] Spectrum.BlackbodyPeakWavelength
+[ RUN      ] Spectrum.SRGBGammaLinearizationZero
+[       OK ] Spectrum.SRGBGammaLinearizationZero
+[ RUN      ] Spectrum.SRGBGammaLinearizationOne
+[       OK ] Spectrum.SRGBGammaLinearizationOne
+[ RUN      ] Spectrum.RGBRoundTrip
+[       OK ] Spectrum.RGBRoundTrip
+[ RUN      ] Spectrum.BlackbodyPlanckFormula
+[       OK ] Spectrum.BlackbodyPlanckFormula
+[----------] 3 tests from RNG
+[ RUN      ] RNG.UniformDistribution
+[       OK ] RNG.UniformDistribution
+[ RUN      ] RNG.DifferentSeeds
+[       OK ] RNG.DifferentSeeds
+[ RUN      ] RNG.Reproducibility
+[       OK ] RNG.Reproducibility
+[----------] 8 tests from Sampling
+[ RUN      ] Sampling.CosineHemispherePDFIntegratesToOne
+[       OK ] Sampling.CosineHemispherePDFIntegratesToOne
+[ RUN      ] Sampling.CosineHemisphereSamplesOnUnitSphere
+[       OK ] Sampling.CosineHemisphereSamplesOnUnitSphere
+[ RUN      ] Sampling.CosineHemisphereMeanCosTheta
+[       OK ] Sampling.CosineHemisphereMeanCosTheta
+[ RUN      ] Sampling.UniformHemisphereSamplesValid
+[       OK ] Sampling.UniformHemisphereSamplesValid
+[ RUN      ] Sampling.UniformSphereSamplesValid
+[       OK ] Sampling.UniformSphereSamplesValid
+[ RUN      ] Sampling.TriangleSamplingBarycentricValid
+[       OK ] Sampling.TriangleSamplingBarycentricValid
+[ RUN      ] Sampling.TriangleSamplingUniform
+[       OK ] Sampling.TriangleSamplingUniform
+[ RUN      ] Sampling.CosineHemispherePDFIntegration
+[       OK ] Sampling.CosineHemispherePDFIntegration
+[----------] 8 tests from MIS
+[ RUN      ] MIS.PowerHeuristic2_Symmetric
+[       OK ] MIS.PowerHeuristic2_Symmetric
+[ RUN      ] MIS.PowerHeuristic2_Dominance
+[       OK ] MIS.PowerHeuristic2_Dominance
+[ RUN      ] MIS.PowerHeuristic2_ZeroPDFs
+[       OK ] MIS.PowerHeuristic2_ZeroPDFs
+[ RUN      ] MIS.PowerHeuristic3_Symmetric
+[       OK ] MIS.PowerHeuristic3_Symmetric
+[ RUN      ] MIS.PowerHeuristic3_SumsToOne
+[       OK ] MIS.PowerHeuristic3_SumsToOne
+[ RUN      ] MIS.MISWeight3_Consistent
+[       OK ] MIS.MISWeight3_Consistent
+[ RUN      ] MIS.MISLightSampleContribution
+[       OK ] MIS.MISLightSampleContribution
+[ RUN      ] MIS.MISBSDFSampleContribution
+[       OK ] MIS.MISBSDFSampleContribution
+[----------] 5 tests from AliasTable
+[ RUN      ] AliasTable.UniformWeights
+[       OK ] AliasTable.UniformWeights
+[ RUN      ] AliasTable.SamplingMatchesPDF
+[       OK ] AliasTable.SamplingMatchesPDF
+[ RUN      ] AliasTable.SingleElement
+[       OK ] AliasTable.SingleElement
+[ RUN      ] AliasTable.ZeroWeightElement
+[       OK ] AliasTable.ZeroWeightElement
+[ RUN      ] AliasTable.PDFSumsToOne
+[       OK ] AliasTable.PDFSumsToOne
+[----------] 11 tests from Triangle
+[ RUN      ] Triangle.HitCentreOfTriangle
+[       OK ] Triangle.HitCentreOfTriangle
+[ RUN      ] Triangle.MissTriangle
+[       OK ] Triangle.MissTriangle
+[ RUN      ] Triangle.ParallelRay
+[       OK ] Triangle.ParallelRay
+[ RUN      ] Triangle.BehindRay
+[       OK ] Triangle.BehindRay
+[ RUN      ] Triangle.EdgeHit
+[       OK ] Triangle.EdgeHit
+[ RUN      ] Triangle.Area
+[       OK ] Triangle.Area
+[ RUN      ] Triangle.GeometricNormal
+[       OK ] Triangle.GeometricNormal
+[ RUN      ] Triangle.InterpolatePosition
+[       OK ] Triangle.InterpolatePosition
+[ RUN      ] Triangle.DegenerateZeroArea
+[       OK ] Triangle.DegenerateZeroArea
+[ RUN      ] Triangle.CollinearVertices
+[       OK ] Triangle.CollinearVertices
+[ RUN      ] Triangle.InterpolateNormal
+[       OK ] Triangle.InterpolateNormal
+[----------] 5 tests from AABB
+[ RUN      ] AABB.RayHitsBox
+[       OK ] AABB.RayHitsBox
+[ RUN      ] AABB.RayMissesBox
+[       OK ] AABB.RayMissesBox
+[ RUN      ] AABB.RayInsideBox
+[       OK ] AABB.RayInsideBox
+[ RUN      ] AABB.Expand
+[       OK ] AABB.Expand
+[ RUN      ] AABB.LongestAxis
+[       OK ] AABB.LongestAxis
+[----------] 5 tests from Fresnel
+[ RUN      ] Fresnel.SchlickAtNormalIncidence
+[       OK ] Fresnel.SchlickAtNormalIncidence
+[ RUN      ] Fresnel.SchlickAtGrazingAngle
+[       OK ] Fresnel.SchlickAtGrazingAngle
+[ RUN      ] Fresnel.SchlickMonotonic
+[       OK ] Fresnel.SchlickMonotonic
+[ RUN      ] Fresnel.DielectricNormalIncidence
+[       OK ] Fresnel.DielectricNormalIncidence
+[ RUN      ] Fresnel.DielectricTotalInternalReflection
+[       OK ] Fresnel.DielectricTotalInternalReflection
+[----------] 5 tests from GGX
+[ RUN      ] GGX.NormalizationIntegral
+[       OK ] GGX.NormalizationIntegral
+[ RUN      ] GGX.DValueAtNormal
+[       OK ] GGX.DValueAtNormal
+[ RUN      ] GGX.SmithGeometryRange
+[       OK ] GGX.SmithGeometryRange
+[ RUN      ] GGX.VNDFSamplingPDFConsistency
+[       OK ] GGX.VNDFSamplingPDFConsistency
+[ RUN      ] GGX.SmithGSymmetry
+[       OK ] GGX.SmithGSymmetry
+[----------] 9 tests from BSDF
+[ RUN      ] BSDF.LambertianEnergyConservation
+[       OK ] BSDF.LambertianEnergyConservation
+[ RUN      ] BSDF.LambertianPDFConsistency
+[       OK ] BSDF.LambertianPDFConsistency
+[ RUN      ] BSDF.MirrorReflection
+[       OK ] BSDF.MirrorReflection
+[ RUN      ] BSDF.GlassSampleValid
+[       OK ] BSDF.GlassSampleValid
+[ RUN      ] BSDF.GlossyEnergyBound
+[       OK ] BSDF.GlossyEnergyBound
+[ RUN      ] BSDF.GlossyPDFConsistency
+[       OK ] BSDF.GlossyPDFConsistency
+[ RUN      ] BSDF.EvaluateNonNegative
+[       OK ] BSDF.EvaluateNonNegative
+[ RUN      ] BSDF.BelowHemisphereReturnsZero
+[       OK ] BSDF.BelowHemisphereReturnsZero
+[ RUN      ] BSDF.GlossyEnergyAtGrazingAngle
+[       OK ] BSDF.GlossyEnergyAtGrazingAngle
+[----------] 6 tests from HashGrid
+[ RUN      ] HashGrid.BuildAndQueryBasic
+[       OK ] HashGrid.BuildAndQueryBasic
+[ RUN      ] HashGrid.QueryDistanceFilter
+[       OK ] HashGrid.QueryDistanceFilter
+[ RUN      ] HashGrid.EmptyGrid
+[       OK ] HashGrid.EmptyGrid
+[ RUN      ] HashGrid.AllPhotonsFound
+[       OK ] HashGrid.AllPhotonsFound
+[ RUN      ] HashGrid.CellCoordConsistency
+[       OK ] HashGrid.CellCoordConsistency
+[ RUN      ] HashGrid.NegativeCoordinates
+[       OK ] HashGrid.NegativeCoordinates
+[----------] 8 tests from DensityEstimator
+[ RUN      ] DensityEstimator.SurfaceConsistency_PlaneDistReject
+[       OK ] DensityEstimator.SurfaceConsistency_PlaneDistReject
+[ RUN      ] DensityEstimator.SurfaceConsistency_DirectionReject
+[       OK ] DensityEstimator.SurfaceConsistency_DirectionReject
+[ RUN      ] DensityEstimator.ValidPhotonContributes
+[       OK ] DensityEstimator.ValidPhotonContributes
+[ RUN      ] DensityEstimator.BackFacingNearbyTriangleRejected
+[       OK ] DensityEstimator.BackFacingNearbyTriangleRejected
+[ RUN      ] DensityEstimator.ThinWallDoubleSided
+[       OK ] DensityEstimator.ThinWallDoubleSided
+[ RUN      ] DensityEstimator.SameCellDifferentFacingRejected
+[       OK ] DensityEstimator.SameCellDifferentFacingRejected
+[ RUN      ] DensityEstimator.NormalizationFactor
+[       OK ] DensityEstimator.NormalizationFactor
+[ RUN      ] DensityEstimator.EpanechnikovKernelCorrection
+[       OK ] DensityEstimator.EpanechnikovKernelCorrection
+[----------] 3 tests from Kernel
+[ RUN      ] Kernel.EpanechnikovBoundary
+[       OK ] Kernel.EpanechnikovBoundary
+[ RUN      ] Kernel.EpanechnikovMonotonic
+[       OK ] Kernel.EpanechnikovMonotonic
+[ RUN      ] Kernel.BoxBoundary
+[       OK ] Kernel.BoxBoundary
+[----------] 2 tests from MISWeights
+[ RUN      ] MISWeights.MISWeight2_NonNegative
+[       OK ] MISWeights.MISWeight2_NonNegative
+[ RUN      ] MISWeights.MISWeight3_NonNegative
+[       OK ] MISWeights.MISWeight3_NonNegative
+[----------] 3 tests from ReflectRefract
+[ RUN      ] ReflectRefract.ReflectLocal
+[       OK ] ReflectRefract.ReflectLocal
+[ RUN      ] ReflectRefract.RefractLocalSnellsLaw
+[       OK ] ReflectRefract.RefractLocalSnellsLaw
+[ RUN      ] ReflectRefract.TotalInternalReflection
+[       OK ] ReflectRefract.TotalInternalReflection
+[----------] 4 tests from Camera
+[ RUN      ] Camera.RayThroughCenter
+[       OK ] Camera.RayThroughCenter
+[ RUN      ] Camera.CornellBoxCameraSetup
+[       OK ] Camera.CornellBoxCameraSetup
+[ RUN      ] Camera.CenterPixelRayDirection
+[       OK ] Camera.CenterPixelRayDirection
+[ RUN      ] Camera.CornerRaysDiverge
+[       OK ] Camera.CornerRaysDiverge
+[----------] 2 tests from PhotonSoA
+[ RUN      ] PhotonSoA.PushBackAndGet
+[       OK ] PhotonSoA.PushBackAndGet
+[ RUN      ] PhotonSoA.ClearWorks
+[       OK ] PhotonSoA.ClearWorks
+[----------] 2 tests from BSDFReciprocity
+[ RUN      ] BSDFReciprocity.LambertianReciprocity
+[       OK ] BSDFReciprocity.LambertianReciprocity
+[ RUN      ] BSDFReciprocity.GlossyMetalReciprocity
+[       OK ] BSDFReciprocity.GlossyMetalReciprocity
+[----------] 2 tests from GlassFresnel
+[ RUN      ] GlassFresnel.EnergyBalance
+[       OK ] GlassFresnel.EnergyBalance
+[ RUN      ] GlassFresnel.GlassSampleReflectRefractBalance
+[       OK ] GlassFresnel.GlassSampleReflectRefractBalance
+[----------] 2 tests from FrameBuffer
+[ RUN      ] FrameBuffer.ZeroGivesBlack
+[       OK ] FrameBuffer.ZeroGivesBlack
+[ RUN      ] FrameBuffer.AccumulateAndTonemap
+[       OK ] FrameBuffer.AccumulateAndTonemap
+[----------] 3 tests from Material
+[ RUN      ] Material.IsEmissive
+[       OK ] Material.IsEmissive
+[ RUN      ] Material.IsSpecular
+[       OK ] Material.IsSpecular
+[ RUN      ] Material.MeanEmission
+[       OK ] Material.MeanEmission
+[----------] 15 tests from CornellBox
+[ RUN      ] CornellBox.LoadScene
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.LoadScene
+[ RUN      ] CornellBox.EmissiveDistribution
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.EmissiveDistribution
+[ RUN      ] CornellBox.BVHMatchesBruteForce
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.BVHMatchesBruteForce
+[ RUN      ] CornellBox.CenterRayHitsSomething
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.CenterRayHitsSomething
+[ RUN      ] CornellBox.FloorRayHitsFloor
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.FloorRayHitsFloor
+[ RUN      ] CornellBox.ShadowRayToLight
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.ShadowRayToLight
+[ RUN      ] CornellBox.ShadowRayBlockedByGeometry
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.ShadowRayBlockedByGeometry
+[ RUN      ] CornellBox.EmitterSamplesValid
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.EmitterSamplesValid
+[ RUN      ] CornellBox.DirectLightFromFloor
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.DirectLightFromFloor
+[ RUN      ] CornellBox.DirectLightPDFConsistency
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.DirectLightPDFConsistency
+[ RUN      ] CornellBox.PhotonTracingProducesPhotons
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonTracingProducesPhotons
+[ RUN      ] CornellBox.PhotonPositionsOnSurfaces
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonPositionsOnSurfaces
+[ RUN      ] CornellBox.PhotonFluxPositiveFinite
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonFluxPositiveFinite
+[ RUN      ] CornellBox.PhotonDensityOnFloor
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonDensityOnFloor
+[ RUN      ] CornellBox.SmallRenderProducesValidImage
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 1000 photons in 73.2211 ms
+[Photon] Global map:  2608 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (2608 buckets)
+[Render] 0%[Render] 4%[Render] 9%[Render] 14%[Render] 18%[Render] 23%[Render] 28%[Render] 32%[Render] 37%[Render] 42%[Render] 46%[Render] 51%[Render] 56%[Render] 60%[Render] 65%[Render] 70%[Render] 75%[Render] 79%[Render] 84%[Render] 89%[Render] 93%[Render] 98%[Render] 100%  (0.0250884 s, 2 spp)
+[       OK ] CornellBox.SmallRenderProducesValidImage
+[----------] 8 tests from OptiX
+[ RUN      ] OptiX.Initialization
+[OptiX] Context created
+[OptiX] Renderer initialised
+[       OK ] OptiX.Initialization
+[ RUN      ] OptiX.AccelBuild
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX] Module created from PTX (153876 bytes)
+[OptiX] Program groups created (render + photon trace)
+D:\Dev\photon_path_tracer\photon_path_tracer\tests\test_main.cpp(2766): error: Expected: renderer.build_accel(scene) doesn't throw an exception.
+  Actual: it throws std::runtime_error with description "OptiX error".
+build_accel should complete without error
+
+[  FAILED  ] OptiX.AccelBuild
+[ RUN      ] OptiX.SceneDataUpload
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX] Module created from PTX (153876 bytes)
+[OptiX] Program groups created (render + photon trace)
+unknown file: error: C++ exception with description "OptiX error" thrown in the test body.
+
+[  FAILED  ] OptiX.SceneDataUpload
+[ RUN      ] OptiX.PhotonDataUpload
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 500 photons in 36.6532 ms
+[Photon] Global map:  1300 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1300 buckets)
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX] Module created from PTX (153876 bytes)
+[OptiX] Program groups created (render + photon trace)
+unknown file: error: C++ exception with description "OptiX error" thrown in the test body.
+
+[  FAILED  ] OptiX.PhotonDataUpload
+[ RUN      ] OptiX.DebugFrameNonZero
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 500 photons in 36.5973 ms
+[Photon] Global map:  1300 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1300 buckets)
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX] Module created from PTX (153876 bytes)
+[OptiX] Program groups created (render + photon trace)
+unknown file: error: C++ exception with description "OptiX error" thrown in the test body.
+
+[  FAILED  ] OptiX.DebugFrameNonZero
+[ RUN      ] OptiX.NormalsDebugMode
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 100 photons in 8.2817 ms
+[Photon] Global map:  298 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1024 buckets)
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX] Module created from PTX (153876 bytes)
+[OptiX] Program groups created (render + photon trace)
+unknown file: error: C++ exception with description "OptiX error" thrown in the test body.
+
+[  FAILED  ] OptiX.NormalsDebugMode
+[ RUN      ] OptiX.FinalRenderProducesValid
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 500 photons in 36.6841 ms
+[Photon] Global map:  1300 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1300 buckets)
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX] Module created from PTX (153876 bytes)
+[OptiX] Program groups created (render + photon trace)
+unknown file: error: C++ exception with description "OptiX error" thrown in the test body.
+
+[  FAILED  ] OptiX.FinalRenderProducesValid
+[ RUN      ] OptiX.ResizeFramebuffer
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 100 photons in 8.3242 ms
+[Photon] Global map:  298 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1024 buckets)
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX] Module created from PTX (153876 bytes)
+[OptiX] Program groups created (render + photon trace)
+unknown file: error: C++ exception with description "OptiX error" thrown in the test body.
+
+[  FAILED  ] OptiX.ResizeFramebuffer
+[----------] Global test environment tear-down
+[==========] 152 tests from 25 test suites ran.
+[  PASSED  ] 145 tests.
+[  FAILED  ] 7 tests, listed below:
+[  FAILED  ] OptiX.AccelBuild
+[  FAILED  ] OptiX.SceneDataUpload
+[  FAILED  ] OptiX.PhotonDataUpload
+[  FAILED  ] OptiX.DebugFrameNonZero
+[  FAILED  ] OptiX.NormalsDebugMode
+[  FAILED  ] OptiX.FinalRenderProducesValid
+[  FAILED  ] OptiX.ResizeFramebuffer
+
+ 7 FAILED TESTS

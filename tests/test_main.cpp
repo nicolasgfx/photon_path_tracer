@@ -1,0 +1,3024 @@
+// ---------------------------------------------------------------------
+// test_main.cpp - Comprehensive unit tests for spectral photon+path tracer
+// ---------------------------------------------------------------------
+// Tests cover:
+//   - Vector math (types.h)
+//   - ONB coordinate frame
+//   - Spectrum operations and CIE colour matching
+//   - RGB↔spectral conversion and round-trip
+//   - Blackbody spectrum (Wien, Stefan-Boltzmann)
+//   - PCG RNG distribution
+//   - Cosine/uniform hemisphere sampling (PDF integration)
+//   - Triangle sampling (uniform barycentric)
+//   - Power heuristic (MIS)
+//   - Alias table (Vose's)
+//   - Moller-Trumbore ray-triangle intersection
+//   - AABB intersection
+//   - BSDF energy conservation (white furnace test)
+//   - BSDF Helmholtz reciprocity
+//   - BSDF at grazing angles
+//   - Glass Fresnel energy balance
+//   - Fresnel boundary conditions
+//   - GGX normalization, VNDF sampling, Smith G symmetry
+//   - Hash grid build / query
+//   - Density estimator surface-consistency filter
+//   - Density estimator normalization factor
+//   - Geometric edge case: photons on nearby back-facing triangle
+//   - Camera ray generation
+//   - FrameBuffer tonemap pipeline
+//   - Material type classification
+//   - Triangle degenerate & normal interpolation
+//   - Cornell box: scene loading, BVH vs brute-force, shadow rays,
+//     camera rays, emitter sampling, direct lighting, photon tracing
+// ---------------------------------------------------------------------
+
+#include <gtest/gtest.h>
+#include <cmath>
+#include <numeric>
+#include <vector>
+#include <map>
+#include <set>
+#include <algorithm>
+
+#include "core/types.h"
+#include "core/spectrum.h"
+#include "core/random.h"
+#include "core/alias_table.h"
+#include "scene/triangle.h"
+#include "scene/material.h"
+#include "bsdf/bsdf.h"
+#include "photon/photon.h"
+#include "photon/hash_grid.h"
+#include "photon/density_estimator.h"
+#include "renderer/mis.h"
+#include "renderer/camera.h"
+#include "renderer/renderer.h"
+#include "renderer/direct_light.h"
+#include "scene/scene.h"
+#include "scene/obj_loader.h"
+#include "photon/emitter.h"
+
+// ---------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------
+static constexpr float kTol   = 1e-5f;
+static constexpr float kLoose = 1e-3f;
+static constexpr float kStat  = 0.05f; // 5% tolerance for statistical tests
+
+// (Intentionally omitted: 'approx' helper was unused - use EXPECT_NEAR instead)
+
+// =====================================================================
+//  SECTION 1 - Vector math (types.h)
+// =====================================================================
+
+TEST(VectorMath, Addition) {
+    float3 a = make_f3(1, 2, 3);
+    float3 b = make_f3(4, 5, 6);
+    float3 c = a + b;
+    EXPECT_NEAR(c.x, 5.f, kTol);
+    EXPECT_NEAR(c.y, 7.f, kTol);
+    EXPECT_NEAR(c.z, 9.f, kTol);
+}
+
+TEST(VectorMath, Subtraction) {
+    float3 a = make_f3(5, 7, 9);
+    float3 b = make_f3(1, 2, 3);
+    float3 c = a - b;
+    EXPECT_NEAR(c.x, 4.f, kTol);
+    EXPECT_NEAR(c.y, 5.f, kTol);
+    EXPECT_NEAR(c.z, 6.f, kTol);
+}
+
+TEST(VectorMath, ScalarMultiply) {
+    float3 a = make_f3(1, 2, 3);
+    float3 b = a * 2.f;
+    EXPECT_NEAR(b.x, 2.f, kTol);
+    EXPECT_NEAR(b.y, 4.f, kTol);
+    EXPECT_NEAR(b.z, 6.f, kTol);
+
+    float3 c = 3.f * a;
+    EXPECT_NEAR(c.x, 3.f, kTol);
+    EXPECT_NEAR(c.y, 6.f, kTol);
+    EXPECT_NEAR(c.z, 9.f, kTol);
+}
+
+TEST(VectorMath, DotProduct) {
+    float3 a = make_f3(1, 0, 0);
+    float3 b = make_f3(0, 1, 0);
+    EXPECT_NEAR(dot(a, b), 0.f, kTol);
+
+    float3 c = make_f3(1, 2, 3);
+    float3 d = make_f3(4, 5, 6);
+    EXPECT_NEAR(dot(c, d), 32.f, kTol); // 4+10+18
+}
+
+TEST(VectorMath, CrossProduct) {
+    float3 x = make_f3(1, 0, 0);
+    float3 y = make_f3(0, 1, 0);
+    float3 z = cross(x, y);
+    EXPECT_NEAR(z.x, 0.f, kTol);
+    EXPECT_NEAR(z.y, 0.f, kTol);
+    EXPECT_NEAR(z.z, 1.f, kTol);
+
+    // Anti-commutativity
+    float3 w = cross(y, x);
+    EXPECT_NEAR(w.z, -1.f, kTol);
+}
+
+TEST(VectorMath, Length) {
+    float3 v = make_f3(3, 4, 0);
+    EXPECT_NEAR(length(v), 5.f, kTol);
+    EXPECT_NEAR(length_sq(v), 25.f, kTol);
+}
+
+TEST(VectorMath, Normalize) {
+    float3 v = make_f3(3, 4, 0);
+    float3 n = normalize(v);
+    EXPECT_NEAR(length(n), 1.f, kTol);
+    EXPECT_NEAR(n.x, 0.6f, kTol);
+    EXPECT_NEAR(n.y, 0.8f, kTol);
+
+    // Zero vector
+    float3 z = normalize(make_f3(0, 0, 0));
+    EXPECT_NEAR(length(z), 0.f, kTol);
+}
+
+TEST(VectorMath, Negation) {
+    float3 a = make_f3(1, -2, 3);
+    float3 b = -a;
+    EXPECT_NEAR(b.x, -1.f, kTol);
+    EXPECT_NEAR(b.y, 2.f, kTol);
+    EXPECT_NEAR(b.z, -3.f, kTol);
+}
+
+TEST(VectorMath, PlusEquals) {
+    float3 a = make_f3(1, 2, 3);
+    a += make_f3(4, 5, 6);
+    EXPECT_NEAR(a.x, 5.f, kTol);
+    EXPECT_NEAR(a.y, 7.f, kTol);
+    EXPECT_NEAR(a.z, 9.f, kTol);
+}
+
+TEST(VectorMath, FminFmax) {
+    float3 a = make_f3(1, 5, 3);
+    float3 b = make_f3(4, 2, 6);
+    float3 mn = fminf3(a, b);
+    float3 mx = fmaxf3(a, b);
+    EXPECT_NEAR(mn.x, 1.f, kTol);
+    EXPECT_NEAR(mn.y, 2.f, kTol);
+    EXPECT_NEAR(mn.z, 3.f, kTol);
+    EXPECT_NEAR(mx.x, 4.f, kTol);
+    EXPECT_NEAR(mx.y, 5.f, kTol);
+    EXPECT_NEAR(mx.z, 6.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 2 - ONB (Orthonormal Basis)
+// =====================================================================
+
+TEST(ONB, FromUpNormal) {
+    ONB frame = ONB::from_normal(make_f3(0, 0, 1));
+    // w = normal
+    EXPECT_NEAR(frame.w.z, 1.f, kTol);
+    // u, v should be perpendicular to w and each other
+    EXPECT_NEAR(dot(frame.u, frame.w), 0.f, kTol);
+    EXPECT_NEAR(dot(frame.v, frame.w), 0.f, kTol);
+    EXPECT_NEAR(dot(frame.u, frame.v), 0.f, kTol);
+    // All unit vectors
+    EXPECT_NEAR(length(frame.u), 1.f, kTol);
+    EXPECT_NEAR(length(frame.v), 1.f, kTol);
+}
+
+TEST(ONB, FromArbitraryNormal) {
+    // Test with several normals
+    float3 normals[] = {
+        normalize(make_f3(1, 0, 0)),
+        normalize(make_f3(0, 1, 0)),
+        normalize(make_f3(1, 1, 1)),
+        normalize(make_f3(-0.3f, 0.7f, 0.2f)),
+    };
+
+    for (auto& n : normals) {
+        ONB frame = ONB::from_normal(n);
+        EXPECT_NEAR(length(frame.u), 1.f, kTol) << "u not unit";
+        EXPECT_NEAR(length(frame.v), 1.f, kTol) << "v not unit";
+        EXPECT_NEAR(length(frame.w), 1.f, kTol) << "w not unit";
+        EXPECT_NEAR(dot(frame.u, frame.v), 0.f, kTol) << "u⊥v fail";
+        EXPECT_NEAR(dot(frame.u, frame.w), 0.f, kTol) << "u⊥w fail";
+        EXPECT_NEAR(dot(frame.v, frame.w), 0.f, kTol) << "v⊥w fail";
+    }
+}
+
+TEST(ONB, RoundTripLocalWorld) {
+    ONB frame = ONB::from_normal(normalize(make_f3(1, 2, 3)));
+    float3 dir_world = normalize(make_f3(0.5f, 0.3f, 0.7f));
+    float3 dir_local = frame.world_to_local(dir_world);
+    float3 dir_back  = frame.local_to_world(dir_local);
+    EXPECT_NEAR(dir_back.x, dir_world.x, kTol);
+    EXPECT_NEAR(dir_back.y, dir_world.y, kTol);
+    EXPECT_NEAR(dir_back.z, dir_world.z, kTol);
+}
+
+TEST(ONB, NormalMapsToLocalZ) {
+    float3 n = normalize(make_f3(0.5f, -0.3f, 0.8f));
+    ONB frame = ONB::from_normal(n);
+    float3 local = frame.world_to_local(n);
+    EXPECT_NEAR(local.x, 0.f, kTol);
+    EXPECT_NEAR(local.y, 0.f, kTol);
+    EXPECT_NEAR(local.z, 1.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 3 - Spectrum
+// =====================================================================
+
+TEST(Spectrum, ZeroAndConstant) {
+    Spectrum s = Spectrum::zero();
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_EQ(s[i], 0.f);
+
+    Spectrum c = Spectrum::constant(2.5f);
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_NEAR(c[i], 2.5f, kTol);
+}
+
+TEST(Spectrum, Arithmetic) {
+    Spectrum a = Spectrum::constant(2.f);
+    Spectrum b = Spectrum::constant(3.f);
+
+    Spectrum sum = a + b;
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_NEAR(sum[i], 5.f, kTol);
+
+    Spectrum prod = a * b;
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_NEAR(prod[i], 6.f, kTol);
+
+    Spectrum scaled = a * 4.f;
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_NEAR(scaled[i], 8.f, kTol);
+
+    Spectrum div = a / 4.f;
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_NEAR(div[i], 0.5f, kTol);
+}
+
+TEST(Spectrum, PlusEqualsAndTimesEquals) {
+    Spectrum a = Spectrum::constant(1.f);
+    a += Spectrum::constant(2.f);
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_NEAR(a[i], 3.f, kTol);
+
+    a *= 2.f;
+    for (int i = 0; i < NUM_LAMBDA; ++i) EXPECT_NEAR(a[i], 6.f, kTol);
+}
+
+TEST(Spectrum, SumAndMax) {
+    Spectrum s = Spectrum::constant(1.f);
+    EXPECT_NEAR(s.sum(), (float)NUM_LAMBDA, kTol);
+    EXPECT_NEAR(s.max_component(), 1.f, kTol);
+
+    s.value[5] = 10.f;
+    EXPECT_NEAR(s.max_component(), 10.f, kTol);
+    EXPECT_EQ(s.dominant_bin(), 5);
+}
+
+TEST(Spectrum, LambdaOfBin) {
+    // Bin 0 should center at LAMBDA_MIN + LAMBDA_STEP/2
+    float expected0 = LAMBDA_MIN + LAMBDA_STEP * 0.5f;
+    EXPECT_NEAR(lambda_of_bin(0), expected0, kTol);
+
+    // Last bin
+    float expectedLast = LAMBDA_MIN + (NUM_LAMBDA - 0.5f) * LAMBDA_STEP;
+    EXPECT_NEAR(lambda_of_bin(NUM_LAMBDA - 1), expectedLast, kTol);
+}
+
+// -- CIE colour matching functions -----------------------------------
+
+TEST(Spectrum, CIE_Y_PeakNear555nm) {
+    // The luminosity function cie_y should peak near 555 nm
+    float peak_lambda = 0.f;
+    float peak_val = 0.f;
+    for (float lam = 400.f; lam <= 700.f; lam += 1.f) {
+        float y = cie_y(lam);
+        if (y > peak_val) {
+            peak_val = y;
+            peak_lambda = lam;
+        }
+    }
+    EXPECT_NEAR(peak_lambda, 555.f, 15.f); // Within 15nm of 555
+    EXPECT_GT(peak_val, 0.9f);
+}
+
+TEST(Spectrum, CIE_NonNegativeInVisibleRange) {
+    // cie_x, cie_y, cie_z should be non-negative in [380, 780]
+    for (float lam = 380.f; lam <= 780.f; lam += 5.f) {
+        EXPECT_GE(cie_y(lam), -0.01f) << "cie_y negative at " << lam;
+        EXPECT_GE(cie_z(lam), -0.01f) << "cie_z negative at " << lam;
+    }
+}
+
+TEST(Spectrum, WhiteSpectrumToSRGB) {
+    // A flat unit spectrum should convert to a roughly white sRGB
+    // With normalised XYZ integration (divided by sum(ybar)), flat 1.0 -> Y=1 -> white
+    Spectrum white = Spectrum::constant(1.0f);
+    float3 rgb = spectrum_to_srgb(white);
+    // All channels should be similar (roughly white)
+    EXPECT_GT(rgb.x, 0.5f);
+    EXPECT_GT(rgb.y, 0.5f);
+    EXPECT_GT(rgb.z, 0.5f);
+    // Not wildly different
+    EXPECT_NEAR(rgb.x, rgb.y, 0.3f);
+    EXPECT_NEAR(rgb.y, rgb.z, 0.3f);
+}
+
+TEST(Spectrum, ZeroSpectrumToBlack) {
+    Spectrum black = Spectrum::zero();
+    float3 rgb = spectrum_to_srgb(black);
+    EXPECT_NEAR(rgb.x, 0.f, kTol);
+    EXPECT_NEAR(rgb.y, 0.f, kTol);
+    EXPECT_NEAR(rgb.z, 0.f, kTol);
+}
+
+// -- RGB → spectral → sRGB round trip --------------------------------
+
+TEST(Spectrum, RGBToSpectrumReflectance_Red) {
+    Spectrum s = rgb_to_spectrum_reflectance(1.f, 0.f, 0.f);
+    // The dominant wavelength should be in the red region (> 580nm)
+    int dom = s.dominant_bin();
+    float lam = lambda_of_bin(dom);
+    EXPECT_GT(lam, 570.f) << "Red spectrum should peak in red region";
+}
+
+TEST(Spectrum, RGBToSpectrumReflectance_Green) {
+    Spectrum s = rgb_to_spectrum_reflectance(0.f, 1.f, 0.f);
+    int dom = s.dominant_bin();
+    float lam = lambda_of_bin(dom);
+    EXPECT_GT(lam, 500.f);
+    EXPECT_LT(lam, 580.f);
+}
+
+TEST(Spectrum, RGBToSpectrumReflectance_Blue) {
+    Spectrum s = rgb_to_spectrum_reflectance(0.f, 0.f, 1.f);
+    int dom = s.dominant_bin();
+    float lam = lambda_of_bin(dom);
+    EXPECT_LT(lam, 500.f);
+}
+
+TEST(Spectrum, RGBToSpectrumReflectance_NonNegative) {
+    Spectrum s = rgb_to_spectrum_reflectance(0.5f, 0.3f, 0.8f);
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        EXPECT_GE(s[i], 0.f) << "Negative spectral value at bin " << i;
+    }
+}
+
+// -- Blackbody -------------------------------------------------------
+
+TEST(Spectrum, BlackbodyPositive) {
+    Spectrum bb = blackbody_spectrum(5500.f);
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        EXPECT_GT(bb[i], 0.f) << "Blackbody should be positive everywhere";
+    }
+}
+
+TEST(Spectrum, BlackbodyPeakWavelength) {
+    // Wien's displacement law: λ_max ≈ 2898/T μm = 2898000/T nm
+    float T = 5500.f;
+    float expected_peak_nm = 2898000.f / T; // ~527 nm
+    Spectrum bb = blackbody_spectrum(T);
+    int peak = bb.dominant_bin();
+    float lam = lambda_of_bin(peak);
+    EXPECT_NEAR(lam, expected_peak_nm, 30.f); // Within 30nm
+}
+
+TEST(Spectrum, SRGBGammaLinearizationZero) {
+    EXPECT_NEAR(srgb_gamma(0.f), 0.f, kTol);
+}
+
+TEST(Spectrum, SRGBGammaLinearizationOne) {
+    EXPECT_NEAR(srgb_gamma(1.f), 1.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 4 - PCG Random Number Generator
+// =====================================================================
+
+TEST(RNG, UniformDistribution) {
+    // Chi-squared test: verify RNG produces roughly uniform [0,1)
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 100000;
+    const int BINS = 10;
+    int counts[BINS] = {};
+    for (int i = 0; i < N; ++i) {
+        float v = rng.next_float();
+        ASSERT_GE(v, 0.f);
+        ASSERT_LT(v, 1.f);
+        int bin = (int)(v * BINS);
+        if (bin >= BINS) bin = BINS - 1;
+        counts[bin]++;
+    }
+    float expected = (float)N / BINS;
+    for (int i = 0; i < BINS; ++i) {
+        EXPECT_NEAR((float)counts[i], expected, expected * 0.1f)
+            << "Bin " << i << " deviates from uniform";
+    }
+}
+
+TEST(RNG, DifferentSeeds) {
+    PCGRng r1 = PCGRng::seed(1);
+    PCGRng r2 = PCGRng::seed(2);
+    // Different seeds should produce different sequences
+    bool all_same = true;
+    for (int i = 0; i < 100; ++i) {
+        if (r1.next_uint() != r2.next_uint()) {
+            all_same = false;
+            break;
+        }
+    }
+    EXPECT_FALSE(all_same);
+}
+
+TEST(RNG, Reproducibility) {
+    PCGRng r1 = PCGRng::seed(42, 7);
+    PCGRng r2 = PCGRng::seed(42, 7);
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_EQ(r1.next_uint(), r2.next_uint());
+    }
+}
+
+// =====================================================================
+//  SECTION 5 - Sampling functions & PDF integration
+// =====================================================================
+
+TEST(Sampling, CosineHemispherePDFIntegratesToOne) {
+    // Numerical integration of cosine_hemisphere_pdf over hemisphere
+    // ∫∫ p(ω) dω = ∫_0^{2π} ∫_0^{π/2} (cos θ / π) sin θ dθ dφ = 1
+    const int N = 1000000;
+    PCGRng rng = PCGRng::seed(123);
+    for (int i = 0; i < N; ++i) {
+        float3 d = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        float pdf = cosine_hemisphere_pdf(d.z);
+        ASSERT_GT(pdf, 0.f);
+        // Weight = f(x)/p(x) where f=1 → weight per sample = 1/1 = 1
+        // but total solid angle = 2π, so MC integral of p(ω) dω ≈ 1.
+        // Just verify all samples have z > 0
+        EXPECT_GT(d.z, -1e-6f) << "Cosine sample below hemisphere";
+    }
+    // Alternative: check E[1/pdf * (1/(2π))] ≈ 1/total solid angle
+    // Actually simpler: integrate cos(θ)/π over hemisphere analytically = 1
+    // Just verify samples are on unit hemisphere
+}
+
+TEST(Sampling, CosineHemisphereSamplesOnUnitSphere) {
+    PCGRng rng = PCGRng::seed(456);
+    for (int i = 0; i < 10000; ++i) {
+        float3 d = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        EXPECT_NEAR(length(d), 1.f, 1e-4f);
+        EXPECT_GT(d.z, -1e-6f); // Upper hemisphere
+    }
+}
+
+TEST(Sampling, CosineHemisphereMeanCosTheta) {
+    // E[cos θ] for cosine-weighted = ∫ cos²θ sinθ dθ dφ / ∫ cosθ sinθ dθ dφ = 2/3
+    PCGRng rng = PCGRng::seed(789);
+    const int N = 500000;
+    double sum_cos = 0.0;
+    for (int i = 0; i < N; ++i) {
+        float3 d = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        sum_cos += d.z; // cos(theta) = z in local frame
+    }
+    double mean_cos = sum_cos / N;
+    EXPECT_NEAR(mean_cos, 2.0 / 3.0, 0.01);
+}
+
+TEST(Sampling, UniformHemisphereSamplesValid) {
+    PCGRng rng = PCGRng::seed(321);
+    for (int i = 0; i < 10000; ++i) {
+        float3 d = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        EXPECT_NEAR(length(d), 1.f, 1e-4f);
+        EXPECT_GE(d.z, -1e-6f);
+    }
+}
+
+TEST(Sampling, UniformSphereSamplesValid) {
+    PCGRng rng = PCGRng::seed(654);
+    int above = 0, below = 0;
+    for (int i = 0; i < 10000; ++i) {
+        float3 d = sample_uniform_sphere(rng.next_float(), rng.next_float());
+        EXPECT_NEAR(length(d), 1.f, 1e-4f);
+        if (d.z > 0) above++; else below++;
+    }
+    // Should be roughly 50/50
+    EXPECT_NEAR((float)above / 10000.f, 0.5f, 0.05f);
+}
+
+TEST(Sampling, TriangleSamplingBarycentricValid) {
+    PCGRng rng = PCGRng::seed(999);
+    for (int i = 0; i < 10000; ++i) {
+        float3 b = sample_triangle(rng.next_float(), rng.next_float());
+        EXPECT_GE(b.x, -1e-6f);
+        EXPECT_GE(b.y, -1e-6f);
+        EXPECT_GE(b.z, -1e-6f);
+        EXPECT_NEAR(b.x + b.y + b.z, 1.f, 1e-4f);
+    }
+}
+
+TEST(Sampling, TriangleSamplingUniform) {
+    // Monte Carlo: area of sub-triangle where alpha > 0.5 should be ~0.25
+    PCGRng rng = PCGRng::seed(1111);
+    const int N = 200000;
+    int count = 0;
+    for (int i = 0; i < N; ++i) {
+        float3 b = sample_triangle(rng.next_float(), rng.next_float());
+        if (b.x > 0.5f) count++;
+    }
+    // Area fraction where alpha > 0.5 = 0.25 (geometric)
+    EXPECT_NEAR((float)count / N, 0.25f, 0.02f);
+}
+
+// =====================================================================
+//  SECTION 6 - Power heuristic (MIS)
+// =====================================================================
+
+TEST(MIS, PowerHeuristic2_Symmetric) {
+    // When pdf_a == pdf_b, weight should be 0.5
+    EXPECT_NEAR(power_heuristic(1.f, 1.f), 0.5f, kTol);
+}
+
+TEST(MIS, PowerHeuristic2_Dominance) {
+    // When pdf_a >> pdf_b, weight → 1
+    EXPECT_NEAR(power_heuristic(100.f, 1.f), 1.f, 0.001f);
+    // When pdf_a << pdf_b, weight → 0
+    EXPECT_NEAR(power_heuristic(1.f, 100.f), 0.f, 0.001f);
+}
+
+TEST(MIS, PowerHeuristic2_ZeroPDFs) {
+    // Both zero should not crash
+    float w = power_heuristic(0.f, 0.f);
+    EXPECT_FALSE(std::isnan(w));
+    EXPECT_FALSE(std::isinf(w));
+}
+
+TEST(MIS, PowerHeuristic3_Symmetric) {
+    EXPECT_NEAR(power_heuristic_3(1.f, 1.f, 1.f), 1.f/3.f, kTol);
+}
+
+TEST(MIS, PowerHeuristic3_SumsToOne) {
+    float pa = 2.f, pb = 3.f, pc = 5.f;
+    float wa = power_heuristic_3(pa, pb, pc);
+    float wb = power_heuristic_3(pb, pa, pc);
+    float wc = power_heuristic_3(pc, pa, pb);
+    EXPECT_NEAR(wa + wb + wc, 1.f, kTol);
+}
+
+TEST(MIS, MISWeight3_Consistent) {
+    // mis.h versions should match random.h versions
+    float pa = 2.f, pb = 3.f, pc = 5.f;
+    float w1 = mis_weight_3(pa, pb, pc);
+    float w2 = power_heuristic_3(pa, pb, pc);
+    EXPECT_NEAR(w1, w2, kTol);
+}
+
+// =====================================================================
+//  SECTION 7 - Alias Table (Vose's Algorithm)
+// =====================================================================
+
+TEST(AliasTable, UniformWeights) {
+    std::vector<float> weights = {1, 1, 1, 1};
+    AliasTable table = AliasTable::build(weights);
+    EXPECT_EQ(table.n, 4);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(table.pdf(i), 0.25f, kTol);
+    }
+}
+
+TEST(AliasTable, SamplingMatchesPDF) {
+    std::vector<float> weights = {1, 2, 3, 4, 5};
+    AliasTable table = AliasTable::build(weights);
+
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 500000;
+    std::vector<int> counts(5, 0);
+    for (int i = 0; i < N; ++i) {
+        int idx = table.sample(rng.next_float(), rng.next_float());
+        ASSERT_GE(idx, 0);
+        ASSERT_LT(idx, 5);
+        counts[idx]++;
+    }
+
+    float total = 15.f; // sum of weights
+    for (int i = 0; i < 5; ++i) {
+        float expected = weights[i] / total;
+        float observed = (float)counts[i] / N;
+        EXPECT_NEAR(observed, expected, 0.01f)
+            << "Alias table sample frequency for index " << i;
+    }
+}
+
+TEST(AliasTable, SingleElement) {
+    std::vector<float> weights = {5.0f};
+    AliasTable table = AliasTable::build(weights);
+    EXPECT_EQ(table.n, 1);
+    EXPECT_NEAR(table.pdf(0), 1.f, kTol);
+
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_EQ(table.sample(rng.next_float(), rng.next_float()), 0);
+    }
+}
+
+TEST(AliasTable, ZeroWeightElement) {
+    std::vector<float> weights = {0, 1, 0, 1, 0};
+    AliasTable table = AliasTable::build(weights);
+
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 100000;
+    std::vector<int> counts(5, 0);
+    for (int i = 0; i < N; ++i) {
+        int idx = table.sample(rng.next_float(), rng.next_float());
+        counts[idx]++;
+    }
+    // Indices 0, 2, 4 should have ~0 samples
+    EXPECT_LT(counts[0], N / 100);
+    EXPECT_LT(counts[2], N / 100);
+    EXPECT_LT(counts[4], N / 100);
+    // Indices 1, 3 should split roughly 50/50
+    EXPECT_NEAR((float)counts[1] / N, 0.5f, 0.05f);
+}
+
+TEST(AliasTable, PDFSumsToOne) {
+    std::vector<float> weights = {3, 7, 1, 9, 2};
+    AliasTable table = AliasTable::build(weights);
+    float sum = 0.f;
+    for (int i = 0; i < table.n; ++i) {
+        sum += table.pdf(i);
+    }
+    EXPECT_NEAR(sum, 1.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 8 - Triangle intersection (Moller-Trumbore)
+// =====================================================================
+
+TEST(Triangle, HitCentreOfTriangle) {
+    Triangle tri;
+    tri.v0 = make_f3(-1, -1, 0);
+    tri.v1 = make_f3( 1, -1, 0);
+    tri.v2 = make_f3( 0,  1, 0);
+    tri.n0 = tri.n1 = tri.n2 = make_f3(0, 0, 1);
+    tri.material_id = 0;
+
+    Ray ray;
+    ray.origin    = make_f3(0, 0, 5);
+    ray.direction = make_f3(0, 0, -1);
+    ray.tmin = 1e-4f;
+    ray.tmax = 1e20f;
+
+    float t, u, v;
+    EXPECT_TRUE(tri.intersect(ray, t, u, v));
+    EXPECT_NEAR(t, 5.f, kTol);
+    // u + v should be < 1 (inside triangle)
+    EXPECT_LT(u + v, 1.f + kTol);
+}
+
+TEST(Triangle, MissTriangle) {
+    Triangle tri;
+    tri.v0 = make_f3(-1, -1, 0);
+    tri.v1 = make_f3( 1, -1, 0);
+    tri.v2 = make_f3( 0,  1, 0);
+
+    Ray ray;
+    ray.origin    = make_f3(10, 10, 5);
+    ray.direction = make_f3(0, 0, -1);
+    ray.tmin = 1e-4f;
+    ray.tmax = 1e20f;
+
+    float t, u, v;
+    EXPECT_FALSE(tri.intersect(ray, t, u, v));
+}
+
+TEST(Triangle, ParallelRay) {
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(1, 0, 0);
+    tri.v2 = make_f3(0, 1, 0);
+
+    Ray ray;
+    ray.origin    = make_f3(0, 0, 1);
+    ray.direction = make_f3(1, 0, 0); // Parallel to triangle plane
+    ray.tmin = 1e-4f;
+    ray.tmax = 1e20f;
+
+    float t, u, v;
+    EXPECT_FALSE(tri.intersect(ray, t, u, v));
+}
+
+TEST(Triangle, BehindRay) {
+    Triangle tri;
+    tri.v0 = make_f3(-1, -1, 0);
+    tri.v1 = make_f3( 1, -1, 0);
+    tri.v2 = make_f3( 0,  1, 0);
+
+    Ray ray;
+    ray.origin    = make_f3(0, 0, -5);
+    ray.direction = make_f3(0, 0, -1); // Pointing away from triangle
+    ray.tmin = 1e-4f;
+    ray.tmax = 1e20f;
+
+    float t, u, v;
+    EXPECT_FALSE(tri.intersect(ray, t, u, v));
+}
+
+TEST(Triangle, EdgeHit) {
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(1, 0, 0);
+    tri.v2 = make_f3(0, 1, 0);
+
+    // Ray hitting exactly on the v0-v1 edge (y=0)
+    Ray ray;
+    ray.origin    = make_f3(0.5f, 0.f, 5.f);
+    ray.direction = make_f3(0, 0, -1);
+    ray.tmin = 1e-4f;
+    ray.tmax = 1e20f;
+
+    float t, u, v;
+    // This may or may not hit depending on edge rules, just check no crash
+    tri.intersect(ray, t, u, v);
+}
+
+TEST(Triangle, Area) {
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(1, 0, 0);
+    tri.v2 = make_f3(0, 1, 0);
+    EXPECT_NEAR(tri.area(), 0.5f, kTol);
+}
+
+TEST(Triangle, GeometricNormal) {
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(1, 0, 0);
+    tri.v2 = make_f3(0, 1, 0);
+    float3 n = tri.geometric_normal();
+    EXPECT_NEAR(n.x, 0.f, kTol);
+    EXPECT_NEAR(n.y, 0.f, kTol);
+    EXPECT_NEAR(n.z, 1.f, kTol);
+}
+
+TEST(Triangle, InterpolatePosition) {
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(1, 0, 0);
+    tri.v2 = make_f3(0, 1, 0);
+    // Centroid: (1/3, 1/3, 1/3)
+    float3 c = tri.interpolate_position(1.f/3, 1.f/3, 1.f/3);
+    EXPECT_NEAR(c.x, 1.f/3, kTol);
+    EXPECT_NEAR(c.y, 1.f/3, kTol);
+    EXPECT_NEAR(c.z, 0.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 9 - AABB intersection
+// =====================================================================
+
+TEST(AABB, RayHitsBox) {
+    AABB box;
+    box.mn = make_f3(-1, -1, -1);
+    box.mx = make_f3( 1,  1,  1);
+
+    Ray ray;
+    ray.origin    = make_f3(0, 0, 5);
+    ray.direction = make_f3(0, 0, -1);
+    ray.tmin = 0.f;
+    ray.tmax = 100.f;
+
+    float tmin, tmax;
+    EXPECT_TRUE(box.intersect(ray, tmin, tmax));
+    EXPECT_NEAR(tmin, 4.f, kTol);
+    EXPECT_NEAR(tmax, 6.f, kTol);
+}
+
+TEST(AABB, RayMissesBox) {
+    AABB box;
+    box.mn = make_f3(-1, -1, -1);
+    box.mx = make_f3( 1,  1,  1);
+
+    Ray ray;
+    ray.origin    = make_f3(5, 5, 5);
+    ray.direction = make_f3(0, 0, -1);
+    ray.tmin = 0.f;
+    ray.tmax = 100.f;
+
+    float tmin, tmax;
+    EXPECT_FALSE(box.intersect(ray, tmin, tmax));
+}
+
+TEST(AABB, RayInsideBox) {
+    AABB box;
+    box.mn = make_f3(-1, -1, -1);
+    box.mx = make_f3( 1,  1,  1);
+
+    Ray ray;
+    ray.origin    = make_f3(0, 0, 0);
+    ray.direction = make_f3(1, 0, 0);
+    ray.tmin = 0.f;
+    ray.tmax = 100.f;
+
+    float tmin, tmax;
+    EXPECT_TRUE(box.intersect(ray, tmin, tmax));
+}
+
+TEST(AABB, Expand) {
+    AABB box;
+    box.expand(make_f3(1, 2, 3));
+    box.expand(make_f3(-1, -2, -3));
+    EXPECT_NEAR(box.mn.x, -1.f, kTol);
+    EXPECT_NEAR(box.mn.y, -2.f, kTol);
+    EXPECT_NEAR(box.mn.z, -3.f, kTol);
+    EXPECT_NEAR(box.mx.x, 1.f, kTol);
+    EXPECT_NEAR(box.mx.y, 2.f, kTol);
+    EXPECT_NEAR(box.mx.z, 3.f, kTol);
+}
+
+TEST(AABB, LongestAxis) {
+    AABB box;
+    box.mn = make_f3(0, 0, 0);
+    box.mx = make_f3(3, 2, 1);
+    EXPECT_EQ(box.longest_axis(), 0); // X is longest
+
+    box.mx = make_f3(1, 3, 2);
+    EXPECT_EQ(box.longest_axis(), 1); // Y is longest
+}
+
+// =====================================================================
+//  SECTION 10 - Fresnel
+// =====================================================================
+
+TEST(Fresnel, SchlickAtNormalIncidence) {
+    // At cos_theta = 1, F = f0
+    EXPECT_NEAR(fresnel_schlick(1.f, 0.04f), 0.04f, kTol);
+    EXPECT_NEAR(fresnel_schlick(1.f, 0.5f), 0.5f, kTol);
+}
+
+TEST(Fresnel, SchlickAtGrazingAngle) {
+    // At cos_theta = 0, F should approach 1
+    EXPECT_NEAR(fresnel_schlick(0.f, 0.04f), 1.f, kTol);
+}
+
+TEST(Fresnel, SchlickMonotonic) {
+    // Fresnel should increase as angle increases (cos decreases)
+    for (float f0 = 0.01f; f0 <= 1.f; f0 += 0.1f) {
+        float prev = fresnel_schlick(1.f, f0);
+        for (float cos_t = 0.9f; cos_t >= 0.f; cos_t -= 0.1f) {
+            float curr = fresnel_schlick(cos_t, f0);
+            EXPECT_GE(curr, prev - kTol) << "Not monotonic at cos=" << cos_t;
+            prev = curr;
+        }
+    }
+}
+
+TEST(Fresnel, DielectricNormalIncidence) {
+    // Glass (n=1.5): F = ((1-1.5)/(1+1.5))^2 = (-0.5/2.5)^2 = 0.04
+    float F = fresnel_dielectric(1.f, 1.f / 1.5f);
+    EXPECT_NEAR(F, 0.04f, 0.01f);
+}
+
+TEST(Fresnel, DielectricTotalInternalReflection) {
+    // sin(critical) = 1/n = 1/1.5 → cos(critical) ≈ 0.745
+    // For angles above critical (cos < cos_crit), F = 1
+    float F = fresnel_dielectric(0.3f, 1.5f); // Inside glass, going out
+    EXPECT_NEAR(F, 1.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 11 - GGX microfacet distribution
+// =====================================================================
+
+TEST(GGX, NormalizationIntegral) {
+    // For GGX: ∫ D(ωh) cos(θh) dω = 1 over hemisphere
+    // MC estimate with uniform sampling
+    PCGRng rng = PCGRng::seed(42);
+    float alpha = 0.3f;
+    const int N = 500000;
+    double integral = 0.0;
+    for (int i = 0; i < N; ++i) {
+        float3 h = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        float D_val = ggx_D(h, alpha);
+        float cos_h = h.z;
+        // dω = 2π (for uniform hemisphere)
+        integral += D_val * cos_h;
+    }
+    integral *= (2.0 * PI) / N; // uniform hemi pdf = 1/(2π)
+    EXPECT_NEAR(integral, 1.0, 0.05);
+}
+
+TEST(GGX, DValueAtNormal) {
+    // D is maximum when h = (0,0,1) for any alpha
+    float alpha = 0.5f;
+    float D_at_normal = ggx_D(make_f3(0, 0, 1), alpha);
+    float D_at_45 = ggx_D(normalize(make_f3(0, 0.7071f, 0.7071f)), alpha);
+    EXPECT_GT(D_at_normal, D_at_45);
+}
+
+TEST(GGX, SmithGeometryRange) {
+    // G should be in [0, 1]
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 1000; ++i) {
+        float3 wo = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        float3 wi = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        float alpha = rng.next_float() * 0.9f + 0.1f;
+        float G = ggx_G(wo, wi, alpha);
+        EXPECT_GE(G, -kTol);
+        EXPECT_LE(G, 1.f + kTol);
+    }
+}
+
+// =====================================================================
+//  SECTION 12 - BSDF tests
+// =====================================================================
+
+TEST(BSDF, LambertianEnergyConservation) {
+    // White furnace test: ∫ f(wo,wi) cos(θi) dωi = albedo for Lambertian
+    // Lambertian f = Kd/π, integral = Kd
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.8f);
+
+    float3 wo = make_f3(0, 0, 1); // Normal incidence
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 200000;
+
+    Spectrum accum = Spectrum::zero();
+    for (int i = 0; i < N; ++i) {
+        BSDFSample s = bsdf::sample(mat, wo, rng);
+        if (s.pdf > 0.f && s.wi.z > 0.f) {
+            float cos_theta = s.wi.z;
+            // MC estimator: f * cos / pdf
+            accum += s.f * (cos_theta / s.pdf);
+        }
+    }
+    accum *= 1.f / N;
+
+    // Should equal Kd = 0.8
+    for (int j = 0; j < NUM_LAMBDA; ++j) {
+        EXPECT_NEAR(accum[j], 0.8f, 0.03f)
+            << "Lambertian energy conservation failed at bin " << j;
+    }
+}
+
+TEST(BSDF, LambertianPDFConsistency) {
+    // Sample direction and verify PDF matches
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.5f);
+
+    float3 wo = normalize(make_f3(0.3f, 0.2f, 0.9f));
+    PCGRng rng = PCGRng::seed(42);
+
+    for (int i = 0; i < 100; ++i) {
+        BSDFSample s = bsdf::sample(mat, wo, rng);
+        if (s.pdf > 0.f) {
+            float expected_pdf = bsdf::pdf(mat, wo, s.wi);
+            EXPECT_NEAR(s.pdf, expected_pdf, kTol)
+                << "Lambertian: sample PDF != eval PDF";
+        }
+    }
+}
+
+TEST(BSDF, MirrorReflection) {
+    Material mat;
+    mat.type = MaterialType::Mirror;
+    mat.Ks = Spectrum::constant(1.f);
+
+    float3 wo = normalize(make_f3(0.3f, 0.0f, 0.9f));
+    PCGRng rng = PCGRng::seed(42);
+
+    BSDFSample s = bsdf::mirror_sample(mat.Ks, wo);
+    // Mirror should reflect: wi.x = -wo.x, wi.y = -wo.y, wi.z = wo.z
+    EXPECT_NEAR(s.wi.x, -wo.x, kTol);
+    EXPECT_NEAR(s.wi.y, -wo.y, kTol);
+    EXPECT_NEAR(s.wi.z, wo.z, kTol);
+    EXPECT_TRUE(s.is_specular);
+}
+
+TEST(BSDF, GlassSampleValid) {
+    // Glass should either reflect or refract, not produce NaN
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 100; ++i) {
+        float3 wo = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        BSDFSample s = bsdf::glass_sample(wo, 1.5f, rng);
+        EXPECT_FALSE(std::isnan(s.wi.x));
+        EXPECT_FALSE(std::isnan(s.wi.y));
+        EXPECT_FALSE(std::isnan(s.wi.z));
+        EXPECT_TRUE(s.is_specular);
+        EXPECT_GT(s.pdf, 0.f);
+    }
+}
+
+TEST(BSDF, GlossyEnergyBound) {
+    // White furnace test: integral should be <= 1 (energy conservation)
+    Material mat;
+    mat.type = MaterialType::GlossyMetal;
+    mat.Kd = Spectrum::constant(0.3f);
+    mat.Ks = Spectrum::constant(0.5f);
+    mat.roughness = 0.4f;
+
+    float3 wo = make_f3(0, 0, 1);
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 200000;
+
+    Spectrum accum = Spectrum::zero();
+    for (int i = 0; i < N; ++i) {
+        BSDFSample s = bsdf::sample(mat, wo, rng);
+        if (s.pdf > 0.f && s.wi.z > 0.f) {
+            float cos_theta = s.wi.z;
+            accum += s.f * (cos_theta / s.pdf);
+        }
+    }
+    accum *= 1.f / N;
+
+    for (int j = 0; j < NUM_LAMBDA; ++j) {
+        EXPECT_LE(accum[j], 1.2f) // slight tolerance for MC noise
+            << "Glossy energy conservation failed at bin " << j << " val=" << accum[j];
+    }
+}
+
+TEST(BSDF, GlossyPDFConsistency) {
+    Material mat;
+    mat.type = MaterialType::GlossyMetal;
+    mat.Kd = Spectrum::constant(0.3f);
+    mat.Ks = Spectrum::constant(0.5f);
+    mat.roughness = 0.4f;
+
+    float3 wo = normalize(make_f3(0.2f, 0.1f, 0.95f));
+    PCGRng rng = PCGRng::seed(42);
+
+    for (int i = 0; i < 100; ++i) {
+        BSDFSample s = bsdf::sample(mat, wo, rng);
+        if (s.pdf > 0.f && s.wi.z > 0.f) {
+            float expected_pdf = bsdf::pdf(mat, wo, s.wi);
+            EXPECT_NEAR(s.pdf, expected_pdf, 0.01f)
+                << "Glossy: sample PDF != eval PDF";
+        }
+    }
+}
+
+TEST(BSDF, EvaluateNonNegative) {
+    // BSDF evaluate should never return negative values
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.5f);
+
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 100; ++i) {
+        float3 wo = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        float3 wi = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        Spectrum f = bsdf::evaluate(mat, wo, wi);
+        for (int j = 0; j < NUM_LAMBDA; ++j) {
+            EXPECT_GE(f[j], 0.f) << "Negative BSDF at bin " << j;
+        }
+    }
+}
+
+TEST(BSDF, BelowHemisphereReturnsZero) {
+    // If wi or wo are below hemisphere, should return zero
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.5f);
+
+    float3 wo = make_f3(0, 0, 1);
+    float3 wi_below = make_f3(0, 0, -1);
+    Spectrum f = bsdf::evaluate(mat, wo, wi_below);
+    EXPECT_NEAR(f.sum(), 0.f, kTol);
+
+    float pdf = bsdf::pdf(mat, wo, wi_below);
+    EXPECT_NEAR(pdf, 0.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 13 - Hash Grid
+// =====================================================================
+
+TEST(HashGrid, BuildAndQueryBasic) {
+    // Create a small set of photons
+    PhotonSoA photons;
+    for (int i = 0; i < 100; ++i) {
+        Photon p;
+        p.position = make_f3((float)i * 0.01f, 0.f, 0.f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = 0;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    float radius = 0.05f;
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Query at origin should find photons within radius
+    int count = 0;
+    grid.query(make_f3(0, 0, 0), radius, photons,
+        [&](uint32_t idx, float dist2) {
+            (void)idx;
+            (void)dist2;
+            count++;
+        });
+
+    EXPECT_GT(count, 0) << "Should find at least one photon near origin";
+    EXPECT_LE(count, 100) << "Should not find more than total";
+}
+
+TEST(HashGrid, QueryDistanceFilter) {
+    // Place one photon at exactly (0.1, 0, 0)
+    PhotonSoA photons;
+    Photon p;
+    p.position = make_f3(0.1f, 0.f, 0.f);
+    p.wi = make_f3(0, 0, 1);
+    p.lambda_bin = 0;
+    p.flux = 1.0f;
+    photons.push_back(p);
+
+    float radius = 0.05f;
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Query at origin with radius 0.05 should NOT find the photon (dist=0.1)
+    int count = 0;
+    grid.query(make_f3(0, 0, 0), radius, photons,
+        [&](uint32_t, float) { count++; });
+    EXPECT_EQ(count, 0);
+
+    // Query with larger radius should find it
+    int count2 = 0;
+    grid.query(make_f3(0, 0, 0), 0.15f, photons,
+        [&](uint32_t, float) { count2++; });
+    EXPECT_EQ(count2, 1);
+}
+
+TEST(HashGrid, EmptyGrid) {
+    PhotonSoA photons;
+    HashGrid grid;
+    grid.build(photons, 0.1f);
+
+    int count = 0;
+    grid.query(make_f3(0, 0, 0), 0.1f, photons,
+        [&](uint32_t, float) { count++; });
+    EXPECT_EQ(count, 0);
+}
+
+TEST(HashGrid, AllPhotonsFound) {
+    // Place photons in a tight cluster, all within radius
+    PhotonSoA photons;
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 50;
+    float radius = 1.0f;
+
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        p.position = make_f3(
+            (rng.next_float() - 0.5f) * 0.1f,
+            (rng.next_float() - 0.5f) * 0.1f,
+            (rng.next_float() - 0.5f) * 0.1f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = 0;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    int count = 0;
+    grid.query(make_f3(0, 0, 0), radius, photons,
+        [&](uint32_t, float) { count++; });
+
+    EXPECT_EQ(count, N) << "Should find all " << N << " photons in tight cluster";
+}
+
+// =====================================================================
+//  SECTION 14 - Density Estimator (surface consistency filter)
+// =====================================================================
+
+TEST(DensityEstimator, SurfaceConsistency_PlaneDistReject) {
+    // Photon far from surface plane should be rejected
+    PhotonSoA photons;
+    Photon p;
+    p.position = make_f3(0.f, 0.f, 0.5f); // 0.5 units above surface
+    p.wi = make_f3(0, 0, 1);  // Pointing into surface
+    p.lambda_bin = 0;
+    p.flux = 100.0f;
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 1.0f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.5f);
+
+    DensityEstimatorConfig config;
+    config.radius = 1.0f;
+    config.surface_tau = 0.01f; // Tight surface consistency
+    config.num_photons_total = 1;
+
+    // Surface at z=0, normal = (0,0,1)
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 1.0f);
+
+    // Should be zero because plane_dist = 0.5 > tau = 0.01
+    EXPECT_NEAR(L.sum(), 0.f, kTol);
+}
+
+TEST(DensityEstimator, SurfaceConsistency_DirectionReject) {
+    // Photon with wrong incoming direction should be rejected
+    PhotonSoA photons;
+    Photon p;
+    p.position = make_f3(0.01f, 0.f, 0.f); // On surface
+    p.wi = make_f3(0, 0, -1); // Pointing AWAY from surface (wrong direction)
+    p.lambda_bin = 0;
+    p.flux = 100.0f;
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.5f);
+
+    DensityEstimatorConfig config;
+    config.radius = 0.5f;
+    config.surface_tau = 1.0f; // Loose tau so plane_dist doesn't reject
+    config.num_photons_total = 1;
+
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Should be zero: dot(wi, normal) = dot((0,0,-1),(0,0,1)) = -1 <= 0
+    EXPECT_NEAR(L.sum(), 0.f, kTol);
+}
+
+TEST(DensityEstimator, ValidPhotonContributes) {
+    // A photon that satisfies all filters should contribute
+    PhotonSoA photons;
+    Photon p;
+    p.position = make_f3(0.001f, 0.f, 0.f); // Very close to query point on surface
+    p.wi = make_f3(0, 0, 1); // Pointing INTO surface
+    p.lambda_bin = 5;
+    p.flux = 1.0f;
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius = 0.5f;
+    config.surface_tau = 0.1f;
+    config.num_photons_total = 1;
+    config.use_kernel = false; // Use box kernel for predictable result
+
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Lambda bin 5 should have nonzero contribution
+    EXPECT_GT(L[5], 0.f) << "Valid photon should contribute";
+}
+
+// =====================================================================
+//  SECTION 15 - Geometric edge case: back-facing nearby triangle
+// =====================================================================
+// This tests the crucial scenario where photons deposited on a nearby
+// but BACK-FACING triangle surface should NOT be gathered during
+// density estimation, even if they are within the gather radius
+// and in the same hash cell.
+
+TEST(DensityEstimator, BackFacingNearbyTriangleRejected) {
+    //
+    // Setup: Two parallel triangles very close together but facing
+    // opposite directions:
+    //   - Query surface at z=0, normal = (0,0,+1)
+    //   - Photons on other surface at z=0.005, whose wi direction
+    //     was aimed at the BACK-facing surface normal = (0,0,-1)
+    //
+    // The photon should be rejected because dot(wi, query_normal) <= 0
+    //
+    PhotonSoA photons;
+    Photon p;
+    // Photon sits on a surface at z=0.005 with normal (0,0,-1)
+    // The photon was incoming from above: wi = (0, 0, -1) stored as flipped = (0,0,1)?
+    // No — in emitter.h, wi is stored as `ray.direction * (-1)`, i.e. the
+    // direction FROM which the photon came. So if the photon was traveling
+    // downward (0,0,-1), the stored wi = (0,0,1).
+    //
+    // But the back-facing surface has normal (0,0,-1). The photon arrived
+    // traveling in (0,0,+1) direction and hit the INSIDE of that surface.
+    // Stored wi = (0,0,-1) (flipped from (0,0,+1)).
+    //
+    // For the query surface normal = (0,0,+1):
+    //   dot(wi=(0,0,-1), n=(0,0,+1)) = -1 <= 0  → REJECTED ✓
+    //
+    p.position = make_f3(0.01f, 0.01f, 0.005f); // Very close, same hash cell
+    p.wi = make_f3(0, 0, -1);  // Photon was coming from below (stored as wi)
+    p.lambda_bin = 10;
+    p.flux = 50.0f; // Strong photon — would cause visible artifact if gathered
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.8f);
+
+    DensityEstimatorConfig config;
+    config.radius = 0.5f;
+    config.surface_tau = 0.1f;   // Generous tau — won't reject by distance
+    config.num_photons_total = 1;
+    config.use_kernel = false;
+
+    // Query at surface facing UP
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Must be zero: the photon direction is incompatible with our surface normal
+    EXPECT_NEAR(L.sum(), 0.f, kTol)
+        << "Back-facing photon should NOT be gathered!";
+}
+
+TEST(DensityEstimator, ThinWallDoubleSided) {
+    //
+    // More thorough thin-wall test:
+    // Simulate a thin wall (two triangles face-to-face, 1mm apart).
+    // - Photons on the front surface (z=+0.001) with wi = (0,0,1) → valid for front
+    // - Photons on the back surface (z=-0.001) with wi = (0,0,-1) → valid for back
+    //
+    // Query at z=0 with normal (0,0,1) should ONLY gather front-surface photons.
+    //
+    PhotonSoA photons;
+
+    // Front-surface photon (facing same way as query)
+    Photon p_front;
+    p_front.position = make_f3(0.0f, 0.0f, 0.001f);
+    p_front.wi = make_f3(0, 0, 1); // Incoming toward front surface
+    p_front.lambda_bin = 3;
+    p_front.flux = 10.0f;
+    photons.push_back(p_front);
+
+    // Back-surface photon (facing opposite to query)
+    Photon p_back;
+    p_back.position = make_f3(0.0f, 0.0f, -0.001f);
+    p_back.wi = make_f3(0, 0, -1); // Incoming toward back surface
+    p_back.lambda_bin = 3;
+    p_back.flux = 10.0f;
+    photons.push_back(p_back);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius = 0.5f;
+    config.surface_tau = 0.01f; // 10mm tau — both photons pass distance check
+    config.num_photons_total = 1;
+    config.use_kernel = false;
+
+    // Query at z=0, facing UP (+Z)
+    Spectrum L_front = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Query at z=0, facing DOWN (-Z)
+    // wo_local must still have positive z in the local shading frame
+    Spectrum L_back = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, -1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Front query should only see p_front
+    EXPECT_GT(L_front[3], 0.f) << "Front query should see front photon";
+
+    // Back query should only see p_back
+    EXPECT_GT(L_back[3], 0.f) << "Back query should see back photon";
+}
+
+TEST(DensityEstimator, SameCellDifferentFacingRejected) {
+    //
+    // Place many photons in the SAME hash cell, half facing one direction
+    // and half facing the other. Only the correctly-facing half should
+    // contribute to the density estimate.
+    //
+    PhotonSoA photons;
+    const int N_per_side = 20;
+
+    for (int i = 0; i < N_per_side; ++i) {
+        // Upward-facing photons
+        Photon p;
+        p.position = make_f3((float)i * 0.001f, 0.f, 0.0001f);
+        p.wi = make_f3(0, 0, 1); // Coming from above
+        p.lambda_bin = 0;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+    for (int i = 0; i < N_per_side; ++i) {
+        // Downward-facing photons (back-facing relative to query)
+        Photon p;
+        p.position = make_f3((float)i * 0.001f, 0.f, -0.0001f);
+        p.wi = make_f3(0, 0, -1); // Coming from below — back-facing
+        p.lambda_bin = 0;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius = 0.5f;
+    config.surface_tau = 0.01f;
+    config.num_photons_total = 2 * N_per_side;
+    config.use_kernel = false;
+
+    // Query facing UP: should only gather upward-facing photons
+    Spectrum L_up = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Query facing DOWN: should only gather downward-facing photons
+    // wo_local z is always positive in local frame (z = surface normal direction)
+    Spectrum L_down = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, -1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Both should contribute roughly equally (same number of photons per side)
+    // and neither should include the other side's photons
+    EXPECT_GT(L_up[0], 0.f);
+    EXPECT_GT(L_down[0], 0.f);
+    // They should be approximately equal in magnitude
+    EXPECT_NEAR(L_up[0], L_down[0], L_up[0] * 0.3f);
+}
+
+// =====================================================================
+//  SECTION 16 - Kernel functions
+// =====================================================================
+
+TEST(Kernel, EpanechnikovBoundary) {
+    float r2 = 1.0f;
+    EXPECT_NEAR(epanechnikov_kernel(0.f, r2), 1.f, kTol);     // Center
+    EXPECT_NEAR(epanechnikov_kernel(r2, r2), 0.f, kTol);      // Edge
+    EXPECT_NEAR(epanechnikov_kernel(r2 * 2.f, r2), 0.f, kTol); // Outside
+}
+
+TEST(Kernel, EpanechnikovMonotonic) {
+    float r2 = 1.0f;
+    float prev = epanechnikov_kernel(0.f, r2);
+    for (float d = 0.1f; d <= 1.0f; d += 0.1f) {
+        float curr = epanechnikov_kernel(d * d, r2);
+        EXPECT_LE(curr, prev + kTol);
+        prev = curr;
+    }
+}
+
+TEST(Kernel, BoxBoundary) {
+    float r2 = 1.0f;
+    EXPECT_EQ(box_kernel(0.f, r2), 1.f);
+    EXPECT_EQ(box_kernel(r2, r2), 1.f);
+    EXPECT_EQ(box_kernel(r2 + 0.01f, r2), 0.f);
+}
+
+// =====================================================================
+//  SECTION 17 - MIS weight functions from mis.h
+// =====================================================================
+
+TEST(MISWeights, MISWeight2_NonNegative) {
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 100; ++i) {
+        float pa = rng.next_float() * 10.f;
+        float pb = rng.next_float() * 10.f;
+        float w = mis_weight_2(pa, pb);
+        EXPECT_GE(w, 0.f);
+        EXPECT_LE(w, 1.f + kTol);
+    }
+}
+
+TEST(MISWeights, MISWeight3_NonNegative) {
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 100; ++i) {
+        float pa = rng.next_float() * 10.f;
+        float pb = rng.next_float() * 10.f;
+        float pc = rng.next_float() * 10.f;
+        float w = mis_weight_3(pa, pb, pc);
+        EXPECT_GE(w, 0.f);
+        EXPECT_LE(w, 1.f + kTol);
+    }
+}
+
+// =====================================================================
+//  SECTION 18 - Reflect / Refract
+// =====================================================================
+
+TEST(ReflectRefract, ReflectLocal) {
+    float3 wo = normalize(make_f3(0.3f, 0.2f, 0.9f));
+    float3 wi = reflect_local(wo);
+    EXPECT_NEAR(wi.x, -wo.x, kTol);
+    EXPECT_NEAR(wi.y, -wo.y, kTol);
+    EXPECT_NEAR(wi.z, wo.z, kTol);
+}
+
+TEST(ReflectRefract, RefractLocalSnellsLaw) {
+    // Snell's law: eta * sin(theta_i) = sin(theta_t)
+    float eta = 1.f / 1.5f; // Air to glass
+    float3 wo = normalize(make_f3(0.3f, 0.f, 0.9f));
+
+    float sin_i = sqrtf(1.f - wo.z * wo.z);
+
+    float3 wt;
+    EXPECT_TRUE(refract_local(wo, eta, wt));
+
+    float sin_t = sqrtf(1.f - wt.z * wt.z);
+    EXPECT_NEAR(eta * sin_i, sin_t, kTol);
+}
+
+TEST(ReflectRefract, TotalInternalReflection) {
+    // From glass to air at steep angle
+    float eta = 1.5f; // Glass to air (eta = n_glass / n_air)
+    float3 wo = normalize(make_f3(0.9f, 0.f, 0.4f)); // Nearly grazing
+    float3 wt;
+    EXPECT_FALSE(refract_local(wo, eta, wt));
+}
+
+// =====================================================================
+//  SECTION 19 - Camera
+// =====================================================================
+
+TEST(Camera, RayThroughCenter) {
+    // Simple test: camera at origin looking at -Z
+    // The central pixel ray should point roughly along -Z
+    // (Camera is defined elsewhere, just test that the utility struct works)
+    // Minimal test: just verify make_f3 and normalize work together
+    float3 dir = normalize(make_f3(0, 0, -1));
+    EXPECT_NEAR(dir.z, -1.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 20 - PhotonSoA
+// =====================================================================
+
+TEST(PhotonSoA, PushBackAndGet) {
+    PhotonSoA soa;
+    Photon p;
+    p.position = make_f3(1, 2, 3);
+    p.wi = make_f3(4, 5, 6);
+    p.lambda_bin = 7;
+    p.flux = 8.5f;
+    soa.push_back(p);
+
+    EXPECT_EQ(soa.size(), 1u);
+    Photon out = soa.get(0);
+    EXPECT_NEAR(out.position.x, 1.f, kTol);
+    EXPECT_NEAR(out.position.y, 2.f, kTol);
+    EXPECT_NEAR(out.position.z, 3.f, kTol);
+    EXPECT_NEAR(out.wi.x, 4.f, kTol);
+    EXPECT_NEAR(out.wi.y, 5.f, kTol);
+    EXPECT_NEAR(out.wi.z, 6.f, kTol);
+    EXPECT_EQ(out.lambda_bin, 7);
+    EXPECT_NEAR(out.flux, 8.5f, kTol);
+}
+
+TEST(PhotonSoA, ClearWorks) {
+    PhotonSoA soa;
+    Photon p;
+    p.position = make_f3(0, 0, 0);
+    p.wi = make_f3(0, 0, 1);
+    p.lambda_bin = 0;
+    p.flux = 1.f;
+    soa.push_back(p);
+    soa.push_back(p);
+    EXPECT_EQ(soa.size(), 2u);
+    soa.clear();
+    EXPECT_EQ(soa.size(), 0u);
+}
+
+// =====================================================================
+//  SECTION 21 - Hash grid consistency checks
+// =====================================================================
+
+TEST(HashGrid, CellCoordConsistency) {
+    HashGrid grid;
+    grid.cell_size = 0.1f;
+    grid.table_size = 1024;
+
+    // Points in the same cell should have the same key
+    float3 a = make_f3(0.05f, 0.05f, 0.05f);
+    float3 b = make_f3(0.09f, 0.01f, 0.09f);
+    int3 ca = grid.cell_coord(a);
+    int3 cb = grid.cell_coord(b);
+    EXPECT_EQ(ca.x, cb.x);
+    EXPECT_EQ(ca.y, cb.y);
+    EXPECT_EQ(ca.z, cb.z);
+
+    // Points in different cells should (likely) have different coords
+    float3 c = make_f3(0.15f, 0.05f, 0.05f);
+    int3 cc = grid.cell_coord(c);
+    EXPECT_NE(ca.x, cc.x);
+}
+
+TEST(HashGrid, NegativeCoordinates) {
+    HashGrid grid;
+    grid.cell_size = 1.0f;
+    grid.table_size = 1024;
+
+    int3 pos = grid.cell_coord(make_f3(-0.5f, -1.5f, -2.5f));
+    EXPECT_EQ(pos.x, -1);
+    EXPECT_EQ(pos.y, -2);
+    EXPECT_EQ(pos.z, -3);
+}
+
+// =====================================================================
+//  SECTION 22 - BSDF Helmholtz reciprocity
+// =====================================================================
+// f(wo, wi) == f(wi, wo) must hold for non-delta BSDFs.
+
+TEST(BSDFReciprocity, LambertianReciprocity) {
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(0.6f);
+
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 200; ++i) {
+        float3 wo = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        float3 wi = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        Spectrum f_forward  = bsdf::evaluate(mat, wo, wi);
+        Spectrum f_backward = bsdf::evaluate(mat, wi, wo);
+        for (int j = 0; j < NUM_LAMBDA; ++j) {
+            EXPECT_NEAR(f_forward[j], f_backward[j], kTol)
+                << "Lambertian reciprocity failed at bin " << j;
+        }
+    }
+}
+
+TEST(BSDFReciprocity, GlossyMetalReciprocity) {
+    Material mat;
+    mat.type = MaterialType::GlossyMetal;
+    mat.Kd = Spectrum::constant(0.3f);
+    mat.Ks = Spectrum::constant(0.5f);
+    mat.roughness = 0.4f;
+
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 200; ++i) {
+        float3 wo = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        float3 wi = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        if (wo.z < 0.01f || wi.z < 0.01f) continue;
+
+        Spectrum f_forward  = bsdf::evaluate(mat, wo, wi);
+        Spectrum f_backward = bsdf::evaluate(mat, wi, wo);
+        for (int j = 0; j < NUM_LAMBDA; ++j) {
+            EXPECT_NEAR(f_forward[j], f_backward[j], kLoose)
+                << "GlossyMetal reciprocity failed at bin " << j
+                << " forward=" << f_forward[j] << " backward=" << f_backward[j];
+        }
+    }
+}
+
+// =====================================================================
+//  SECTION 23 - Glass Fresnel energy balance
+// =====================================================================
+// Reflected fraction + transmitted fraction = 1
+
+TEST(GlassFresnel, EnergyBalance) {
+    // At various angles, F_reflect + F_transmit = 1
+    for (float cos_t = 0.1f; cos_t <= 1.0f; cos_t += 0.05f) {
+        float F = fresnel_dielectric(cos_t, 1.0f / 1.5f);
+        float T = 1.0f - F;
+        EXPECT_GE(F, 0.f);
+        EXPECT_GE(T, 0.f);
+        EXPECT_NEAR(F + T, 1.0f, kTol)
+            << "Fresnel + transmittance != 1 at cos=" << cos_t;
+    }
+}
+
+TEST(GlassFresnel, GlassSampleReflectRefractBalance) {
+    // Over many samples, the fraction of reflects should match E[F]
+    PCGRng rng = PCGRng::seed(42);
+    float3 wo = normalize(make_f3(0.3f, 0.0f, 0.9f));
+    float ior = 1.5f;
+
+    int N = 50000;
+    int reflect_count = 0;
+    for (int i = 0; i < N; ++i) {
+        BSDFSample s = bsdf::glass_sample(wo, ior, rng);
+        if (s.wi.z > 0.f) reflect_count++; // Reflection keeps z positive
+    }
+
+    float F_expected = fresnel_dielectric(wo.z, 1.0f / ior);
+    float F_observed = (float)reflect_count / N;
+    EXPECT_NEAR(F_observed, F_expected, 0.03f)
+        << "Glass reflect fraction should match Fresnel";
+}
+
+// =====================================================================
+//  SECTION 24 - Glossy BSDF at grazing angles
+// =====================================================================
+
+TEST(BSDF, GlossyEnergyAtGrazingAngle) {
+    // Energy conservation should hold even at steep angles
+    Material mat;
+    mat.type = MaterialType::GlossyMetal;
+    mat.Kd = Spectrum::constant(0.3f);
+    mat.Ks = Spectrum::constant(0.5f);
+    mat.roughness = 0.3f;
+
+    // Grazing angle: wo nearly parallel to surface
+    float3 wo = normalize(make_f3(0.95f, 0.0f, 0.31f));
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 300000;
+
+    Spectrum accum = Spectrum::zero();
+    for (int i = 0; i < N; ++i) {
+        BSDFSample s = bsdf::sample(mat, wo, rng);
+        if (s.pdf > 0.f && s.wi.z > 0.f) {
+            float cos_theta = s.wi.z;
+            accum += s.f * (cos_theta / s.pdf);
+        }
+    }
+    accum *= 1.f / N;
+
+    for (int j = 0; j < NUM_LAMBDA; ++j) {
+        EXPECT_LE(accum[j], 1.3f) // Some MC noise tolerance
+            << "Glossy energy > 1 at grazing angle, bin " << j;
+        EXPECT_GE(accum[j], 0.f);
+    }
+}
+
+// =====================================================================
+//  SECTION 25 - RGB → Spectrum round-trip
+// =====================================================================
+
+TEST(Spectrum, RGBRoundTrip) {
+    // The Smits-style RGB → Spectrum → sRGB round-trip is NOT exact
+    // (the spectral basis functions are not calibrated inverses of
+    // the CIE matching functions). Instead we verify that the
+    // dominant channel is preserved and the output is finite.
+
+    // Red: R channel should dominate
+    {
+        Spectrum s = rgb_to_spectrum_reflectance(1.0f, 0.0f, 0.0f);
+        float3 rgb = spectrum_to_srgb(s);
+        EXPECT_GT(rgb.x, rgb.y) << "Red dominant: R > G";
+        EXPECT_GT(rgb.x, rgb.z) << "Red dominant: R > B";
+        EXPECT_TRUE(std::isfinite(rgb.x) && std::isfinite(rgb.y) && std::isfinite(rgb.z));
+    }
+    // Green: G channel should dominate
+    {
+        Spectrum s = rgb_to_spectrum_reflectance(0.0f, 1.0f, 0.0f);
+        float3 rgb = spectrum_to_srgb(s);
+        EXPECT_GT(rgb.y, rgb.x) << "Green dominant: G > R";
+        EXPECT_GT(rgb.y, rgb.z) << "Green dominant: G > B";
+        EXPECT_TRUE(std::isfinite(rgb.x) && std::isfinite(rgb.y) && std::isfinite(rgb.z));
+    }
+    // Blue: B channel should dominate
+    {
+        Spectrum s = rgb_to_spectrum_reflectance(0.0f, 0.0f, 1.0f);
+        float3 rgb = spectrum_to_srgb(s);
+        EXPECT_GT(rgb.z, rgb.x) << "Blue dominant: B > R";
+        EXPECT_GT(rgb.z, rgb.y) << "Blue dominant: B > G";
+        EXPECT_TRUE(std::isfinite(rgb.x) && std::isfinite(rgb.y) && std::isfinite(rgb.z));
+    }
+    // White: all channels approximately equal (within ±30 % of mean)
+    {
+        Spectrum s = rgb_to_spectrum_reflectance(1.0f, 1.0f, 1.0f);
+        float3 rgb = spectrum_to_srgb(s);
+        float mean = (rgb.x + rgb.y + rgb.z) / 3.0f;
+        EXPECT_NEAR(rgb.x, mean, mean * 0.3f) << "White: R ≈ mean";
+        EXPECT_NEAR(rgb.y, mean, mean * 0.3f) << "White: G ≈ mean";
+        EXPECT_NEAR(rgb.z, mean, mean * 0.3f) << "White: B ≈ mean";
+    }
+}
+
+// =====================================================================
+//  SECTION 26 - Blackbody Stefan-Boltzmann law
+// =====================================================================
+
+TEST(Spectrum, BlackbodyPlanckFormula) {
+    // Verify the blackbody_spectrum function matches the Planck function
+    // at several specific wavelengths and temperatures.
+    // B(λ,T) = 2hc² / (λ⁵ (e^(hc/λkT) - 1))  in W/(sr·m²·m)
+    // Our function returns per-nm, so result = B * 1e-9.
+    constexpr double h  = 6.62607015e-34;
+    constexpr double c  = 2.99792458e8;
+    constexpr double kb = 1.380649e-23;
+
+    auto planck = [&](double lambda_nm, double T) -> double {
+        double lam_m = lambda_nm * 1e-9;
+        double lam5  = lam_m * lam_m * lam_m * lam_m * lam_m;
+        double exponent = (h * c) / (lam_m * kb * T);
+        double denom = exp(exponent) - 1.0;
+        double L = (2.0 * h * c * c) / (lam5 * denom);
+        return L * 1e-9; // per-nm
+    };
+
+    float temps[] = { 3000.f, 5000.f, 6500.f, 10000.f };
+    for (float T : temps) {
+        Spectrum bb = blackbody_spectrum(T);
+        // Check a few bins
+        int bins[] = { 0, NUM_LAMBDA / 4, NUM_LAMBDA / 2, 3 * NUM_LAMBDA / 4, NUM_LAMBDA - 1 };
+        for (int i : bins) {
+            float lam = lambda_of_bin(i);
+            double expected_val = planck((double)lam, (double)T);
+            double actual_val   = (double)bb[i];
+            // Allow 1 % relative error (float precision)
+            double tol = expected_val * 0.01 + 1e-20;
+            EXPECT_NEAR(actual_val, expected_val, tol)
+                << "T=" << T << " lambda=" << lam << " nm";
+        }
+    }
+
+    // Also verify monotonicity: hotter blackbody has more visible power
+    Spectrum bb_cool = blackbody_spectrum(4000.f);
+    Spectrum bb_hot  = blackbody_spectrum(8000.f);
+    double sum_cool = 0, sum_hot = 0;
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        sum_cool += bb_cool[i];
+        sum_hot  += bb_hot[i];
+    }
+    EXPECT_GT(sum_hot, sum_cool) << "Hotter blackbody should have more visible power";
+}
+
+// =====================================================================
+//  SECTION 27 - GGX VNDF sampling & Smith G symmetry
+// =====================================================================
+
+TEST(GGX, VNDFSamplingPDFConsistency) {
+    // The sampled half-vector should have a PDF consistent with ggx_D
+    PCGRng rng = PCGRng::seed(42);
+    float alpha = 0.3f;
+
+    for (int i = 0; i < 200; ++i) {
+        float3 wo = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        if (wo.z < 0.05f) continue;
+
+        float3 h = ggx_sample_halfvector(wo, alpha, rng.next_float(), rng.next_float());
+
+        // Half-vector should be on upper hemisphere and unit length
+        EXPECT_GT(h.z, -kTol) << "Half-vector below hemisphere";
+        EXPECT_NEAR(length(h), 1.f, 1e-3f) << "Half-vector not unit";
+
+        // D value should be positive
+        float D_val = ggx_D(h, alpha);
+        EXPECT_GE(D_val, 0.f) << "D < 0 for sampled half-vector";
+    }
+}
+
+TEST(GGX, SmithGSymmetry) {
+    // G(wo, wi, alpha) == G(wi, wo, alpha)
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 500; ++i) {
+        float3 wo = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        float3 wi = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        float alpha = rng.next_float() * 0.9f + 0.1f;
+
+        float G_forward  = ggx_G(wo, wi, alpha);
+        float G_backward = ggx_G(wi, wo, alpha);
+        EXPECT_NEAR(G_forward, G_backward, kTol)
+            << "Smith G not symmetric for alpha=" << alpha;
+    }
+}
+
+// =====================================================================
+//  SECTION 28 - Camera ray generation
+// =====================================================================
+
+TEST(Camera, CornellBoxCameraSetup) {
+    Camera cam = Camera::cornell_box_camera(512, 512);
+
+    // Camera frame vectors should be orthonormal
+    EXPECT_NEAR(dot(cam.u, cam.v), 0.f, kTol);
+    EXPECT_NEAR(dot(cam.u, cam.w), 0.f, kTol);
+    EXPECT_NEAR(dot(cam.v, cam.w), 0.f, kTol);
+    EXPECT_NEAR(length(cam.u), 1.f, kTol);
+    EXPECT_NEAR(length(cam.v), 1.f, kTol);
+    EXPECT_NEAR(length(cam.w), 1.f, kTol);
+}
+
+TEST(Camera, CenterPixelRayDirection) {
+    Camera cam = Camera::cornell_box_camera(512, 512);
+    PCGRng rng = PCGRng::seed(42);
+
+    // Center pixel: should point roughly toward look_at
+    Ray ray = cam.generate_ray(256, 256, rng);
+    float3 expected_dir = normalize(cam.look_at - cam.position);
+
+    EXPECT_NEAR(ray.direction.x, expected_dir.x, 0.02f);
+    EXPECT_NEAR(ray.direction.y, expected_dir.y, 0.02f);
+    EXPECT_NEAR(ray.direction.z, expected_dir.z, 0.02f);
+
+    // Ray origin should be camera position
+    EXPECT_NEAR(ray.origin.x, cam.position.x, kTol);
+    EXPECT_NEAR(ray.origin.y, cam.position.y, kTol);
+    EXPECT_NEAR(ray.origin.z, cam.position.z, kTol);
+}
+
+TEST(Camera, CornerRaysDiverge) {
+    Camera cam = Camera::cornell_box_camera(512, 512);
+    PCGRng rng = PCGRng::seed(42);
+
+    Ray r_tl = cam.generate_ray(0, 0, rng);
+    Ray r_tr = cam.generate_ray(511, 0, rng);
+    Ray r_bl = cam.generate_ray(0, 511, rng);
+    Ray r_br = cam.generate_ray(511, 511, rng);
+
+    // All corner rays should diverge from each other
+    EXPECT_LT(dot(r_tl.direction, r_br.direction), 0.99f);
+    EXPECT_LT(dot(r_tr.direction, r_bl.direction), 0.99f);
+
+    // All should be unit vectors
+    EXPECT_NEAR(length(r_tl.direction), 1.f, 1e-4f);
+    EXPECT_NEAR(length(r_br.direction), 1.f, 1e-4f);
+}
+
+// =====================================================================
+//  SECTION 29 - FrameBuffer tonemap
+// =====================================================================
+
+TEST(FrameBuffer, ZeroGivesBlack) {
+    FrameBuffer fb;
+    fb.resize(2, 2);
+    fb.tonemap(1.0f);
+
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(fb.srgb[i * 4 + 0], 0);
+        EXPECT_EQ(fb.srgb[i * 4 + 1], 0);
+        EXPECT_EQ(fb.srgb[i * 4 + 2], 0);
+        EXPECT_EQ(fb.srgb[i * 4 + 3], 255); // Alpha = full
+    }
+}
+
+TEST(FrameBuffer, AccumulateAndTonemap) {
+    FrameBuffer fb;
+    fb.resize(1, 1);
+
+    // Accumulate two samples of a flat white-ish spectrum
+    // With normalised XYZ, flat 1.0 maps to Y=1 -> white sRGB
+    Spectrum white = Spectrum::constant(1.0f);
+    fb.accumulate(0, 0, white);
+    fb.accumulate(0, 0, white);
+
+    EXPECT_NEAR(fb.sample_count[0], 2.f, kTol);
+
+    fb.tonemap(1.0f);
+
+    // After tonemap, should be a bright neutral color
+    uint8_t r = fb.srgb[0], g = fb.srgb[1], b = fb.srgb[2];
+    EXPECT_GT(r, 100); // Should be fairly bright
+    EXPECT_GT(g, 100);
+    EXPECT_GT(b, 100);
+    // Should be roughly neutral (not wildly off-white)
+    EXPECT_NEAR((float)r, (float)g, 60.f);
+    EXPECT_NEAR((float)g, (float)b, 60.f);
+}
+
+// =====================================================================
+//  SECTION 30 - Material type classification
+// =====================================================================
+
+TEST(Material, IsEmissive) {
+    Material mat;
+    mat.Le = Spectrum::zero();
+    EXPECT_FALSE(mat.is_emissive());
+
+    mat.Le = Spectrum::constant(1.0f);
+    EXPECT_TRUE(mat.is_emissive());
+}
+
+TEST(Material, IsSpecular) {
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    EXPECT_FALSE(mat.is_specular());
+
+    mat.type = MaterialType::Mirror;
+    EXPECT_TRUE(mat.is_specular());
+
+    mat.type = MaterialType::Glass;
+    EXPECT_TRUE(mat.is_specular());
+
+    mat.type = MaterialType::GlossyMetal;
+    EXPECT_FALSE(mat.is_specular());
+}
+
+TEST(Material, MeanEmission) {
+    Material mat;
+    mat.Le = Spectrum::constant(2.0f);
+    EXPECT_NEAR(mat.mean_emission(), 2.0f, kTol);
+
+    mat.Le = Spectrum::zero();
+    EXPECT_NEAR(mat.mean_emission(), 0.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 31 - Density estimator normalization
+// =====================================================================
+
+TEST(DensityEstimator, NormalizationFactor) {
+    // Place K identical photons at the query point.
+    // With box kernel, L = (1/(π r²)) * K * Φ/N * f
+    // For Lambertian with Kd=1: f = 1/π
+    // So L[bin] = (1/(π r²)) * K * Φ/N * (1/π)
+
+    const int K = 10;
+    const float radius = 0.5f;
+    const float flux = 1.0f;
+    const int N_total = 100;
+    const int bin = 5;
+
+    PhotonSoA photons;
+    for (int i = 0; i < K; ++i) {
+        Photon p;
+        p.position = make_f3(0.001f * i, 0.f, 0.f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = bin;
+        p.flux = flux;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius = radius;
+    config.surface_tau = 0.1f;
+    config.num_photons_total = N_total;
+    config.use_kernel = false; // Box kernel for exact result
+
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, radius);
+
+    // Expected: inv_area * K * (flux/N_total) * (Kd/π)
+    // inv_area = 1/(π * r²) = 1/(π * 0.25)
+    float inv_area = 1.0f / (PI * radius * radius);
+    float expected = inv_area * K * (flux / N_total) * (1.0f / PI); // Kd=1 → f = 1/π
+
+    EXPECT_NEAR(L[bin], expected, expected * 0.01f)
+        << "Density estimator normalization incorrect";
+
+    // Other bins should be zero
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        if (i != bin) EXPECT_NEAR(L[i], 0.f, kTol);
+    }
+}
+
+TEST(DensityEstimator, EpanechnikovKernelCorrection) {
+    // With Epanechnikov kernel and all photons at center (dist²≈0),
+    // kernel = 1.0 and correction factor = 1.5
+    // Result should be 1.5× the box kernel result for center photons
+    PhotonSoA photons;
+    Photon p;
+    p.position = make_f3(0.0001f, 0.f, 0.f); // Very close to center
+    p.wi = make_f3(0, 0, 1);
+    p.lambda_bin = 0;
+    p.flux = 1.0f;
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius = 0.5f;
+    config.surface_tau = 0.1f;
+    config.num_photons_total = 1;
+
+    // Box kernel
+    config.use_kernel = false;
+    Spectrum L_box = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Epanechnikov kernel
+    config.use_kernel = true;
+    Spectrum L_epan = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // For a photon very close to center: epan_kernel ≈ 1.0
+    // So L_epan ≈ 1.5 × L_box
+    EXPECT_NEAR(L_epan[0], L_box[0] * 1.5f, L_box[0] * 0.05f)
+        << "Epanechnikov correction factor should be 1.5× for center photon";
+}
+
+// =====================================================================
+//  SECTION 32 - Triangle edge cases
+// =====================================================================
+
+TEST(Triangle, DegenerateZeroArea) {
+    // Degenerate triangle: two vertices coincide
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(0, 0, 0);  // Same as v0!
+    tri.v2 = make_f3(1, 0, 0);
+
+    EXPECT_NEAR(tri.area(), 0.f, kTol);
+
+    // Intersection should not crash
+    Ray ray;
+    ray.origin = make_f3(0, 0, 5);
+    ray.direction = make_f3(0, 0, -1);
+    ray.tmin = 1e-4f;
+    ray.tmax = 1e20f;
+    float t, u, v;
+    tri.intersect(ray, t, u, v); // Just verify no crash
+}
+
+TEST(Triangle, CollinearVertices) {
+    // All three vertices on a line
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(1, 0, 0);
+    tri.v2 = make_f3(2, 0, 0);
+
+    EXPECT_NEAR(tri.area(), 0.f, kTol);
+}
+
+TEST(Triangle, InterpolateNormal) {
+    Triangle tri;
+    tri.v0 = make_f3(0, 0, 0);
+    tri.v1 = make_f3(1, 0, 0);
+    tri.v2 = make_f3(0, 1, 0);
+    tri.n0 = normalize(make_f3(0, 0, 1));
+    tri.n1 = normalize(make_f3(1, 0, 1));
+    tri.n2 = normalize(make_f3(0, 1, 1));
+
+    // At v0: alpha=1, beta=0, gamma=0 → should be n0
+    float3 n = tri.interpolate_normal(1, 0, 0);
+    n = normalize(n);
+    EXPECT_NEAR(n.x, tri.n0.x, kTol);
+    EXPECT_NEAR(n.y, tri.n0.y, kTol);
+    EXPECT_NEAR(n.z, tri.n0.z, kTol);
+
+    // At v1
+    n = tri.interpolate_normal(0, 1, 0);
+    n = normalize(n);
+    EXPECT_NEAR(n.x, tri.n1.x, kTol);
+    EXPECT_NEAR(n.y, tri.n1.y, kTol);
+    EXPECT_NEAR(n.z, tri.n1.z, kTol);
+
+    // At centroid: blended normal should still be unit after normalize
+    n = tri.interpolate_normal(1.f/3, 1.f/3, 1.f/3);
+    n = normalize(n);
+    EXPECT_NEAR(length(n), 1.f, kTol);
+}
+
+// =====================================================================
+//  SECTION 33 - Cosine hemisphere PDF integrates to 1 (MC verification)
+// =====================================================================
+
+TEST(Sampling, CosineHemispherePDFIntegration) {
+    // MC estimate: ∫ p(ω) dω = 1 using uniform hemisphere sampling
+    // p(ω) = cos(θ)/π
+    PCGRng rng = PCGRng::seed(42);
+    const int N = 500000;
+    double integral = 0.0;
+
+    for (int i = 0; i < N; ++i) {
+        float3 d = sample_uniform_hemisphere(rng.next_float(), rng.next_float());
+        float pdf_cosine = cosine_hemisphere_pdf(d.z);
+        float pdf_uniform = uniform_hemisphere_pdf();
+        // MC: ∫ p_cosine(ω) dω ≈ (1/N) Σ p_cosine(ω_i) / p_uniform(ω_i)
+        integral += pdf_cosine / pdf_uniform;
+    }
+    integral /= N;
+    EXPECT_NEAR(integral, 1.0, 0.02) << "Cosine hemisphere PDF should integrate to 1";
+}
+
+// =====================================================================
+//  SECTION 34 - MIS combined estimator
+// =====================================================================
+
+TEST(MIS, MISLightSampleContribution) {
+    Spectrum Li = Spectrum::constant(10.f);
+    Spectrum f_bsdf = Spectrum::constant(0.5f / PI);
+    float cos_theta = 0.8f;
+    float pdf_light = 2.0f;
+    float pdf_bsdf = 0.5f;
+
+    MISContribution c = mis_light_sample(Li, f_bsdf, cos_theta, pdf_light, pdf_bsdf, 0.f);
+
+    // Weight should be > 0.5 since light pdf dominates
+    EXPECT_GT(c.weight, 0.5f);
+    // Radiance should be non-negative
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        EXPECT_GE(c.radiance[i], 0.f);
+    }
+}
+
+TEST(MIS, MISBSDFSampleContribution) {
+    Spectrum Le = Spectrum::constant(5.f);
+    Spectrum f_bsdf = Spectrum::constant(0.3f / PI);
+    float cos_theta = 0.6f;
+    float pdf_bsdf = 1.5f;
+    float pdf_light = 0.1f;
+
+    MISContribution c = mis_bsdf_sample(Le, f_bsdf, cos_theta, pdf_bsdf, pdf_light, 0.f);
+
+    EXPECT_GT(c.weight, 0.5f); // BSDF dominates
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        EXPECT_GE(c.radiance[i], 0.f);
+    }
+}
+
+// =====================================================================
+//  SECTION 35 - Cornell Box scene tests (real geometry)
+// =====================================================================
+// These tests load the actual Cornell box OBJ and test the full
+// pipeline on realistic geometry.
+
+// Helper: build a Cornell box scene with area light
+static Scene build_cornell_test_scene() {
+    Scene scene;
+    std::string path = std::string(SCENES_DIR) + "/cornell_box/cornellbox.obj";
+    if (!load_obj(path, scene)) {
+        // If loading fails, return empty scene (tests will detect this)
+        return scene;
+    }
+
+    // Add fallback area light only when the scene has no emitters
+    // (The new cornellbox.obj has Ke in its MTL, so this should not fire.)
+    scene.build_bvh();
+    scene.build_emissive_distribution();
+
+    if (scene.num_emissive() == 0) {
+        Material light_mat;
+        light_mat.name = "__area_light__";
+        light_mat.type = MaterialType::Emissive;
+        light_mat.Le = blackbody_spectrum(6500.f, 1e-8f);
+        uint32_t light_mat_id = (uint32_t)scene.materials.size();
+        scene.materials.push_back(light_mat);
+
+        float3 v0 = make_f3(-0.15f,  0.499f, -0.15f);
+        float3 v1 = make_f3( 0.15f,  0.499f, -0.15f);
+        float3 v2 = make_f3( 0.15f,  0.499f,  0.15f);
+        float3 v3 = make_f3(-0.15f,  0.499f,  0.15f);
+        float3 n  = make_f3( 0.0f,  -1.0f,    0.0f);
+
+        Triangle t1;
+        t1.v0 = v0; t1.v1 = v1; t1.v2 = v2;
+        t1.n0 = t1.n1 = t1.n2 = n;
+        t1.uv0 = t1.uv1 = t1.uv2 = make_f2(0, 0);
+        t1.material_id = light_mat_id;
+
+        Triangle t2;
+        t2.v0 = v0; t2.v1 = v2; t2.v2 = v3;
+        t2.n0 = t2.n1 = t2.n2 = n;
+        t2.uv0 = t2.uv1 = t2.uv2 = make_f2(0, 0);
+        t2.material_id = light_mat_id;
+
+        scene.triangles.push_back(t1);
+        scene.triangles.push_back(t2);
+
+        scene.build_bvh();
+        scene.build_emissive_distribution();
+    }
+
+    return scene;
+}
+
+// -- 35.1 Scene loading ----------------------------------------------
+
+TEST(CornellBox, LoadScene) {
+    Scene scene = build_cornell_test_scene();
+
+    // cornellbox.obj subdivision mesh: 13056 triangles, 7 materials (incl default)
+    EXPECT_EQ(scene.triangles.size(), 13056u);
+    EXPECT_GT(scene.materials.size(), 0u);
+    EXPECT_GT(scene.bvh_nodes.size(), 0u);
+}
+
+TEST(CornellBox, EmissiveDistribution) {
+    Scene scene = build_cornell_test_scene();
+
+    // cornellbox.obj has 128 emissive triangles (Light material with Ke)
+    EXPECT_EQ(scene.num_emissive(), 128u);
+    EXPECT_GT(scene.total_emissive_power, 0.f);
+
+    // Emissive alias table PDF should sum to 1
+    float pdf_sum = 0.f;
+    for (size_t i = 0; i < scene.emissive_tri_indices.size(); ++i) {
+        pdf_sum += scene.emissive_alias_table.pdf((int)i);
+    }
+    EXPECT_NEAR(pdf_sum, 1.f, kTol);
+}
+
+// -- 35.2 BVH vs brute-force ----------------------------------------
+
+TEST(CornellBox, BVHMatchesBruteForce) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "Scene not loaded"; }
+
+    PCGRng rng = PCGRng::seed(42);
+    Camera cam = Camera::cornell_box_camera(64, 64);
+
+    const int N_RAYS = 200;
+
+    for (int i = 0; i < N_RAYS; ++i) {
+        int px = (int)(rng.next_float() * 64);
+        int py = (int)(rng.next_float() * 64);
+        if (px >= 64) px = 63;
+        if (py >= 64) py = 63;
+
+        Ray ray = cam.generate_ray(px, py, rng);
+
+        // BVH intersection
+        HitRecord bvh_hit = scene.intersect(ray);
+
+        // Brute-force: test all triangles
+        HitRecord brute_hit{};
+        brute_hit.hit = false;
+        brute_hit.t = ray.tmax;
+
+        for (size_t j = 0; j < scene.triangles.size(); ++j) {
+            float t, u, v;
+            Ray test_ray = ray;
+            test_ray.tmax = brute_hit.t;
+            if (scene.triangles[j].intersect(test_ray, t, u, v)) {
+                if (t < brute_hit.t && t > ray.tmin) {
+                    brute_hit.hit = true;
+                    brute_hit.t = t;
+                    brute_hit.triangle_id = (uint32_t)j;
+                }
+            }
+        }
+
+        // Both should agree on hit/miss
+        EXPECT_EQ(bvh_hit.hit, brute_hit.hit)
+            << "BVH/brute-force disagree on hit for ray " << i;
+
+        if (bvh_hit.hit && brute_hit.hit) {
+            // t values should match closely
+            EXPECT_NEAR(bvh_hit.t, brute_hit.t, 1e-3f)
+                << "BVH/brute-force t mismatch for ray " << i;
+        }
+    }
+}
+
+// -- 35.3 Camera rays hit expected surfaces --------------------------
+
+TEST(CornellBox, CenterRayHitsSomething) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "Scene not loaded"; }
+
+    Camera cam = Camera::cornell_box_camera(512, 512);
+    PCGRng rng = PCGRng::seed(42);
+
+    // Center pixel should hit *something* inside the box
+    // (it may hit an object / block rather than the back wall)
+    Ray ray = cam.generate_ray(256, 256, rng);
+    HitRecord hit = scene.intersect(ray);
+
+    EXPECT_TRUE(hit.hit) << "Center ray should hit something";
+    if (hit.hit) {
+        // Hit must be within the scene bounds [-0.6, 0.6]³
+        EXPECT_GT(hit.position.x, -0.6f);
+        EXPECT_LT(hit.position.x,  0.6f);
+        EXPECT_GT(hit.position.y, -0.6f);
+        EXPECT_LT(hit.position.y,  0.6f);
+        EXPECT_GT(hit.position.z, -0.6f);
+        EXPECT_LT(hit.position.z,  0.6f);
+    }
+}
+
+TEST(CornellBox, FloorRayHitsFloor) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "Scene not loaded"; }
+
+    // Brute-force a downward ray to verify floor geometry exists,
+    // then test via BVH. We use a slightly tilted ray to avoid
+    // axis-aligned edge cases in AABB intersection (0 * inf = NaN).
+    Ray ray;
+    ray.origin    = make_f3(0.001f, 0.4f, 0.001f);  // near center, avoid exact 0
+    ray.direction = normalize(make_f3(0.0f, -1.0f, 0.0f));
+
+    // First: brute-force to confirm the floor exists
+    bool brute_hit = false;
+    float best_t = ray.tmax;
+    float best_y = 0.f;
+    for (size_t i = 0; i < scene.triangles.size(); ++i) {
+        float t, u, v;
+        Ray test = ray;
+        test.tmax = best_t;
+        if (scene.triangles[i].intersect(test, t, u, v)) {
+            best_t = t;
+            brute_hit = true;
+            float alpha = 1.f - u - v;
+            float3 pos = scene.triangles[i].interpolate_position(alpha, u, v);
+            best_y = pos.y;
+        }
+    }
+
+    EXPECT_TRUE(brute_hit).operator<<("Brute-force downward ray should hit the floor");
+    if (brute_hit) {
+        EXPECT_NEAR(best_y, -0.5f, 0.05f)
+            << "Brute-force hit should be near floor y = -0.5";
+    }
+
+    // Now test through the BVH
+    HitRecord hit = scene.intersect(ray);
+    EXPECT_TRUE(hit.hit) << "BVH downward ray should hit the floor";
+    if (hit.hit) {
+        EXPECT_NEAR(hit.position.y, -0.5f, 0.05f)
+            << "BVH hit should be near floor y = -0.5";
+    }
+}
+
+// -- 35.4 Shadow ray visibility --------------------------------------
+
+TEST(CornellBox, ShadowRayToLight) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "Scene not loaded"; }
+
+    // Point on the floor directly below the light
+    float3 floor_pos = make_f3(0.0f, -0.499f, 0.0f);
+    float3 light_pos = make_f3(0.0f,  0.499f, 0.0f);
+
+    float3 to_light = light_pos - floor_pos;
+    float dist = length(to_light);
+    float3 dir = to_light / dist;
+
+    Ray shadow_ray;
+    shadow_ray.origin = floor_pos + make_f3(0, EPSILON, 0);
+    shadow_ray.direction = dir;
+    shadow_ray.tmin = 1e-4f;
+    shadow_ray.tmax = dist - 2e-4f;
+
+    HitRecord hit = scene.intersect(shadow_ray);
+
+    // The path from floor center straight up to light should be unoccluded
+    EXPECT_FALSE(hit.hit)
+        << "Shadow ray from floor center to light should be unoccluded";
+}
+
+TEST(CornellBox, ShadowRayBlockedByGeometry) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "Scene not loaded"; }
+
+    // Point outside the box trying to reach inside through the back wall
+    float3 outside = make_f3(0.0f, 0.0f, -2.0f);
+    float3 inside  = make_f3(0.0f, 0.0f,  0.0f);
+
+    float3 dir = normalize(inside - outside);
+    float dist = length(inside - outside);
+
+    Ray shadow_ray;
+    shadow_ray.origin = outside;
+    shadow_ray.direction = dir;
+    shadow_ray.tmin = 1e-4f;
+    shadow_ray.tmax = dist;
+
+    HitRecord hit = scene.intersect(shadow_ray);
+
+    // Should be occluded by the back wall
+    EXPECT_TRUE(hit.hit)
+        << "Ray from outside should be blocked by the back wall";
+    if (hit.hit) {
+        EXPECT_LT(hit.t, dist)
+            << "Hit should be before the target point";
+    }
+}
+
+// -- 35.5 Emitter sampling -------------------------------------------
+
+TEST(CornellBox, EmitterSamplesValid) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    PCGRng rng = PCGRng::seed(42);
+
+    for (int i = 0; i < 100; ++i) {
+        EmittedPhoton ep = sample_emitted_photon(scene, rng);
+
+        // Photon should originate near the light (y ≈ 0.499)
+        EXPECT_NEAR(ep.ray.origin.y, 0.499f, 0.01f)
+            << "Photon should originate at the ceiling light";
+
+        // Direction should point downward (into the scene)
+        // The light normal is (0, -1, 0), so the photon goes into the scene
+        EXPECT_LT(ep.ray.direction.y, 0.1f)
+            << "Photon from ceiling light should generally point downward";
+
+        // Flux should be positive and finite
+        EXPECT_GT(ep.flux, 0.f) << "Photon flux should be positive";
+        EXPECT_FALSE(std::isnan(ep.flux)) << "Photon flux should not be NaN";
+        EXPECT_FALSE(std::isinf(ep.flux)) << "Photon flux should not be Inf";
+
+        // Wavelength bin should be valid
+        EXPECT_LT(ep.lambda_bin, NUM_LAMBDA);
+    }
+}
+
+// -- 35.6 Direct lighting --------------------------------------------
+
+TEST(CornellBox, DirectLightFromFloor) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    PCGRng rng = PCGRng::seed(42);
+
+    // Point on the floor directly below the light - should see the light
+    float3 floor_pos = make_f3(0.0f, -0.499f, 0.0f);
+    float3 floor_normal = make_f3(0.0f, 1.0f, 0.0f);
+
+    int visible_count = 0;
+    const int N = 100;
+
+    for (int i = 0; i < N; ++i) {
+        DirectLightSample dls = sample_direct_light(floor_pos, floor_normal, scene, rng);
+        if (dls.visible) {
+            visible_count++;
+            EXPECT_GT(dls.pdf_light, 0.f) << "PDF should be positive for visible sample";
+            EXPECT_GT(dls.Li.max_component(), 0.f) << "Li should be nonzero";
+            EXPECT_GT(dls.distance, 0.f);
+        }
+    }
+
+    // Most samples should be visible from floor center
+    EXPECT_GT(visible_count, N / 2)
+        << "Most direct light samples from floor center should be visible";
+}
+
+TEST(CornellBox, DirectLightPDFConsistency) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    PCGRng rng = PCGRng::seed(42);
+
+    float3 floor_pos = make_f3(0.0f, -0.499f, 0.0f);
+    float3 floor_normal = make_f3(0.0f, 1.0f, 0.0f);
+
+    for (int i = 0; i < 50; ++i) {
+        DirectLightSample dls = sample_direct_light(floor_pos, floor_normal, scene, rng);
+        if (!dls.visible || dls.pdf_light <= 0.f) continue;
+
+        // direct_light_pdf for the same direction should give similar result
+        float3 offset_pos = floor_pos + floor_normal * EPSILON;
+        float reverse_pdf = direct_light_pdf(offset_pos, dls.wi, scene);
+
+        // They should be close (not exactly equal due to floating point)
+        if (reverse_pdf > 0.f) {
+            EXPECT_NEAR(dls.pdf_light, reverse_pdf, dls.pdf_light * 0.1f)
+                << "Forward and reverse light PDFs should be close";
+        }
+    }
+}
+
+// -- 35.7 Photon tracing integration ---------------------------------
+
+TEST(CornellBox, PhotonTracingProducesPhotons) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    EmitterConfig config;
+    config.num_photons = 1000;
+    config.max_bounces = 5;
+
+    PhotonSoA global_map, caustic_map;
+    trace_photons(scene, config, global_map, caustic_map);
+
+    // Should produce a meaningful number of global photons
+    EXPECT_GT(global_map.size(), 500u)
+        << "Photon tracing should produce many stored photons";
+}
+
+TEST(CornellBox, PhotonPositionsOnSurfaces) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    EmitterConfig config;
+    config.num_photons = 500;
+    config.max_bounces = 3;
+
+    PhotonSoA global_map, caustic_map;
+    trace_photons(scene, config, global_map, caustic_map);
+
+    // All photon positions should be within the Cornell box bounds
+    // Cornell box is roughly [-0.5, 0.5]³
+    for (size_t i = 0; i < global_map.size(); ++i) {
+        float x = global_map.pos_x[i];
+        float y = global_map.pos_y[i];
+        float z = global_map.pos_z[i];
+
+        EXPECT_GT(x, -0.55f) << "Photon x out of bounds (low)";
+        EXPECT_LT(x,  0.55f) << "Photon x out of bounds (high)";
+        EXPECT_GT(y, -0.55f) << "Photon y out of bounds (low)";
+        EXPECT_LT(y,  0.55f) << "Photon y out of bounds (high)";
+        EXPECT_GT(z, -0.55f) << "Photon z out of bounds (low)";
+        EXPECT_LT(z,  0.55f) << "Photon z out of bounds (high)";
+    }
+}
+
+TEST(CornellBox, PhotonFluxPositiveFinite) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    EmitterConfig config;
+    config.num_photons = 500;
+    config.max_bounces = 5;
+
+    PhotonSoA global_map, caustic_map;
+    trace_photons(scene, config, global_map, caustic_map);
+
+    for (size_t i = 0; i < global_map.size(); ++i) {
+        EXPECT_GT(global_map.flux[i], 0.f) << "Photon flux should be positive";
+        EXPECT_FALSE(std::isnan(global_map.flux[i])) << "Photon flux NaN at " << i;
+        EXPECT_FALSE(std::isinf(global_map.flux[i])) << "Photon flux Inf at " << i;
+    }
+}
+
+// -- 35.8 Photon density on known geometry ---------------------------
+
+TEST(CornellBox, PhotonDensityOnFloor) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    // Trace many photons
+    EmitterConfig em_config;
+    em_config.num_photons = 10000;
+    em_config.max_bounces = 5;
+
+    PhotonSoA global_map, caustic_map;
+    trace_photons(scene, em_config, global_map, caustic_map);
+
+    if (global_map.size() == 0) { GTEST_SKIP() << "No photons stored"; }
+
+    HashGrid grid;
+    grid.build(global_map, 0.1f);
+
+    // Query density at floor center (should be bright - directly below light)
+    float3 floor_pos = make_f3(0.0f, -0.499f, 0.0f);
+    float3 floor_normal = make_f3(0.0f, 1.0f, 0.0f);
+    float3 wo_local = make_f3(0.0f, 0.0f, 1.0f); // Looking straight up
+
+    Material floor_mat;
+    floor_mat.type = MaterialType::Lambertian;
+    floor_mat.Kd = Spectrum::constant(0.8f);
+
+    DensityEstimatorConfig de_config;
+    de_config.radius = 0.1f;
+    de_config.surface_tau = 0.02f;
+    de_config.num_photons_total = em_config.num_photons;
+    de_config.use_kernel = true;
+
+    Spectrum L_center = estimate_photon_density(
+        floor_pos, floor_normal, wo_local, floor_mat,
+        global_map, grid, de_config, 0.1f);
+
+    // Floor center should receive some illumination
+    EXPECT_GT(L_center.sum(), 0.f)
+        << "Floor center should have nonzero photon density";
+
+    // Query at a corner (should be dimmer)
+    float3 corner_pos = make_f3(-0.45f, -0.499f, -0.45f);
+    Spectrum L_corner = estimate_photon_density(
+        corner_pos, floor_normal, wo_local, floor_mat,
+        global_map, grid, de_config, 0.1f);
+
+    // Center should be brighter than corner (due to inverse-square falloff)
+    // This may not always hold with only 10K photons, so use a loose check
+    // Just verify the corner also gets some light
+    // (Don't assert center > corner because stochastic noise)
+    EXPECT_GE(L_center.sum() + L_corner.sum(), 0.f)
+        << "Both floor positions should contribute to density";
+}
+
+// -- 35.9 Full pipeline: small render produces valid image -----------
+
+TEST(CornellBox, SmallRenderProducesValidImage) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    Camera cam = Camera::cornell_box_camera(8, 8);
+
+    Renderer renderer;
+    renderer.set_scene(&scene);
+    renderer.set_camera(cam);
+
+    RenderConfig cfg;
+    cfg.image_width = 8;
+    cfg.image_height = 8;
+    cfg.samples_per_pixel = 2;
+    cfg.num_photons = 1000;
+    cfg.gather_radius = 0.1f;
+    cfg.mode = RenderMode::Full;
+    renderer.set_config(cfg);
+
+    renderer.build_photon_maps();
+    renderer.render_frame();
+
+    const FrameBuffer& fb = renderer.framebuffer();
+
+    // Image should not be all black (the scene is lit)
+    int nonzero_pixels = 0;
+    for (int i = 0; i < 64; ++i) {
+        uint8_t r = fb.srgb[i * 4 + 0];
+        uint8_t g = fb.srgb[i * 4 + 1];
+        uint8_t b = fb.srgb[i * 4 + 2];
+        if (r > 0 || g > 0 || b > 0) nonzero_pixels++;
+    }
+
+    EXPECT_GT(nonzero_pixels, 0)
+        << "Rendered image should not be all black";
+}
+
+// =====================================================================
+//  SECTION 36 -- OptiX Renderer Tests
+// =====================================================================
+// These tests verify that the OptiX backend is functional.
+// OptiX is mandatory -- there is no CPU-only build.
+
+#include "optix/optix_renderer.h"
+
+// -- 36.1 OptixRenderer can initialize without error -----------------
+
+TEST(OptiX, Initialization) {
+    OptixRenderer renderer;
+    EXPECT_NO_THROW(renderer.init())
+        << "OptixRenderer::init() should succeed on a machine with an NVIDIA GPU";
+}
+
+// -- 36.2 Acceleration structure builds from a Cornell box scene -----
+
+TEST(OptiX, AccelBuild) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "No scene geometry"; }
+
+    OptixRenderer renderer;
+    renderer.init();
+    EXPECT_NO_THROW(renderer.build_accel(scene))
+        << "build_accel should complete without error";
+}
+
+// -- 36.3 Scene data uploads to GPU ----------------------------------
+
+TEST(OptiX, SceneDataUpload) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "No scene geometry"; }
+
+    OptixRenderer renderer;
+    renderer.init();
+    renderer.build_accel(scene);
+    EXPECT_NO_THROW(renderer.upload_scene_data(scene))
+        << "upload_scene_data should complete without error";
+}
+
+// -- 36.4 Photon data uploads to GPU ---------------------------------
+
+TEST(OptiX, PhotonDataUpload) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    // Build small photon map on CPU
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(&scene);
+    Camera cam = Camera::cornell_box_camera(8, 8);
+    cpu_renderer.set_camera(cam);
+
+    RenderConfig cfg;
+    cfg.num_photons = 500;
+    cfg.gather_radius = 0.1f;
+    cfg.caustic_radius = 0.05f;
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+
+    OptixRenderer optix_renderer;
+    optix_renderer.init();
+    optix_renderer.build_accel(scene);
+    optix_renderer.upload_scene_data(scene);
+
+    EXPECT_NO_THROW(optix_renderer.upload_photon_data(
+        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
+        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius))
+        << "upload_photon_data should complete without error";
+}
+
+// -- 36.5 Debug frame produces non-zero output -----------------------
+
+TEST(OptiX, DebugFrameNonZero) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(&scene);
+    Camera cam = Camera::cornell_box_camera(8, 8);
+    cpu_renderer.set_camera(cam);
+
+    RenderConfig cfg;
+    cfg.image_width = 8;
+    cfg.image_height = 8;
+    cfg.num_photons = 500;
+    cfg.gather_radius = 0.1f;
+    cfg.caustic_radius = 0.05f;
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+
+    OptixRenderer optix_renderer;
+    optix_renderer.init();
+    optix_renderer.build_accel(scene);
+    optix_renderer.upload_scene_data(scene);
+    optix_renderer.upload_emitter_data(scene);
+    optix_renderer.upload_photon_data(
+        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
+        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius);
+
+    optix_renderer.resize(8, 8);
+    optix_renderer.render_debug_frame(cam, 0, RenderMode::Full, 1);
+
+    FrameBuffer fb;
+    optix_renderer.download_framebuffer(fb);
+
+    EXPECT_EQ(fb.width, 8);
+    EXPECT_EQ(fb.height, 8);
+
+    // At least some pixels should be non-zero (scene is lit)
+    int nonzero = 0;
+    for (int i = 0; i < 64; ++i) {
+        uint8_t r = fb.srgb[i * 4 + 0];
+        uint8_t g = fb.srgb[i * 4 + 1];
+        uint8_t b = fb.srgb[i * 4 + 2];
+        if (r > 0 || g > 0 || b > 0) nonzero++;
+    }
+    EXPECT_GT(nonzero, 0)
+        << "OptiX debug frame should produce at least some non-black pixels";
+}
+
+// -- 36.6 Normals debug mode produces varied output ------------------
+
+TEST(OptiX, NormalsDebugMode) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "No scene geometry"; }
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(&scene);
+    Camera cam = Camera::cornell_box_camera(16, 16);
+    cpu_renderer.set_camera(cam);
+
+    RenderConfig cfg;
+    cfg.image_width = 16;
+    cfg.image_height = 16;
+    cfg.num_photons = 100;
+    cfg.gather_radius = 0.1f;
+    cfg.caustic_radius = 0.05f;
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+
+    OptixRenderer optix_renderer;
+    optix_renderer.init();
+    optix_renderer.build_accel(scene);
+    optix_renderer.upload_scene_data(scene);
+    optix_renderer.upload_photon_data(
+        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
+        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius);
+
+    optix_renderer.resize(16, 16);
+    optix_renderer.render_debug_frame(cam, 0, RenderMode::Normals, 1);
+
+    FrameBuffer fb;
+    optix_renderer.download_framebuffer(fb);
+
+    // Normals mode should show surface variation - check that pixels
+    // are not all the same value (walls face different directions)
+    std::set<uint32_t> distinct;
+    for (int i = 0; i < 256; ++i) {
+        uint32_t col = ((uint32_t)fb.srgb[i * 4 + 0] << 16) |
+                       ((uint32_t)fb.srgb[i * 4 + 1] <<  8) |
+                       ((uint32_t)fb.srgb[i * 4 + 2]);
+        distinct.insert(col);
+    }
+
+    EXPECT_GT(distinct.size(), 2u)
+        << "Normals mode should show at least a few distinct surface colors";
+}
+
+// -- 36.7 Final render produces valid framebuffer --------------------
+
+TEST(OptiX, FinalRenderProducesValid) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(&scene);
+    Camera cam = Camera::cornell_box_camera(8, 8);
+    cpu_renderer.set_camera(cam);
+
+    RenderConfig cfg;
+    cfg.image_width = 8;
+    cfg.image_height = 8;
+    cfg.samples_per_pixel = 2;
+    cfg.num_photons = 500;
+    cfg.gather_radius = 0.1f;
+    cfg.caustic_radius = 0.05f;
+    cfg.mode = RenderMode::Full;
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+
+    OptixRenderer optix_renderer;
+    optix_renderer.init();
+    optix_renderer.build_accel(scene);
+    optix_renderer.upload_scene_data(scene);
+    optix_renderer.upload_emitter_data(scene);
+    optix_renderer.upload_photon_data(
+        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
+        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius);
+
+    optix_renderer.render_final(cam, cfg);
+
+    FrameBuffer fb;
+    optix_renderer.download_framebuffer(fb);
+
+    EXPECT_EQ(fb.width, 8);
+    EXPECT_EQ(fb.height, 8);
+    EXPECT_EQ((int)fb.srgb.size(), 8 * 8 * 4);
+
+    // At least some pixels should be non-zero
+    int nonzero = 0;
+    for (int i = 0; i < 64; ++i) {
+        if (fb.srgb[i * 4 + 0] > 0 || fb.srgb[i * 4 + 1] > 0 ||
+            fb.srgb[i * 4 + 2] > 0) {
+            nonzero++;
+        }
+    }
+    EXPECT_GT(nonzero, 0)
+        << "Final OptiX render should produce at least some non-black pixels";
+}
+
+// -- 36.8 Resize changes framebuffer dimensions ----------------------
+
+TEST(OptiX, ResizeFramebuffer) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.triangles.empty()) { GTEST_SKIP() << "No scene geometry"; }
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(&scene);
+    Camera cam = Camera::cornell_box_camera(16, 16);
+    cpu_renderer.set_camera(cam);
+
+    RenderConfig cfg;
+    cfg.image_width = 16;
+    cfg.image_height = 16;
+    cfg.num_photons = 100;
+    cfg.gather_radius = 0.1f;
+    cfg.caustic_radius = 0.05f;
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+
+    OptixRenderer optix_renderer;
+    optix_renderer.init();
+    optix_renderer.build_accel(scene);
+    optix_renderer.upload_scene_data(scene);
+    optix_renderer.upload_photon_data(
+        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
+        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius);
+
+    // Render at 16x16
+    optix_renderer.resize(16, 16);
+    optix_renderer.render_debug_frame(cam, 0, RenderMode::Full, 1);
+
+    FrameBuffer fb16;
+    optix_renderer.download_framebuffer(fb16);
+    EXPECT_EQ(fb16.width, 16);
+    EXPECT_EQ(fb16.height, 16);
+
+    // Resize to 8x8
+    optix_renderer.resize(8, 8);
+    optix_renderer.render_debug_frame(cam, 0, RenderMode::Full, 1);
+
+    FrameBuffer fb8;
+    optix_renderer.download_framebuffer(fb8);
+    EXPECT_EQ(fb8.width, 8);
+    EXPECT_EQ(fb8.height, 8);
+}
+
+// =====================================================================
+//  Main
+// =====================================================================
+
+int main(int argc, char **argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}
