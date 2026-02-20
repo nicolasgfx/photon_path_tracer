@@ -2,7 +2,8 @@
 
 A physically-based spectral renderer combining **photon mapping** and
 **path tracing**, running entirely on the GPU via **NVIDIA OptiX** and
-**CUDA**.
+**CUDA**. Features **photon-guided importance sampling** with
+Fibonacci-sphere directional bins for variance reduction.
 
 ![Render Result](output/render.png)
 <!-- Replace the image above with an actual render once available -->
@@ -17,24 +18,41 @@ A physically-based spectral renderer combining **photon mapping** and
   via OptiX raygen programs
 - **GPU path tracing** -- multi-bounce path tracing with
   next-event estimation and photon density estimation
+- **Photon directional bin cache** -- per-pixel Fibonacci-sphere
+  binning of photon flux distribution (32 bins, 24 bytes each)
+- **Guided BSDF bounce** -- first-bounce directions sampled
+  proportional to cached photon flux (CDF + cone jitter)
+- **Guided NEE** -- shadow rays steered toward lights matching the
+  photon flux distribution (bin-flux-weighted emissive CDF)
+- **Cached density estimation** -- first-sample photon gather cached
+  per pixel, reused across subsequent SPP frames
+- **Stratified sub-pixel sampling** -- 4x4 jittered strata for
+  reduced clumping at 16 SPP
 - **Interactive debug viewer** -- real-time first-hit rendering with
-  normals, material ID, and depth visualisation modes
+  normals, material ID, depth, and photon overlay modes
 - **Hashed uniform grid** -- fast photon lookup with Epanechnikov
   kernel and surface consistency filtering
-- **Material system in codebase** -- Lambertian, mirror, glass,
-  GlossyMetal definitions are present; current OptiX runtime path
-  focuses on Lambertian + mirror-style specular reflections
-- **Comprehensive test suite** -- 152 unit tests covering all core
-  components
+- **Visibility-weighted photon attenuation** -- NEE shadow-ray
+  visibility modulates photon density, preserving contact shadows
+- **GPU kernel profiling** -- per-pixel clock64() timers for
+  ray trace, NEE, photon gather, and BSDF breakdown
+- **Material system** -- Lambertian, mirror, glass, glossy
+  definitions present; OptiX runtime focuses on Lambertian + mirror
+- **Comprehensive test suite** -- 163 unit tests covering all core
+  components including photon bins, guided bounce, and stratified
+  sampling
 
-### Runtime scope (current OptiX path)
+### Component Outputs
 
-- Direct lighting: NEE with shadow rays
-- Indirect lighting: photon density estimation (single photon map)
-- Component outputs: `out_nee_direct.png`, `out_photon_indirect.png`,
-  `out_combined.png`
-- Debug caustic toggle exists, but a separate caustic photon map/output
-  is not implemented yet
+Each full render produces:
+
+| File                             | Contents                    |
+|----------------------------------|-----------------------------|
+| `output/render.png`              | Final combined render       |
+| `output/out_nee_direct.png`      | NEE direct lighting only    |
+| `output/out_photon_indirect.png` | Photon indirect only        |
+| `output/out_combined.png`        | NEE + photon (spectral sum) |
+| `output/out_debug_nee.png`       | Single-frame NEE preview    |
 
 ---
 
@@ -48,6 +66,7 @@ A physically-based spectral renderer combining **photon mapping** and
 | **CMake**            | 3.24                              |
 | **C++ Standard**     | C++17                             |
 | **OS**               | Windows 10+ (MSVC 2022) or Linux  |
+| **VRAM**             | 12 GB recommended (bin cache ~604 MB at 1024x768) |
 
 > **OptiX is mandatory.** There is no CPU fallback. The build will
 > fail if `OptiX_INSTALL_DIR` is not set.
@@ -76,7 +95,7 @@ cmake --build build --config Debug
 ### 3. Run
 
 ```bash
-# Interactive debug viewer (default scene: Cornell box)
+# Interactive debug viewer (default scene from config.h)
 build\Debug\photon_tracer.exe
 
 # Custom scene with options
@@ -117,7 +136,7 @@ switch visualisation modes and trigger the final render.
 
 | Key | Action |
 |---|---|
-| **R** | Start full path tracing render and save PNG outputs |
+| **R** | Start full path tracing render (NEE debug PNG -> bin population -> progressive SPP -> PNG output) |
 | **TAB** | Cycle render mode: `Full` -> `DirectOnly` -> `IndirectOnly` -> `PhotonMap` -> `Normals` -> `MaterialID` -> `Depth` |
 | **H** | Toggle help overlay |
 
@@ -127,7 +146,7 @@ switch visualisation modes and trigger the final render.
 |---|---|
 | **F1** | Toggle photon points overlay |
 | **F2** | Toggle global-map overlay |
-| **F3** | Toggle caustic-map selection (separate caustic map is not implemented yet) |
+| **F3** | Toggle caustic-map selector (separate caustic map not yet implemented) |
 | **F4** | Toggle hash-grid debug flag |
 | **F5** | Toggle photon-direction debug flag |
 | **F6** | Toggle PDF debug flag |
@@ -146,13 +165,42 @@ switch visualisation modes and trigger the final render.
 
 | Option         | Description                          | Default          |
 |----------------|--------------------------------------|------------------|
-| `--width W`    | Image width                          | 512              |
-| `--height H`   | Image height                         | 512              |
+| `--width W`    | Image width                          | 1024             |
+| `--height H`   | Image height                         | 768              |
 | `--spp N`      | Samples per pixel (final render)     | 16               |
-| `--photons N`  | Number of photons                    | 500000           |
+| `--photons N`  | Number of photons                    | 1000000          |
 | `--radius R`   | Photon gather radius                 | 0.05             |
 | `--output FILE`| Output file path                     | output/render.png|
 | `--mode MODE`  | Render mode: full, direct, indirect, photon, normals, material, depth | full |
+
+---
+
+## Rendering Pipeline
+
+```
+1. Scene Load (OBJ + MTL) -> normalise to [-0.5, 0.5]^3
+2. Build BVH + emissive distribution
+3. OptiX init -> build GAS -> upload scene + emitter data
+4. GPU photon trace (1M photons) -> hash grid (CPU) -> upload
+5. Interactive debug viewer (GLFW, 1 spp first-hit)
+6. (R key) -> NEE debug PNG -> populate bin cache -> progressive render
+7. PNG output (render + component decomposition + profiling)
+```
+
+### Photon Directional Bins
+
+The key innovation: per-pixel Fibonacci-sphere bins cache the photon
+flux distribution at each pixel's first diffuse hit. This enables:
+
+- **Guided BSDF bounce (B1):** Sample continuation direction from
+  bin flux CDF with cone jitter, steering paths toward bright regions.
+- **Guided NEE (B2):** Re-weight emissive triangle CDF using bin
+  flux alignment (alpha=5.0), steering shadow rays toward lights that
+  actually contribute indirect illumination.
+- **Cached density (A1):** Cache the first-sample photon density
+  gather per pixel, eliminating redundant hash-grid lookups.
+- **Stratified sampling (B3):** 4x4 sub-pixel strata reduce
+  clumping at 16 SPP.
 
 ---
 
@@ -161,16 +209,16 @@ switch visualisation modes and trigger the final render.
 ```
 src/
   main.cpp                     Entry point, GLFW loop
-  core/                        Types, spectrum, config, RNG
+  core/                        Types, spectrum, config, RNG, photon bins
   bsdf/                        BSDF models (Lambertian, mirror, glass, GGX)
   scene/                       OBJ/MTL loader, scene structure, BVH
-  renderer/                    CPU renderer, camera, path tracer kernels
-  photon/                      Photon structures, hash grid, emitter
+  renderer/                    CPU renderer, camera, MIS, path tracer kernels
+  photon/                      Photon structures, hash grid, emitter, density
   optix/                       OptiX device programs and host pipeline
   debug/                       Debug visualisation state and key bindings
 tests/
-  test_main.cpp                152 unit tests (GoogleTest)
-scenes/                        Test scenes (Cornell box, etc.)
+  test_main.cpp                163 unit tests (GoogleTest)
+scenes/                        Test scenes (Cornell box, conference, etc.)
 doc/
   architecture/                Detailed architecture documentation
   prompts/                     Design specification documents
@@ -178,9 +226,26 @@ doc/
 
 ---
 
+## Scene Selection
+
+Scenes are selected at compile time via `#define` in `src/core/config.h`:
+
+| Scene             | Define               | Notes                          |
+|-------------------|----------------------|--------------------------------|
+| Cornell Box       | `SCENE_CORNELL_BOX`  | Reference frame (no normalise) |
+| Conference Room   | `SCENE_CONFERENCE`   | Default scene                  |
+| Living Room       | `SCENE_LIVING_ROOM`  | Complex indoor scene           |
+| Breakfast Room    | `SCENE_BREAKFAST_ROOM` | Complex indoor scene         |
+| Sibenik Cathedral | `SCENE_SIBENIK`      | Large architectural scene      |
+
+All non-reference scenes are automatically normalised to the Cornell
+Box coordinate frame at load time.
+
+---
+
 ## Tests
 
-The project includes 152 unit tests built with GoogleTest v1.14.0:
+The project includes 163 unit tests built with GoogleTest v1.14.0:
 
 ```bash
 # Build and run tests
@@ -211,6 +276,11 @@ Test coverage includes:
 - Cornell box scene loading and BVH validation
 - Photon tracing, position bounds, flux validation
 - Photon density on known geometry
+- Fibonacci sphere coverage (N=8, 16, 32) and nearest-bin queries
+- Hemisphere coverage and bin solid angle distribution
+- Bin population and centroid normalisation
+- Stratified sub-pixel coverage (4x4 strata)
+- PhotonBin struct size validation (24 bytes)
 - OptiX initialisation, accel build, scene upload
 - OptiX debug frame rendering (non-zero output)
 - OptiX normals mode visualisation
@@ -223,7 +293,8 @@ Test coverage includes:
 
 See [doc/architecture/architecture.md](doc/architecture/architecture.md)
 for a detailed description of the rendering pipeline, mathematical
-foundations, strengths, and limitations.
+foundations (rendering equation, Monte Carlo estimators, guided NEE,
+density estimation), strengths, and limitations.
 
 ---
 

@@ -624,6 +624,9 @@ static void run_interactive(
                 optix_renderer.clear_buffers();
             }
 
+            // ── Populate photon directional bin cache ────────────────
+            optix_renderer.populate_photon_bins(g_app.render_cam);
+
             g_app.render_requested = false;
         }
 

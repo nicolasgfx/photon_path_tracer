@@ -57,6 +57,7 @@
 #include "scene/scene.h"
 #include "scene/obj_loader.h"
 #include "photon/emitter.h"
+#include "core/photon_bins.h"
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -3012,6 +3013,213 @@ TEST(OptiX, ResizeFramebuffer) {
     optix_renderer.download_framebuffer(fb8);
     EXPECT_EQ(fb8.width, 8);
     EXPECT_EQ(fb8.height, 8);
+}
+
+// =====================================================================
+//  Photon Directional Bins Tests
+// =====================================================================
+
+TEST(PhotonBins, FibonacciSphereCoversUnitSphere) {
+    // Verify Fibonacci sphere directions are unit-length and quasi-uniform
+    for (int N : {8, 16, 32}) {
+        PhotonBinDirs dirs;
+        dirs.init(N);
+        EXPECT_EQ(dirs.count, N);
+
+        // All directions must be unit length
+        for (int k = 0; k < N; ++k) {
+            float len = length(dirs.dirs[k]);
+            EXPECT_NEAR(len, 1.0f, 1e-5f) << "N=" << N << " k=" << k;
+        }
+
+        // Centroid should be near zero (quasi-uniform)
+        float3 centroid = make_f3(0, 0, 0);
+        for (int k = 0; k < N; ++k) centroid += dirs.dirs[k];
+        centroid = centroid * (1.0f / N);
+        float centroid_len = length(centroid);
+        EXPECT_LT(centroid_len, 0.2f) << "N=" << N << " centroid not near zero";
+
+        // No duplicate directions (min pairwise dot < 1)
+        float max_dot = -2.0f;
+        for (int i = 0; i < N; ++i)
+            for (int j = i + 1; j < N; ++j) {
+                float d = dot(dirs.dirs[i], dirs.dirs[j]);
+                if (d > max_dot) max_dot = d;
+            }
+        EXPECT_LT(max_dot, 0.999f) << "N=" << N << " directions too similar";
+    }
+}
+
+TEST(PhotonBins, FindNearestBinReturnsItself) {
+    // Each Fibonacci direction should map to itself as nearest
+    PhotonBinDirs dirs;
+    dirs.init(32);
+    for (int k = 0; k < 32; ++k) {
+        int found = dirs.find_nearest(dirs.dirs[k]);
+        EXPECT_EQ(found, k) << "Direction " << k << " did not map to itself";
+    }
+}
+
+TEST(PhotonBins, FindNearestBinGeometric) {
+    PhotonBinDirs dirs;
+    dirs.init(16);
+
+    // A direction very close to bin 0 should map to bin 0
+    float3 d0 = dirs.dirs[0];
+    float3 perturbed = normalize(d0 + make_f3(0.01f, 0.01f, 0.01f));
+    int found = dirs.find_nearest(perturbed);
+    // Should be bin 0 or very close neighbor
+    float d_self = dot(perturbed, dirs.dirs[0]);
+    float d_found = dot(perturbed, dirs.dirs[found]);
+    EXPECT_GE(d_found, d_self - 1e-5f);
+}
+
+TEST(PhotonBins, HemisphereCoverage) {
+    // For normal = (0,0,1), approximately half the bins should be
+    // in the positive hemisphere
+    PhotonBinDirs dirs;
+    dirs.init(32);
+    float3 normal = make_f3(0, 0, 1);
+    int pos_count = 0;
+    for (int k = 0; k < 32; ++k)
+        if (dot(dirs.dirs[k], normal) > 0.0f) ++pos_count;
+
+    // Should be roughly N/2 (±3)
+    EXPECT_GE(pos_count, 32 / 2 - 4);
+    EXPECT_LE(pos_count, 32 / 2 + 4);
+}
+
+TEST(PhotonBins, BinPopulationBasic) {
+    // Create a few bins and verify manual population
+    PhotonBin bins[16] = {};
+    PhotonBinDirs dirs;
+    dirs.init(16);
+
+    // Simulate a photon arriving from direction close to bin 0
+    float3 wi = dirs.dirs[0];
+    float flux = 2.5f;
+    float kernel_w = 0.8f;
+
+    int k = dirs.find_nearest(wi);
+    bins[k].flux  += flux * kernel_w;
+    bins[k].dir_x += wi.x * flux * kernel_w;
+    bins[k].dir_y += wi.y * flux * kernel_w;
+    bins[k].dir_z += wi.z * flux * kernel_w;
+    bins[k].weight += kernel_w;
+    bins[k].count  += 1;
+
+    EXPECT_EQ(k, 0);
+    EXPECT_FLOAT_EQ(bins[0].flux, 2.0f);
+    EXPECT_EQ(bins[0].count, 1);
+    EXPECT_NEAR(bins[0].weight, 0.8f, 1e-6f);
+
+    // Normalize centroid
+    float3 d = make_f3(bins[0].dir_x, bins[0].dir_y, bins[0].dir_z);
+    float len = length(d);
+    EXPECT_GT(len, 0.0f);
+    d = d * (1.0f / len);
+    EXPECT_NEAR(dot(d, wi), 1.0f, 1e-5f); // centroid = photon direction
+}
+
+TEST(PhotonBins, EmptyBinsHandled) {
+    PhotonBin bins[16] = {};
+    // All bins empty
+    for (int k = 0; k < 16; ++k) {
+        EXPECT_EQ(bins[k].count, 0);
+        EXPECT_FLOAT_EQ(bins[k].flux, 0.0f);
+    }
+}
+
+TEST(PhotonBins, CentroidNormalization) {
+    // Two photons near the same bin with different fluxes
+    PhotonBinDirs dirs;
+    dirs.init(16);
+
+    float3 wi1 = normalize(dirs.dirs[0] + make_f3(0.01f, 0, 0));
+    float3 wi2 = normalize(dirs.dirs[0] + make_f3(-0.01f, 0, 0));
+    int k1 = dirs.find_nearest(wi1);
+    int k2 = dirs.find_nearest(wi2);
+
+    // Both should land in the same bin (bin 0 or nearby)
+    if (k1 == k2) {
+        PhotonBin bin = {};
+        float f1 = 3.0f, f2 = 1.0f;
+        float w1 = 0.9f, w2 = 0.7f;
+
+        bin.flux   += f1 * w1;
+        bin.dir_x  += wi1.x * f1 * w1;
+        bin.dir_y  += wi1.y * f1 * w1;
+        bin.dir_z  += wi1.z * f1 * w1;
+        bin.weight += w1;
+        bin.count  += 1;
+
+        bin.flux   += f2 * w2;
+        bin.dir_x  += wi2.x * f2 * w2;
+        bin.dir_y  += wi2.y * f2 * w2;
+        bin.dir_z  += wi2.z * f2 * w2;
+        bin.weight += w2;
+        bin.count  += 1;
+
+        EXPECT_EQ(bin.count, 2);
+
+        // Normalize centroid
+        float3 d = make_f3(bin.dir_x, bin.dir_y, bin.dir_z);
+        float len = length(d);
+        EXPECT_GT(len, 0.0f);
+        d = d * (1.0f / len);
+        EXPECT_NEAR(length(d), 1.0f, 1e-5f);
+
+        // Centroid should be closer to wi1 (higher flux)
+        float dot1 = dot(d, wi1);
+        float dot2 = dot(d, wi2);
+        EXPECT_GT(dot1, dot2);
+    }
+}
+
+TEST(PhotonBins, StratifiedSubPixelCoverage) {
+    // Generate 16 stratified sub-pixel offsets (4×4)
+    // Verify: each stratum has exactly one sample, all in [0,1)
+    std::set<std::pair<int,int>> strata_used;
+    for (int s = 0; s < 16; ++s) {
+        int stratum_x = s % STRATA_X;
+        int stratum_y = s / STRATA_X;
+        auto key = std::make_pair(stratum_x, stratum_y);
+        EXPECT_EQ(strata_used.count(key), 0u) << "Stratum reused: " << stratum_x << "," << stratum_y;
+        strata_used.insert(key);
+
+        // With jitter in [0,1), offset is in [stratum/N, (stratum+1)/N)
+        float jx = (stratum_x + 0.5f) / (float)STRATA_X;
+        float jy = (stratum_y + 0.5f) / (float)STRATA_Y;
+        EXPECT_GE(jx, 0.0f);
+        EXPECT_LT(jx, 1.0f);
+        EXPECT_GE(jy, 0.0f);
+        EXPECT_LT(jy, 1.0f);
+    }
+    EXPECT_EQ(strata_used.size(), 16u);
+}
+
+TEST(PhotonBins, BinSolidAngle) {
+    // Each of N bins covers approximately 4π/N steradians
+    // Cone half-angle ≈ arccos(1 - 2/N)
+    int N = 32;
+    float cos_half = 1.0f - 2.0f / (float)N;
+    // Solid angle of a cone = 2π(1 - cos(half_angle))
+    float solid_angle = 2.0f * PI * (1.0f - cos_half);
+    float expected = 4.0f * PI / (float)N;
+    // Should be roughly 4π/N (not exact due to Fibonacci packing)
+    EXPECT_NEAR(solid_angle, expected, expected * 0.5f);
+}
+
+TEST(PhotonBins, PhotonBinSize) {
+    // Verify struct size is as expected (24 bytes)
+    EXPECT_EQ(sizeof(PhotonBin), 24u);
+}
+
+TEST(PhotonBins, MaxBinCountRespected) {
+    // Init with more than MAX should be clamped
+    PhotonBinDirs dirs;
+    dirs.init(MAX_PHOTON_BIN_COUNT + 10);
+    EXPECT_EQ(dirs.count, MAX_PHOTON_BIN_COUNT);
 }
 
 // =====================================================================

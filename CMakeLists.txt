@@ -125,6 +125,7 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/optix_device.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/launch_params.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/config.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/photon_bins.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/random.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectrum.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/types.h"

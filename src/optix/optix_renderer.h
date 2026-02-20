@@ -160,6 +160,10 @@ public:
     void render_one_spp(const Camera& camera, int frame_number,
                         int max_bounces = DEFAULT_MAX_BOUNCES);
 
+    /// Populate the photon directional bin cache (must be called once
+    /// before the first render_one_spp() call in a render sequence).
+    void populate_photon_bins(const Camera& camera);
+
     /// Read back the sRGB buffer from the device
     void download_framebuffer(FrameBuffer& fb) const;
 
@@ -234,6 +238,10 @@ private:
     DeviceBuffer d_prof_photon_gather_;
     DeviceBuffer d_prof_bsdf_;
 
+    // Photon directional bin cache
+    DeviceBuffer d_photon_bin_cache_;       // PhotonBin [W*H*PHOTON_BIN_COUNT]
+    DeviceBuffer d_photon_density_cache_;   // float [W*H*NUM_LAMBDA]
+
     // Scene geometry (device)
     DeviceBuffer d_vertices_;
     DeviceBuffer d_normals_;
@@ -283,6 +291,7 @@ private:
     int  width_       = DEFAULT_IMAGE_WIDTH;
     int  height_      = DEFAULT_IMAGE_HEIGHT;
     bool initialised_ = false;
+    bool bins_populated_ = false; // true after populate_photon_bins() called
     int  num_emissive_ = 0;
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
 };
@@ -298,6 +307,7 @@ inline void OptixRenderer::resize(int w, int h) {
     if (w == width_ && h == height_ && d_spectrum_buffer_.d_ptr) return;
     width_  = w;
     height_ = h;
+    bins_populated_ = false; // invalidate bin cache on resize
 
     size_t pixels = (size_t)w * h;
     d_spectrum_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
@@ -315,6 +325,10 @@ inline void OptixRenderer::resize(int w, int h) {
     d_prof_photon_gather_.alloc(pixels * sizeof(long long));
     d_prof_bsdf_.alloc(pixels * sizeof(long long));
 
+    // Photon directional bin cache
+    d_photon_bin_cache_.alloc(pixels * PHOTON_BIN_COUNT * sizeof(PhotonBin));
+    d_photon_density_cache_.alloc(pixels * NUM_LAMBDA * sizeof(float));
+
     // Zero the buffers
     CUDA_CHECK(cudaMemset(d_spectrum_buffer_.d_ptr, 0, d_spectrum_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
@@ -328,6 +342,10 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_prof_nee_.d_ptr, 0, d_prof_nee_.bytes));
     CUDA_CHECK(cudaMemset(d_prof_photon_gather_.d_ptr, 0, d_prof_photon_gather_.bytes));
     CUDA_CHECK(cudaMemset(d_prof_bsdf_.d_ptr, 0, d_prof_bsdf_.bytes));
+
+    // Photon bin cache
+    CUDA_CHECK(cudaMemset(d_photon_bin_cache_.d_ptr, 0, d_photon_bin_cache_.bytes));
+    CUDA_CHECK(cudaMemset(d_photon_density_cache_.d_ptr, 0, d_photon_density_cache_.bytes));
 }
 
 /// Zero the accumulation buffers without reallocating (for camera movement)
@@ -352,6 +370,10 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_prof_photon_gather_.d_ptr, 0, d_prof_photon_gather_.bytes));
     if (d_prof_bsdf_.d_ptr)
         CUDA_CHECK(cudaMemset(d_prof_bsdf_.d_ptr, 0, d_prof_bsdf_.bytes));
+    if (d_photon_bin_cache_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_photon_bin_cache_.d_ptr, 0, d_photon_bin_cache_.bytes));
+    if (d_photon_density_cache_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_photon_density_cache_.d_ptr, 0, d_photon_density_cache_.bytes));
 }
 
 inline void OptixRenderer::download_framebuffer(FrameBuffer& fb) const {

@@ -494,7 +494,9 @@ static void fill_common_params(
     const DeviceBuffer& prof_ray_trace,
     const DeviceBuffer& prof_nee,
     const DeviceBuffer& prof_photon_gather,
-    const DeviceBuffer& prof_bsdf)
+    const DeviceBuffer& prof_bsdf,
+    const DeviceBuffer& photon_bin_cache,
+    const DeviceBuffer& photon_density_cache)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -565,6 +567,15 @@ static void fill_common_params(
     p.total_emissive_power = total_emissive_power;
 
     p.traversable = gas_handle;
+
+    // Photon directional bin cache
+    p.photon_bin_cache     = photon_bin_cache.d_ptr
+        ? reinterpret_cast<PhotonBin*>(photon_bin_cache.d_ptr) : nullptr;
+    p.photon_density_cache = photon_density_cache.d_ptr
+        ? const_cast<float*>(photon_density_cache.as<float>()) : nullptr;
+    p.photon_bin_count     = PHOTON_BIN_COUNT;
+    p.photon_bins_valid    = 0;  // caller sets to 1 after populate
+    p.populate_bins_mode   = 0;  // caller sets to 1 for bin population pass
 }
 
 // =====================================================================
@@ -590,6 +601,7 @@ void OptixRenderer::render_debug_frame(
         gather_radius_,
         DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
+        DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer());
 
     lp.samples_per_pixel = spp;
@@ -640,15 +652,18 @@ void OptixRenderer::render_one_spp(
         gather_radius_,
         d_nee_direct_buffer_, d_photon_indirect_buffer_,
         d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
-        d_prof_photon_gather_, d_prof_bsdf_);
+        d_prof_photon_gather_, d_prof_bsdf_,
+        d_photon_bin_cache_, d_photon_density_cache_);
 
-    lp.samples_per_pixel = 1;
-    lp.max_bounces       = max_bounces;
-    lp.frame_number      = frame_number;
-    lp.render_mode       = RENDER_MODE_FULL;
-    lp.is_final_render   = 1;
-    lp.nee_light_samples = DEFAULT_NEE_LIGHT_SAMPLES;
+    lp.samples_per_pixel  = 1;
+    lp.max_bounces        = max_bounces;
+    lp.frame_number       = frame_number;
+    lp.render_mode        = RENDER_MODE_FULL;
+    lp.is_final_render    = 1;
+    lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
     lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
+    lp.photon_bins_valid  = bins_populated_ ? 1 : 0;
+    lp.populate_bins_mode = 0;
 
     d_launch_params_.alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
@@ -663,6 +678,70 @@ void OptixRenderer::render_one_spp(
         width_, height_, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// =====================================================================
+// populate_photon_bins() -- fill the directional bin cache (once)
+// =====================================================================
+void OptixRenderer::populate_photon_bins(const Camera& camera)
+{
+    if (!d_photon_bin_cache_.d_ptr) return;
+
+    std::cout << "[Bins] Populating photon directional bin cache ("
+              << PHOTON_BIN_COUNT << " bins per pixel)...\n";
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    LaunchParams lp = {};
+    fill_common_params(lp,
+        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+        width_, height_, camera,
+        d_vertices_, d_normals_, d_material_ids_,
+        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_lambda_, d_photon_flux_,
+        d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
+        d_emissive_indices_, d_emissive_cdf_,
+        num_emissive_, 0.f,
+        gas_handle_,
+        gather_radius_,
+        DeviceBuffer(), DeviceBuffer(),
+        DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
+        DeviceBuffer(), DeviceBuffer(),
+        d_photon_bin_cache_, d_photon_density_cache_);
+
+    lp.samples_per_pixel  = 1;
+    lp.max_bounces        = DEFAULT_MAX_BOUNCES;
+    lp.frame_number       = 0;
+    lp.render_mode        = RENDER_MODE_FULL;
+    lp.is_final_render    = 0;
+    lp.nee_light_samples  = 1;
+    lp.nee_deep_samples   = 1;
+    lp.photon_bins_valid  = 0;
+    lp.populate_bins_mode = 1;  // ← trigger bin population path
+
+    d_launch_params_.alloc(sizeof(LaunchParams));
+    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
+
+    OPTIX_CHECK(optixLaunch(
+        pipeline_,
+        nullptr,
+        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+        sizeof(LaunchParams),
+        &sbt_,
+        width_, height_, 1));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    std::printf("[Bins] Population done: %8.1f ms  (%d bins × %d pixels = %.0f MB)\n",
+                ms, PHOTON_BIN_COUNT, width_ * height_,
+                (double)d_photon_bin_cache_.bytes / (1024.0 * 1024.0));
+
+    bins_populated_ = true;
 }
 
 // =====================================================================
@@ -700,15 +779,18 @@ void OptixRenderer::render_final(
             gather_radius_,
             d_nee_direct_buffer_, d_photon_indirect_buffer_,
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
-            d_prof_photon_gather_, d_prof_bsdf_);
+            d_prof_photon_gather_, d_prof_bsdf_,
+            d_photon_bin_cache_, d_photon_density_cache_);
 
-        lp.samples_per_pixel = 1;
-        lp.max_bounces       = config.max_bounces;
-        lp.frame_number      = s;
-        lp.render_mode       = RENDER_MODE_FULL;
-        lp.is_final_render   = 1;  // FINAL: full path tracing
-        lp.nee_light_samples = DEFAULT_NEE_LIGHT_SAMPLES;
-        lp.nee_deep_samples  = DEFAULT_NEE_DEEP_SAMPLES;
+        lp.samples_per_pixel  = 1;
+        lp.max_bounces        = config.max_bounces;
+        lp.frame_number       = s;
+        lp.render_mode        = RENDER_MODE_FULL;
+        lp.is_final_render    = 1;  // FINAL: full path tracing
+        lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
+        lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
+        lp.photon_bins_valid  = bins_populated_ ? 1 : 0;
+        lp.populate_bins_mode = 0;
 
         d_launch_params_.alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,

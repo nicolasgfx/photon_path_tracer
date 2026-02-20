@@ -5,6 +5,7 @@
 #include "core/types.h"
 #include "core/spectrum.h"
 #include "core/config.h"
+#include "core/photon_bins.h"
 
 #ifdef PPT_USE_OPTIX
 #include <optix.h>
@@ -117,6 +118,13 @@ struct LaunchParams {
     long long* prof_nee;             // time in NEE direct lighting
     long long* prof_photon_gather;   // time in photon density estimation
     long long* prof_bsdf;            // time in BSDF eval + continuation
+
+    // ── Photon directional bin cache ─────────────────────────────────
+    PhotonBin* photon_bin_cache;     // [width * height * photon_bin_count]
+    float*     photon_density_cache; // [width * height * NUM_LAMBDA] cached spectral density
+    int        photon_bin_count;     // runtime copy of PHOTON_BIN_COUNT
+    int        photon_bins_valid;    // 1 = bin cache populated, 0 = need population pass
+    int        populate_bins_mode;   // 1 = this launch does bin population only
 
 #ifdef PPT_USE_OPTIX
     OptixTraversableHandle traversable;

@@ -109,6 +109,16 @@ constexpr uint32_t HASHGRID_PRIME_1        = 73856093u;
 constexpr uint32_t HASHGRID_PRIME_2        = 19349663u;
 constexpr uint32_t HASHGRID_PRIME_3        = 83492791u;
 
+// ── Photon directional bins ─────────────────────────────────────────
+constexpr int   PHOTON_BIN_COUNT           = 32;     // directional bins per pixel (Fibonacci sphere)
+constexpr int   MAX_PHOTON_BIN_COUNT       = 32;     // compile-time upper bound for array size
+constexpr float PHOTON_BIN_HORIZON_EPS     = 0.05f;  // bins below -eps of horizon are skipped
+constexpr int   PHOTON_BIN_NEE_TOP_K      = 4;      // top-K bins for guided NEE direction bias
+
+// ── Stratified sub-pixel sampling ───────────────────────────────────
+constexpr int   STRATA_X                   = 4;      // horizontal strata (STRATA_X * STRATA_Y = SPP)
+constexpr int   STRATA_Y                   = 4;      // vertical strata
+
 // ── Density estimator ───────────────────────────────────────────────
 constexpr float DEFAULT_SURFACE_TAU        = 0.02f;  // plane-distance filter
 constexpr bool  DEFAULT_USE_KERNEL         = true;
@@ -139,7 +149,7 @@ constexpr float DEFAULT_CAM_MOUSE_SENS     = 0.0005f; // radians/pixel
 constexpr int   OPTIX_NUM_PAYLOAD_VALUES   = 14;    // payloads per trace call
 constexpr int   OPTIX_NUM_ATTRIBUTE_VALUES = 2;     // barycentrics
 constexpr int   OPTIX_MAX_TRACE_DEPTH      = 2;     // radiance + shadow
-constexpr int   OPTIX_STACK_SIZE           = 2048;
+constexpr int   OPTIX_STACK_SIZE           = 16384;  // increased for bin arrays on stack
 constexpr float OPTIX_SCENE_EPSILON        = 1e-4f;
 
 // ── CUDA ────────────────────────────────────────────────────────────

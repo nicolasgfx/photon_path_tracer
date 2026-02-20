@@ -1,3 +1,4 @@
+
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
 // debug.h – Debug visualization overlay system (Section 10)
