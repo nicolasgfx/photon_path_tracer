@@ -12,6 +12,8 @@
 #include <iostream>
 #include <chrono>
 #include <cmath>
+#include <algorithm>
+#include <cstdint>
 
 // ── Build photon maps ───────────────────────────────────────────────
 
@@ -52,8 +54,9 @@ void Renderer::build_photon_maps() {
 
 // ── Trace a single camera path ──────────────────────────────────────
 
-Spectrum Renderer::trace_path(Ray ray, PCGRng& rng) {
+Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
     Spectrum L_total = Spectrum::zero();      // Accumulated radiance
+    Spectrum L_nee   = Spectrum::zero();      // Direct-only component (proxy for noise)
     Spectrum throughput = Spectrum::constant(1.0f);  // Path throughput
 
     DensityEstimatorConfig de_config;
@@ -76,13 +79,14 @@ Spectrum Renderer::trace_path(Ray ray, PCGRng& rng) {
         if (config_.mode != RenderMode::Full) {
             switch (config_.mode) {
                 case RenderMode::Normals:
-                    return render_normals(hit);
+                    { auto s = render_normals(hit);     return TraceResult{s, s}; }
                 case RenderMode::MaterialID:
-                    return render_material_id(hit);
+                    { auto s = render_material_id(hit); return TraceResult{s, s}; }
                 case RenderMode::Depth:
-                    return render_depth(hit, 5.0f);
+                    { auto s = render_depth(hit, 5.0f); return TraceResult{s, s}; }
                 case RenderMode::PhotonMap:
-                    return render_photon_density(hit, ray.direction * (-1.f));
+                    { auto s = render_photon_density(hit, ray.direction * (-1.f));
+                      return TraceResult{s, s}; }
                 default:
                     break;
             }
@@ -144,6 +148,7 @@ Spectrum Renderer::trace_path(Ray ray, PCGRng& rng) {
 
                     Spectrum contrib = dls.Li * f * (cos_theta * w / dls.pdf_light);
                     L_total += throughput * contrib;
+                    L_nee   += throughput * contrib;  // NEE shadow-ray: low-variance proxy
                 }
             }
         }
@@ -180,6 +185,7 @@ Spectrum Renderer::trace_path(Ray ray, PCGRng& rng) {
 
                     Spectrum contrib = bsdf_mat.Le * bs.f * (cos_theta * w / bs.pdf);
                     L_total += throughput * contrib;
+                    L_nee   += throughput * contrib;  // BSDF-sampled emitter: also direct
                 }
             }
         }
@@ -226,7 +232,7 @@ Spectrum Renderer::trace_path(Ray ray, PCGRng& rng) {
         ray.direction = wi_world;
     }
 
-    return L_total;
+    return TraceResult{L_total, L_nee};
 }
 
 // ── Debug render modes ──────────────────────────────────────────────
@@ -283,24 +289,108 @@ void Renderer::render_frame() {
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    int height = config_.image_height;
-    int width  = config_.image_width;
-    int spp    = config_.samples_per_pixel;
+    const int height       = config_.image_height;
+    const int width        = config_.image_width;
+    const int total_pixels = width * height;
+    const int spp          = config_.samples_per_pixel;
+    const bool adaptive    = config_.adaptive_sampling;
+    const int  min_spp     = config_.adaptive_min_spp;
+    const int  max_spp     = (config_.adaptive_max_spp > 0)
+                                 ? config_.adaptive_max_spp
+                                 : spp;
+    const float threshold  = config_.adaptive_threshold;
+    const int   radius     = config_.adaptive_radius;
+    const int   update_int = config_.adaptive_update_interval;
 
-    #pragma omp parallel for schedule(dynamic, 1)
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            int pixel_idx = y * width + x;
-
-            for (int s = 0; s < spp; ++s) {
-                PCGRng rng = PCGRng::seed(
-                    (uint64_t)pixel_idx * 1000 + s,
-                    (uint64_t)pixel_idx + 1);
-
-                Ray ray = camera_.generate_ray(x, y, rng);
-                Spectrum L = trace_path(ray, rng);
-                fb_.accumulate(x, y, L);
+    if (!adaptive) {
+        // ── Non-adaptive path (original behaviour) ─────────────────
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int pixel_idx = y * width + x;
+                for (int s = 0; s < spp; ++s) {
+                    PCGRng rng = PCGRng::seed(
+                        (uint64_t)pixel_idx * 1000 + s,
+                        (uint64_t)pixel_idx + 1);
+                    Ray ray = camera_.generate_ray(x, y, rng);
+                    auto L = trace_path(ray, rng);
+                    fb_.accumulate(x, y, L.combined);
+                }
             }
+        }
+    } else {
+        // ── Adaptive path ───────────────────────────────────────────
+        // active_mask: 0=done, 1=keep sampling
+        std::vector<uint8_t> active(total_pixels, 1u);
+
+        // Helper: recompute noise-based active mask on the CPU
+        auto update_mask = [&]() {
+            constexpr float eps = 1e-4f;
+            #pragma omp parallel for schedule(static)
+            for (int py = 0; py < height; ++py) {
+                for (int px = 0; px < width; ++px) {
+                    int idx = py * width + px;
+                    float n = fb_.sample_count[idx];
+
+                    if (n < (float)min_spp) { active[idx] = 1; continue; }
+                    if (n >= (float)max_spp) { active[idx] = 0; continue; }
+
+                    // Neighbourhood max relative noise
+                    float local_noise = 0.f;
+                    for (int dy = -radius; dy <= radius; ++dy) {
+                        int ny = py + dy;
+                        if (ny < 0 || ny >= height) continue;
+                        for (int dx = -radius; dx <= radius; ++dx) {
+                            int nx = px + dx;
+                            if (nx < 0 || nx >= width) continue;
+                            int nidx = ny * width + nx;
+                            float nn = fb_.sample_count[nidx];
+                            if (nn < 2.f) { local_noise = 1.f; break; }
+                            float mu  = fb_.lum_sum[nidx] / nn;
+                            float var = std::fmax(fb_.lum_sum2[nidx] / nn
+                                                  - mu * mu, 0.f);
+                            float se  = std::sqrt(var / nn);
+                            float rel = se / (std::fabs(mu) + eps);
+                            local_noise = std::fmax(local_noise, rel);
+                        }
+                    }
+                    active[idx] = (local_noise > threshold) ? 1u : 0u;
+                }
+            }
+        };
+
+        for (int pass = 0; pass < max_spp; ++pass) {
+            // Phase 1: warmup — always sample
+            // Phase 2: adaptive — update mask every update_interval passes
+            if (pass >= min_spp && (pass - min_spp) % update_int == 0) {
+                update_mask();
+                int active_count = 0;
+                for (int i = 0; i < total_pixels; ++i)
+                    active_count += active[i];
+                if (active_count == 0) break;  // fully converged
+            }
+
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    int pixel_idx = y * width + x;
+                    if (pass >= min_spp && !active[pixel_idx]) continue;
+
+                    PCGRng rng = PCGRng::seed(
+                        (uint64_t)pixel_idx * 1000 + pass,
+                        (uint64_t)pixel_idx + 1);
+                    Ray ray = camera_.generate_ray(x, y, rng);
+                    auto L = trace_path(ray, rng);
+                    const Spectrum* proxy = ADAPTIVE_NOISE_USE_DIRECT_ONLY
+                        ? &L.nee_direct : nullptr;
+                    fb_.accumulate(x, y, L.combined, proxy);
+                }
+            }
+
+            // Progress
+            float pct = 100.f * (pass + 1) / max_spp;
+            std::cout << "\r[Render] " << (int)pct << "%  pass "
+                      << (pass + 1) << "/" << max_spp << "   " << std::flush;
         }
     }
 
@@ -308,7 +398,8 @@ void Renderer::render_frame() {
     double sec = std::chrono::duration<double>(t1 - t0).count();
 
     std::cout << "\r[Render] 100%  (" << sec << " s, "
-              << config_.samples_per_pixel << " spp)\n";
+              << config_.samples_per_pixel << " spp"
+              << (adaptive ? ", adaptive" : "") << ")\n";
 
     fb_.tonemap(1.0f);
 }

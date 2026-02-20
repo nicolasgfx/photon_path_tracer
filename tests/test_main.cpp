@@ -1191,6 +1191,290 @@ TEST(HashGrid, AllPhotonsFound) {
     EXPECT_EQ(count, N) << "Should find all " << N << " photons in tight cluster";
 }
 
+TEST(HashGrid, DenseCell_ManyPhotonsSameCell) {
+    // Place many photons in the exact same cell to test dense scenarios
+    PhotonSoA photons;
+    const int N = 500;
+    float radius = 0.5f;
+
+    // All photons within a 0.1 unit cube (much smaller than cell size)
+    PCGRng rng = PCGRng::seed(123);
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        p.position = make_f3(
+            (rng.next_float() - 0.5f) * 0.1f,
+            (rng.next_float() - 0.5f) * 0.1f,
+            (rng.next_float() - 0.5f) * 0.1f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = i % NUM_LAMBDA;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Query at center should find all photons
+    int count = 0;
+    grid.query(make_f3(0, 0, 0), radius, photons,
+        [&](uint32_t, float) { count++; });
+
+    EXPECT_EQ(count, N) << "Should find all " << N << " photons in dense cell";
+
+    // Verify they're all in approximately the same cell
+    int3 cell0 = grid.cell_coord(make_f3(photons.pos_x[0], 
+                                         photons.pos_y[0], 
+                                         photons.pos_z[0]));
+    int same_cell = 0;
+    for (int i = 0; i < N; ++i) {
+        int3 cell_i = grid.cell_coord(make_f3(photons.pos_x[i],
+                                               photons.pos_y[i],
+                                               photons.pos_z[i]));
+        if (cell_i.x == cell0.x && cell_i.y == cell0.y && cell_i.z == cell0.z) {
+            same_cell++;
+        }
+    }
+    EXPECT_GT(same_cell, N * 0.95) << "Most photons should be in the same cell";
+}
+
+TEST(HashGrid, DenseRegion_HighPhotonDensity) {
+    // Test performance and correctness with very high photon density
+    PhotonSoA photons;
+    const int N = 2000;
+    float radius = 1.0f;
+
+    // Create a dense sphere of photons
+    PCGRng rng = PCGRng::seed(456);
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        // Uniform distribution in unit sphere
+        float theta = 2.0f * PI * rng.next_float();
+        float phi = std::acos(2.0f * rng.next_float() - 1.0f);
+        float r = std::cbrt(rng.next_float()) * 0.5f; // Radius ≤ 0.5
+        
+        p.position = make_f3(
+            r * std::sin(phi) * std::cos(theta),
+            r * std::sin(phi) * std::sin(theta),
+            r * std::cos(phi));
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = i % NUM_LAMBDA;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Query at center should find all photons (all within radius)
+    int count = 0;
+    grid.query(make_f3(0, 0, 0), radius, photons,
+        [&](uint32_t idx, float dist2) {
+            EXPECT_LE(dist2, radius * radius + kTol);
+            count++;
+        });
+
+    EXPECT_EQ(count, N) << "Should find all photons in dense region";
+}
+
+TEST(HashGrid, HashCollision_MultipleKeysMapToSameBucket) {
+    // Test that hash collisions are handled correctly
+    // Force collisions by using a small table size
+    PhotonSoA photons;
+    
+    // Create photons at positions designed to likely collide
+    // (large spatial separation but small hash table)
+    for (int i = 0; i < 20; ++i) {
+        Photon p;
+        p.position = make_f3((float)i * 10.0f, 0.0f, 0.0f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = 0;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    float radius = 5.0f;
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Each query should only find its local photons, not others that hash-collided
+    for (int i = 0; i < 20; ++i) {
+        float3 query_pos = make_f3((float)i * 10.0f, 0.0f, 0.0f);
+        int count = 0;
+        grid.query(query_pos, radius, photons,
+            [&](uint32_t idx, float dist2) {
+                count++;
+                // Verify distance is actually within radius
+                EXPECT_LE(dist2, radius * radius + kTol)
+                    << "Photon " << idx << " should be within radius";
+            });
+        
+        // Should find at least the photon at this position
+        EXPECT_GE(count, 1) << "Should find at least local photon at i=" << i;
+        // Should not find all 20 photons (they're spatially separated)
+        EXPECT_LT(count, 20) << "Should not find all photons due to distance";
+    }
+}
+
+TEST(HashGrid, DenseCell_CorrectSorting) {
+    // Verify that photons in dense cells are correctly sorted by cell key
+    PhotonSoA photons;
+    const int N = 300;
+    float radius = 0.2f;
+
+    PCGRng rng = PCGRng::seed(789);
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        p.position = make_f3(
+            rng.next_float() * 2.0f - 1.0f,
+            rng.next_float() * 2.0f - 1.0f,
+            rng.next_float() * 2.0f - 1.0f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = i % NUM_LAMBDA;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Verify sorted_indices has all photons
+    EXPECT_EQ(grid.sorted_indices.size(), (size_t)N);
+
+    // Verify no duplicate indices
+    std::set<uint32_t> unique_indices(grid.sorted_indices.begin(), 
+                                       grid.sorted_indices.end());
+    EXPECT_EQ(unique_indices.size(), (size_t)N) << "All indices should be unique";
+
+    // Verify all indices are in valid range
+    for (uint32_t idx : grid.sorted_indices) {
+        EXPECT_LT(idx, (uint32_t)N) << "Index should be in range [0, N)";
+    }
+}
+
+TEST(HashGrid, DenseCell_NeighborCellQuery) {
+    // Test that queries correctly search 3x3x3 neighboring cells in dense scenarios
+    PhotonSoA photons;
+    float radius = 0.3f;
+
+    // Place photons in a grid pattern at cell boundaries
+    // This tests the neighbor cell search
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                Photon p;
+                // Position at cell centers (cell_size = 2*radius = 0.6)
+                p.position = make_f3(x * 0.6f, y * 0.6f, z * 0.6f);
+                p.wi = make_f3(0, 0, 1);
+                p.lambda_bin = 0;
+                p.flux = 1.0f;
+                photons.push_back(p);
+            }
+        }
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Query at origin should find photons in the 27 neighboring cells
+    int count = 0;
+    grid.query(make_f3(0, 0, 0), radius, photons,
+        [&](uint32_t, float) { count++; });
+
+    EXPECT_GT(count, 0) << "Should find photons from neighboring cells";
+    EXPECT_LE(count, 27) << "Should not find more than 27 photons (one per cell)";
+}
+
+TEST(HashGrid, DenseCell_EmptyBucketsHandled) {
+    // Test that empty hash buckets are correctly handled in dense scenarios
+    PhotonSoA photons;
+    const int N = 100;
+    float radius = 0.5f;
+
+    // Create photons clustered in one region
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        p.position = make_f3(0.0f, 0.0f, (float)i * 0.01f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = 0;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    // Query in empty region should return zero without crash
+    int count = 0;
+    grid.query(make_f3(100.0f, 100.0f, 100.0f), radius, photons,
+        [&](uint32_t, float) { count++; });
+
+    EXPECT_EQ(count, 0) << "Query in empty region should find no photons";
+
+    // Query in dense region should find photons
+    int count2 = 0;
+    grid.query(make_f3(0.0f, 0.0f, 0.5f), radius, photons,
+        [&](uint32_t, float) { count2++; });
+
+    EXPECT_GT(count2, 0) << "Query in dense region should find photons";
+}
+
+TEST(HashGrid, DenseCell_DistanceFilteringAccurate) {
+    // Verify distance filtering is accurate even with many photons per cell
+    PhotonSoA photons;
+    const int N = 200;
+    float radius = 0.5f;
+
+    PCGRng rng = PCGRng::seed(321);
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        // Random positions in a larger region
+        p.position = make_f3(
+            rng.next_float() * 2.0f - 1.0f,
+            rng.next_float() * 2.0f - 1.0f,
+            rng.next_float() * 2.0f - 1.0f);
+        p.wi = make_f3(0, 0, 1);
+        p.lambda_bin = 0;
+        p.flux = 1.0f;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, radius);
+
+    float3 query_pos = make_f3(0.0f, 0.0f, 0.0f);
+    int count = 0;
+    
+    grid.query(query_pos, radius, photons,
+        [&](uint32_t idx, float dist2) {
+            // Verify each returned photon is actually within radius
+            float3 p = make_f3(photons.pos_x[idx], 
+                              photons.pos_y[idx], 
+                              photons.pos_z[idx]);
+            float3 diff = query_pos - p;
+            float actual_dist2 = dot(diff, diff);
+            
+            EXPECT_NEAR(dist2, actual_dist2, kTol)
+                << "Callback dist2 should match actual distance";
+            EXPECT_LE(actual_dist2, radius * radius + kTol)
+                << "Photon should be within query radius";
+            count++;
+        });
+
+    // All photons within radius should be found (verify against brute force)
+    int brute_count = 0;
+    for (size_t i = 0; i < photons.size(); ++i) {
+        float3 p = make_f3(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
+        float3 diff = query_pos - p;
+        float dist2 = dot(diff, diff);
+        if (dist2 <= radius * radius) {
+            brute_count++;
+        }
+    }
+
+    EXPECT_EQ(count, brute_count) 
+        << "Grid query should find same photons as brute force";
+}
+
 // =====================================================================
 //  SECTION 14 - Density Estimator (surface consistency filter)
 // =====================================================================

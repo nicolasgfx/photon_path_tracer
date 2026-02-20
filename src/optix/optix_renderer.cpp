@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
 #include "core/config.h"
+#include "optix/adaptive_sampling.h"
 
 #include <cuda_runtime.h>
 #include <fstream>
@@ -816,16 +817,23 @@ void OptixRenderer::render_final(
     // Reset accumulation
     resize(config.image_width, config.image_height);
 
-    const int total_spp = config.samples_per_pixel;
+    const int total_spp    = config.samples_per_pixel;
+    const int max_spp      = (config.adaptive_max_spp > 0)
+                                 ? config.adaptive_max_spp
+                                 : total_spp;
+    const int min_spp      = config.adaptive_min_spp;
+    const bool adaptive    = config.adaptive_sampling && (max_spp > min_spp);
+
     const long long total_pixels = (long long)config.image_width * config.image_height;
     std::cout << "[Render] Starting: " << config.image_width << "x"
               << config.image_height << " @ " << total_spp
-              << " spp (" << total_pixels << " pixels)\n";
+              << " spp" << (adaptive ? " (adaptive)" : "")
+              << " (" << total_pixels << " pixels)\n";
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
-    // Render in batches of 1 spp for progress feedback
-    for (int s = 0; s < total_spp; ++s) {
+    // Helper lambda: launch one pass with the given frame number and optional mask
+    auto launch_pass = [&](int frame_number, bool use_mask) {
         LaunchParams lp = {};
         fill_common_params(lp,
             d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
@@ -848,15 +856,24 @@ void OptixRenderer::render_final(
 
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
-        lp.frame_number       = s;
+        lp.frame_number       = frame_number;
         lp.render_mode        = RENDER_MODE_FULL;
         lp.is_final_render    = 1;  // FINAL: full path tracing
         lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
         lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
 
+        // Adaptive buffers
+        lp.lum_sum    = adaptive
+            ? reinterpret_cast<float*>(d_lum_sum_.d_ptr)   : nullptr;
+        lp.lum_sum2   = adaptive
+            ? reinterpret_cast<float*>(d_lum_sum2_.d_ptr)  : nullptr;
+        lp.active_mask = (adaptive && use_mask)
+            ? reinterpret_cast<uint8_t*>(d_active_mask_.d_ptr) : nullptr;
+
         d_launch_params_.alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                                sizeof(LaunchParams), cudaMemcpyHostToDevice));
+        last_launch_params_host_ = lp;
 
         OPTIX_CHECK(optixLaunch(
             pipeline_,
@@ -867,16 +884,15 @@ void OptixRenderer::render_final(
             width_, height_, 1));
 
         CUDA_CHECK(cudaDeviceSynchronize());
+    };
 
-        // Progress every sample (cheap — only 16 spp typical)
+    // ── Progress helper ──────────────────────────────────────────────
+    auto print_progress = [&](int done, int total, int active_pixels) {
         auto t_now = std::chrono::high_resolution_clock::now();
         double elapsed_s = std::chrono::duration<double>(t_now - t_start).count();
-        int done = s + 1;
-        float pct = 100.f * done / total_spp;
-        double eta_s = (done < total_spp)
-            ? elapsed_s * (total_spp - done) / done : 0.0;
-
-        // Progress bar: [========>       ] 56%  3/16 spp  1.2s  ETA 0.9s
+        float pct = 100.f * done / total;
+        double eta_s = (done < total)
+            ? elapsed_s * (total - done) / done : 0.0;
         constexpr int BAR_W = 20;
         int filled = (int)(pct / 100.f * BAR_W);
         char bar[BAR_W + 1];
@@ -884,12 +900,59 @@ void OptixRenderer::render_final(
             bar[i] = (i < filled) ? '=' : ' ';
         if (filled < BAR_W) bar[filled] = '>';
         bar[BAR_W] = '\0';
-
         char line[256];
-        snprintf(line, sizeof(line),
-                 "\r[Render] [%s] %3d%%  %d/%d spp  %.1fs  ETA %.1fs   ",
-                 bar, (int)pct, done, total_spp, elapsed_s, eta_s);
+        if (active_pixels >= 0)
+            snprintf(line, sizeof(line),
+                     "\r[Render] [%s] %3d%%  %d/%d spp  active=%d  %.1fs  ETA %.1fs   ",
+                     bar, (int)pct, done, total, active_pixels, elapsed_s, eta_s);
+        else
+            snprintf(line, sizeof(line),
+                     "\r[Render] [%s] %3d%%  %d/%d spp  %.1fs  ETA %.1fs   ",
+                     bar, (int)pct, done, total, elapsed_s, eta_s);
         std::cout << line << std::flush;
+    };
+
+    if (!adaptive) {
+        // ── Non-adaptive path (unchanged behaviour) ──────────────────
+        for (int s = 0; s < total_spp; ++s) {
+            launch_pass(s, /*use_mask=*/false);
+            print_progress(s + 1, total_spp, /*active=*/-1);
+        }
+    } else {
+        // ── Adaptive path ─────────────────────────────────────────────
+        // Phase 1: warmup — render min_spp passes uniformly
+        for (int s = 0; s < min_spp; ++s) {
+            launch_pass(s, /*use_mask=*/false);
+            print_progress(s + 1, max_spp, /*active=*/(int)total_pixels);
+        }
+
+        // Phase 2: adaptive — update mask every update_interval passes
+        int active_pixels = (int)total_pixels;
+        int frame = min_spp;
+        const int update_interval = config.adaptive_update_interval;
+
+        for (int s = min_spp; s < max_spp; ++s) {
+            // Recompute mask at start of adaptive phase and every N passes
+            if ((s - min_spp) % update_interval == 0) {
+                AdaptiveParams ap;
+                ap.sample_counts  = reinterpret_cast<float*>(d_sample_counts_.d_ptr);
+                ap.lum_sum        = reinterpret_cast<float*>(d_lum_sum_.d_ptr);
+                ap.lum_sum2       = reinterpret_cast<float*>(d_lum_sum2_.d_ptr);
+                ap.active_mask    = reinterpret_cast<uint8_t*>(d_active_mask_.d_ptr);
+                ap.width          = width_;
+                ap.height         = height_;
+                ap.min_spp        = min_spp;
+                ap.max_spp        = max_spp;
+                ap.threshold      = config.adaptive_threshold;
+                ap.radius         = config.adaptive_radius;
+                active_pixels = adaptive_update_mask(ap);
+
+                if (active_pixels == 0) break;  // fully converged
+            }
+
+            launch_pass(frame++, /*use_mask=*/true);
+            print_progress(s + 1, max_spp, active_pixels);
+        }
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();

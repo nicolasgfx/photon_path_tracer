@@ -120,6 +120,12 @@ struct LaunchParams {
     long long* prof_photon_gather;   // time in photon density estimation
     long long* prof_bsdf;            // time in BSDF eval + continuation
 
+    // ── Adaptive sampling ────────────────────────────────────────────
+    // All three pointers are nullptr when adaptive sampling is disabled.
+    float*   lum_sum;       // [width * height]  Σ Y_i   (linear luminance)
+    float*   lum_sum2;      // [width * height]  Σ Y_i²
+    uint8_t* active_mask;   // [width * height]  1 = trace this pixel, 0 = skip
+
     // ── Dense 3D cell-bin grid (replaces per-pixel bin cache) ────────
     // Precomputed on CPU, uploaded once.  Each grid cell contains
     // PHOTON_BIN_COUNT directional bins with accumulated flux from

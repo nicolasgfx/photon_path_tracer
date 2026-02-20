@@ -61,12 +61,29 @@ set(CUDA_SOURCES
     src/photon/emitter.cu
     src/renderer/path_tracer.cu
     src/renderer/direct_light.cu
+    src/optix/adaptive_sampling.cu
 )
+
+# -- Shared CUDA static library (shared by photon_tracer and ppt_tests) --------
+add_library(ppt_cuda_objects STATIC ${CUDA_SOURCES})
+set_target_properties(ppt_cuda_objects PROPERTIES
+    CUDA_ARCHITECTURES "75;86;89"
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)
+target_include_directories(ppt_cuda_objects PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${OptiX_INCLUDE_DIR}
+)
+target_compile_definitions(ppt_cuda_objects PRIVATE PPT_USE_OPTIX=1)
+if(MSVC)
+    set_source_files_properties(${CUDA_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4505>")
+endif()
 
 # -- Main executable ---------------------------------------------------
 add_executable(photon_tracer
     ${CORE_SOURCES}
-    ${CUDA_SOURCES}
 )
 
 target_include_directories(photon_tracer PRIVATE
@@ -79,6 +96,7 @@ find_package(OpenGL REQUIRED)
 find_package(OpenMP)
 
 target_link_libraries(photon_tracer PRIVATE
+    ppt_cuda_objects
     CUDA::cudart
     glfw
     OpenGL::GL
@@ -87,10 +105,9 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(photon_tracer PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
-# CUDA architecture
+# CUDA architecture (photon_tracer itself has no .cu files, symbols come via ppt_cuda_objects)
 set_target_properties(photon_tracer PROPERTIES
     CUDA_ARCHITECTURES "75;86;89"
-    CUDA_SEPARABLE_COMPILATION ON
 )
 
 # Suppress C4505 from CUDA/stb runtime headers (unreferenced internal functions)
@@ -98,9 +115,6 @@ if(MSVC)
     # For C/C++ source files
     set_source_files_properties(${CORE_SOURCES} PROPERTIES
         COMPILE_OPTIONS "/wd4505")
-    # For .cu files: pass via -Xcompiler so nvcc forwards it to cl.exe
-    set_source_files_properties(${CUDA_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4505>")
 endif()
 
 # OptiX is always enabled
@@ -189,12 +203,18 @@ if(PPT_BUILD_TESTS)
         src/optix/optix_renderer.cpp
     )
 
-    add_executable(ppt_tests ${TEST_SOURCES})
+    add_executable(ppt_tests
+        ${TEST_SOURCES}
+    )
+    set_target_properties(ppt_tests PROPERTIES
+        CUDA_ARCHITECTURES "75;86;89"
+    )
     target_include_directories(ppt_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${OptiX_INCLUDE_DIR}
     )
     target_link_libraries(ppt_tests PRIVATE
+        ppt_cuda_objects
         GTest::gtest_main
         CUDA::cudart
     )

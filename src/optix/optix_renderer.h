@@ -241,6 +241,11 @@ private:
     DeviceBuffer d_nee_direct_buffer_;       // float [W*H*NUM_LAMBDA]
     DeviceBuffer d_photon_indirect_buffer_;  // float [W*H*NUM_LAMBDA]
 
+    // Adaptive sampling buffers
+    DeviceBuffer d_lum_sum_;          // float [W*H]
+    DeviceBuffer d_lum_sum2_;         // float [W*H]
+    DeviceBuffer d_active_mask_;      // uint8_t [W*H]
+
     // GPU kernel profiling buffers (long long [W*H] each)
     DeviceBuffer d_prof_total_;
     DeviceBuffer d_prof_ray_trace_;
@@ -330,6 +335,11 @@ inline void OptixRenderer::resize(int w, int h) {
     d_sample_counts_.alloc(pixels * sizeof(float));
     d_srgb_buffer_.alloc(pixels * 4 * sizeof(uint8_t));
 
+    // Adaptive sampling buffers
+    d_lum_sum_.alloc(pixels * sizeof(float));
+    d_lum_sum2_.alloc(pixels * sizeof(float));
+    d_active_mask_.alloc(pixels * sizeof(uint8_t));
+
     // Component buffers
     d_nee_direct_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
     d_photon_indirect_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
@@ -345,6 +355,9 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_spectrum_buffer_.d_ptr, 0, d_spectrum_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
     CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr,     0, d_srgb_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_lum_sum_.d_ptr,          0, d_lum_sum_.bytes));
+    CUDA_CHECK(cudaMemset(d_lum_sum2_.d_ptr,         0, d_lum_sum2_.bytes));
+    CUDA_CHECK(cudaMemset(d_active_mask_.d_ptr,      0, d_active_mask_.bytes));
     CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
 
@@ -364,6 +377,12 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr, 0, d_sample_counts_.bytes));
     if (d_srgb_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr, 0, d_srgb_buffer_.bytes));
+    if (d_lum_sum_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_lum_sum_.d_ptr, 0, d_lum_sum_.bytes));
+    if (d_lum_sum2_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_lum_sum2_.d_ptr, 0, d_lum_sum2_.bytes));
+    if (d_active_mask_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_active_mask_.d_ptr, 0, d_active_mask_.bytes));
     if (d_nee_direct_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     if (d_photon_indirect_buffer_.d_ptr)

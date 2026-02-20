@@ -292,31 +292,102 @@ The population is launched as a separate OptiX pass
 
 ### 4.3 Guided BSDF Bounce (B1)
 
-At bounce 0 of `full_path_trace()`, the continuation direction is
-sampled from the bin flux CDF instead of the cosine hemisphere:
+`dev_sample_guided_bounce()` in `optix_device.cu` samples a
+continuation direction proportional to the photon flux CDF, stratified
+across the SPP loop so that finte sample budgets distribute work
+correctly across all bins.
 
-1. **Build hemisphere CDF:** For each bin $k$ with $\cos\theta_{n,k}
-   > -\epsilon$, compute:
+#### 4.3.1 CDF Construction
+
+For each bin $k$ in the positive hemisphere ($\cos\theta_{n,k} > 0$,
+`count > 0`):
 
 $$
-\text{cdf}[k] = \sum_{j \le k} \Phi_j \cdot \max(\cos\theta_{n,j}, 0)
+w_k = \Phi_k \cdot \cos\theta_{n,k}, \qquad
+\text{cdf}[k] = \sum_{j \le k} w_j,  \qquad
+W = \text{cdf}[N-1]
 $$
 
-   where $\Phi_j$ is the bin's flux and $\theta_{n,j}$ is the angle
-   between the bin centroid and the surface normal.
+$\Phi_k$ is the bin's accumulated Epanechnikov-weighted scalar flux,
+and $\theta_{n,k}$ is the angle between the flux-weighted centroid
+direction and the surface normal. Bins below the tangent plane
+($\cos\theta_{n,k} \le 0$) or without photons (`count == 0`) do
+**not** contribute.
 
-2. **Select bin:** Sample $\xi \sim U(0, \text{total})$ and find the
-   bin via linear scan of the CDF.
+#### 4.3.2 Stratified Bin Selection
 
-3. **Jitter within bin:** Sample a direction uniformly within a cone
-   of half-angle $\alpha = \arccos(1 - 2/N)$ centered on the
-   selected bin's normalised centroid.
+**Problem with naive sampling.** If one bin holds 80% of the flux,
+a naive draw $\xi \sim U(0, W)$ sends 80% of samples to that single
+bin. With 16 SPP there is a $(0.8)^{16} \approx 3\%$ chance it is
+never sampled at all; conversely, the other bins are heavily
+under-sampled even though they carry real energy.
 
-4. **Hemisphere clamp:** If the sampled direction falls below the
-   tangent plane, reflect it across the normal.
+**Stratified fix.** For sample $s \in \{0,\dots,S-1\}$ and bounce
+depth $b$:
 
-5. **Fallback:** If no bins have flux in the positive hemisphere,
-   fall back to cosine-weighted hemisphere sampling.
+$$
+\text{stratum} = (s + b \cdot 97) \bmod S
+$$
+
+$$
+\xi_s = \frac{\text{stratum} + u_s}{S} \cdot W, \qquad u_s \sim U(0,1)
+$$
+
+The CDF interval $[0, W)$ is divided into $S$ equal strata of width
+$W/S$.  Sample $s$ is confined to stratum $\text{stratum}$; a bin with
+weight fraction $f_k = w_k / W$ spans a contiguous interval of length
+$f_k \cdot W$ in the CDF, so exactly $\lfloor S \cdot f_k \rfloor$ or
+$\lceil S \cdot f_k \rceil$ strata overlap it. For example with $S=16$:
+
+| Bin flux fraction $f_k$ | Samples allocated |
+|------------------------|-------------------|
+| 60% | 9–10 |
+| 25% | 4 |
+| 15% | 2–3 |
+
+**Angular positions of the bins do not matter.** Whether two heavy
+bins are 10° or 170° apart, each occupies its own disjoint interval
+in the 1D CDF and is visited proportionally.
+
+**Bounce-depth decorrelation.** Without the `b * 97` offset, all
+bounces of path $s$ would use stratum $s \bmod S$. If that stratum
+maps to a low-weight bin, every diffuse bounce of that path would be
+biased toward a low-importance direction. Multiplying by the prime 97
+(larger than `DEFAULT_MAX_BOUNCES`) rotates the stratum independently
+at each depth:
+
+| Path $s=0$ | Stratum (with $S=16$) |
+|------------|----------------------|
+| Bounce 0 | 0 |
+| Bounce 1 | $97 \bmod 16 = 1$ |
+| Bounce 2 | $194 \bmod 16 = 2$ |
+
+**PDF invariance.** The marginal probability of selecting bin $k$ for
+any single draw remains $p(\text{bin}_k) = f_k$, identical to the
+naive uniform draw. `dev_guided_bounce_pdf()` therefore needs no
+modification — it computes the same per-sample PDF. Only the *joint*
+distribution across the $S$-sample batch changes (from independent
+draws to a stratified Latin-hypercube-like covering).
+
+When `total_spp <= 1` the formula collapses to the original
+`rng.next_float()`.
+
+#### 4.3.3 Cone Jitter and Hemisphere Clamp
+
+After bin selection, a direction is sampled uniformly within a cone
+of half-angle:
+
+$$
+\alpha = \arccos\!\left(1 - \frac{2}{N}\right)
+$$
+
+centered on the normalised flux-centroid of the selected bin. If the
+sampled direction falls below the tangent plane, it is resampled (up
+to 8 attempts); if all attempts fail, the bin centroid direction is
+returned (which is guaranteed above the horizon by the CDF filter).
+
+**Fallback:** If $W = 0$ (no bins have positive-hemisphere flux), the
+function falls back to cosine-weighted hemisphere sampling.
 
 ### 4.4 Guided NEE (B2)
 
@@ -563,6 +634,149 @@ breakdown of time spent in:
 - Photon gather (density estimation)
 - BSDF evaluation + continuation
 
+### 6.9 Adaptive Sampling
+
+Screen-noise adaptive sampling concentrates samples in high-variance
+regions (glossy reflections, shadow boundaries, caustics) and skips
+stable regions once estimated noise falls below a configurable
+threshold, reducing total sample count without visible quality loss.
+
+#### 6.9.1 Noise Metric
+
+The per-pixel noise metric is the **relative standard error** of the
+CIE Y (luminance) component of a chosen radiance signal:
+
+$$
+r_i = \frac{\mathrm{se}_i}{|{\mu}_i| + \varepsilon}, \quad
+\mathrm{se}_i = \sqrt{\frac{\sigma^2_i}{n_i}}, \quad
+\sigma^2_i = \frac{\sum Y_j^2}{n_i} - \left(\frac{\sum Y_j}{n_i}\right)^2
+$$
+
+where $\varepsilon = 10^{-4}$ prevents division by zero in dark
+regions and $n_i$ is the current sample count for pixel $i$.
+
+**Noise signal choice** (`ADAPTIVE_NOISE_USE_DIRECT_ONLY` in
+`config.h`, default `true`):
+
+| Setting | Signal | Variance | Convergence |
+|---------|--------|----------|-------------|
+| `true`  | NEE direct-only luminance $Y_{\text{NEE}}$ | Low (explicit shadow rays, bounded) | Fast — stable within ~4 SPP |
+| `false` | Full path luminance $Y_{\text{combined}}$ | Enormous (Russian roulette, photon gather, specular chains) | May never converge — **broken** |
+
+Using the full combined path radiance as the variance proxy was the
+root cause of the original failure: its per-sample variance is orders
+of magnitude larger than that of the NEE direct component, so
+$\mathrm{se}/\mu$ does not decrease fast enough to fall below the
+threshold at any reasonable SPP. Switching to $Y_{\text{NEE}}$ fixes
+this — direct lighting converges to a stable estimate in a handful of
+samples, and its spatial pattern (bright near lights, dark in shadow)
+is the correct guide for identifying pixels that genuinely need more
+samples.
+
+To avoid isolated quiet pixels surrounded by noisy ones, the active
+mask criterion uses a **neighbourhood maximum** over a
+$(2R+1) \times (2R+1)$ window:
+
+$$
+r_i^{\text{nbr}} = \max_{|dx| \le R,\; |dy| \le R}\; r_{i+\Delta}
+$$
+
+A pixel is marked **active** (continue sampling) if
+$r_i^{\text{nbr}} > \tau$, where $\tau$ =`adaptive_threshold`
+(default 0.02, i.e., 2% relative noise).
+
+#### 6.9.2 Sampling Policy
+
+The adaptive pass proceeds in two phases inside
+`OptixRenderer::render_final()` (GPU path) and
+`Renderer::render_frame()` (CPU path):
+
+| Phase | Pass range | Behaviour |
+|-------|------------|-----------|
+| Warmup | `0` to `min_spp - 1` | All pixels active; mask not evaluated |
+| Adaptive | `min_spp` to `max_spp` | Mask recomputed every `update_interval` passes; converged pixels skipped |
+
+The loop exits early when **no active pixels remain**
+(`active_count == 0`).
+
+Default `RenderConfig` values:
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `adaptive_sampling` | `false` | Opt-in; uniform sampling when disabled |
+| `adaptive_min_spp` | 4 | Warmup passes (minimum output SPP) |
+| `adaptive_max_spp` | 0 | 0 → inherits `samples_per_pixel` |
+| `adaptive_update_interval` | 1 | Mask refresh period (passes) |
+| `adaptive_threshold` | 0.02 | 2% relative noise target |
+| `adaptive_radius` | 1 | Half-width $R=1$ → 3×3 neighbourhood |
+
+#### 6.9.3 GPU Implementation
+
+Three additional per-pixel device buffers are allocated by
+`OptixRenderer` when adaptive sampling is enabled:
+
+| Buffer | Type | Content |
+|--------|------|---------|
+| `d_lum_sum_` | `float [W×H]` | Running $\sum Y_i$ per pixel |
+| `d_lum_sum2_` | `float [W×H]` | Running $\sum Y_i^2$ per pixel |
+| `d_active_mask_` | `uint8_t [W×H]` | 1 = active (trace), 0 = skip |
+
+Pointers are forwarded to `LaunchParams` (`lum_sum`, `lum_sum2`,
+`active_mask`) and are `nullptr` when adaptive sampling is disabled,
+leaving all non-adaptive launches unaffected.
+
+In `__raygen__render`, two changes are made relative to the
+non-adaptive path:
+
+1. **Early exit** — checked before any tracing:
+   ```cuda
+   if (params.active_mask && params.active_mask[pixel_idx] == 0)
+       return;
+   ```
+2. **Luminance moment accumulation** — after spectrum accumulation,
+   a CIE Y value is computed and added to both running-sum buffers.
+   The source spectrum is chosen by `ADAPTIVE_NOISE_USE_DIRECT_ONLY`:
+   ```cuda
+   const Spectrum& lum_proxy = ADAPTIVE_NOISE_USE_DIRECT_ONLY
+       ? L_nee_accum   // explicit shadow-ray direct; low variance
+       : L_accum;      // full multi-bounce path; high variance (not recommended)
+   ```
+
+The mask-update CUDA kernel `k_update_mask` (in
+`src/optix/adaptive_sampling.cu`, 16×16 blocks) is called via the
+host function `adaptive_update_mask(const AdaptiveParams&)` once
+per `update_interval` passes:
+
+```
+for each pixel i (one thread):
+  n = sample_counts[i]
+  if n < min_spp → active_mask[i] = 1; continue
+  mu     = lum_sum[i] / n
+  var    = lum_sum2[i]/n − mu²
+  r_pix  = sqrt(max(0,var)/n) / (|mu| + 1e−4)
+  r_nbr  = max r over (2R+1)×(2R+1) neighbourhood
+  active_mask[i] = (r_nbr > threshold) ? 1 : 0
+  if active: atomicAdd(active_count, 1)
+```
+
+`active_count` is returned to the host; zero triggers early loop
+exit.
+
+#### 6.9.4 CPU Implementation
+
+On the CPU path (`Renderer::render_frame()`), the same policy runs
+with `std::vector<uint8_t>` mask and `std::vector<float>`
+`lum_sum`/`lum_sum2` buffers. A lambda mirrors the GPU
+`k_update_mask` logic. OpenMP parallelism is preserved within each
+per-pass sample loop; the mask update iterates serially between
+passes.
+
+`Renderer::trace_path()` returns `TraceResult { combined, nee_direct }`
+and `FrameBuffer::accumulate()` accepts an optional `const Spectrum* proxy_L`.
+When `ADAPTIVE_NOISE_USE_DIRECT_ONLY == true`, `nee_direct` is passed as
+the proxy so `lum_sum`/`lum_sum2` track direct-only luminance, identical
+in spirit to the GPU path.
+
 ---
 
 ## 7. Spectral Framework
@@ -706,6 +920,8 @@ src/
     optix_renderer.h / .cpp   Host-side OptiX pipeline management
     optix_device.cu           All OptiX device programs (PTX source)
     launch_params.h           Shared host/device LaunchParams struct
+    adaptive_sampling.h       AdaptiveParams struct + host entry point
+    adaptive_sampling.cu      k_update_mask CUDA kernel + adaptive_update_mask()
   debug/
     debug.h                   Debug key bindings, DebugState
 tests/
@@ -758,6 +974,13 @@ tests/
     visibility modulates the photon density contribution, preserving
     contact shadows while allowing some indirect illumination via
     `PHOTON_SHADOW_FLOOR`.
+
+11. **Screen-noise adaptive sampling.** A per-pixel running variance
+    of CIE Y luminance drives a GPU active-mask kernel that
+    concentrates samples in high-variance regions and skips converged
+    pixels, reducing total GPU work without visual quality loss. A
+    warmup phase ensures all pixels receive a minimum sample count
+    before the mask is evaluated.
 
 ---
 
@@ -851,6 +1074,26 @@ All tunable constants are centralised in `src/core/config.h`:
 | `STRATA_X`               | 4           | Horizontal strata                 |
 | `STRATA_Y`               | 4           | Vertical strata                   |
 
+### Adaptive Sampling (RenderConfig)
+
+Set on the `RenderConfig` struct passed to `OptixRenderer` and
+`Renderer::render_frame()`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `adaptive_sampling` | `bool` | `false` | Enable adaptive sampling |
+| `adaptive_min_spp` | `int` | 4 | Warmup passes before mask evaluation |
+| `adaptive_max_spp` | `int` | 0 | Max SPP (0 → `samples_per_pixel`) |
+| `adaptive_update_interval` | `int` | 1 | Passes between mask updates |
+| `adaptive_threshold` | `float` | 0.02 | Relative noise threshold $\tau$ |
+| `adaptive_radius` | `int` | 1 | Neighbourhood half-width $R$ |
+
+Noise signal (compile-time flag in `config.h`):
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `ADAPTIVE_NOISE_USE_DIRECT_ONLY` | `true` | Use NEE direct-only luminance as variance proxy; set `false` to use full combined path (not recommended — full-path variance is too large to converge) |
+
 ### NEE
 
 | Parameter                | Default     | Description                       |
@@ -923,9 +1166,40 @@ struct PhotonSoA {
 Contains all device pointers: framebuffer, scene geometry, materials,
 photon map, hash grid, emitter CDF, camera, rendering flags
 (`is_final_render`, `render_mode`, `samples_per_pixel`),
-profiling timers, and photon bin cache pointers
+profiling timers, photon bin cache pointers
 (`photon_bin_cache`, `photon_density_cache`, `photon_bin_count`,
-`photon_bins_valid`, `populate_bins_mode`).
+`photon_bins_valid`, `populate_bins_mode`), and adaptive sampling
+pointers (`lum_sum`, `lum_sum2`, `active_mask`—all `nullptr` when
+adaptive sampling is disabled).
+
+### AdaptiveParams
+```cpp
+struct AdaptiveParams {
+    int*     sample_counts;  // [W*H] accumulated sample count per pixel
+    float*   lum_sum;        // [W*H] running Σ Y_i
+    float*   lum_sum2;       // [W*H] running Σ Y_i²
+    uint8_t* active_mask;    // [W*H] output: 1=active, 0=converged
+    int      width;
+    int      height;
+    int      min_spp;        // warmup threshold
+    int      max_spp;        // upper bound
+    float    threshold;      // relative noise τ
+    int      radius;         // neighbourhood half-width R
+};
+// Host entry point (adaptive_sampling.cu):
+// int adaptive_update_mask(const AdaptiveParams&);
+// Returns active pixel count (0 → all converged).
+```
+
+### FrameBuffer (adaptive fields)
+The `FrameBuffer` struct in `renderer.h` carries two additional
+buffers when adaptive sampling is active:
+```cpp
+std::vector<float> lum_sum;   // Σ Y_i  per pixel (CPU path)
+std::vector<float> lum_sum2;  // Σ Y_i² per pixel (CPU path)
+```
+These are allocated to `width * height` on resize and populated
+inside `FrameBuffer::accumulate()` via `spectrum_to_xyz(L).y`.
 
 ### HashGrid
 Hashed uniform grid with `cellStart` / `cellEnd` / `sortedIndices`

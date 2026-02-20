@@ -50,6 +50,14 @@ struct RenderConfig {
     bool   use_mis           = DEFAULT_USE_MIS;
     bool   use_photon_guided = DEFAULT_USE_PHOTON_GUIDED;
 
+    // Adaptive sampling
+    bool  adaptive_sampling      = false;
+    int   adaptive_min_spp       = 4;      ///< warmup passes (uniform)
+    int   adaptive_max_spp       = 0;      ///< 0 = use samples_per_pixel
+    int   adaptive_update_interval = 1;   ///< recompute mask every N passes
+    float adaptive_threshold     = 0.02f; ///< relative-noise threshold to keep sampling
+    int   adaptive_radius        = 1;     ///< neighbourhood half-width (pixels)
+
     // Debug
     RenderMode mode          = RenderMode::Full;
 };
@@ -60,6 +68,8 @@ struct FrameBuffer {
     int width, height;
     std::vector<Spectrum> pixels;       // Spectral radiance accumulator
     std::vector<float>    sample_count; // Per-pixel sample count
+    std::vector<float>    lum_sum;      // Σ Y_i  (linear luminance, for adaptive)
+    std::vector<float>    lum_sum2;     // Σ Y_i² (for variance estimate)
     std::vector<uint8_t>  srgb;         // Final sRGB output (RGBA)
 
     void resize(int w, int h) {
@@ -67,18 +77,32 @@ struct FrameBuffer {
         height = h;
         pixels.resize(w * h, Spectrum::zero());
         sample_count.resize(w * h, 0.f);
+        lum_sum.resize(w * h, 0.f);
+        lum_sum2.resize(w * h, 0.f);
         srgb.resize(w * h * 4, 0);
     }
 
     void clear() {
         for (auto& p : pixels)       p = Spectrum::zero();
         for (auto& s : sample_count) s = 0.f;
+        for (auto& v : lum_sum)      v = 0.f;
+        for (auto& v : lum_sum2)     v = 0.f;
     }
 
-    void accumulate(int x, int y, const Spectrum& L) {
+    // proxy_L: if non-null, use this spectrum (e.g. NEE direct only) for the
+    // luminance noise estimate instead of the full combined L.
+    // Controlled by ADAPTIVE_NOISE_USE_DIRECT_ONLY in config.h.
+    void accumulate(int x, int y, const Spectrum& L,
+                    const Spectrum* proxy_L = nullptr) {
         int idx = y * width + x;
         pixels[idx] += L;
         sample_count[idx] += 1.f;
+        // Luminance moments for adaptive sampling noise estimate
+        const Spectrum& lum_src = (proxy_L != nullptr) ? *proxy_L : L;
+        float3 xyz = spectrum_to_xyz(lum_src);
+        float  Y   = xyz.y;               // CIE Y = linear luminance
+        lum_sum[idx]  += Y;
+        lum_sum2[idx] += Y * Y;
     }
 
     // Tonemap and convert to sRGB
@@ -136,8 +160,16 @@ public:
     const HashGrid&  caustic_grid()    const { return caustic_grid_; }
 
 private:
+    // Result of a single traced camera path
+    struct TraceResult {
+        Spectrum combined;    ///< full radiance (NEE + photon + emission)
+        Spectrum nee_direct;  ///< direct-lighting-only component (all bounces,
+                              ///  throughput-weighted), used as low-variance
+                              ///  proxy for adaptive noise estimation
+    };
+
     // Trace a single camera path and return spectral radiance
-    Spectrum trace_path(Ray ray, PCGRng& rng);
+    TraceResult trace_path(Ray ray, PCGRng& rng);
 
     // Debug render modes
     Spectrum render_normals(const HitRecord& hit);

@@ -442,10 +442,18 @@ float3 sample_cone_dev(float3 axis, float cos_half_angle, PCGRng& rng) {
 // Returns a direction sampled proportional to bin flux, jittered within
 // the selected bin's solid angle.  Falls back to cosine hemisphere if
 // bins carry no flux in the positive hemisphere.
+//
+// sample_index / total_spp — SPP stratification:
+//   Bin selection is stratified across the SPP loop so that each bin is
+//   visited proportionally to its flux, not just on average.  The
+//   marginal PDF of a single sample is unchanged (MIS weights unaffected);
+//   only the joint distribution across S samples improves.  When
+//   total_spp == 1 the formula reduces to the original uniform draw.
 __forceinline__ __device__
 float3 dev_sample_guided_bounce(
     const PhotonBin* bins, int N, float3 normal,
-    const PhotonBinDirs& bin_dirs, PCGRng& rng)
+    const PhotonBinDirs& bin_dirs, PCGRng& rng,
+    int sample_index, int total_spp)
 {
     // Build CDF from bin fluxes — ONLY positive-hemisphere bins
     // (bins whose centroid has dot(dir, normal) > 0)
@@ -467,8 +475,14 @@ float3 dev_sample_guided_bounce(
         return sample_cosine_hemisphere_dev(rng);
     }
 
-    // Select bin via CDF (highest-flux bins have highest probability)
-    float xi = rng.next_float() * total;
+    // Select bin via CDF — stratified across SPP passes.
+    // For sample s of S, the stratum is [s/S, (s+1)/S) so the jittered
+    // draw covers [0,total] uniformly across the full SPP batch.
+    // Fallback: total_spp <= 1 → pure random (original behaviour).
+    float strat_u = (total_spp > 1)
+        ? ((float)(sample_index % total_spp) + rng.next_float()) / (float)total_spp
+        : rng.next_float();
+    float xi = strat_u * total;
     int selected = N - 1;
     for (int k = 0; k < N; ++k) {
         if (xi <= cdf[k]) { selected = k; break; }
@@ -1016,7 +1030,8 @@ struct PathTraceResult {
 
 __forceinline__ __device__
 PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
-                                int pixel_idx) {
+                                int pixel_idx,
+                                int sample_index, int total_spp) {
     PathTraceResult result;
     result.combined        = Spectrum::zero();
     result.nee_direct      = Spectrum::zero();
@@ -1130,7 +1145,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         if (p_guided > 0.0f && rng.next_float() < p_guided) {
             wi_world = dev_sample_guided_bounce(
                 active_bins, params.photon_bin_count, hit.shading_normal,
-                bin_dirs, rng);
+                bin_dirs, rng, sample_index, total_spp);
             wi_local = frame.world_to_local(wi_world);
         } else {
             wi_local = sample_cosine_hemisphere_dev(rng);
@@ -1189,6 +1204,11 @@ extern "C" __global__ void __raygen__render() {
     int py = idx.y;
     int pixel_idx = py * params.width + px;
 
+    // ── Adaptive sampling: skip inactive pixels ──────────────────────
+    // active_mask is nullptr when adaptive sampling is disabled.
+    if (params.active_mask && params.active_mask[pixel_idx] == 0)
+        return;
+
     // ── NORMAL RENDER PATH ──────────────────────────────────────
 
     Spectrum L_accum = Spectrum::zero();
@@ -1229,7 +1249,7 @@ extern "C" __global__ void __raygen__render() {
             - params.cam_pos);
 
         if (params.is_final_render) {
-            PathTraceResult ptr = full_path_trace(origin, direction, rng, pixel_idx);
+            PathTraceResult ptr = full_path_trace(origin, direction, rng, pixel_idx, s, params.samples_per_pixel);
             L_accum        += ptr.combined;
             L_nee_accum    += ptr.nee_direct;
             L_photon_accum += ptr.photon_indirect;
@@ -1249,6 +1269,32 @@ extern "C" __global__ void __raygen__render() {
     for (int i = 0; i < NUM_LAMBDA; ++i)
         params.spectrum_buffer[pixel_idx * NUM_LAMBDA + i] += L_accum.value[i];
     params.sample_counts[pixel_idx] += (float)params.samples_per_pixel;
+
+    // Adaptive sampling: accumulate luminance moments (if enabled)
+    if (params.lum_sum && params.lum_sum2) {
+        // Choose which radiance component to measure variance on.
+        // ADAPTIVE_NOISE_USE_DIRECT_ONLY=true  → L_nee_accum (explicit shadow rays,
+        //   orders-of-magnitude lower per-sample variance; converges quickly).
+        // ADAPTIVE_NOISE_USE_DIRECT_ONLY=false → L_accum (full multi-bounce path;
+        //   variance is enormous and the noise metric may never converge).
+        const Spectrum& lum_proxy = ADAPTIVE_NOISE_USE_DIRECT_ONLY
+            ? L_nee_accum : L_accum;
+
+        float Y = 0.f, Y_integral = 0.f;
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            float lam = LAMBDA_MIN + (i + 0.5f) * LAMBDA_STEP;
+            float y1  = (lam - 568.8f) * ((lam < 568.8f) ? 0.0213f : 0.0247f);
+            float y2  = (lam - 530.9f) * ((lam < 530.9f) ? 0.0613f : 0.0322f);
+            float ybar = 0.821f * expf(-0.5f * y1 * y1)
+                       + 0.286f * expf(-0.5f * y2 * y2);
+            Y          += lum_proxy.value[i] * ybar;
+            Y_integral += ybar;
+        }
+        if (Y_integral > 0.f) Y /= Y_integral;
+        Y = fmaxf(Y, 0.f);
+        params.lum_sum[pixel_idx]  += Y;
+        params.lum_sum2[pixel_idx] += Y * Y;
+    }
 
     // Component accumulation (only during final render)
     if (params.is_final_render && params.nee_direct_buffer) {

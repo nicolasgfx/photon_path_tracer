@@ -27,15 +27,15 @@
 //   - Fast iteration: 512×512 or 800×800
 //   - Final:          1080p+ (expect much slower)
 constexpr int DEFAULT_IMAGE_WIDTH  = 1024;
-constexpr int DEFAULT_IMAGE_HEIGHT = 1024;
+constexpr int DEFAULT_IMAGE_HEIGHT = 768;
 
 // ── Sampling / path depth ───────────────────────────────────────────
 // Recommendation:
 //   - Preview:  1–4 spp
 //   - Default:  16 spp (good balance)
 //   - Final:    64–256 spp depending on noise tolerance
-constexpr int   DEFAULT_SPP            = 32;   // samples per pixel
-constexpr int   DEFAULT_MAX_BOUNCES    = 8;    // path depth
+constexpr int   DEFAULT_SPP            = 64;   // samples per pixel
+constexpr int   DEFAULT_MAX_BOUNCES    = 4;    // path depth
 constexpr int   DEFAULT_MIN_BOUNCES_RR = 3;    // start Russian roulette after this
 constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
 
@@ -44,8 +44,8 @@ constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
 //   - Preview:  50k–200k photons, radius 0.07–0.12
 //   - Default:  500k photons,     radius 0.05
 //   - Final:    1M–5M photons,    radius 0.02–0.05
-constexpr int   DEFAULT_NUM_PHOTONS    = 4000000;
-constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;
+constexpr int   DEFAULT_NUM_PHOTONS    = 10000000;
+constexpr float DEFAULT_GATHER_RADIUS  = 0.3f;
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.02f;
 
 // Photon emission distribution tweak (variance reduction):
@@ -67,7 +67,7 @@ constexpr bool  DEBUG_PHOTON_SINGLE_BOUNCE = false;
 //   - Default:  4
 //   - Final:    8–16 for softer shadows (scene dependent)
 constexpr int   DEFAULT_NEE_LIGHT_SAMPLES = 16;
-constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 1;  // bounces >= 1 (throughput attenuated)
+constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 8;  // bounces >= 1 (throughput attenuated)
 
 // ── Integrator toggles ──────────────────────────────────────────────
 // Recommendation:
@@ -76,11 +76,26 @@ constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 1;  // bounces >= 1 (throughput atte
 constexpr bool  DEFAULT_USE_MIS           = true;
 constexpr bool  DEFAULT_USE_PHOTON_GUIDED = true;
 
+// ── Adaptive sampling noise metric ──────────────────────────────────
+// When true, the variance estimate used by the adaptive mask is computed
+// from the NEE direct-only luminance (L_nee) rather than the full combined
+// path radiance (L_combined).
+//
+// Rationale: full path variance is enormous (a single path may or may not
+// connect to a light via many specular bounces), so the relative standard
+// error se/mu does not decrease fast enough to trigger convergence.
+// The NEE direct component uses explicit shadow rays, and has orders-of-
+// magnitude lower per-sample variance; it converges in a handful of
+// samples, giving the mask a stable signal to work with.
+//
+// Set to false to restore the original full-path metric.
+constexpr bool  ADAPTIVE_NOISE_USE_DIRECT_ONLY = false;
+
 // Guided BSDF bounce mixture when photon bins are available.
 // Probability of sampling a guided direction vs cosine hemisphere.
 // Used in OptiX device path tracer to steer diffuse bounces toward
 // high-flux directions while keeping a cosine fallback for robustness.
-constexpr float DEFAULT_GUIDED_BSDF_MIX = 0.80f;
+constexpr float DEFAULT_GUIDED_BSDF_MIX = 0.50f; // default 0.8
 
 // ── Photon directional bins (guided NEE / caching) ──────────────────
 // Higher counts can improve guidance but increase memory/time.
