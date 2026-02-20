@@ -1478,17 +1478,32 @@ extern "C" __global__ void __raygen__photon_trace() {
         (uint64_t)photon_idx * 7 + 42,
         (uint64_t)photon_idx + 1);
 
-    // 1. Sample emissive triangle via CDF
-    float xi = rng.next_float();
-    int local_idx = binary_search_cdf(
-        params.emissive_cdf, params.num_emissive, xi);
-    if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+    // 1. Sample emissive triangle (mixture: power CDF + uniform)
+    // Power CDF keeps energy proportional; uniform ensures small/rare
+    // emitters still get enough photons for smooth color bleeding.
+    const float mix_uniform = fminf(fmaxf(DEFAULT_PHOTON_EMITTER_UNIFORM_MIX, 0.0f), 1.0f);
+
+    int local_idx = 0;
+    if (mix_uniform > 0.0f && rng.next_float() < mix_uniform) {
+        // Uniform over emissive triangles
+        float u = rng.next_float();
+        local_idx = (int)(u * (float)params.num_emissive);
+        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+    } else {
+        // Power-proportional CDF
+        float xi = rng.next_float();
+        local_idx = binary_search_cdf(
+            params.emissive_cdf, params.num_emissive, xi);
+        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+    }
     uint32_t tri_idx = params.emissive_tri_indices[local_idx];
 
-    // PDF of this triangle
-    float pdf_tri;
-    if (local_idx == 0) pdf_tri = params.emissive_cdf[0];
-    else pdf_tri = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+    // Mixture PDF for this triangle
+    float pdf_power;
+    if (local_idx == 0) pdf_power = params.emissive_cdf[0];
+    else pdf_power = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+    float pdf_uniform = 1.0f / (float)params.num_emissive;
+    float pdf_tri = (1.0f - mix_uniform) * pdf_power + mix_uniform * pdf_uniform;
 
     // 2. Get triangle geometry
     float3 v0 = params.vertices[tri_idx * 3 + 0];

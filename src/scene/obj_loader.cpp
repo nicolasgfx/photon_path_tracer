@@ -183,6 +183,10 @@ bool load_obj(const std::string& filepath, Scene& scene) {
     uint32_t current_material = 0;
     bool has_vertex_colors = false;
 
+    // Smooth normal accumulation: triangles that had no OBJ normals
+    struct SmoothTriRef { uint32_t tri_idx; int vi0, vi1, vi2; };
+    std::vector<SmoothTriRef> smooth_tris;
+
     // Add a default material
     {
         Material default_mat;
@@ -267,15 +271,22 @@ bool load_obj(const std::string& filepath, Scene& scene) {
                 tri.uv1 = get_uv(face_verts[i-1]);
                 tri.uv2 = get_uv(face_verts[i]);
 
-                // Normals: use provided or compute geometric
+                // Normals: use provided or defer to smooth-normal post-pass
                 bool has_normals = (face_verts[0].vn >= 0);
                 if (has_normals) {
                     tri.n0 = get_normal(face_verts[0]);
                     tri.n1 = get_normal(face_verts[i-1]);
                     tri.n2 = get_normal(face_verts[i]);
                 } else {
+                    // Placeholder – will be filled by area-weighted post-pass below
                     float3 gn = tri.geometric_normal();
                     tri.n0 = tri.n1 = tri.n2 = gn;
+                    smooth_tris.push_back({
+                        (uint32_t)scene.triangles.size(),
+                        face_verts[0].v,
+                        face_verts[i-1].v,
+                        face_verts[i].v
+                    });
                 }
 
                 tri.material_id = current_material;
@@ -327,6 +338,43 @@ bool load_obj(const std::string& filepath, Scene& scene) {
     std::cout << "[OBJ] Loaded " << positions.size() << " vertices, "
               << scene.triangles.size() << " triangles, "
               << scene.materials.size() << " materials\n";
+
+    // ── Area-weighted smooth normals post-pass ───────────────────────
+    // For triangles that had no per-vertex normals in the OBJ file,
+    // accumulate area-weighted geometric normals per vertex position and
+    // normalise, giving smooth shading across the mesh.
+    if (!smooth_tris.empty()) {
+        std::vector<float3> accum(positions.size(), make_f3(0.f, 0.f, 0.f));
+
+        for (const auto& ref : smooth_tris) {
+            const Triangle& tri = scene.triangles[ref.tri_idx];
+            float3 gn = tri.geometric_normal();
+            float  w  = tri.area();
+            if (ref.vi0 >= 0 && ref.vi0 < (int)accum.size())
+                accum[ref.vi0] = accum[ref.vi0] + gn * w;
+            if (ref.vi1 >= 0 && ref.vi1 < (int)accum.size())
+                accum[ref.vi1] = accum[ref.vi1] + gn * w;
+            if (ref.vi2 >= 0 && ref.vi2 < (int)accum.size())
+                accum[ref.vi2] = accum[ref.vi2] + gn * w;
+        }
+
+        // Normalise the per-vertex sums
+        for (auto& n : accum) {
+            float l = length(n);
+            n = (l > 1e-8f) ? normalize(n) : make_f3(0.f, 0.f, 1.f);
+        }
+
+        // Write smooth normals back into the triangles
+        for (const auto& ref : smooth_tris) {
+            Triangle& tri = scene.triangles[ref.tri_idx];
+            if (ref.vi0 >= 0 && ref.vi0 < (int)accum.size()) tri.n0 = accum[ref.vi0];
+            if (ref.vi1 >= 0 && ref.vi1 < (int)accum.size()) tri.n1 = accum[ref.vi1];
+            if (ref.vi2 >= 0 && ref.vi2 < (int)accum.size()) tri.n2 = accum[ref.vi2];
+        }
+
+        std::cout << "[OBJ] Computed area-weighted smooth normals for "
+                  << smooth_tris.size() << " triangles\n";
+    }
 
     if (has_vertex_colors) {
         std::cout << "[OBJ] Per-vertex colors detected (radiosity data)\n";

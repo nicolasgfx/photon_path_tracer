@@ -44,9 +44,18 @@ constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
 //   - Preview:  50k–200k photons, radius 0.07–0.12
 //   - Default:  500k photons,     radius 0.05
 //   - Final:    1M–5M photons,    radius 0.02–0.05
-constexpr int   DEFAULT_NUM_PHOTONS    = 5000000;
+constexpr int   DEFAULT_NUM_PHOTONS    = 2000000;
 constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.02f;
+
+// Photon emission distribution tweak (variance reduction):
+// Emit photons from a mixture of:
+//   (1 - mix) : power-proportional CDF (area * mean emission)
+//   mix       : uniform over emissive triangles
+// This helps tiny / low-power emitters (e.g. exit signs) get enough
+// photons to avoid speckled indirect color bleed when gather radius is
+// large, while keeping the estimator unbiased.
+constexpr float DEFAULT_PHOTON_EMITTER_UNIFORM_MIX = 0.10f;
 
 // Debug aid: true = photons stop after 1st hit (useful to validate emission)
 constexpr bool  DEBUG_PHOTON_SINGLE_BOUNCE = false;
