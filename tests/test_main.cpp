@@ -1197,14 +1197,16 @@ TEST(HashGrid, DenseCell_ManyPhotonsSameCell) {
     const int N = 500;
     float radius = 0.5f;
 
-    // All photons within a 0.1 unit cube (much smaller than cell size)
+    // All photons within a 0.1 unit cube at positive coordinates.
+    // Positions are entirely in [0.1, 0.2]^3 so they all fall in the same
+    // hash cell (floor([0.1,0.2] / 1.0) = 0 on every axis).
     PCGRng rng = PCGRng::seed(123);
     for (int i = 0; i < N; ++i) {
         Photon p;
         p.position = make_f3(
-            (rng.next_float() - 0.5f) * 0.1f,
-            (rng.next_float() - 0.5f) * 0.1f,
-            (rng.next_float() - 0.5f) * 0.1f);
+            0.1f + rng.next_float() * 0.1f,
+            0.1f + rng.next_float() * 0.1f,
+            0.1f + rng.next_float() * 0.1f);
         p.wi = make_f3(0, 0, 1);
         p.lambda_bin = i % NUM_LAMBDA;
         p.flux = 1.0f;
@@ -1544,10 +1546,11 @@ TEST(DensityEstimator, ValidPhotonContributes) {
     // A photon that satisfies all filters should contribute
     PhotonSoA photons;
     Photon p;
-    p.position = make_f3(0.001f, 0.f, 0.f); // Very close to query point on surface
-    p.wi = make_f3(0, 0, 1); // Pointing INTO surface
-    p.lambda_bin = 5;
-    p.flux = 1.0f;
+    p.position    = make_f3(0.001f, 0.f, 0.f); // Very close to query point on surface
+    p.wi          = make_f3(0, 0, 1);   // Pointing away from surface (stored convention)
+    p.geom_normal = make_f3(0, 0, 1);   // Surface normal matches query normal
+    p.lambda_bin  = 5;
+    p.flux        = 1.0f;
     photons.push_back(p);
 
     HashGrid grid;
@@ -1644,20 +1647,22 @@ TEST(DensityEstimator, ThinWallDoubleSided) {
     //
     PhotonSoA photons;
 
-    // Front-surface photon (facing same way as query)
+    // Front-surface photon (facing same way as query normal +Z)
     Photon p_front;
-    p_front.position = make_f3(0.0f, 0.0f, 0.001f);
-    p_front.wi = make_f3(0, 0, 1); // Incoming toward front surface
-    p_front.lambda_bin = 3;
-    p_front.flux = 10.0f;
+    p_front.position    = make_f3(0.0f, 0.0f, 0.001f);
+    p_front.wi          = make_f3(0, 0, 1);  // away from surface
+    p_front.geom_normal = make_f3(0, 0, 1);  // surface faces +Z
+    p_front.lambda_bin  = 3;
+    p_front.flux        = 10.0f;
     photons.push_back(p_front);
 
-    // Back-surface photon (facing opposite to query)
+    // Back-surface photon (facing opposite to front query normal)
     Photon p_back;
-    p_back.position = make_f3(0.0f, 0.0f, -0.001f);
-    p_back.wi = make_f3(0, 0, -1); // Incoming toward back surface
-    p_back.lambda_bin = 3;
-    p_back.flux = 10.0f;
+    p_back.position    = make_f3(0.0f, 0.0f, -0.001f);
+    p_back.wi          = make_f3(0, 0, -1);  // away from back surface
+    p_back.geom_normal = make_f3(0, 0, -1);  // surface faces -Z
+    p_back.lambda_bin  = 3;
+    p_back.flux        = 10.0f;
     photons.push_back(p_back);
 
     HashGrid grid;
@@ -1701,21 +1706,23 @@ TEST(DensityEstimator, SameCellDifferentFacingRejected) {
     const int N_per_side = 20;
 
     for (int i = 0; i < N_per_side; ++i) {
-        // Upward-facing photons
+        // Upward-facing photons: surface normal = +Z, wi points away from surface
         Photon p;
-        p.position = make_f3((float)i * 0.001f, 0.f, 0.0001f);
-        p.wi = make_f3(0, 0, 1); // Coming from above
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.position    = make_f3((float)i * 0.001f, 0.f, 0.0001f);
+        p.wi          = make_f3(0, 0, 1);  // away from +Z surface
+        p.geom_normal = make_f3(0, 0, 1);  // surface faces up (+Z)
+        p.lambda_bin  = 0;
+        p.flux        = 1.0f;
         photons.push_back(p);
     }
     for (int i = 0; i < N_per_side; ++i) {
-        // Downward-facing photons (back-facing relative to query)
+        // Downward-facing photons: surface normal = -Z, wi points away from surface
         Photon p;
-        p.position = make_f3((float)i * 0.001f, 0.f, -0.0001f);
-        p.wi = make_f3(0, 0, -1); // Coming from below — back-facing
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.position    = make_f3((float)i * 0.001f, 0.f, -0.0001f);
+        p.wi          = make_f3(0, 0, -1);  // away from -Z surface
+        p.geom_normal = make_f3(0, 0, -1);  // surface faces down (-Z)
+        p.lambda_bin  = 0;
+        p.flux        = 1.0f;
         photons.push_back(p);
     }
 
@@ -1860,22 +1867,31 @@ TEST(Camera, RayThroughCenter) {
 TEST(PhotonSoA, PushBackAndGet) {
     PhotonSoA soa;
     Photon p;
-    p.position = make_f3(1, 2, 3);
-    p.wi = make_f3(4, 5, 6);
-    p.lambda_bin = 7;
-    p.flux = 8.5f;
+    p.position    = make_f3(1, 2, 3);
+    p.wi          = make_f3(4, 5, 6);
+    p.geom_normal = make_f3(0, 0, 1);  // upward surface normal
+    p.lambda_bin  = 7;
+    p.flux        = 8.5f;
     soa.push_back(p);
 
     EXPECT_EQ(soa.size(), 1u);
     Photon out = soa.get(0);
-    EXPECT_NEAR(out.position.x, 1.f, kTol);
-    EXPECT_NEAR(out.position.y, 2.f, kTol);
-    EXPECT_NEAR(out.position.z, 3.f, kTol);
-    EXPECT_NEAR(out.wi.x, 4.f, kTol);
-    EXPECT_NEAR(out.wi.y, 5.f, kTol);
-    EXPECT_NEAR(out.wi.z, 6.f, kTol);
+    EXPECT_NEAR(out.position.x,    1.f, kTol);
+    EXPECT_NEAR(out.position.y,    2.f, kTol);
+    EXPECT_NEAR(out.position.z,    3.f, kTol);
+    EXPECT_NEAR(out.wi.x,          4.f, kTol);
+    EXPECT_NEAR(out.wi.y,          5.f, kTol);
+    EXPECT_NEAR(out.wi.z,          6.f, kTol);
+    EXPECT_NEAR(out.geom_normal.x, 0.f, kTol);
+    EXPECT_NEAR(out.geom_normal.y, 0.f, kTol);
+    EXPECT_NEAR(out.geom_normal.z, 1.f, kTol);
     EXPECT_EQ(out.lambda_bin, 7);
     EXPECT_NEAR(out.flux, 8.5f, kTol);
+
+    // Also verify the raw SoA arrays are populated
+    EXPECT_NEAR(soa.norm_x[0], 0.f, kTol);
+    EXPECT_NEAR(soa.norm_y[0], 0.f, kTol);
+    EXPECT_NEAR(soa.norm_z[0], 1.f, kTol);
 }
 
 TEST(PhotonSoA, ClearWorks) {
@@ -2326,10 +2342,11 @@ TEST(DensityEstimator, NormalizationFactor) {
     PhotonSoA photons;
     for (int i = 0; i < K; ++i) {
         Photon p;
-        p.position = make_f3(0.001f * i, 0.f, 0.f);
-        p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = bin;
-        p.flux = flux;
+        p.position    = make_f3(0.001f * i, 0.f, 0.f);
+        p.wi          = make_f3(0, 0, 1);
+        p.geom_normal = make_f3(0, 0, 1);  // surface normal matches query +Z
+        p.lambda_bin  = bin;
+        p.flux        = flux;
         photons.push_back(p);
     }
 
@@ -3586,8 +3603,9 @@ TEST(PhotonBins, BinSolidAngle) {
 }
 
 TEST(PhotonBins, PhotonBinSize) {
-    // Verify struct size is as expected (24 bytes)
-    EXPECT_EQ(sizeof(PhotonBin), 24u);
+    // 36 bytes: flux(4) + dir_xyz(12) + avg_nxyz(12) + weight(4) + count(2) + pad(2)
+    // (was 24 bytes before the surface-normal visibility term avg_nx/y/z was added)
+    EXPECT_EQ(sizeof(PhotonBin), 36u);
 }
 
 TEST(PhotonBins, MaxBinCountRespected) {
@@ -3611,6 +3629,9 @@ TEST(CellBinGrid, BuildBasic) {
     photons.wi_x    = {0.0f, 0.0f, 0.0f, 0.0f};
     photons.wi_y    = {0.0f, 0.0f, 0.0f, 0.0f};
     photons.wi_z    = {1.0f, 1.0f, 1.0f, 1.0f};
+    photons.norm_x  = {0.0f, 0.0f, 0.0f, 0.0f};  // surface normal x
+    photons.norm_y  = {0.0f, 0.0f, 0.0f, 0.0f};  // surface normal y
+    photons.norm_z  = {1.0f, 1.0f, 1.0f, 1.0f};  // surface normal z (upward)
     photons.lambda_bin = {0, 1, 2, 3};
     photons.flux    = {1.0f, 2.0f, 3.0f, 4.0f};
     photons.bin_idx = {0, 1, 2, 3};
@@ -3636,6 +3657,9 @@ TEST(CellBinGrid, CellIndexClampedAtBounds) {
     photons.wi_x    = {1.0f};
     photons.wi_y    = {0.0f};
     photons.wi_z    = {0.0f};
+    photons.norm_x  = {0.0f};
+    photons.norm_y  = {0.0f};
+    photons.norm_z  = {1.0f};
     photons.lambda_bin = {0};
     photons.flux    = {1.0f};
     photons.bin_idx = {0};
@@ -3664,6 +3688,9 @@ TEST(CellBinGrid, ScatterTo27Neighbors) {
     photons.wi_x    = {0.0f};
     photons.wi_y    = {0.0f};
     photons.wi_z    = {1.0f};
+    photons.norm_x  = {0.0f};
+    photons.norm_y  = {0.0f};
+    photons.norm_z  = {1.0f};
     photons.lambda_bin = {0};
     photons.flux    = {5.0f};
     photons.bin_idx = {0};
@@ -3692,6 +3719,534 @@ TEST(CellBinGrid, EmptyPhotons) {
     EXPECT_EQ(grid.dim_y, 0);
     EXPECT_EQ(grid.dim_z, 0);
     EXPECT_TRUE(grid.bins.empty());
+}
+
+// =====================================================================
+//  SECTION 37 - Normal Visibility Filter (geom_normal)
+// =====================================================================
+// These tests verify the photon surface-normal visibility term introduced
+// to prevent irradiance leaking through thin walls:
+//
+//   – PhotonSoA correctly stores geom_normal in norm_x/y/z SoA arrays
+//   – DensityEstimator rejects photons whose geom_normal opposes query normal
+//   – DensityEstimator accepts photons whose geom_normal matches query normal
+//   – The geom_normal check fires even when the old wi-direction check passes
+//   – CellBinGrid accumulates and normalises avg_nx/y/z per bin
+//   – CellBinGrid handles perfectly cancelling normals → zero avg_n
+//   – Integration: trace_photons stores valid unit-length normals
+//   – Integration: back-facing photons contribute zero in a thin-wall scenario
+
+// ── 37.1  PhotonSoA geom_normal round-trip ──────────────────────────
+
+TEST(PhotonSoA, GeomNormalRoundTrip) {
+    // push_back with an arbitrary geom_normal and check the SoA arrays and get()
+    PhotonSoA soa;
+
+    Photon p1;
+    p1.position    = make_f3(0, 0, 0);
+    p1.wi          = make_f3(0, 1, 0);
+    p1.geom_normal = make_f3(0, 0, 1);   // upward surface
+    p1.lambda_bin  = 0;
+    p1.flux        = 1.0f;
+    soa.push_back(p1);
+
+    Photon p2;
+    p2.position    = make_f3(1, 0, 0);
+    p2.wi          = make_f3(0, -1, 0);
+    p2.geom_normal = make_f3(0, 0, -1);  // downward surface
+    p2.lambda_bin  = 1;
+    p2.flux        = 2.0f;
+    soa.push_back(p2);
+
+    ASSERT_EQ(soa.size(), 2u);
+    ASSERT_EQ(soa.norm_x.size(), 2u);
+    ASSERT_EQ(soa.norm_y.size(), 2u);
+    ASSERT_EQ(soa.norm_z.size(), 2u);
+
+    // First photon
+    EXPECT_NEAR(soa.norm_x[0],  0.f, kTol);
+    EXPECT_NEAR(soa.norm_y[0],  0.f, kTol);
+    EXPECT_NEAR(soa.norm_z[0],  1.f, kTol);
+    Photon out0 = soa.get(0);
+    EXPECT_NEAR(out0.geom_normal.x,  0.f, kTol);
+    EXPECT_NEAR(out0.geom_normal.y,  0.f, kTol);
+    EXPECT_NEAR(out0.geom_normal.z,  1.f, kTol);
+
+    // Second photon
+    EXPECT_NEAR(soa.norm_x[1],  0.f, kTol);
+    EXPECT_NEAR(soa.norm_y[1],  0.f, kTol);
+    EXPECT_NEAR(soa.norm_z[1], -1.f, kTol);
+    Photon out1 = soa.get(1);
+    EXPECT_NEAR(out1.geom_normal.z, -1.f, kTol);
+}
+
+TEST(PhotonSoA, GeomNormalClearResetsNormArrays) {
+    PhotonSoA soa;
+    Photon p;
+    p.position    = make_f3(0, 0, 0);
+    p.wi          = make_f3(0, 0, 1);
+    p.geom_normal = make_f3(0, 1, 0);
+    p.lambda_bin  = 0;
+    p.flux        = 1.f;
+    soa.push_back(p);
+    EXPECT_EQ(soa.size(), 1u);
+
+    soa.clear();
+    EXPECT_EQ(soa.size(), 0u);
+    EXPECT_TRUE(soa.norm_x.empty());
+    EXPECT_TRUE(soa.norm_y.empty());
+    EXPECT_TRUE(soa.norm_z.empty());
+}
+
+// ── 37.2  DensityEstimator normal visibility ─────────────────────────
+
+TEST(DensityEstimator, NormalVisibility_BackFacingGeomNormalRejected) {
+    // A photon deposited on the BACK face of a wall has geom_normal opposite
+    // to the front-face query normal. The normal visibility check must reject it
+    // to prevent irradiance leaking through the wall.
+    //
+    // Setup:
+    //   query position  = (0, 0, 0),  query normal = (0, 0, +1) ← front face
+    //   photon position = (0, 0, 0)   (same location – pure normal test)
+    //   photon wi       = (0, 0, +1)  → dot(wi, query_n) = +1 > 0 (OLD check passes!)
+    //   photon geom_n   = (0, 0, -1)  → dot(geom_n, query_n) = -1 ≤ 0 (NEW check fails)
+    // Expected result: L = 0
+    PhotonSoA photons;
+    Photon p;
+    p.position    = make_f3(0.f, 0.f, 0.f);
+    p.wi          = make_f3(0.f, 0.f, 1.f);   // OLD check would pass
+    p.geom_normal = make_f3(0.f, 0.f, -1.f);  // NEW check rejects
+    p.lambda_bin  = 3;
+    p.flux        = 100.f;  // strong photon — would be very visible if leaked
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius          = 0.5f;
+    config.surface_tau     = 5.0f;  // very generous — won't reject by plane distance
+    config.num_photons_total = 1;
+    config.use_kernel      = false;
+
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    EXPECT_NEAR(L.sum(), 0.f, kTol)
+        << "Back-facing geom_normal must be rejected (irradiance leak through wall)";
+}
+
+TEST(DensityEstimator, NormalVisibility_FrontFacingGeomNormalAccepted) {
+    // A photon with geom_normal matching the query normal should contribute.
+    PhotonSoA photons;
+    Photon p;
+    p.position    = make_f3(0.f, 0.f, 0.f);
+    p.wi          = make_f3(0.f, 0.f, 1.f);
+    p.geom_normal = make_f3(0.f, 0.f, 1.f);  // same hemisphere → accepted
+    p.lambda_bin  = 5;
+    p.flux        = 1.f;
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius            = 0.5f;
+    config.surface_tau       = 1.0f;
+    config.num_photons_total = 1;
+    config.use_kernel        = false;
+
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    EXPECT_GT(L[5], 0.f)
+        << "Front-facing geom_normal must be accepted and contribute irradiance";
+}
+
+TEST(DensityEstimator, NormalVisibility_OnlyGeomNormalCheckBlocks) {
+    // Designed to isolate the geom_normal check from the wi-direction check:
+    // wi direction PASSES old check, geom_normal FAILS new check → result is zero.
+    //
+    // This precisely simulates a photon that bounced off the floor (geom_n up),
+    // but we are asking it while standing on the ceiling (query_n down).
+    // Even though wi = (0,0,-1) → dot(wi, n_ceiling=(0,0,-1)) = 1 > 0 (wi check passes),
+    // geom_n = (0,0,+1) → dot(geom_n, n_ceiling=(0,0,-1)) = -1 ≤ 0 (geom_n rejects).
+    PhotonSoA photons;
+    Photon p;
+    p.position    = make_f3(0.f, 0.f, 0.f);
+    p.wi          = make_f3(0.f, 0.f, -1.f);  // pointing downward (toward ceiling query)
+    p.geom_normal = make_f3(0.f, 0.f,  1.f);  // photon was on a floor (faces up)
+    p.lambda_bin  = 2;
+    p.flux        = 50.f;
+    photons.push_back(p);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius            = 0.5f;
+    config.surface_tau       = 5.0f;
+    config.num_photons_total = 1;
+    config.use_kernel        = false;
+
+    // Query from ceiling, normal pointing downward
+    Spectrum L = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, -1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    EXPECT_NEAR(L.sum(), 0.f, kTol)
+        << "geom_normal check should reject floor photon when querying ceiling";
+}
+
+TEST(DensityEstimator, NormalVisibility_ThinWallBothSidesCorrect) {
+    // Thin wall scenario: two photons at nearly the same position, one on each
+    // side of an infinitely thin wall.
+    //   – Front photon: geom_n = (0,0,+1) → accepted by front-face query
+    //   – Back  photon: geom_n = (0,0,-1) → rejected by front-face query
+    PhotonSoA photons;
+
+    Photon front;
+    front.position    = make_f3(0.f, 0.f, 0.0001f);
+    front.wi          = make_f3(0.f, 0.f,  1.f);
+    front.geom_normal = make_f3(0.f, 0.f,  1.f);  // front surface
+    front.lambda_bin  = 4;
+    front.flux        = 10.f;
+    photons.push_back(front);
+
+    Photon back;
+    back.position    = make_f3(0.f, 0.f, -0.0001f);
+    back.wi          = make_f3(0.f, 0.f, -1.f);
+    back.geom_normal = make_f3(0.f, 0.f, -1.f);   // back surface
+    back.lambda_bin  = 4;
+    back.flux        = 10.f;
+    photons.push_back(back);
+
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius            = 0.5f;
+    config.surface_tau       = 0.01f;  // generous enough to accept both positions
+    config.num_photons_total = 1;
+    config.use_kernel        = false;
+
+    // Front-face query
+    Spectrum L_front = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0,  1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Back-face query
+    Spectrum L_back = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, -1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
+
+    // Each side should only see its own photon
+    EXPECT_GT(L_front[4], 0.f) << "Front query should see front photon";
+    EXPECT_GT(L_back[4],  0.f) << "Back query should see back photon";
+
+    // Cross-contamination: roughly equal flux so values should be close
+    // (not one being drastically larger due to the other side bleeding through)
+    if (L_front[4] > 0.f && L_back[4] > 0.f) {
+        float ratio = L_front[4] / L_back[4];
+        EXPECT_NEAR(ratio, 1.0f, 0.1f)
+            << "Both sides should see equal irradiance (same flux, symmetric setup)";
+    }
+}
+
+// ── 37.3  CellBinGrid normal accumulation ───────────────────────────
+
+TEST(CellBinGrid, SinglePhotonNormalPreserved) {
+    // After building with a single photon, avg_n in every cell it scattered
+    // into should equal the photon's geom_normal (possibly sign-flipped by
+    // flux-weighting and normalization, but pointing the same way).
+    const float3 expected_n = make_f3(0.f, 1.f, 0.f);  // upward y normal
+
+    PhotonSoA photons;
+    photons.pos_x   = {0.0f};
+    photons.pos_y   = {0.0f};
+    photons.pos_z   = {0.0f};
+    photons.wi_x    = {0.0f};
+    photons.wi_y    = {1.0f};
+    photons.wi_z    = {0.0f};
+    photons.norm_x  = {expected_n.x};
+    photons.norm_y  = {expected_n.y};
+    photons.norm_z  = {expected_n.z};
+    photons.lambda_bin = {0};
+    photons.flux    = {2.0f};
+    photons.bin_idx = {0};
+
+    CellBinGrid grid;
+    grid.build(photons, 0.2f, 4);
+
+    // Every bin that received the photon should have avg_n ≈ expected_n
+    const size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
+    int bins_checked = 0;
+    for (size_t c = 0; c < total; ++c) {
+        const PhotonBin& b = grid.bins[c * 4 + 0];  // bin 0
+        if (b.count == 0) continue;
+        ++bins_checked;
+        EXPECT_NEAR(b.avg_nx, expected_n.x, 1e-4f);
+        EXPECT_NEAR(b.avg_ny, expected_n.y, 1e-4f);
+        EXPECT_NEAR(b.avg_nz, expected_n.z, 1e-4f);
+        // avg_n should be unit length
+        float len = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
+        EXPECT_NEAR(len, 1.0f, 1e-4f) << "avg_n should be unit length after normalization";
+    }
+    EXPECT_GT(bins_checked, 0) << "At least one cell should have received the photon";
+}
+
+TEST(CellBinGrid, NormalAccumulatedAndNormalized) {
+    // Two photons on the same surface (normal = (0,0,+1), same bin index).
+    // The accumulated avg_n should also be (0,0,+1) after normalization.
+    PhotonSoA photons;
+    photons.pos_x   = {-0.05f, 0.05f};
+    photons.pos_y   = { 0.0f,  0.0f};
+    photons.pos_z   = { 0.0f,  0.0f};
+    photons.wi_x    = { 0.0f,  0.0f};
+    photons.wi_y    = { 0.0f,  0.0f};
+    photons.wi_z    = { 1.0f,  1.0f};
+    photons.norm_x  = { 0.0f,  0.0f};
+    photons.norm_y  = { 0.0f,  0.0f};
+    photons.norm_z  = { 1.0f,  1.0f};
+    photons.lambda_bin = {0, 0};
+    photons.flux    = {3.0f, 7.0f};
+    photons.bin_idx = {0, 0};
+
+    CellBinGrid grid;
+    grid.build(photons, 0.2f, 4);
+
+    // Find a cell that received both photons
+    const size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
+    bool found_multi = false;
+    for (size_t c = 0; c < total; ++c) {
+        const PhotonBin& b = grid.bins[c * 4 + 0];
+        if (b.count < 2) continue;
+        found_multi = true;
+        // Accumulated normals are both (0,0,1) → avg_n should be (0,0,1)
+        EXPECT_NEAR(b.avg_nx, 0.f, 1e-4f);
+        EXPECT_NEAR(b.avg_ny, 0.f, 1e-4f);
+        EXPECT_NEAR(b.avg_nz, 1.f, 1e-4f);
+        float len = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
+        EXPECT_NEAR(len, 1.0f, 1e-4f);
+        break;
+    }
+    EXPECT_TRUE(found_multi) << "Expected a cell receiving both photons";
+}
+
+TEST(CellBinGrid, OppositeNormalsCancelToZero) {
+    // Two photons at the same position but with exactly opposite normals.
+    // After flux-weighted accumulation and normalization, avg_n should be
+    // near zero (the code leaves it as zero when nlen < 1e-8).
+    PhotonSoA photons;
+    photons.pos_x   = {0.0f, 0.0f};
+    photons.pos_y   = {0.0f, 0.0f};
+    photons.pos_z   = {0.0f, 0.0f};
+    photons.wi_x    = {0.0f, 0.0f};
+    photons.wi_y    = {0.0f, 0.0f};
+    photons.wi_z    = {1.0f, -1.0f};
+    photons.norm_x  = {0.0f, 0.0f};
+    photons.norm_y  = {0.0f, 0.0f};
+    photons.norm_z  = {1.0f, -1.0f};   // exactly opposite normals
+    photons.lambda_bin = {0, 0};
+    photons.flux    = {5.0f, 5.0f};    // equal flux → perfect cancellation
+    photons.bin_idx = {0, 0};           // same bin
+
+    CellBinGrid grid;
+    grid.build(photons, 0.2f, 4);
+
+    // The centre cell should have avg_n ≈ (0,0,0) (or very small)
+    const size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
+    bool found = false;
+    for (size_t c = 0; c < total; ++c) {
+        const PhotonBin& b = grid.bins[c * 4 + 0];
+        if (b.count < 2) continue;
+        found = true;
+        float nlen = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
+        EXPECT_LT(nlen, 0.1f) << "Opposite normals should cancel; avg_n should be near zero";
+        break;
+    }
+    EXPECT_TRUE(found) << "Expected a cell with both photons";
+}
+
+TEST(CellBinGrid, NormArraysSizeMatchesPositions) {
+    // Verify that norm_x/y/z arrays have the same length as pos_x after build.
+    PhotonSoA photons;
+    for (int i = 0; i < 10; ++i) {
+        Photon p;
+        p.position    = make_f3((float)i * 0.1f, 0.f, 0.f);
+        p.wi          = make_f3(0.f, 0.f, 1.f);
+        p.geom_normal = make_f3(0.f, 1.f, 0.f);
+        p.lambda_bin  = (uint16_t)(i % NUM_LAMBDA);
+        p.flux        = 1.f;
+        photons.push_back(p);
+    }
+    // bin_idx must be set for CellBinGrid
+    photons.bin_idx.assign(10, 0);
+
+    EXPECT_EQ(photons.norm_x.size(), photons.pos_x.size());
+    EXPECT_EQ(photons.norm_y.size(), photons.pos_y.size());
+    EXPECT_EQ(photons.norm_z.size(), photons.pos_z.size());
+
+    CellBinGrid grid;
+    grid.build(photons, 0.2f, 4);
+    // Grid should have been built without crashing
+    EXPECT_GT(grid.dim_x * grid.dim_y * grid.dim_z, 0);
+}
+
+// ── 37.4  Integration: trace_photons stores valid unit normals ───────
+
+TEST(CornellBox, PhotonNormalsAreValidUnitVectors) {
+    // After CPU photon tracing on the real Cornell box, every stored photon
+    // should have a unit-length geom_normal (stored in norm_x/y/z).
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    EmitterConfig config;
+    config.num_photons = 2000;
+    config.max_bounces = 5;
+
+    PhotonSoA global_map, caustic_map;
+    trace_photons(scene, config, global_map, caustic_map);
+
+    if (global_map.size() == 0) { GTEST_SKIP() << "No photons traced"; }
+
+    ASSERT_EQ(global_map.norm_x.size(), global_map.size());
+    ASSERT_EQ(global_map.norm_y.size(), global_map.size());
+    ASSERT_EQ(global_map.norm_z.size(), global_map.size());
+
+    int zero_normal_count = 0;
+    for (size_t i = 0; i < global_map.size(); ++i) {
+        float nx = global_map.norm_x[i];
+        float ny = global_map.norm_y[i];
+        float nz = global_map.norm_z[i];
+        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+
+        EXPECT_FALSE(std::isnan(nx)) << "norm_x[" << i << "] is NaN";
+        EXPECT_FALSE(std::isnan(ny)) << "norm_y[" << i << "] is NaN";
+        EXPECT_FALSE(std::isnan(nz)) << "norm_z[" << i << "] is NaN";
+
+        if (len < 0.5f) ++zero_normal_count;
+        else
+            EXPECT_NEAR(len, 1.0f, 0.01f)
+                << "Photon " << i << " geom_normal is not unit length";
+    }
+
+    // Zero normals shouldn't happen for real surface hits
+    float zero_frac = (float)zero_normal_count / (float)global_map.size();
+    EXPECT_LT(zero_frac, 0.01f)
+        << "More than 1% of photons have near-zero geom_normal";
+}
+
+TEST(CornellBox, PhotonNormalsAreOutwardFacing) {
+    // Photons can only be stored at bounce > 0 (the no-direct-deposit rule).
+    // So we need max_bounces ≥ 3 to get photons that have bounced at least
+    // twice and may land on the floor (pos_y < -0.48).  The floor's outward
+    // normal faces up (+Y), so those photons should have norm_y > 0.
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    EmitterConfig config;
+    config.num_photons = 5000;
+    config.max_bounces = 4;  // allow multi-bounce paths so floor photons are stored
+
+    PhotonSoA global_map, caustic_map;
+    trace_photons(scene, config, global_map, caustic_map);
+    if (global_map.size() == 0) { GTEST_SKIP() << "No photons traced"; }
+
+    // Collect photons that landed near the floor (y < -0.48)
+    int floor_photons = 0;
+    int floor_correct_normal = 0;
+    for (size_t i = 0; i < global_map.size(); ++i) {
+        if (global_map.pos_y[i] < -0.48f) {
+            ++floor_photons;
+            // Floor normal should be +Y
+            if (global_map.norm_y[i] > 0.5f) ++floor_correct_normal;
+        }
+    }
+
+    if (floor_photons > 0) {
+        float correct_frac = (float)floor_correct_normal / (float)floor_photons;
+        EXPECT_GT(correct_frac, 0.8f)
+            << "Most floor photons should have outward (+Y) normal; got "
+            << floor_correct_normal << "/" << floor_photons;
+    }
+}
+
+// ── 37.5  Integration: thin-wall leakage with real geometry ─────────
+
+TEST(CornellBox, NormalVisibilityEliminatesLeakage) {
+    // Construct a synthetic thin-wall scenario and verify that the density
+    // estimator returns zero on the wrong side.
+    //
+    // Setup: 50 strong photons deposited on a surface facing +Z.
+    //        Query on a surface facing -Z at the same location.
+    //        Without normal visibility, lots of irradiance leaks through.
+    //        With normal visibility, result must be zero.
+    const int N = 50;
+    const float big_flux = 100.f;  // deliberately large to detect any leak
+
+    PhotonSoA photons;
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        p.position    = make_f3((float)i * 0.001f, 0.f, 0.f);
+        // wi points AWAY from the surface (convention: stored as -incoming_direction).
+        // With geom_n = (0,0,+1), the outgoing wi from the surface is (0,0,+1).
+        // Correct-side query (n=(0,0,+1)): dot(wi,n)=1>0 (passes wi check), dot(geom_n,n)=1>0 → accepted.
+        // Wrong-side  query (n=(0,0,-1)): dot(wi,n)=-1≤0 (rejected by wi check) AND
+        //   dot(geom_n=(0,0,+1), n=(0,0,-1))=-1≤0 (rejected by geom_n check) → both checks agree.
+        p.wi          = make_f3(0.f, 0.f, 1.f);
+        p.geom_normal = make_f3(0.f, 0.f, 1.f);   // photon on +Z surface
+        p.lambda_bin  = (uint16_t)(i % NUM_LAMBDA);
+        p.flux        = big_flux;
+        photons.push_back(p);
+    }
+
+    HashGrid grid;
+    grid.build(photons, 1.0f);
+
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd = Spectrum::constant(1.f);
+
+    DensityEstimatorConfig config;
+    config.radius            = 1.0f;
+    config.surface_tau       = 5.0f;  // allows all photons through plane-distance check
+    config.num_photons_total = N;
+    config.use_kernel        = false;
+
+    // Query on surface facing -Z: the normal visibility check should reject all photons
+    Spectrum L_wrong_side = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, -1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 1.0f);
+
+    EXPECT_NEAR(L_wrong_side.sum(), 0.f, kTol)
+        << "Normal visibility must prevent all irradiance leaking to the wrong side";
+
+    // Sanity check: the correct side (facing +Z) DOES see the photons
+    Spectrum L_correct_side = estimate_photon_density(
+        make_f3(0, 0, 0), make_f3(0, 0, 1),
+        make_f3(0, 0, 1), mat, photons, grid, config, 1.0f);
+
+    EXPECT_GT(L_correct_side.sum(), 0.f)
+        << "Correct side should receive irradiance from photons";
 }
 
 // =====================================================================

@@ -79,6 +79,15 @@ inline Spectrum estimate_photon_density(
             float plane_dist = fabsf(dot(hit_normal, diff));
             if (plane_dist > config.surface_tau) return;
 
+            // Check: photon must be on the same side of the surface as the
+            // query point — reject photons deposited on opposite faces (e.g.
+            // the back of a wall) to prevent irradiance leaking through walls.
+            // Guard: only apply if norm arrays are populated (old binary files may lack them).
+            if (!photons.norm_x.empty()) {
+                float3 photon_n = make_f3(photons.norm_x[idx], photons.norm_y[idx], photons.norm_z[idx]);
+                if (dot(photon_n, hit_normal) <= 0.f) return;
+            }
+
             // Check: photon incoming direction should point into the surface
             float3 photon_wi = make_f3(photons.wi_x[idx], photons.wi_y[idx], photons.wi_z[idx]);
             if (dot(photon_wi, hit_normal) <= 0.f) return;

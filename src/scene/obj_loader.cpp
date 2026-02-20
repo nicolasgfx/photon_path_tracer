@@ -4,6 +4,9 @@
 #include "scene/obj_loader.h"
 #include "core/spectrum.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -155,10 +158,41 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             std::string tex_path;
             std::getline(ss >> std::ws, tex_path);
             tex_path = trim(tex_path);
-            // Texture loading would go here (stb_image)
-            // For now, store the path reference
-            (void)base_dir;
-            (void)tex_path;
+            // Normalize backslashes to forward slashes
+            std::replace(tex_path.begin(), tex_path.end(), '\\', '/');
+            std::string full_path = base_dir + "/" + tex_path;
+
+            // Check if this texture was already loaded
+            bool found = false;
+            for (size_t ti = 0; ti < scene.textures.size(); ++ti) {
+                if (scene.textures[ti].path == full_path) {
+                    scene.materials[current_idx].diffuse_tex = (int)ti;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                int w, h, c;
+                unsigned char* img = stbi_load(full_path.c_str(), &w, &h, &c, 4);
+                if (img) {
+                    Texture tex;
+                    tex.width    = w;
+                    tex.height   = h;
+                    tex.channels = 4;
+                    tex.path     = full_path;
+                    tex.data.resize(w * h * 4);
+                    // Convert to float [0,1]
+                    for (int p = 0; p < w * h * 4; ++p)
+                        tex.data[p] = img[p] / 255.0f;
+                    stbi_image_free(img);
+                    scene.materials[current_idx].diffuse_tex = (int)scene.textures.size();
+                    scene.textures.push_back(std::move(tex));
+                    std::cout << "[MTL] Loaded texture: " << tex_path
+                              << " (" << w << "x" << h << ")\n";
+                } else {
+                    std::cerr << "[MTL] Failed to load texture: " << full_path << "\n";
+                }
+            }
         }
     }
 

@@ -195,7 +195,12 @@ Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
 
         if (!hit.hit) break;
 
-        const Material& mat = scene_->materials[hit.material_id];
+        // Get material, applying diffuse texture if present
+        Material mat = scene_->materials[hit.material_id];
+        if (mat.diffuse_tex >= 0 && mat.diffuse_tex < (int)scene_->textures.size()) {
+            float3 rgb = scene_->textures[mat.diffuse_tex].sample(hit.uv);
+            mat.Kd = rgb_to_spectrum_reflectance(rgb.x, rgb.y, rgb.z);
+        }
 
         // Handle emission (camera sees a light directly, or via specular bounce)
         if (mat.is_emissive() && bounce == 0) {

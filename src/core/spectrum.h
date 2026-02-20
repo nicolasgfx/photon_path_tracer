@@ -162,7 +162,7 @@ inline HD float3 spectrum_to_srgb(const Spectrum& s) {
 // ── RGB → Spectrum (Smits-style Gaussian basis) ────────────────────
 // Reconstruct a plausible spectral reflectance from RGB.
 // Uses narrow Gaussians to minimise inter-channel crosstalk.
-inline Spectrum rgb_to_spectrum_reflectance(float r, float g, float b) {
+inline HD Spectrum rgb_to_spectrum_reflectance(float r, float g, float b) {
     Spectrum s = Spectrum::zero();
     for (int i = 0; i < NUM_LAMBDA; ++i) {
         float lam = lambda_of_bin(i);

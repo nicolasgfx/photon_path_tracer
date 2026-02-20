@@ -107,7 +107,11 @@ struct CornellBoxDataset {
             std::cout << "[Dataset] Binary not found at " << bin_path
                       << " — generating via CPU photon trace (fallback)\n";
 
-            header.num_photons_cfg = DEFAULT_NUM_PHOTONS;
+            // Use a smaller photon count for CPU bootstrap to keep it manageable.
+            // The GPU renderer should be used for high-quality dataset generation.
+            // 300k photons ≈ 30-60s on CPU — sufficient for relative-error tests.
+            constexpr int CPU_BOOTSTRAP_PHOTONS = 300'000;
+            header.num_photons_cfg = CPU_BOOTSTRAP_PHOTONS;
             header.gather_radius   = DEFAULT_GATHER_RADIUS;
             header.caustic_radius  = DEFAULT_CAUSTIC_RADIUS;
             header.max_bounces     = DEFAULT_MAX_BOUNCES;
@@ -376,32 +380,43 @@ static Spectrum gather_with_local_bins(
             float plane_dist = fabsf(dot(normal, diff));
             if (plane_dist > DEFAULT_SURFACE_TAU) return;
 
+            // Normal visibility filter: reject photons from opposite faces
+            // (mirrors density_estimator.h; guard for v1 files with empty norm arrays)
+            if (!ds.photons.norm_x.empty()) {
+                float3 photon_n = make_f3(ds.photons.norm_x[idx],
+                                          ds.photons.norm_y[idx],
+                                          ds.photons.norm_z[idx]);
+                if (dot(photon_n, normal) <= 0.f) return;
+            }
+
             float3 wi_world = make_f3(ds.photons.wi_x[idx], ds.photons.wi_y[idx],
                                        ds.photons.wi_z[idx]);
             if (dot(wi_world, normal) <= 0.f) return;
 
-            float w = 1.0f - dist2 / r2;  // Epanechnikov
+            // Density estimation uses box kernel (weight = 1) to match estimate_photon_density.
+            // Bin population uses Epanechnikov for smoother guidance.
+            float w_bin = 1.0f - dist2 / r2;  // Epanechnikov for bins
 
             // Density estimation
             float3 wi_local = frame.world_to_local(wi_world);
             Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
             float flux = ds.photons.flux[idx];
             int bin = ds.photons.lambda_bin[idx];
-            L.value[bin] += flux * inv_N * f.value[bin] * w * inv_area;
+            L.value[bin] += flux * inv_N * f.value[bin] * inv_area;  // box kernel (w=1)
 
             // Bin population (O(1) via precomputed index)
             int k = (int)ds.photon_bin_idx[idx];
             if (k >= num_bins) k = 0;
-            local_bins[k].flux   += flux * w;
-            local_bins[k].dir_x  += wi_world.x * flux * w;
-            local_bins[k].dir_y  += wi_world.y * flux * w;
-            local_bins[k].dir_z  += wi_world.z * flux * w;
-            local_bins[k].weight += w;
+            local_bins[k].flux   += flux * w_bin;
+            local_bins[k].dir_x  += wi_world.x * flux * w_bin;
+            local_bins[k].dir_y  += wi_world.y * flux * w_bin;
+            local_bins[k].dir_z  += wi_world.z * flux * w_bin;
+            local_bins[k].weight += w_bin;
             local_bins[k].count  += 1;
             count++;
         });
 
-    if (count > 0) L *= 1.5f;  // Epanechnikov correction
+    // No Epanechnikov correction needed — density now uses box kernel
 
     // Normalize bin centroids + total flux
     for (int k = 0; k < num_bins; ++k) {

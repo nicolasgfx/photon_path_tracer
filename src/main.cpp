@@ -115,7 +115,11 @@ static void draw_overlay_text(float x, float y, const char* text,
 }
 
 static void render_help_overlay(int win_w, int win_h,
-                                 const DebugState& debug) {
+                                 const DebugState& debug,
+                                 const Camera& camera,
+                                 bool volume_enabled,
+                                 int active_scene_index = -1,
+                                 float light_scale = 1.0f) {
     // Set up 2D orthographic projection for overlay
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
@@ -132,7 +136,7 @@ static void render_help_overlay(int win_w, int win_h,
     // Semi-transparent background box
     float pad   = 10.f;
     float box_w = 280.f;
-    float box_h = 290.f;
+    float box_h = 470.f;
     float bx    = pad;
     float by    = pad;
 
@@ -173,7 +177,7 @@ static void render_help_overlay(int win_w, int win_h,
     ly += line_h * 0.7f;
     draw_overlay_text(0, ly, "R      Full path trace render", 0.8f, 0.8f, 0.8f, 1.f);
     ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "ESC/Q  Quit", 0.8f, 0.8f, 0.8f, 1.f);
+    draw_overlay_text(0, ly, "ESC    Cancel render / release mouse / quit", 0.8f, 0.8f, 0.8f, 1.f);
     ly += line_h;
 
     // Render modes
@@ -205,6 +209,64 @@ static void render_help_overlay(int win_w, int win_h,
         float cg = t.on ? 1.0f : 0.5f;
         float cb = t.on ? 0.3f : 0.5f;
         draw_overlay_text(0, ly, buf, cr, cg, cb, 1.f);
+        ly += line_h * 0.7f;
+    }
+
+    ly += line_h * 0.3f;
+    draw_overlay_text(0, ly, "--- Volume Scattering ---", 1.f, 1.f, 0.3f, 1.f);
+    ly += line_h;
+    {
+        char vbuf[64];
+        snprintf(vbuf, sizeof(vbuf), "V    Volume [%s]", volume_enabled ? "ON" : "OFF");
+        float vr = volume_enabled ? 0.3f : 0.5f;
+        float vg = volume_enabled ? 1.0f : 0.5f;
+        float vb = volume_enabled ? 0.3f : 0.5f;
+        draw_overlay_text(0, ly, vbuf, vr, vg, vb, 1.f);
+        ly += line_h * 0.7f;
+    }
+
+    ly += line_h * 0.3f;
+    draw_overlay_text(0, ly, "--- Scenes (1-4) ---", 1.f, 1.f, 0.3f, 1.f);
+    ly += line_h;
+    for (int i = 0; i < NUM_SCENE_PROFILES; ++i) {
+        char sbuf[128];
+        snprintf(sbuf, sizeof(sbuf), "%d    %s%s", i + 1,
+                 SCENE_PROFILES[i].display_name,
+                 (i == active_scene_index) ? " [*]" : "");
+        float sr = (i == active_scene_index) ? 0.3f : 0.5f;
+        float sg = (i == active_scene_index) ? 1.0f : 0.5f;
+        float sb = (i == active_scene_index) ? 0.3f : 0.5f;
+        draw_overlay_text(0, ly, sbuf, sr, sg, sb, 1.f);
+        ly += line_h * 0.7f;
+    }
+
+    ly += line_h * 0.3f;
+    draw_overlay_text(0, ly, "--- Light Brightness ---", 1.f, 1.f, 0.3f, 1.f);
+    ly += line_h;
+    {
+        char lbuf[128];
+        snprintf(lbuf, sizeof(lbuf), "+/-  Brightness: %.2fx", light_scale);
+        draw_overlay_text(0, ly, lbuf, 0.8f, 0.8f, 0.8f, 1.f);
+        ly += line_h * 0.7f;
+    }
+
+    ly += line_h * 0.3f;
+    draw_overlay_text(0, ly, "--- Depth of Field ---", 1.f, 1.f, 0.3f, 1.f);
+    ly += line_h;
+    {
+        char dof_buf[128];
+        snprintf(dof_buf, sizeof(dof_buf), "O    DOF [%s]",
+                 camera.dof_enabled ? "ON" : "OFF");
+        float dr = camera.dof_enabled ? 0.3f : 0.5f;
+        float dg = camera.dof_enabled ? 1.0f : 0.5f;
+        float db = camera.dof_enabled ? 0.3f : 0.5f;
+        draw_overlay_text(0, ly, dof_buf, dr, dg, db, 1.f);
+        ly += line_h * 0.7f;
+        snprintf(dof_buf, sizeof(dof_buf), "[/]  f-number: f/%.1f", camera.dof_f_number);
+        draw_overlay_text(0, ly, dof_buf, 0.8f, 0.8f, 0.8f, 1.f);
+        ly += line_h * 0.7f;
+        snprintf(dof_buf, sizeof(dof_buf), ",/.  Focus dist: %.4f", camera.dof_focus_dist);
+        draw_overlay_text(0, ly, dof_buf, 0.8f, 0.8f, 0.8f, 1.f);
         ly += line_h * 0.7f;
     }
 
@@ -378,7 +440,20 @@ struct AppState {
     DebugState debug;
     bool       render_requested = false;  // R key pressed
     bool       rendering        = false;
+    bool       volume_enabled   = DEFAULT_VOLUME_ENABLED;  // V key toggle
     bool       showing_final    = false;  // keep final render on-screen
+
+    // Scene switching (keys 1-4)
+    int        scene_switch_requested = -1;  // -1 = none, 0-3 = profile index
+    int        active_scene_index     = -1;  // currently loaded scene profile index
+    float      active_cam_speed       = SCENE_CAM_SPEED; // runtime cam speed
+
+    // Light brightness scaling (runtime, +/- keys)
+    float      light_scale            = DEFAULT_LIGHT_SCALE;
+    bool       light_scale_changed    = false;  // triggers photon re-trace
+
+    // Render cancellation
+    bool       render_cancel_requested = false;
 
     // Progressive final render state
     int        render_spp_done  = 0;      // samples completed so far
@@ -396,15 +471,34 @@ struct AppState {
     bool       camera_moved = false;  // flag to reset accumulation
 };
 
-static AppState g_app;
+static AppState        g_app;
+static Camera*         g_active_camera          = nullptr;  // set by run_interactive for key_callback DOF editing
+static OptixRenderer*  g_active_optix_renderer  = nullptr;  // set by run_interactive for key_callback volume toggle
 
 static void key_callback(GLFWwindow* window, int key,
                           int /*scancode*/, int action, int /*mods*/) {
     if (action != GLFW_PRESS) return;
 
-    if (key == GLFW_KEY_ESCAPE || key == GLFW_KEY_Q) {
+    if (key == GLFW_KEY_ESCAPE) {
+        // ESC during rendering -> cancel the render
+        if (g_app.rendering) {
+            g_app.render_cancel_requested = true;
+            printf("\n[Render] Cancelling...\n");
+            return;
+        }
+        // ESC when mouse captured -> release mouse
         if (g_app.mouse_captured) {
-            // Release mouse first; second press quits
+            g_app.mouse_captured = false;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            return;
+        }
+        // ESC otherwise -> quit
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+        return;
+    }
+
+    if (key == GLFW_KEY_Q) {
+        if (g_app.mouse_captured) {
             g_app.mouse_captured = false;
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             return;
@@ -437,6 +531,85 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
+    // Volume scattering toggle – V key
+    if (key == GLFW_KEY_V) {
+        g_app.volume_enabled = !g_app.volume_enabled;
+        if (g_active_optix_renderer)
+            g_active_optix_renderer->set_volume_enabled(g_app.volume_enabled);
+        printf("[Volume] Scattering: %s\n", g_app.volume_enabled ? "ON" : "OFF");
+        g_app.camera_moved  = true;  // reset accumulation
+        g_app.showing_final = false;
+        return;
+    }
+
+    // Scene switching – keys 1-4
+    if (key >= GLFW_KEY_1 && key <= GLFW_KEY_4 && !g_app.rendering) {
+        int idx = key - GLFW_KEY_1;  // 0-3
+        if (idx != g_app.active_scene_index) {
+            g_app.scene_switch_requested = idx;
+            printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
+        } else {
+            printf("[Scene] Already on %s\n", SCENE_PROFILES[idx].display_name);
+        }
+        return;
+    }
+
+    // Light brightness – +/= increase, -/_ decrease
+    if ((key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) && !g_app.rendering) {
+        g_app.light_scale = fminf(LIGHT_SCALE_MAX, g_app.light_scale * LIGHT_SCALE_STEP);
+        g_app.light_scale_changed = true;
+        printf("[Light] Brightness: %.2fx\n", g_app.light_scale);
+        return;
+    }
+    if ((key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) && !g_app.rendering) {
+        g_app.light_scale = fmaxf(LIGHT_SCALE_MIN, g_app.light_scale / LIGHT_SCALE_STEP);
+        g_app.light_scale_changed = true;
+        printf("[Light] Brightness: %.2fx\n", g_app.light_scale);
+        return;
+    }
+
+    // DOF hotkeys – O toggle, [/] f-number, ,/. focus distance
+    if (g_active_camera) {
+        constexpr float kFStopFactor = 1.2599f; // 2^(1/3): one-third stop per key press
+        constexpr float kFocusStep   = 1.10f;   // 10% focus distance per key press
+
+        Camera& cam = *g_active_camera;
+        bool dof_changed = false;
+
+        if (key == GLFW_KEY_O) {
+            cam.dof_enabled = !cam.dof_enabled;
+            printf("[DOF] %s\n", cam.dof_enabled ? "ON" : "OFF");
+            dof_changed = true;
+        } else if (key == GLFW_KEY_LEFT_BRACKET) {
+            // [ -> widen aperture (lower f-number = more blur)
+            cam.dof_f_number = fmaxf(1.0f, cam.dof_f_number / kFStopFactor);
+            printf("[DOF] f-number: f/%.2f (more blur)\n", cam.dof_f_number);
+            dof_changed = true;
+        } else if (key == GLFW_KEY_RIGHT_BRACKET) {
+            // ] -> narrow aperture (higher f-number = less blur)
+            cam.dof_f_number = fminf(64.0f, cam.dof_f_number * kFStopFactor);
+            printf("[DOF] f-number: f/%.2f (less blur)\n", cam.dof_f_number);
+            dof_changed = true;
+        } else if (key == GLFW_KEY_COMMA) {
+            // , -> focus closer
+            cam.dof_focus_dist = fmaxf(0.01f, cam.dof_focus_dist / kFocusStep);
+            printf("[DOF] Focus distance: %.4f\n", cam.dof_focus_dist);
+            dof_changed = true;
+        } else if (key == GLFW_KEY_PERIOD) {
+            // . -> focus farther
+            cam.dof_focus_dist = fminf(1000.0f, cam.dof_focus_dist * kFocusStep);
+            printf("[DOF] Focus distance: %.4f\n", cam.dof_focus_dist);
+            dof_changed = true;
+        }
+
+        if (dof_changed) {
+            cam.update();
+            g_app.camera_moved   = true;
+            g_app.showing_final  = false;
+            return;
+        }
+    }
+
     // Any debug toggle should return to the interactive debug view.
     g_app.showing_final = false;
     handle_debug_key(key, g_app.debug);
@@ -457,8 +630,8 @@ static void mouse_button_callback(GLFWwindow* window, int button,
 static void run_interactive(
     OptixRenderer& optix_renderer,
     Camera& camera,
-    const Options& opt,
-    const Scene& /*scene*/)
+    Options& opt,
+    Scene& scene)
 {
     if (!glfwInit()) {
         std::cerr << "[GLFW] Failed to initialize\n";
@@ -486,6 +659,13 @@ static void run_interactive(
     // Start with mouse captured for FPS-style controls
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
+    // Expose camera and renderer to key_callback for runtime editing
+    g_active_camera         = &camera;
+    g_active_optix_renderer = &optix_renderer;
+
+    // Sync initial volume state from AppState into the renderer
+    optix_renderer.set_volume_enabled(g_app.volume_enabled);
+
     // Compute initial yaw/pitch from camera look direction
     {
         float3 fwd = normalize(camera.look_at - camera.position);
@@ -504,9 +684,13 @@ static void run_interactive(
 
     std::cout << "[Window] OptiX debug viewer (first-hit rendering)\n";
     std::cout << "  WASD = move | Mouse = look | M = release/capture mouse\n";
-    std::cout << "  ESC/Q = quit | F1-F9 = debug toggles | TAB = cycle mode\n";
+    std::cout << "  ESC = cancel render / release mouse / quit | Q = quit\n";
+    std::cout << "  F1-F9 = debug toggles | TAB = cycle mode\n";
     std::cout << "  R = full path tracing render -> " << opt.output_file << "\n";
     std::cout << "  H = toggle help overlay\n";
+    std::cout << "  1-4 = switch scene (Cornell | Conference | Living | Sibenik)\n";
+    std::cout << "  +/- = adjust light brightness (re-traces photons)\n";
+    std::cout << "  V = toggle volume scattering | O = toggle DOF | [/] = blur | ,/. = focus dist\n";
 
     FrameBuffer display_fb;
     display_fb.resize(win_w, win_h);
@@ -514,8 +698,157 @@ static void run_interactive(
     int frame = 0;
     auto last_time = std::chrono::high_resolution_clock::now();
 
+    // Original emission spectra (for light brightness scaling)
+    std::vector<Spectrum> original_Le;
+    auto capture_original_Le = [&]() {
+        original_Le.resize(scene.materials.size());
+        for (size_t m = 0; m < scene.materials.size(); ++m)
+            original_Le[m] = scene.materials[m].Le;
+    };
+    capture_original_Le();
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // ── Runtime scene switch (keys 1-4) ────────────────────────────
+        if (g_app.scene_switch_requested >= 0) {
+            int idx = g_app.scene_switch_requested;
+            g_app.scene_switch_requested = -1;
+
+            const SceneProfile& prof = SCENE_PROFILES[idx];
+            std::string obj_path = std::string(SCENES_DIR) + "/" + prof.obj_path;
+
+            std::cout << "\n========================================\n";
+            std::cout << "  Loading scene: " << prof.display_name << "\n";
+            std::cout << "========================================\n";
+
+            // Load new scene
+            Scene new_scene;
+            auto t0 = std::chrono::high_resolution_clock::now();
+            if (!load_obj(obj_path, new_scene)) {
+                std::cerr << "[Error] Failed to load: " << obj_path << "\n";
+            } else {
+                if (!prof.is_reference)
+                    new_scene.normalize_to_reference();
+                new_scene.build_bvh();
+                new_scene.build_emissive_distribution();
+
+                // Add area light if no emissive surfaces
+                if (new_scene.num_emissive() == 0) {
+                    std::cout << "[Scene] No emissive surfaces -- adding area light\n";
+                    Material light_mat;
+                    light_mat.name = "__area_light__";
+                    light_mat.type = MaterialType::Emissive;
+                    light_mat.Le = blackbody_spectrum(6500.f, 1e-8f);
+                    uint32_t light_mat_id = (uint32_t)new_scene.materials.size();
+                    new_scene.materials.push_back(light_mat);
+
+                    float3 v0 = make_f3(-0.15f,  0.499f, -0.15f);
+                    float3 v1 = make_f3( 0.15f,  0.499f, -0.15f);
+                    float3 v2 = make_f3( 0.15f,  0.499f,  0.15f);
+                    float3 v3 = make_f3(-0.15f,  0.499f,  0.15f);
+                    float3 n  = make_f3( 0.0f,  -1.0f,    0.0f);
+
+                    Triangle tri1;
+                    tri1.v0 = v0; tri1.v1 = v1; tri1.v2 = v2;
+                    tri1.n0 = tri1.n1 = tri1.n2 = n;
+                    tri1.uv0 = tri1.uv1 = tri1.uv2 = make_f2(0, 0);
+                    tri1.material_id = light_mat_id;
+
+                    Triangle tri2;
+                    tri2.v0 = v0; tri2.v1 = v2; tri2.v2 = v3;
+                    tri2.n0 = tri2.n1 = tri2.n2 = n;
+                    tri2.uv0 = tri2.uv1 = tri2.uv2 = make_f2(0, 0);
+                    tri2.material_id = light_mat_id;
+
+                    new_scene.triangles.push_back(tri1);
+                    new_scene.triangles.push_back(tri2);
+                    new_scene.build_bvh();
+                    new_scene.build_emissive_distribution();
+                }
+
+                // Replace current scene
+                scene = std::move(new_scene);
+
+                // Rebuild OptiX data
+                optix_renderer.build_accel(scene);
+                optix_renderer.upload_scene_data(scene);
+                optix_renderer.upload_emitter_data(scene);
+
+                // Re-trace photons
+                auto tp0 = std::chrono::high_resolution_clock::now();
+                optix_renderer.trace_photons(scene, opt.config);
+                auto tp1 = std::chrono::high_resolution_clock::now();
+                double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+
+                // Reset camera to scene profile defaults
+                camera.position = make_f3(prof.cam_pos[0], prof.cam_pos[1], prof.cam_pos[2]);
+                camera.look_at  = make_f3(prof.cam_lookat[0], prof.cam_lookat[1], prof.cam_lookat[2]);
+                camera.fov_deg  = prof.cam_fov;
+                camera.width    = win_w;
+                camera.height   = win_h;
+                camera.update();
+
+                // Sync yaw/pitch from new camera direction
+                float3 fwd = normalize(camera.look_at - camera.position);
+                g_app.yaw   = atan2f(fwd.x, -fwd.z);
+                g_app.pitch = asinf(fmaxf(-1.f, fminf(1.f, fwd.y)));
+
+                g_app.active_cam_speed    = prof.cam_speed;
+                g_app.active_scene_index  = idx;
+                g_app.camera_moved        = true;
+                g_app.showing_final       = false;
+                g_app.light_scale         = DEFAULT_LIGHT_SCALE;  // reset brightness
+                opt.scene_file            = obj_path;
+
+                // Re-capture original emission for brightness scaling
+                capture_original_Le();
+
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                std::cout << "[Scene] " << prof.display_name << " loaded in "
+                          << total_ms << " ms (photons: " << photon_ms << " ms)\n";
+                std::cout << "[Scene] " << scene.num_triangles() << " tris, "
+                          << scene.num_emissive() << " emissive\n";
+
+                // Update window title
+                std::string title = std::string("Spectral Photon+Path Tracer [OptiX] – ")
+                                    + prof.display_name;
+                glfwSetWindowTitle(window, title.c_str());
+            }
+        }
+
+        // ── Light brightness change (+/- keys) ─────────────────────────
+        if (g_app.light_scale_changed) {
+            g_app.light_scale_changed = false;
+
+            // Scale all emissive materials' Le by the new factor relative to 1.0
+            // We store original Le values and always scale from those
+            for (size_t m = 0; m < scene.materials.size(); ++m) {
+                Spectrum scaled = original_Le[m];
+                for (int k = 0; k < NUM_LAMBDA; ++k)
+                    scaled.value[k] *= g_app.light_scale;
+                scene.materials[m].Le = scaled;
+            }
+
+            // Rebuild emissive distribution with new powers
+            scene.build_emissive_distribution();
+
+            // Re-upload materials and emitter CDF
+            optix_renderer.upload_scene_data(scene);
+            optix_renderer.upload_emitter_data(scene);
+
+            // Re-trace photons with updated emission
+            std::cout << "[Light] Re-tracing photons at " << g_app.light_scale << "x brightness...\n";
+            auto tp0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.trace_photons(scene, opt.config);
+            auto tp1 = std::chrono::high_resolution_clock::now();
+            double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+            std::cout << "[Light] Photon re-trace done in " << photon_ms << " ms\n";
+
+            g_app.camera_moved  = true;
+            g_app.showing_final = false;
+        }
 
         // Mouse cursor position for hover inspectors.
         {
@@ -567,7 +900,7 @@ static void run_interactive(
             float3 right = normalize(cross(forward, make_f3(0, 1, 0)));
             float3 up_dir = make_f3(0, 1, 0);
 
-            float speed = SCENE_CAM_SPEED * dt;
+            float speed = g_app.active_cam_speed * dt;
             // Shift for faster movement
             if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
                 speed *= 3.f;
@@ -654,27 +987,50 @@ static void run_interactive(
 
         // Progressive rendering: one spp per main-loop iteration
         if (g_app.rendering) {
-            optix_renderer.render_one_spp(
-                g_app.render_cam, g_app.render_spp_done,
-                opt.config.max_bounces);
-            g_app.render_spp_done++;
+            // Check for cancel request (ESC key)
+            if (g_app.render_cancel_requested) {
+                g_app.render_cancel_requested = false;
+                g_app.rendering = false;
+                g_app.showing_final = false;
+                g_app.render_requested = false;
 
-            // Download and display the progressive result
-            optix_renderer.download_framebuffer(display_fb);
+                // Restore mouse capture state
+                if (g_app.mouse_was_captured) {
+                    g_app.mouse_captured = true;
+                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                    g_app.first_mouse = true;
+                }
 
-            // Console progress
-            auto t_now = std::chrono::high_resolution_clock::now();
-            double elapsed = std::chrono::duration<double>(t_now - g_app.render_start).count();
-            double eta = (g_app.render_spp_done < g_app.render_spp_total)
-                ? elapsed * (g_app.render_spp_total - g_app.render_spp_done) / g_app.render_spp_done
-                : 0.0;
-            std::printf("\r  [Render] %d/%d spp  %.1fs  ETA %.1fs   ",
-                        g_app.render_spp_done, g_app.render_spp_total,
-                        elapsed, eta);
-            std::fflush(stdout);
+                // Resize back to preview
+                optix_renderer.resize(win_w, win_h);
+                optix_renderer.clear_buffers();
+                frame = 0;
 
-            // Check if done
-            if (g_app.render_spp_done >= g_app.render_spp_total) {
+                std::cout << "\n[Render] Cancelled at "
+                          << g_app.render_spp_done << "/"
+                          << g_app.render_spp_total << " spp\n";
+            } else {
+                optix_renderer.render_one_spp(
+                    g_app.render_cam, g_app.render_spp_done,
+                    opt.config.max_bounces);
+                g_app.render_spp_done++;
+
+                // Download and display the progressive result
+                optix_renderer.download_framebuffer(display_fb);
+
+                // Console progress
+                auto t_now = std::chrono::high_resolution_clock::now();
+                double elapsed = std::chrono::duration<double>(t_now - g_app.render_start).count();
+                double eta = (g_app.render_spp_done < g_app.render_spp_total)
+                    ? elapsed * (g_app.render_spp_total - g_app.render_spp_done) / g_app.render_spp_done
+                    : 0.0;
+                std::printf("\r  [Render] %d/%d spp  %.1fs  ETA %.1fs   ",
+                            g_app.render_spp_done, g_app.render_spp_total,
+                            elapsed, eta);
+                std::fflush(stdout);
+
+                // Check if done
+                if (g_app.render_spp_done >= g_app.render_spp_total) {
                 std::cout << "\n[Render] Done!\n";
 
                 // Print GPU kernel profiling summary
@@ -748,6 +1104,7 @@ static void run_interactive(
                 std::cout << "  Saved: " << opt.output_file << "\n";
                 std::cout << "  Components: out_nee_direct.png, out_photon_indirect.png, out_combined.png\n";
                 std::cout << "========================================\n\n";
+                }
             }
         } else {
             if (!g_app.showing_final) {
@@ -791,7 +1148,8 @@ static void run_interactive(
 
         // Draw debug help overlay (if enabled)
         if (g_app.debug.show_help_overlay) {
-            render_help_overlay(win_w, win_h, g_app.debug);
+            render_help_overlay(win_w, win_h, g_app.debug, camera, g_app.volume_enabled,
+                                g_app.active_scene_index, g_app.light_scale);
         }
 
         // Draw hover-cell overlay (when map mode toggles are active and
@@ -935,6 +1293,18 @@ int main(int argc, char* argv[]) {
         }
 
         // -- Interactive debug window (always) ------------------------
+        // Determine initial scene index from compile-time define
+        #if defined(SCENE_CORNELL_BOX)
+            g_app.active_scene_index = 0;
+        #elif defined(SCENE_CONFERENCE)
+            g_app.active_scene_index = 1;
+        #elif defined(SCENE_LIVING_ROOM)
+            g_app.active_scene_index = 2;
+        #elif defined(SCENE_SIBENIK)
+            g_app.active_scene_index = 3;
+        #endif
+        g_app.active_cam_speed = SCENE_CAM_SPEED;
+
         run_interactive(optix_renderer, camera, opt, scene);
 
     } catch (const std::exception& e) {

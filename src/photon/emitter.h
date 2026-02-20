@@ -169,6 +169,7 @@ inline void trace_photons(const Scene& scene,
                 Photon p;
                 p.position   = hit.position;
                 p.wi         = ray.direction * (-1.f); // Flip: stored as incoming
+                p.geom_normal = hit.normal;             // Geometric normal at hit
                 p.lambda_bin = ep.lambda_bin;
                 p.flux       = flux;
 

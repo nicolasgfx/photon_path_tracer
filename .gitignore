@@ -56,6 +56,9 @@ out/
 # Keep the README preview render tracked
 !output/render.png
 
+# Large test data binary files (exceed GitHub 100MB limit)
+tests/data/*.bin
+
 # Exclude scenes (keep only cornell_box and conference)
 scenes/breakfast_room/
 scenes/living_room/

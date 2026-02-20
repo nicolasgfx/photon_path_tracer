@@ -257,18 +257,26 @@ where $\varphi_g = \pi(3 - \sqrt{5})$ is the golden angle. This
 produces a nearly uniform point distribution on $S^2$ without
 clustering at the poles.
 
-Each bin direction $\mathbf{d}_k$ stores a `PhotonBin` (24 bytes):
+Each bin direction $\mathbf{d}_k$ stores a `PhotonBin` (36 bytes):
 
-| Field   | Type  | Description                                   |
-|---------|-------|-----------------------------------------------|
-| `flux`  | float | Total Epanechnikov-weighted scalar flux        |
-| `dir_x` | float | Flux-weighted centroid direction $x$           |
-| `dir_y` | float | Flux-weighted centroid direction $y$           |
-| `dir_z` | float | Flux-weighted centroid direction $z$           |
-| `weight`| float | Total Epanechnikov weight (for normalisation)  |
-| `count` | int   | Number of photons accumulated in this bin      |
+| Field    | Type  | Description                                       |
+|----------|-------|---------------------------------------------------|
+| `flux`   | float | Total Epanechnikov-weighted scalar flux           |
+| `dir_x`  | float | Flux-weighted centroid direction $x$              |
+| `dir_y`  | float | Flux-weighted centroid direction $y$              |
+| `dir_z`  | float | Flux-weighted centroid direction $z$              |
+| `weight` | float | Total Epanechnikov weight (for normalisation)     |
+| `count`  | int   | Number of photons accumulated in this bin         |
+| `avg_nx` | float | Flux-weighted average surface normal $x$          |
+| `avg_ny` | float | Flux-weighted average surface normal $y$          |
+| `avg_nz` | float | Flux-weighted average surface normal $z$          |
 
-**Memory:** 24 bytes × 32 bins × 786,432 pixels (1024×768) = **604 MB**.
+The `avg_n` fields record the mean geometric normal of the surfaces
+that deposited photons into this bin.  At render time, any bin whose
+`avg_n` faces away from the query-point normal is rejected, preventing
+irradiance from leaking through thin geometry (see §6.5).
+
+**Memory:** 36 bytes × 32 bins × 786,432 pixels (1024×768) = **906 MB**.
 
 ### 4.2 Bin Population (`dev_populate_bins_for_pixel`)
 
@@ -277,12 +285,14 @@ For each pixel, the population pass:
 1. Traces the center ray, following specular bounces to the first
    diffuse hit.
 2. Gathers all photons from the hash grid within the gather radius,
-   applying the Epanechnikov kernel and plane-distance filter.
+   applying the Epanechnikov kernel, plane-distance filter, and
+   normal visibility check (same-hemisphere test).
 3. For each accepted photon, finds the nearest Fibonacci bin via
    brute-force dot product scan ($O(N)$ for $N \le 32$) and
    accumulates:
    - `flux += photon_flux * w` (Epanechnikov weight)
    - `dir += wi_world * photon_flux * w` (flux-weighted centroid)
+   - `avg_n += geom_normal * photon_flux` (flux-weighted surface normal)
    - `weight += w`, `count += 1`
 4. Normalises centroid directions to unit length (falls back to
    Fibonacci center if degenerate).
@@ -618,11 +628,34 @@ $$
 
 ### 6.5 Surface Consistency Filtering
 
-To avoid cross-surface contamination, a photon is accepted only if:
+To avoid cross-surface contamination a photon is accepted only if **all
+three** of the following conditions hold:
 
-- $|\langle \mathbf{n}_x, \mathbf{x}_i - \mathbf{x} \rangle| < \tau$
-  (plane-distance filter, $\tau = 0.02$)
-- Distance $\|\mathbf{x} - \mathbf{x}_i\| < r$
+1. **Plane-distance check** — $|\langle \mathbf{n}_x, \mathbf{x}_i - \mathbf{x} \rangle| < \tau$
+   ($\tau = $ `DEFAULT_SURFACE_TAU`, default 0.02)
+2. **Radial check** — $\|\mathbf{x} - \mathbf{x}_i\| < r$
+3. **Normal visibility check** (new) — $\langle \mathbf{n}_{\text{photon}}, \mathbf{n}_x \rangle > 0$,
+   where $\mathbf{n}_{\text{photon}}$ is the geometric normal of the
+   surface on which the photon was deposited.
+
+Condition 3 is the primary defence against **irradiance leaking through
+thin walls**.  The plane-distance check (condition 1) already catches
+many such cases, but fails when:
+- the wall is thinner than $\tau$ (common in CAD-style scenes), or
+- `surface_tau` was deliberately set loose for smoother gradients.
+
+A photon deposited on the *back face* of a wall has
+$\mathbf{n}_{\text{photon}}$ pointing opposite to $\mathbf{n}_x$
+(the front-face query normal), so $\langle \mathbf{n}_{\text{photon}},
+\mathbf{n}_x \rangle \le 0$ and the photon is rejected regardless of
+its spatial proximity.
+
+The normal $\mathbf{n}_{\text{photon}}$ is the **geometric** normal at
+the photon hit, stored in `PhotonSoA::norm_x/y/z` (CPU) and
+`params.photon_norm_x/y/z` (device).  For the precomputed
+`CellBinGrid`, the **flux-weighted average** surface normal
+(`PhotonBin::avg_nx/ny/nz`) is compared against the query-point
+normal at O(1) lookup time.
 
 ### 6.6 Progressive Accumulation
 
@@ -1149,7 +1182,7 @@ struct Spectrum {
 };
 ```
 
-### PhotonBin (24 bytes)
+### PhotonBin (36 bytes)
 ```cpp
 struct PhotonBin {
     float flux;       // total Epanechnikov-weighted scalar flux
@@ -1158,6 +1191,9 @@ struct PhotonBin {
     float dir_z;      // flux-weighted centroid direction z
     float weight;     // total Epanechnikov weight
     int   count;      // number of photons in this bin
+    float avg_nx;     // flux-weighted average surface normal x
+    float avg_ny;     // flux-weighted average surface normal y
+    float avg_nz;     // flux-weighted average surface normal z
 };
 ```
 
@@ -1175,7 +1211,8 @@ struct PhotonBinDirs {
 ```cpp
 struct PhotonSoA {
     vector<float> pos_x, pos_y, pos_z;
-    vector<float> wi_x, wi_y, wi_z;
+    vector<float> wi_x, wi_y, wi_z;       // incoming direction (away from surface)
+    vector<float> norm_x, norm_y, norm_z; // geometric surface normal at photon hit
     vector<uint16_t> lambda_bin;
     vector<float> flux;
 };

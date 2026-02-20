@@ -25,7 +25,7 @@
 // ---------------------------------------------------------------------
 namespace {
     // Must match the payload layout documented in optix_device.cu.
-    constexpr int OPTIX_NUM_PAYLOAD_VALUES   = 14;
+    constexpr int OPTIX_NUM_PAYLOAD_VALUES   = 15;
     constexpr int OPTIX_NUM_ATTRIBUTE_VALUES = 2;     // barycentrics
     constexpr int OPTIX_MAX_TRACE_DEPTH      = 2;     // radiance + shadow
 
@@ -187,9 +187,14 @@ void OptixRenderer::build_accel(const Scene& scene) {
               << (compacted_size / 1024) << " KB\n";
 
     // Now create module, programs, pipeline, SBT
-    create_module();
-    create_programs();
-    create_pipeline();
+    // Module/programs/pipeline are shader-dependent, not scene-dependent.
+    // Only create them on the first call so build_accel is safe to re-invoke
+    // when hot-swapping scenes at runtime (keys 1-5).
+    if (!module_) {
+        create_module();
+        create_programs();
+        create_pipeline();
+    }
     build_sbt(scene);
 }
 
@@ -246,6 +251,38 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
     d_ior_.upload(ior);
     d_mat_type_.upload(mat_type);
 
+    // Per-material diffuse texture ID (-1 = none)
+    std::vector<int> diffuse_tex(num_mats);
+    for (size_t m = 0; m < num_mats; ++m)
+        diffuse_tex[m] = scene.materials[m].diffuse_tex;
+    d_diffuse_tex_.upload(diffuse_tex);
+
+    // Texture atlas: concatenate all textures into one flat RGBA float buffer
+    size_t num_textures = scene.textures.size();
+    if (num_textures > 0) {
+        std::vector<GpuTexDesc> descs(num_textures);
+        size_t total_floats = 0;
+        for (size_t t = 0; t < num_textures; ++t) {
+            descs[t].offset = (int)total_floats;
+            descs[t].width  = scene.textures[t].width;
+            descs[t].height = scene.textures[t].height;
+            total_floats += scene.textures[t].data.size();
+        }
+        std::vector<float> atlas(total_floats);
+        for (size_t t = 0; t < num_textures; ++t) {
+            std::memcpy(&atlas[descs[t].offset],
+                        scene.textures[t].data.data(),
+                        scene.textures[t].data.size() * sizeof(float));
+        }
+        d_tex_atlas_.upload(atlas);
+        d_tex_descs_.upload(descs);
+        std::cout << "[OptiX] Uploaded " << num_textures << " textures ("
+                  << (total_floats * sizeof(float) / (1024*1024)) << " MB atlas)\n";
+    } else {
+        d_tex_atlas_.free();
+        d_tex_descs_.free();
+    }
+
     std::cout << "[OptiX] Uploaded " << num_mats << " materials, "
               << num_tris << " triangles to device\n";
 }
@@ -269,6 +306,9 @@ void OptixRenderer::upload_photon_data(
     d_photon_wi_x_.upload(global_photons.wi_x);
     d_photon_wi_y_.upload(global_photons.wi_y);
     d_photon_wi_z_.upload(global_photons.wi_z);
+    d_photon_norm_x_.upload(global_photons.norm_x);
+    d_photon_norm_y_.upload(global_photons.norm_y);
+    d_photon_norm_z_.upload(global_photons.norm_z);
     d_photon_lambda_.upload(global_photons.lambda_bin);
     d_photon_flux_.upload(global_photons.flux);
     if (!global_photons.bin_idx.empty())
@@ -360,6 +400,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_out_photon_wi_x_.alloc(max_stored * sizeof(float));
     d_out_photon_wi_y_.alloc(max_stored * sizeof(float));
     d_out_photon_wi_z_.alloc(max_stored * sizeof(float));
+    d_out_photon_norm_x_.alloc(max_stored * sizeof(float));
+    d_out_photon_norm_y_.alloc(max_stored * sizeof(float));
+    d_out_photon_norm_z_.alloc(max_stored * sizeof(float));
     d_out_photon_lambda_.alloc(max_stored * sizeof(uint16_t));
     d_out_photon_flux_.alloc(max_stored * sizeof(float));
     d_out_photon_count_.alloc_zero(sizeof(unsigned int)); // zero the counter
@@ -381,6 +424,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.traversable      = gas_handle_;
     lp.vertices          = d_vertices_.as<float3>();
     lp.normals           = d_normals_.as<float3>();
+    lp.texcoords         = d_texcoords_.as<float2>();
     lp.material_ids      = d_material_ids_.as<uint32_t>();
 
     lp.num_materials     = (int)(d_mat_type_.bytes / sizeof(uint8_t));
@@ -390,6 +434,10 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.roughness         = d_roughness_.as<float>();
     lp.ior               = d_ior_.as<float>();
     lp.mat_type          = d_mat_type_.as<uint8_t>();
+    lp.diffuse_tex       = d_diffuse_tex_.d_ptr ? d_diffuse_tex_.as<int>() : nullptr;
+    lp.tex_atlas         = d_tex_atlas_.d_ptr   ? d_tex_atlas_.as<float>() : nullptr;
+    lp.tex_descs         = d_tex_descs_.d_ptr   ? d_tex_descs_.as<GpuTexDesc>() : nullptr;
+    lp.num_textures      = (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc));
 
     lp.num_photons       = num_photons;
     lp.max_bounces       = config.max_bounces;
@@ -408,6 +456,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.out_photon_wi_x   = d_out_photon_wi_x_.as<float>();
     lp.out_photon_wi_y   = d_out_photon_wi_y_.as<float>();
     lp.out_photon_wi_z   = d_out_photon_wi_z_.as<float>();
+    lp.out_photon_norm_x = d_out_photon_norm_x_.as<float>();
+    lp.out_photon_norm_y = d_out_photon_norm_y_.as<float>();
+    lp.out_photon_norm_z = d_out_photon_norm_z_.as<float>();
     lp.out_photon_lambda  = d_out_photon_lambda_.as<uint16_t>();
     lp.out_photon_flux    = d_out_photon_flux_.as<float>();
     lp.out_photon_count   = d_out_photon_count_.as<unsigned int>();
@@ -483,6 +534,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     CUDA_CHECK(cudaMemcpy(stored_photons_.wi_x.data(),   d_out_photon_wi_x_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.wi_y.data(),   d_out_photon_wi_y_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.wi_z.data(),   d_out_photon_wi_z_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stored_photons_.norm_x.data(), d_out_photon_norm_x_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stored_photons_.norm_y.data(), d_out_photon_norm_y_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stored_photons_.norm_z.data(), d_out_photon_norm_z_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.lambda_bin.data(), d_out_photon_lambda_.d_ptr, stored_count*sizeof(uint16_t), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.flux.data(),   d_out_photon_flux_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToHost));
 
@@ -531,6 +585,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_photon_wi_x_.upload(stored_photons_.wi_x);
     d_photon_wi_y_.upload(stored_photons_.wi_y);
     d_photon_wi_z_.upload(stored_photons_.wi_z);
+    d_photon_norm_x_.upload(stored_photons_.norm_x);
+    d_photon_norm_y_.upload(stored_photons_.norm_y);
+    d_photon_norm_z_.upload(stored_photons_.norm_z);
     d_photon_lambda_.upload(stored_photons_.lambda_bin);
     d_photon_flux_.upload(stored_photons_.flux);
     d_photon_bin_idx_.upload(stored_photons_.bin_idx);
@@ -609,14 +666,20 @@ static void fill_common_params(
     const DeviceBuffer& srgb, int w, int h,
     const Camera& camera,
     const DeviceBuffer& vertices, const DeviceBuffer& normals,
+    const DeviceBuffer& texcoords_buf,
     const DeviceBuffer& material_ids,
     const DeviceBuffer& Kd, const DeviceBuffer& Ks,
     const DeviceBuffer& Le, const DeviceBuffer& roughness,
     const DeviceBuffer& ior, const DeviceBuffer& mat_type,
+    const DeviceBuffer& diffuse_tex_buf,
+    const DeviceBuffer& tex_atlas_buf, const DeviceBuffer& tex_descs_buf,
+    int num_textures,
     const DeviceBuffer& photon_pos_x, const DeviceBuffer& photon_pos_y,
     const DeviceBuffer& photon_pos_z,
     const DeviceBuffer& photon_wi_x, const DeviceBuffer& photon_wi_y,
     const DeviceBuffer& photon_wi_z,
+    const DeviceBuffer& photon_norm_x, const DeviceBuffer& photon_norm_y,
+    const DeviceBuffer& photon_norm_z,
     const DeviceBuffer& photon_lambda, const DeviceBuffer& photon_flux,
     const DeviceBuffer& photon_bin_idx,
     const DeviceBuffer& grid_sorted, const DeviceBuffer& grid_start,
@@ -677,6 +740,8 @@ static void fill_common_params(
 
     p.vertices     = const_cast<float3*>(vertices.as<float3>());
     p.normals      = const_cast<float3*>(normals.as<float3>());
+    p.texcoords    = texcoords_buf.d_ptr
+        ? const_cast<float2*>(texcoords_buf.as<float2>()) : nullptr;
     p.material_ids = const_cast<uint32_t*>(material_ids.as<uint32_t>());
 
     p.num_materials = (int)(mat_type.bytes / sizeof(uint8_t));
@@ -686,6 +751,13 @@ static void fill_common_params(
     p.roughness     = const_cast<float*>(roughness.as<float>());
     p.ior           = const_cast<float*>(ior.as<float>());
     p.mat_type      = const_cast<uint8_t*>(mat_type.as<uint8_t>());
+    p.diffuse_tex   = diffuse_tex_buf.d_ptr
+        ? const_cast<int*>(diffuse_tex_buf.as<int>()) : nullptr;
+    p.tex_atlas     = tex_atlas_buf.d_ptr
+        ? const_cast<float*>(tex_atlas_buf.as<float>()) : nullptr;
+    p.tex_descs     = tex_descs_buf.d_ptr
+        ? reinterpret_cast<GpuTexDesc*>(tex_descs_buf.d_ptr) : nullptr;
+    p.num_textures  = num_textures;
 
     p.num_photons       = (int)(photon_flux.bytes / sizeof(float));
     p.photon_pos_x      = const_cast<float*>(photon_pos_x.as<float>());
@@ -694,6 +766,9 @@ static void fill_common_params(
     p.photon_wi_x       = const_cast<float*>(photon_wi_x.as<float>());
     p.photon_wi_y       = const_cast<float*>(photon_wi_y.as<float>());
     p.photon_wi_z       = const_cast<float*>(photon_wi_z.as<float>());
+    p.photon_norm_x     = photon_norm_x.d_ptr ? const_cast<float*>(photon_norm_x.as<float>()) : nullptr;
+    p.photon_norm_y     = photon_norm_y.d_ptr ? const_cast<float*>(photon_norm_y.as<float>()) : nullptr;
+    p.photon_norm_z     = photon_norm_z.d_ptr ? const_cast<float*>(photon_norm_z.as<float>()) : nullptr;
     p.photon_lambda     = const_cast<uint16_t*>(photon_lambda.as<uint16_t>());
     p.photon_flux       = const_cast<float*>(photon_flux.as<float>());
     p.photon_bin_idx     = photon_bin_idx.d_ptr
@@ -762,10 +837,14 @@ void OptixRenderer::render_debug_frame(
     fill_common_params(lp,
         d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
         width_, height_, camera,
-        d_vertices_, d_normals_, d_material_ids_,
+        d_vertices_, d_normals_, d_texcoords_,
+        d_material_ids_,
         d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
         d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
         d_photon_lambda_, d_photon_flux_,
         d_photon_bin_idx_,
         d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
@@ -780,6 +859,9 @@ void OptixRenderer::render_debug_frame(
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
         d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
+
+    // Runtime toggle (V key) overrides the compile-time default
+    lp.volume_enabled = (int)runtime_volume_enabled_;
 
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
@@ -819,10 +901,14 @@ void OptixRenderer::render_one_spp(
     fill_common_params(lp,
         d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
         width_, height_, camera,
-        d_vertices_, d_normals_, d_material_ids_,
+        d_vertices_, d_normals_, d_texcoords_,
+        d_material_ids_,
         d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
         d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
         d_photon_lambda_, d_photon_flux_,
         d_photon_bin_idx_,
         d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
@@ -837,6 +923,9 @@ void OptixRenderer::render_one_spp(
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
         d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
+
+    // Runtime toggle (V key) overrides the compile-time default
+    lp.volume_enabled = (int)runtime_volume_enabled_;
 
     lp.samples_per_pixel  = 1;
     lp.max_bounces        = max_bounces;
@@ -1003,10 +1092,14 @@ void OptixRenderer::render_final(
         fill_common_params(lp,
             d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
             width_, height_, camera,
-            d_vertices_, d_normals_, d_material_ids_,
+            d_vertices_, d_normals_, d_texcoords_,
+            d_material_ids_,
             d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+            d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+            (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
             d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
             d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+            d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
             d_photon_lambda_, d_photon_flux_,
             d_photon_bin_idx_,
             d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
@@ -1021,6 +1114,9 @@ void OptixRenderer::render_final(
             config.volume_enabled, config.volume_density, config.volume_falloff,
             config.volume_albedo, config.volume_samples, config.volume_max_t,
             d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
+
+        // Runtime toggle (V key) overrides the RenderConfig value
+        lp.volume_enabled = (int)runtime_volume_enabled_;
 
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;

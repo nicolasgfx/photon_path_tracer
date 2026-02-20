@@ -10,8 +10,7 @@
 #include "core/config.h"
 
 // ── Per-bin data (GPU cache) ────────────────────────────────────────
-// 24 bytes per bin.  Per-pixel: 24 × PHOTON_BIN_COUNT.
-// At N=32, 1024×768: 24 × 32 × 786,432 = 604 MB.
+// 36 bytes per bin.  Per-pixel: 36 × PHOTON_BIN_COUNT.
 struct PhotonBin {
     float flux;       // total Epanechnikov-weighted scalar flux
     float dir_x;      // flux-weighted centroid direction x
@@ -19,6 +18,12 @@ struct PhotonBin {
     float dir_z;      // flux-weighted centroid direction z
     float weight;     // total Epanechnikov weight (for normalization)
     int   count;      // number of photons accumulated in this bin
+    // Flux-weighted average surface normal of the photons in this bin.
+    // Used as a visibility term: reject contributions whose deposited-surface
+    // normal faces away from the query-point normal (photons through walls).
+    float avg_nx;     // average surface normal x
+    float avg_ny;     // average surface normal y
+    float avg_nz;     // average surface normal z
 };
 
 // ── Fibonacci sphere bin directions ─────────────────────────────────

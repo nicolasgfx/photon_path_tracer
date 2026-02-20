@@ -102,8 +102,8 @@ constexpr float DEFAULT_GUIDED_BSDF_MIX = 0.50f; // default 0.8
 // Set DEFAULT_VOLUME_ENABLED = true to activate.
 // Density controls overall optical thickness; falloff adds exponential
 // height decay  ρ(y) = ρ₀ · exp(-k·(y - y₀))  with k = falloff.
-constexpr bool  DEFAULT_VOLUME_ENABLED     = true;
-constexpr float DEFAULT_VOLUME_DENSITY     = 0.01f;    // base extinction scale (subtle haze)
+constexpr bool  DEFAULT_VOLUME_ENABLED     = !true;
+constexpr float DEFAULT_VOLUME_DENSITY     = 0.15f;    // base extinction scale (visible shafts)
 constexpr float DEFAULT_VOLUME_FALLOFF     = 0.0f;    // height falloff coefficient (0 = homogeneous)
 constexpr float DEFAULT_VOLUME_ALBEDO      = 0.95f;   // σ_s / σ_t (single-scatter albedo)
 constexpr int   DEFAULT_VOLUME_SAMPLES     = 2;       // medium samples per ray segment
@@ -113,11 +113,11 @@ constexpr float DEFAULT_VOLUME_MAX_T       = 2.0f;    // max march distance (mis
 // Physically-based DOF via stochastic lens sampling.
 // Exposure is kept constant regardless of aperture (artist-friendly).
 // Set DEFAULT_DOF_ENABLED = true to activate.
-constexpr bool  DEFAULT_DOF_ENABLED        = true;
+constexpr bool  DEFAULT_DOF_ENABLED        = !true;
 constexpr float DEFAULT_DOF_FOCUS_DISTANCE = 0.1f;   // scene units (distance to focus plane)
-constexpr float DEFAULT_DOF_F_NUMBER       = 15.0f;   // f-stop (lower = more blur)
+constexpr float DEFAULT_DOF_F_NUMBER       = 8.0f;   // f-stop (lower = more blur)
 constexpr float DEFAULT_DOF_SENSOR_HEIGHT  = 0.024f; // 24 mm full-frame sensor height
-constexpr float DEFAULT_DOF_FOCUS_RANGE    = 0.5f;   // scene units: depth of the in-focus slab
+constexpr float DEFAULT_DOF_FOCUS_RANGE    = 0.2f;   // scene units: depth of the in-focus slab
                                                      // 0 = razor-thin plane, >0 = wider sharp zone
 
 // ── Photon directional bins (guided NEE / caching) ──────────────────
@@ -191,7 +191,7 @@ constexpr float DEFAULT_SURFACE_TAU = 0.02f;
   constexpr float SCENE_CAM_SPEED              = 0.5f;
 
 #elif defined(SCENE_SIBENIK)
-  constexpr const char* SCENE_OBJ_PATH        = "sibenik/sibenik.obj";
+  constexpr const char* SCENE_OBJ_PATH        = "sibenik/sibnek.obj";
   constexpr const char* SCENE_DISPLAY_NAME     = "Sibenik Cathedral";
   constexpr bool  SCENE_IS_REFERENCE           = false;
   constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
@@ -202,6 +202,37 @@ constexpr float DEFAULT_SURFACE_TAU = 0.02f;
 #else
   #error "No scene selected! Uncomment one SCENE_* define in config.h"
 #endif
+
+// ── Runtime scene profile (for hotkey scene switching) ──────────────
+struct SceneProfile {
+    const char* obj_path;       // relative to SCENES_DIR
+    const char* display_name;
+    bool  is_reference;
+    float cam_pos[3];
+    float cam_lookat[3];
+    float cam_fov;
+    float cam_speed;
+};
+
+constexpr int NUM_SCENE_PROFILES = 4;
+
+// Keys 1–4 map to indices 0–3
+constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
+    { "cornell_box/cornellbox.obj",       "Cornell Box",        true,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 40.0f, 0.5f },
+    { "conference/conference.obj",        "Conference Room",    false,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f },
+    { "living_room/living_room.obj",      "Living Room",        false,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f },
+    { "sibenik/sibnek.obj",              "Sibenik Cathedral",  false,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f },
+};
+
+// Default light scale factor (runtime-adjustable via +/- keys)
+constexpr float DEFAULT_LIGHT_SCALE = 1.0f;
+constexpr float LIGHT_SCALE_STEP    = 1.25f;  // multiplicative step per key press
+constexpr float LIGHT_SCALE_MIN     = 0.01f;
+constexpr float LIGHT_SCALE_MAX     = 100.0f;
 
 // ── Scene normalisation (Cornell Box = reference frame) ────────────
 // The standard Cornell Box spans [-0.5, 0.5] on every axis, giving a

@@ -258,20 +258,20 @@ TEST(Medium_BeerLambert, MonotonicallyDecreasing) {
 
 TEST(Medium_RayleighPhase, Normalization) {
     // Numerical integration over sphere: ∫₀²π ∫₀π p(cosθ) sinθ dθ dφ = 1
+    // For azimuthally symmetric p(cosθ), the φ integral reduces to 2π.
     const int N_theta = 500;
-    const int N_phi   = 500;
     double integral = 0.0;
     double d_theta = PI / N_theta;
-    double d_phi   = 2.0 * PI / N_phi;
 
     for (int it = 0; it < N_theta; ++it) {
         double theta = (it + 0.5) * d_theta;
         double cos_theta = cos(theta);
         double sin_theta = sin(theta);
         double p = rayleigh_phase((float)cos_theta);
-        integral += p * sin_theta * d_theta * d_phi;
+        integral += p * sin_theta * d_theta;
     }
-    // Integrate over phi gives factor of 2π (already in d_phi sum)
+    // Multiply by 2π for the φ integral (no phi dependence → factor of 2π)
+    integral *= 2.0 * PI;
     EXPECT_NEAR(integral, 1.0, 0.01)
         << "Rayleigh phase should integrate to 1 over the sphere";
 }

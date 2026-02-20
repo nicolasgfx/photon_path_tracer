@@ -33,6 +33,9 @@
 //     lambda_bin      : uint16[count]
 //     flux            : float[count]
 //     bin_idx         : uint8[count]
+//     norm_x          : float[count]  (v2+)
+//     norm_y          : float[count]  (v2+)
+//     norm_z          : float[count]  (v2+)
 //   [Caustic photons]  (same layout, preceded by uint64 count)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -44,7 +47,7 @@
 
 // Magic number: "PPTD" = Photon Path Tracer Data
 constexpr uint32_t PPTD_MAGIC   = 0x50505444u;
-constexpr uint32_t PPTD_VERSION = 1u;
+constexpr uint32_t PPTD_VERSION = 2u;  // v2: added norm_x/y/z (geometric normal)
 
 // ── Header stored in the binary ─────────────────────────────────────
 struct TestDataHeader {
@@ -101,9 +104,12 @@ inline void write_photons(std::ofstream& f, const PhotonSoA& p) {
     write_vec(f, p.lambda_bin);
     write_vec(f, p.flux);
     write_vec(f, p.bin_idx);
+    write_vec(f, p.norm_x);
+    write_vec(f, p.norm_y);
+    write_vec(f, p.norm_z);
 }
 
-inline bool read_photons(std::ifstream& f, PhotonSoA& p) {
+inline bool read_photons(std::ifstream& f, PhotonSoA& p, uint32_t version = PPTD_VERSION) {
     uint64_t n = read_val<uint64_t>(f);
     if (n == 0) { p.clear(); return true; }
     read_vec(f, p.pos_x,      (size_t)n);
@@ -115,6 +121,12 @@ inline bool read_photons(std::ifstream& f, PhotonSoA& p) {
     read_vec(f, p.lambda_bin, (size_t)n);
     read_vec(f, p.flux,       (size_t)n);
     read_vec(f, p.bin_idx,    (size_t)n);
+    if (version >= 2) {
+        read_vec(f, p.norm_x, (size_t)n);
+        read_vec(f, p.norm_y, (size_t)n);
+        read_vec(f, p.norm_z, (size_t)n);
+    }
+    // v1: norm arrays left empty; density_estimator guards against this
     return f.good();
 }
 
@@ -189,10 +201,13 @@ inline bool load_test_data(
                   << std::dec << ")\n";
         return false;
     }
-    if (hdr.version != PPTD_VERSION) {
+    if (hdr.version != PPTD_VERSION && hdr.version != 1) {
         std::cerr << "[TestDataIO] Version mismatch (expected "
-                  << PPTD_VERSION << ", got " << hdr.version << ")\n";
+                  << PPTD_VERSION << " or 1, got " << hdr.version << ")\n";
         return false;
+    }
+    if (hdr.version == 1) {
+        std::cout << "[TestDataIO] Loading v1 file (no norm arrays; normal visibility filter disabled)\n";
     }
 
     hdr.num_photons_cfg = detail::read_val<uint32_t>(f);
@@ -206,8 +221,8 @@ inline bool load_test_data(
     hdr.scene_path.resize(path_len);
     f.read(hdr.scene_path.data(), path_len);
 
-    if (!detail::read_photons(f, global_photons))  return false;
-    if (!detail::read_photons(f, caustic_photons)) return false;
+    if (!detail::read_photons(f, global_photons,  hdr.version)) return false;
+    if (!detail::read_photons(f, caustic_photons, hdr.version)) return false;
 
     if (!f.good() && !f.eof()) {
         std::cerr << "[TestDataIO] Error reading " << filepath << "\n";

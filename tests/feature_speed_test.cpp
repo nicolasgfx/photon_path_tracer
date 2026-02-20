@@ -70,9 +70,10 @@ TEST(NEE, ShadowSampleCountPolicy) {
 // ---------------------------------------------------------------------
 
 TEST(PhotonBins, StructSizeMatchesComment) {
-    // Important for speed expectations; comment in core/photon_bins.h claims 24 bytes.
-    static_assert(sizeof(PhotonBin) == 24, "PhotonBin layout changed; update memory-footprint assumptions");
-    EXPECT_EQ(sizeof(PhotonBin), 24u);
+    // Important for speed expectations; comment in core/photon_bins.h claims 36 bytes.
+    // (was 24 bytes before surface-normal visibility field avg_nx/y/z was added)
+    static_assert(sizeof(PhotonBin) == 36, "PhotonBin layout changed; update memory-footprint assumptions");
+    EXPECT_EQ(sizeof(PhotonBin), 36u);
 }
 
 TEST(PhotonBins, DirsInitAndNearest) {

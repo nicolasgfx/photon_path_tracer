@@ -9,7 +9,8 @@
 // ── Single photon (AoS, for host-side convenience) ──────────────────
 struct Photon {
     float3   position;
-    float3   wi;            // Incoming direction at the hit point
+    float3   wi;            // Incoming direction at the hit point (away from surface)
+    float3   geom_normal;   // Geometric normal of the surface where the photon was deposited
     uint16_t lambda_bin;    // Wavelength bin index [0, NUM_LAMBDA)
     float    flux;          // Radiant flux for that bin [W/nm]
 };
@@ -27,6 +28,11 @@ struct PhotonSoA {
     std::vector<float> wi_y;
     std::vector<float> wi_z;
 
+    // Geometric surface normal at the photon hit
+    std::vector<float> norm_x;
+    std::vector<float> norm_y;
+    std::vector<float> norm_z;
+
     // Wavelength bin
     std::vector<uint16_t> lambda_bin;
 
@@ -42,6 +48,7 @@ struct PhotonSoA {
     void reserve(size_t n) {
         pos_x.reserve(n);      pos_y.reserve(n);      pos_z.reserve(n);
         wi_x.reserve(n);       wi_y.reserve(n);       wi_z.reserve(n);
+        norm_x.reserve(n);     norm_y.reserve(n);     norm_z.reserve(n);
         lambda_bin.reserve(n);
         flux.reserve(n);
         bin_idx.reserve(n);
@@ -50,6 +57,7 @@ struct PhotonSoA {
     void resize(size_t n) {
         pos_x.resize(n);       pos_y.resize(n);       pos_z.resize(n);
         wi_x.resize(n);        wi_y.resize(n);        wi_z.resize(n);
+        norm_x.resize(n);      norm_y.resize(n);      norm_z.resize(n);
         lambda_bin.resize(n);
         flux.resize(n);
         bin_idx.resize(n);
@@ -62,22 +70,27 @@ struct PhotonSoA {
         wi_x.push_back(p.wi.x);
         wi_y.push_back(p.wi.y);
         wi_z.push_back(p.wi.z);
+        norm_x.push_back(p.geom_normal.x);
+        norm_y.push_back(p.geom_normal.y);
+        norm_z.push_back(p.geom_normal.z);
         lambda_bin.push_back(p.lambda_bin);
         flux.push_back(p.flux);
     }
 
     Photon get(size_t i) const {
         Photon p;
-        p.position = make_f3(pos_x[i], pos_y[i], pos_z[i]);
-        p.wi       = make_f3(wi_x[i],  wi_y[i],  wi_z[i]);
-        p.lambda_bin = lambda_bin[i];
-        p.flux     = flux[i];
+        p.position    = make_f3(pos_x[i],  pos_y[i],  pos_z[i]);
+        p.wi          = make_f3(wi_x[i],   wi_y[i],   wi_z[i]);
+        p.geom_normal = make_f3(norm_x[i], norm_y[i], norm_z[i]);
+        p.lambda_bin  = lambda_bin[i];
+        p.flux        = flux[i];
         return p;
     }
 
     void clear() {
         pos_x.clear();  pos_y.clear();  pos_z.clear();
         wi_x.clear();   wi_y.clear();   wi_z.clear();
+        norm_x.clear(); norm_y.clear(); norm_z.clear();
         lambda_bin.clear();
         flux.clear();
         bin_idx.clear();

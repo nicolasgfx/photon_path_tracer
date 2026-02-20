@@ -21,6 +21,13 @@ constexpr int RENDER_MODE_NORMALS       = 4;
 constexpr int RENDER_MODE_MATERIAL_ID   = 5;
 constexpr int RENDER_MODE_DEPTH         = 6;
 
+// ── GPU texture descriptor (for flat atlas lookup) ──────────────────
+struct GpuTexDesc {
+    int offset;    // start index in the flat RGBA atlas (in floats)
+    int width;
+    int height;
+};
+
 // ── Launch parameters (accessible from all OptiX programs) ──────────
 
 struct LaunchParams {
@@ -63,6 +70,7 @@ struct LaunchParams {
     // Scene geometry (device pointers)
     float3*   vertices;          // [num_tris * 3]
     float3*   normals;           // [num_tris * 3]
+    float2*   texcoords;         // [num_tris * 3]
     uint32_t* material_ids;      // [num_tris]
 
     // Material spectral data (device pointers, flattened)
@@ -73,6 +81,12 @@ struct LaunchParams {
     float*    roughness;         // [num_materials]
     float*    ior;               // [num_materials]
     uint8_t*  mat_type;          // [num_materials]
+    int*      diffuse_tex;        // [num_materials]  texture ID or -1
+
+    // Texture atlas (flat RGBA float buffer, all textures concatenated)
+    float*      tex_atlas;        // [total_texels * 4]
+    GpuTexDesc* tex_descs;        // [num_textures]
+    int         num_textures;
 
     // Photon map (device pointers)
     float*    photon_pos_x;
@@ -81,6 +95,9 @@ struct LaunchParams {
     float*    photon_wi_x;
     float*    photon_wi_y;
     float*    photon_wi_z;
+    float*    photon_norm_x;   // geometric surface normal at photon hit
+    float*    photon_norm_y;
+    float*    photon_norm_z;
     uint16_t* photon_lambda;
     float*    photon_flux;
     uint8_t*  photon_bin_idx;      // [num_photons] precomputed Fibonacci bin index
@@ -109,6 +126,9 @@ struct LaunchParams {
     float*    out_photon_wi_x;
     float*    out_photon_wi_y;
     float*    out_photon_wi_z;
+    float*    out_photon_norm_x;   // geometric normal at photon hit (output)
+    float*    out_photon_norm_y;
+    float*    out_photon_norm_z;
     uint16_t* out_photon_lambda;
     float*    out_photon_flux;
     unsigned int* out_photon_count;  // atomic counter (device)

@@ -219,15 +219,48 @@ verify photon map quality before committing to a full render.
 | **Shift**          | 3× movement speed                             |
 | **M**              | Toggle mouse capture                          |
 | **Left click**     | Re-capture mouse when released                |
-| **ESC / Q**        | Release mouse, or quit if already released    |
+| **ESC**             | Cancel render → release mouse → quit (3-tier)  |
+| **Q**               | Quit immediately                               |
 
 ### Render Controls
 
-| Key     | Action                                                                 |
-|---------|------------------------------------------------------------------------|
-| **R**   | Launch full path tracing render                                        |
-| **TAB** | Cycle mode: `Full` → `DirectOnly` → `IndirectOnly` → `PhotonMap` → `Normals` → `MaterialID` → `Depth` |
-| **H**   | Toggle help overlay                                                    |
+| Key        | Action                                                                 |
+|------------|------------------------------------------------------------------------|
+| **R**      | Launch full path tracing render                                        |
+| **ESC**    | Cancel an in-progress render and return to preview                     |
+| **TAB**    | Cycle mode: `Full` → `DirectOnly` → `IndirectOnly` → `PhotonMap` → `Normals` → `MaterialID` → `Depth` |
+| **H**      | Toggle help overlay                                                    |
+
+### Scene Switching
+
+| Key | Scene         |
+|-----|---------------|
+| **1** | Cornell Box |
+| **2** | Conference  |
+| **3** | Living Room |
+| **4** | Sibenik     |
+
+Switching scenes rebuilds the acceleration structure, re-traces photons, and
+resets the camera to the scene's default viewpoint.
+
+### Light Brightness
+
+| Key             | Action                                 |
+|-----------------|----------------------------------------|
+| **+ / =**       | Increase light brightness (+0.1×)      |
+| **- / _**       | Decrease light brightness (−0.1×)      |
+
+Scales all emissive materials uniformly. Photons are automatically re-traced
+after each adjustment. Range: 0.1× – 10.0× (default 1.0×).
+
+### Effects Toggles
+
+| Key           | Action                                                             |
+|---------------|--------------------------------------------------------------------|
+| **V**         | Toggle volumetric scattering (crepuscular rays)                    |
+| **O**         | Toggle depth of field (thin-lens)                                  |
+| **[ / ]**     | DOF — widen / narrow aperture (⅓-stop steps; lower f = more blur) |
+| **, / .**     | DOF — focus closer / farther (10 % steps)                          |
 
 ### Debug Overlays (F-keys)
 

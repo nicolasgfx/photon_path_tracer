@@ -175,17 +175,21 @@ Optional radial kernel (e.g., Epanechnikov):
 - Multiply each photon by kernel weight $W(\|x-x_i\|)$.
 - If you use Epanechnikov, apply the correct normalization constant.
 
-### 6.1 Surface Consistency Filter (Recommended)
+### 6.1 Surface Consistency Filter (Implemented)
 
-Reject photon $i$ unless:
+Reject photon $i$ unless all three checks pass:
 
-- hemisphere consistency: photon arrives from above surface
-  - `dot(wi_photon, n_x) > 0` if `wi_photon` points into the surface
-- plane-distance check:
-
+1. **Plane-distance check** — photon must be on the same side of the surface as the query point:
 $$
 |n_x \cdot (x_i - x)| < \tau
 $$
+
+2. **Radial-distance check** — photon must be within the gather radius $r$ (Epanechnikov kernel).
+
+3. **Normal visibility check** — photon's stored geometric surface normal must face the same hemisphere as the query normal:
+   - `dot(photon.geom_normal, n_query) > 0`
+   - Stored per photon as `PhotonSoA::norm_x/y/z`; accumulated per bin as `PhotonBin::avg_nx/ny/nz`.
+   - This is the primary guard against irradiance leaking **through thin walls**: the plane-distance check alone fails when the wall thickness is less than $\tau$.
 
 Purpose: avoid cross-surface contamination through thin walls/gaps.
 
@@ -571,15 +575,20 @@ per-bin data compactly:
 
 **Compact PhotonBin layout (GPU):**
 ```c
-struct PhotonBin {    // 24 bytes per bin
+struct PhotonBin {    // 36 bytes per bin
     float flux;       // total weighted flux (summed across all λ)
     float dir_x;      // flux-weighted centroid direction x
     float dir_y;      // centroid y
     float dir_z;      // centroid z
+    float avg_nx;     // flux-weighted surface normal centroid x (visibility term)
+    float avg_ny;     // surface normal centroid y
+    float avg_nz;     // surface normal centroid z
     float weight;     // Epanechnikov weight sum (for normalization)
     uint16_t count;   // number of photons accumulated
     uint16_t pad;
 };
+// avg_n is used for the normal visibility check: dot(avg_n, query_normal) > 0
+// guards against irradiance leaking through thin walls.
 ```
 
 For spectral contribution, we still need wavelength info.  Options:
@@ -656,13 +665,17 @@ struct PhotonBin {
     float dir_x;      // flux-weighted centroid direction x
     float dir_y;      // flux-weighted centroid direction y
     float dir_z;      // flux-weighted centroid direction z
+    float avg_nx;     // flux-weighted surface normal centroid x (visibility term)
+    float avg_ny;     // flux-weighted surface normal centroid y
+    float avg_nz;     // flux-weighted surface normal centroid z
     float weight;     // total Epanechnikov weight (for normalization)
     int   count;      // number of photons in this bin
 };
-// sizeof(PhotonBin) = 24 bytes
-// Per-pixel: 24 × PHOTON_BIN_COUNT
-// At N=16, 1024×768: 24 × 16 × 786,432 = 302 MB
-// At N=32, 1024×768: 24 × 32 × 786,432 = 604 MB
+// sizeof(PhotonBin) = 36 bytes
+// avg_n is normalised after accumulation; used for dot(avg_n, query_normal) > 0 check.
+// Per-pixel: 36 × PHOTON_BIN_COUNT
+// At N=16, 1024×768: 36 × 16 × 786,432 = 452 MB
+// At N=32, 1024×768: 36 × 32 × 786,432 = 905 MB
 ```
 
 #### 15.4.2 Config Constants

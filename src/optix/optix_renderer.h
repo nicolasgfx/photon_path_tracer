@@ -189,6 +189,11 @@ public:
     void clear_buffers();  ///< Zero accumulation buffers (camera moved)
     bool is_initialised() const { return initialised_; }
 
+    /// Runtime toggle for participating medium (V key in interactive viewer).
+    /// Overrides the compile-time DEFAULT_VOLUME_ENABLED for all render paths.
+    void set_volume_enabled(bool v) { runtime_volume_enabled_ = v; }
+    bool is_volume_enabled()  const { return runtime_volume_enabled_; }
+
     /// Download GPU kernel profiling data and print a summary.
     /// Call after the final render completes.
     void print_kernel_profiling() const;
@@ -284,10 +289,16 @@ private:
     DeviceBuffer d_roughness_;
     DeviceBuffer d_ior_;
     DeviceBuffer d_mat_type_;
+    DeviceBuffer d_diffuse_tex_;    // int [num_materials]
+
+    // Texture atlas (device)
+    DeviceBuffer d_tex_atlas_;      // float [total_texels * 4]
+    DeviceBuffer d_tex_descs_;      // GpuTexDesc [num_textures]
 
     // Photon data (device -- for hash grid lookups in render)
     DeviceBuffer d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_;
     DeviceBuffer d_photon_wi_x_,  d_photon_wi_y_,  d_photon_wi_z_;
+    DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
     DeviceBuffer d_photon_lambda_, d_photon_flux_;
     DeviceBuffer d_photon_bin_idx_;  // uint8_t [num_photons] precomputed bin index
     DeviceBuffer d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_;
@@ -299,6 +310,7 @@ private:
     // Photon output buffers (device -- written by __raygen__photon_trace)
     DeviceBuffer d_out_photon_pos_x_, d_out_photon_pos_y_, d_out_photon_pos_z_;
     DeviceBuffer d_out_photon_wi_x_,  d_out_photon_wi_y_,  d_out_photon_wi_z_;
+    DeviceBuffer d_out_photon_norm_x_, d_out_photon_norm_y_, d_out_photon_norm_z_;  // surface normals
     DeviceBuffer d_out_photon_lambda_, d_out_photon_flux_;
     DeviceBuffer d_out_photon_count_;
 
@@ -337,6 +349,7 @@ private:
     int  height_      = DEFAULT_IMAGE_HEIGHT;
     bool initialised_ = false;
     int  num_emissive_ = 0;
+    bool runtime_volume_enabled_ = DEFAULT_VOLUME_ENABLED;  // toggled via V key
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
 };
 

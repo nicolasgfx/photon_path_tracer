@@ -216,6 +216,7 @@ if(PPT_BUILD_TESTS)
     )
     target_include_directories(ppt_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${stb_SOURCE_DIR}
         ${OptiX_INCLUDE_DIR}
     )
     target_link_libraries(ppt_tests PRIVATE

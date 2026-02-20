@@ -160,6 +160,9 @@ struct CellBinGrid {
             float wi_x = photons.wi_x[i];
             float wi_y = photons.wi_y[i];
             float wi_z = photons.wi_z[i];
+            float nx   = photons.norm_x[i];
+            float ny   = photons.norm_y[i];
+            float nz   = photons.norm_z[i];
             int k = (int)photons.bin_idx[i];
             if (k >= bin_count) k = 0;
 
@@ -170,21 +173,24 @@ struct CellBinGrid {
 
             // Scatter into 3×3×3 neighbors
             for (int dz = -1; dz <= 1; ++dz) {
-                int nz = cz + dz;
-                if (nz < 0 || nz >= dim_z) continue;
+                int nz_ = cz + dz;
+                if (nz_ < 0 || nz_ >= dim_z) continue;
                 for (int dy = -1; dy <= 1; ++dy) {
-                    int ny = cy + dy;
-                    if (ny < 0 || ny >= dim_y) continue;
+                    int ny_ = cy + dy;
+                    if (ny_ < 0 || ny_ >= dim_y) continue;
                     for (int dx = -1; dx <= 1; ++dx) {
-                        int nx = cx + dx;
-                        if (nx < 0 || nx >= dim_x) continue;
+                        int nx_ = cx + dx;
+                        if (nx_ < 0 || nx_ >= dim_x) continue;
 
-                        int flat = nx + ny * dim_x + nz * dim_x * dim_y;
+                        int flat = nx_ + ny_ * dim_x + nz_ * dim_x * dim_y;
                         PhotonBin& b = bins[(size_t)flat * bin_count + k];
                         b.flux   += flux;
                         b.dir_x  += wi_x * flux;
                         b.dir_y  += wi_y * flux;
                         b.dir_z  += wi_z * flux;
+                        b.avg_nx += nx * flux;
+                        b.avg_ny += ny * flux;
+                        b.avg_nz += nz * flux;
                         b.weight += 1.0f;
                         b.count  += 1;
                     }
@@ -192,7 +198,7 @@ struct CellBinGrid {
             }
         }
 
-        // ── 4. Normalize centroid directions ─────────────────────────
+        // ── 4. Normalize centroid directions and surface normals ─────
         PhotonBinDirs fib;
         fib.init(bin_count);
 
@@ -213,6 +219,17 @@ struct CellBinGrid {
                         b.dir_y = fib.dirs[k].y;
                         b.dir_z = fib.dirs[k].z;
                     }
+
+                    // Normalize average surface normal
+                    float nlen = std::sqrt(b.avg_nx * b.avg_nx +
+                                            b.avg_ny * b.avg_ny +
+                                            b.avg_nz * b.avg_nz);
+                    if (nlen > 1e-8f) {
+                        b.avg_nx /= nlen;
+                        b.avg_ny /= nlen;
+                        b.avg_nz /= nlen;
+                    }
+                    // (if nlen ≈ 0 the bin is degenerate; leave as zero)
                 }
             }
         }

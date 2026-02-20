@@ -349,13 +349,22 @@ static Spectrum gather_with_local_bins(
                                        ds.photons.wi_z[idx]);
             if (dot(wi_world, normal) <= 0.f) return;
 
-            float w = 1.0f - dist2 / r2;
+            // Normal visibility filter (mirrors density_estimator.h)
+            if (!ds.photons.norm_x.empty()) {
+                float3 photon_n = make_f3(ds.photons.norm_x[idx], ds.photons.norm_y[idx],
+                                          ds.photons.norm_z[idx]);
+                if (dot(photon_n, normal) <= 0.f) return;
+            }
+
             float3 wi_local = frame.world_to_local(wi_world);
             Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
             float flux = ds.photons.flux[idx];
             int bin = ds.photons.lambda_bin[idx];
-            L.value[bin] += flux * inv_N * f.value[bin] * w * inv_area;
+            // Box kernel (w=1) — matches estimate_photon_density exactly
+            L.value[bin] += flux * inv_N * f.value[bin] * inv_area;
 
+            // Epanechnikov weight for bin population only
+            float w = 1.0f - dist2 / r2;
             int k = (int)ds.photon_bin_idx[idx];
             if (k >= num_bins) k = 0;
             local_bins[k].flux   += flux * w;
@@ -367,7 +376,7 @@ static Spectrum gather_with_local_bins(
             count++;
         });
 
-    if (count > 0) L *= 1.5f;
+    // No Epanechnikov correction needed — box kernel used for density
 
     for (int k = 0; k < num_bins; ++k) {
         if (local_bins[k].count > 0) {
