@@ -79,6 +79,9 @@ void OptixRenderer::init() {
 void OptixRenderer::build_accel(const Scene& scene) {
     if (!context_) throw std::runtime_error("OptiX context not created");
 
+    // Keep a host-side copy for debug hover ray queries.
+    host_triangles_ = scene.triangles;
+
     // Flatten triangle vertices into a contiguous float3 array
     size_t num_tris = scene.triangles.size();
     std::vector<float3> vertices(num_tris * 3);
@@ -308,6 +311,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         return;
     }
 
+    auto t_phase_start = std::chrono::high_resolution_clock::now();
+    auto t_lap = t_phase_start;
+
     int num_photons = config.num_photons;
     int max_stored  = num_photons * DEFAULT_MAX_BOUNCES; // upper bound on stored photons
 
@@ -384,6 +390,13 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     // Restore SBT
     sbt_.raygenRecord = saved_raygen;
 
+    {
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] Photon GPU trace:  %8.1f ms\n", ms);
+        t_lap = t_now;
+    }
+
     // Download photon count
     unsigned int stored_count = 0;
     CUDA_CHECK(cudaMemcpy(&stored_count, d_out_photon_count_.d_ptr,
@@ -407,11 +420,25 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     CUDA_CHECK(cudaMemcpy(stored_photons_.lambda_bin.data(), d_out_photon_lambda_.d_ptr, stored_count*sizeof(uint16_t), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.flux.data(),   d_out_photon_flux_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToHost));
 
+    {
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] Photon download:   %8.1f ms\n", ms);
+        t_lap = t_now;
+    }
+
     // Build hash grid on CPU
     stored_grid_.build(stored_photons_, config.gather_radius);
 
     std::cout << "[OptiX] Hash grid built: " << stored_grid_.sorted_indices.size()
               << " entries, " << stored_grid_.table_size << " buckets\n";
+
+    {
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] Hash grid build:   %8.1f ms\n", ms);
+        t_lap = t_now;
+    }
 
     // Upload photons + grid back to device
     d_photon_pos_x_.upload(stored_photons_.pos_x);
@@ -427,6 +454,14 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_grid_cell_end_.upload(stored_grid_.cell_end);
 
     std::cout << "[OptiX] Photon data uploaded to device\n";
+
+    {
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] Photon upload:     %8.1f ms\n", ms);
+        double total = std::chrono::duration<double, std::milli>(t_now - t_phase_start).count();
+        std::printf("[Timing] Photon total:      %8.1f ms\n", total);
+    }
 }
 
 // =====================================================================
@@ -454,7 +489,12 @@ static void fill_common_params(
     OptixTraversableHandle gas_handle,
     float gather_radius,
     const DeviceBuffer& nee_direct_buf,
-    const DeviceBuffer& photon_indirect_buf)
+    const DeviceBuffer& photon_indirect_buf,
+    const DeviceBuffer& prof_total,
+    const DeviceBuffer& prof_ray_trace,
+    const DeviceBuffer& prof_nee,
+    const DeviceBuffer& prof_photon_gather,
+    const DeviceBuffer& prof_bsdf)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -463,6 +503,18 @@ static void fill_common_params(
         ? const_cast<float*>(nee_direct_buf.as<float>()) : nullptr;
     p.photon_indirect_buffer = photon_indirect_buf.d_ptr
         ? const_cast<float*>(photon_indirect_buf.as<float>()) : nullptr;
+
+    // Profiling buffers (may be nullptr)
+    p.prof_total         = prof_total.d_ptr
+        ? reinterpret_cast<long long*>(prof_total.d_ptr) : nullptr;
+    p.prof_ray_trace     = prof_ray_trace.d_ptr
+        ? reinterpret_cast<long long*>(prof_ray_trace.d_ptr) : nullptr;
+    p.prof_nee           = prof_nee.d_ptr
+        ? reinterpret_cast<long long*>(prof_nee.d_ptr) : nullptr;
+    p.prof_photon_gather = prof_photon_gather.d_ptr
+        ? reinterpret_cast<long long*>(prof_photon_gather.d_ptr) : nullptr;
+    p.prof_bsdf          = prof_bsdf.d_ptr
+        ? reinterpret_cast<long long*>(prof_bsdf.d_ptr) : nullptr;
     p.width           = w;
     p.height          = h;
 
@@ -520,7 +572,7 @@ static void fill_common_params(
 // =====================================================================
 void OptixRenderer::render_debug_frame(
     const Camera& camera, int frame_number,
-    RenderMode mode, int spp)
+    RenderMode mode, int spp, bool shadow_rays)
 {
     LaunchParams lp = {};
     fill_common_params(lp,
@@ -536,6 +588,8 @@ void OptixRenderer::render_debug_frame(
         num_emissive_, 0.f,
         gas_handle_,
         gather_radius_,
+        DeviceBuffer(), DeviceBuffer(),
+        DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer());
 
     lp.samples_per_pixel = spp;
@@ -543,7 +597,9 @@ void OptixRenderer::render_debug_frame(
     lp.frame_number      = frame_number;
     lp.render_mode       = (int)mode;
     lp.is_final_render   = 0;  // DEBUG: first-hit + direct lighting only
-    lp.nee_light_samples = 1;  // debug uses 1 NEE sample
+    lp.debug_shadow_rays = shadow_rays ? 1 : 0;
+    lp.nee_light_samples = shadow_rays ? DEFAULT_NEE_LIGHT_SAMPLES : 1;
+    lp.nee_deep_samples   = shadow_rays ? DEFAULT_NEE_DEEP_SAMPLES  : 1;
 
     // Upload launch params
     d_launch_params_.alloc(sizeof(LaunchParams));
@@ -582,7 +638,9 @@ void OptixRenderer::render_one_spp(
         num_emissive_, 0.f,
         gas_handle_,
         gather_radius_,
-        d_nee_direct_buffer_, d_photon_indirect_buffer_);
+        d_nee_direct_buffer_, d_photon_indirect_buffer_,
+        d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
+        d_prof_photon_gather_, d_prof_bsdf_);
 
     lp.samples_per_pixel = 1;
     lp.max_bounces       = max_bounces;
@@ -590,6 +648,7 @@ void OptixRenderer::render_one_spp(
     lp.render_mode       = RENDER_MODE_FULL;
     lp.is_final_render   = 1;
     lp.nee_light_samples = DEFAULT_NEE_LIGHT_SAMPLES;
+    lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
 
     d_launch_params_.alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
@@ -639,7 +698,9 @@ void OptixRenderer::render_final(
             num_emissive_, 0.f,
             gas_handle_,
             gather_radius_,
-            d_nee_direct_buffer_, d_photon_indirect_buffer_);
+            d_nee_direct_buffer_, d_photon_indirect_buffer_,
+            d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
+            d_prof_photon_gather_, d_prof_bsdf_);
 
         lp.samples_per_pixel = 1;
         lp.max_bounces       = config.max_bounces;
@@ -647,6 +708,7 @@ void OptixRenderer::render_final(
         lp.render_mode       = RENDER_MODE_FULL;
         lp.is_final_render   = 1;  // FINAL: full path tracing
         lp.nee_light_samples = DEFAULT_NEE_LIGHT_SAMPLES;
+        lp.nee_deep_samples  = DEFAULT_NEE_DEEP_SAMPLES;
 
         d_launch_params_.alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
@@ -695,13 +757,116 @@ void OptixRenderer::render_final(
 }
 
 // =====================================================================
+// print_kernel_profiling() -- download GPU timing data and print summary
+// =====================================================================
+void OptixRenderer::print_kernel_profiling() const {
+    if (!d_prof_total_.d_ptr) {
+        std::cout << "[Profiling] No kernel profiling data available.\n";
+        return;
+    }
+
+    size_t pixels = (size_t)width_ * height_;
+    std::vector<long long> total(pixels), ray(pixels), nee(pixels);
+    std::vector<long long> pg(pixels), bsdf(pixels);
+
+    CUDA_CHECK(cudaMemcpy(total.data(), d_prof_total_.d_ptr,
+                          pixels * sizeof(long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(ray.data(), d_prof_ray_trace_.d_ptr,
+                          pixels * sizeof(long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(nee.data(), d_prof_nee_.d_ptr,
+                          pixels * sizeof(long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(pg.data(), d_prof_photon_gather_.d_ptr,
+                          pixels * sizeof(long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(bsdf.data(), d_prof_bsdf_.d_ptr,
+                          pixels * sizeof(long long), cudaMemcpyDeviceToHost));
+
+    // Compute statistics
+    auto stats = [&](const std::vector<long long>& v, const char* label) {
+        long long sum = 0, mn = LLONG_MAX, mx = 0;
+        int active = 0;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (v[i] > 0) {
+                sum += v[i];
+                if (v[i] < mn) mn = v[i];
+                if (v[i] > mx) mx = v[i];
+                active++;
+            }
+        }
+        double avg = active > 0 ? (double)sum / active : 0.0;
+        std::printf("  %-20s  sum %12.0f  avg %10.0f  min %10lld  max %10lld  (%d px)\n",
+                    label, (double)sum, avg, (active > 0 ? mn : 0LL), mx, active);
+        return sum;
+    };
+
+    std::cout << "\n========================================\n";
+    std::cout << "  GPU Kernel Profiling (clock64 ticks)\n";
+    std::cout << "  Resolution: " << width_ << "x" << height_
+              << " (" << pixels << " pixels)\n";
+    std::cout << "========================================\n";
+
+    long long sum_total = stats(total, "Total kernel");
+    long long sum_ray   = stats(ray,   "Ray trace");
+    long long sum_nee   = stats(nee,   "NEE (shadow)");
+    long long sum_pg    = stats(pg,    "Photon gather");
+    long long sum_bsdf  = stats(bsdf,  "BSDF continuation");
+
+    long long sum_accounted = sum_ray + sum_nee + sum_pg + sum_bsdf;
+
+    std::cout << "  ----------------------------------------\n";
+    if (sum_total > 0) {
+        std::printf("  %-20s  %5.1f%%\n", "Ray trace",
+                    100.0 * sum_ray / sum_total);
+        std::printf("  %-20s  %5.1f%%\n", "NEE (shadow)",
+                    100.0 * sum_nee / sum_total);
+        std::printf("  %-20s  %5.1f%%\n", "Photon gather",
+                    100.0 * sum_pg / sum_total);
+        std::printf("  %-20s  %5.1f%%\n", "BSDF continuation",
+                    100.0 * sum_bsdf / sum_total);
+        std::printf("  %-20s  %5.1f%%\n", "Overhead/other",
+                    100.0 * (sum_total - sum_accounted) / sum_total);
+    }
+    std::cout << "========================================\n\n";
+}
+
+// =====================================================================
 // trace_single_ray() -- for debug hover inspection
 // =====================================================================
 HitRecord OptixRenderer::trace_single_ray(float3 origin, float3 direction) const {
-    // TODO: implement via a 1-pixel OptiX launch or a CUDA kernel
     HitRecord hit = {};
     hit.hit = false;
-    (void)origin; (void)direction;
+    hit.t   = DEFAULT_RAY_TMAX;
+
+    if (host_triangles_.empty()) {
+        return hit;
+    }
+
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = normalize(direction);
+    ray.tmin = OPTIX_SCENE_EPSILON;
+    ray.tmax = DEFAULT_RAY_TMAX;
+
+    for (uint32_t tri_id = 0; tri_id < (uint32_t)host_triangles_.size(); ++tri_id) {
+        const Triangle& tri = host_triangles_[tri_id];
+        float t, u, v;
+
+        Ray test_ray = ray;
+        test_ray.tmax = hit.t;
+        if (!tri.intersect(test_ray, t, u, v)) continue;
+
+        if (t < hit.t) {
+            float alpha = 1.f - u - v;
+            hit.hit = true;
+            hit.t = t;
+            hit.triangle_id = tri_id;
+            hit.material_id = tri.material_id;
+            hit.position = tri.interpolate_position(alpha, u, v);
+            hit.normal = tri.geometric_normal();
+            hit.shading_normal = tri.interpolate_normal(alpha, u, v);
+            hit.uv = tri.interpolate_uv(alpha, u, v);
+        }
+    }
+
     return hit;
 }
 

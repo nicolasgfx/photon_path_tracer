@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------
 
 #include "core/config.h"
+#include "core/font_overlay.h"
 #include "scene/obj_loader.h"
 #include "scene/scene.h"
 #include "renderer/renderer.h"
@@ -75,6 +76,11 @@ static bool write_png(const std::string& filename, const FrameBuffer& fb) {
                &fb.srgb[src_y * fb.width * 4],
                fb.width * 4);
     }
+
+    // Stamp watermarks (top-left origin buffer, before writing)
+    font_overlay::stampWatermarks(flipped,
+        static_cast<uint32_t>(fb.width),
+        static_cast<uint32_t>(fb.height));
 
     int ok = stbi_write_png(filename.c_str(), fb.width, fb.height, 4,
                              flipped.data(), fb.width * 4);
@@ -207,6 +213,108 @@ static void render_help_overlay(int win_w, int win_h,
     glPopMatrix();
 
     // Restore GL state
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
+
+static void render_hover_cell_overlay(
+    int win_w, int win_h,
+    const Camera& camera,
+    const DebugState& debug,
+    const OptixRenderer& optix_renderer,
+    bool mouse_captured)
+{
+    if (mouse_captured) return;
+    if (!debug.show_global_map && !debug.show_caustic_map) return;
+    if (debug.hover_x < 0 || debug.hover_x >= win_w ||
+        debug.hover_y < 0 || debug.hover_y >= win_h) return;
+
+    const PhotonSoA& photons = optix_renderer.photons();
+    const HashGrid& grid = optix_renderer.grid();
+    if (photons.size() == 0 || grid.sorted_indices.empty()) return;
+
+    float s = ((float)debug.hover_x + 0.5f) / (float)win_w;
+    float t = 1.0f - (((float)debug.hover_y + 0.5f) / (float)win_h);
+    float3 ray_dir = normalize(
+        camera.lower_left + camera.horizontal * s + camera.vertical * t
+        - camera.position);
+
+    HitRecord hit = optix_renderer.trace_single_ray(camera.position, ray_dir);
+    if (!hit.hit) return;
+
+    PhotonMapType map_type = debug.show_caustic_map
+        ? PhotonMapType::Caustic : PhotonMapType::Global;
+
+    CellInfo info = query_cell_info(hit.position, photons, grid, map_type);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, win_w, win_h, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float box_w = 340.f;
+    float box_h = 150.f;
+    float bx = (float)win_w - box_w - 10.f;
+    float by = 10.f;
+
+    glColor4f(0.0f, 0.0f, 0.0f, 0.72f);
+    glBegin(GL_QUADS);
+    glVertex2f(bx,         by);
+    glVertex2f(bx + box_w, by);
+    glVertex2f(bx + box_w, by + box_h);
+    glVertex2f(bx,         by + box_h);
+    glEnd();
+
+    char buf[256];
+    float scale = 2.f;
+    float tx = bx + 12.f;
+    float ty = by + 12.f;
+    float line_h = 14.f;
+
+    glPushMatrix();
+    glTranslatef(tx, ty, 0.f);
+    glScalef(scale, scale, 1.f);
+
+    float ly = 0.f;
+    draw_overlay_text(0, ly, "=== Hover Cell Info ===", 1.f, 1.f, 0.3f, 1.f);
+    ly += line_h;
+
+    snprintf(buf, sizeof(buf), "Map: %s",
+             (map_type == PhotonMapType::Caustic) ? "Caustic" : "Global");
+    draw_overlay_text(0, ly, buf, 0.8f, 0.9f, 1.f, 1.f);
+    ly += line_h * 0.75f;
+
+    snprintf(buf, sizeof(buf), "Cell: (%d, %d, %d)",
+             info.cell_index.x, info.cell_index.y, info.cell_index.z);
+    draw_overlay_text(0, ly, buf, 0.8f, 0.8f, 0.8f, 1.f);
+    ly += line_h * 0.75f;
+
+    snprintf(buf, sizeof(buf), "Photons: %u", info.photon_count);
+    draw_overlay_text(0, ly, buf, 0.8f, 0.8f, 0.8f, 1.f);
+    ly += line_h * 0.75f;
+
+    snprintf(buf, sizeof(buf), "Flux sum/avg: %.5g / %.5g",
+             info.sum_flux, info.avg_flux);
+    draw_overlay_text(0, ly, buf, 0.8f, 0.8f, 0.8f, 1.f);
+    ly += line_h * 0.75f;
+
+    snprintf(buf, sizeof(buf), "Dominant λ: %.1f nm (bin %d)",
+             info.dominant_lambda_nm, info.dominant_lambda_bin);
+    draw_overlay_text(0, ly, buf, 0.8f, 0.8f, 0.8f, 1.f);
+
+    glPopMatrix();
+
     glDisable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
     glMatrixMode(GL_PROJECTION);
@@ -392,6 +500,14 @@ static void run_interactive(
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
+        // Mouse cursor position for hover inspectors.
+        {
+            double mx, my;
+            glfwGetCursorPos(window, &mx, &my);
+            g_app.debug.hover_x = (int)mx;
+            g_app.debug.hover_y = (int)my;
+        }
+
         // Delta time
         auto now = std::chrono::high_resolution_clock::now();
         float dt = std::chrono::duration<float>(now - last_time).count();
@@ -478,6 +594,7 @@ static void run_interactive(
             g_app.render_cam.update();
 
             optix_renderer.resize(opt.config.image_width, opt.config.image_height);
+            optix_renderer.clear_buffers();  // ensure clean accumulation
 
             std::cout << "\n========================================\n";
             std::cout << "  Progressive Render (R key)\n";
@@ -489,185 +606,22 @@ static void run_interactive(
             std::cout << "  Output:     " << opt.output_file << "\n";
             std::cout << "========================================\n";
 
-            // ── Photon debug visualization PNG (before path tracing) ─
+            // ── 1st-hit NEE debug PNG (quick preview) ───────────────
             {
-                const PhotonSoA& photons = optix_renderer.photons();
-                if (photons.size() > 0) {
-                    std::cout << "[Photon Debug] Rendering " << photons.size()
-                              << " photons...\n";
-
-                    const int pw = opt.config.image_width;
-                    const int ph = opt.config.image_height;
-
-                    FrameBuffer photon_fb;
-                    photon_fb.resize(pw, ph);
-                    // Black background
-                    for (int i = 0; i < pw * ph; ++i) {
-                        photon_fb.srgb[i * 4 + 0] = 0;
-                        photon_fb.srgb[i * 4 + 1] = 0;
-                        photon_fb.srgb[i * 4 + 2] = 0;
-                        photon_fb.srgb[i * 4 + 3] = 255;
-                    }
-
-                    float aspect = (float)pw / (float)ph;
-                    float theta  = g_app.render_cam.fov_deg * PI / 180.0f;
-                    float half_h = tanf(theta * 0.5f);
-                    float half_w = half_h * aspect;
-                    const int DOT_RADIUS = 1;
-
-                    for (size_t i = 0; i < photons.size(); i += DEBUG_PHOTON_STRIDE) {
-                        float3 pos = make_f3(photons.pos_x[i],
-                                             photons.pos_y[i],
-                                             photons.pos_z[i]);
-                        float3 to_p = pos - g_app.render_cam.position;
-                        float depth = dot(to_p, g_app.render_cam.w * (-1.f));
-                        if (depth <= 0.f) continue;
-
-                        float u_coord = dot(to_p, g_app.render_cam.u);
-                        float v_coord = dot(to_p, g_app.render_cam.v);
-                        float sx = (u_coord / depth + half_w) / (2.f * half_w);
-                        float sy = (v_coord / depth + half_h) / (2.f * half_h);
-                        int cx = (int)(sx * pw);
-                        int cy = (int)(sy * ph);
-                        if (cx < 0 || cx >= pw || cy < 0 || cy >= ph) continue;
-
-                        Spectrum s = Spectrum::zero();
-                        s.value[photons.lambda_bin[i]] = 3.0f;
-                        float3 rgb = spectrum_to_srgb(s);
-                        uint8_t r = (uint8_t)(fminf(fmaxf(rgb.x, 0.f), 1.f) * 255.f);
-                        uint8_t g = (uint8_t)(fminf(fmaxf(rgb.y, 0.f), 1.f) * 255.f);
-                        uint8_t b = (uint8_t)(fminf(fmaxf(rgb.z, 0.f), 1.f) * 255.f);
-
-                        for (int dy = -DOT_RADIUS; dy <= DOT_RADIUS; ++dy) {
-                            for (int dx = -DOT_RADIUS; dx <= DOT_RADIUS; ++dx) {
-                                int px = cx + dx;
-                                int py = cy + dy;
-                                if (px < 0 || px >= pw || py < 0 || py >= ph) continue;
-                                int idx = py * pw + px;
-                                photon_fb.srgb[idx * 4 + 0] = r;
-                                photon_fb.srgb[idx * 4 + 1] = g;
-                                photon_fb.srgb[idx * 4 + 2] = b;
-                                photon_fb.srgb[idx * 4 + 3] = 255;
-                            }
-                        }
-                    }
-
-                    write_png("output/photon_debug.png", photon_fb);
-                    std::cout << "[Photon Debug] Saved: output/photon_debug.png\n";
-                }
-            }
-
-            // ── 1st-hit NEE debug PNG (no shadows, quick preview) ───
-            {
+                auto t_nee_start = std::chrono::high_resolution_clock::now();
                 optix_renderer.render_debug_frame(
-                    g_app.render_cam, 0, RenderMode::Full, 1);
+                    g_app.render_cam, 0, RenderMode::Full, 1,
+                    true /* shadow_rays for NEE debug PNG */);
                 FrameBuffer nee_fb;
                 optix_renderer.download_framebuffer(nee_fb);
                 write_png("output/out_debug_nee.png", nee_fb);
+                auto t_nee_end = std::chrono::high_resolution_clock::now();
+                double ms = std::chrono::duration<double, std::milli>(
+                    t_nee_end - t_nee_start).count();
+                std::printf("[Timing] NEE debug PNG:     %8.1f ms\n", ms);
                 std::cout << "[Debug NEE] Saved: output/out_debug_nee.png\n";
                 // Clear buffers so the progressive render starts clean
                 optix_renderer.clear_buffers();
-            }
-
-            // ── OBJ export: scene mesh + photon point cloud ─────────
-            {
-                const PhotonSoA& photons = optix_renderer.photons();
-                fs::create_directories("output");
-
-                // Count how many photons we'll actually export
-                size_t num_export = 0;
-                for (size_t i = 0; i < photons.size(); i += DEBUG_OBJ_PHOTON_STRIDE)
-                    num_export++;
-
-                // Write MTL file with one material per spectral color band
-                std::string mtl_file = "output/photon_debug.mtl";
-                {
-                    std::ofstream mtl(mtl_file);
-                    mtl.imbue(std::locale::classic());
-                    mtl << std::fixed << std::setprecision(6);
-                    mtl << "# Photon debug materials\n\n";
-                    mtl << "newmtl scene_grey\n";
-                    mtl << "Kd 0.6 0.6 0.6\n\n";
-
-                    for (int bin = 0; bin < NUM_LAMBDA; ++bin) {
-                        Spectrum s = Spectrum::zero();
-                        s.value[bin] = 3.0f;
-                        float3 rgb = spectrum_to_srgb(s);
-                        float r = fminf(fmaxf(rgb.x, 0.f), 1.f);
-                        float g = fminf(fmaxf(rgb.y, 0.f), 1.f);
-                        float b = fminf(fmaxf(rgb.z, 0.f), 1.f);
-                        mtl << "newmtl photon_" << bin << "\n";
-                        mtl << "Kd " << r << " " << g << " " << b << "\n\n";
-                    }
-                }
-
-                // Write OBJ file (using stride to keep file manageable)
-                std::string obj_file = "output/photon_debug.obj";
-                std::ofstream ofs(obj_file);
-                ofs.imbue(std::locale::classic());
-                if (ofs.is_open()) {
-                    ofs << std::fixed << std::setprecision(6);
-                    ofs << "# Photon Path Tracer - scene + photon export\n";
-                    ofs << "# Scene triangles: " << scene.triangles.size() << "\n";
-                    ofs << "# Photons exported: " << num_export
-                        << " (every " << DEBUG_OBJ_PHOTON_STRIDE << "th of "
-                        << photons.size() << ")\n";
-                    ofs << "mtllib photon_debug.mtl\n\n";
-
-                    // Scene vertices
-                    ofs << "# Scene geometry\n";
-                    for (size_t t = 0; t < scene.triangles.size(); ++t) {
-                        const auto& tri = scene.triangles[t];
-                        ofs << "v " << tri.v0.x << " " << tri.v0.y << " " << tri.v0.z << "\n";
-                        ofs << "v " << tri.v1.x << " " << tri.v1.y << " " << tri.v1.z << "\n";
-                        ofs << "v " << tri.v2.x << " " << tri.v2.y << " " << tri.v2.z << "\n";
-                    }
-
-                    // Photon micro-triangles (strided)
-                    constexpr float SZ = 0.002f;
-                    ofs << "\n# Photon micro-triangles\n";
-                    for (size_t i = 0; i < photons.size(); i += DEBUG_OBJ_PHOTON_STRIDE) {
-                        float px = photons.pos_x[i];
-                        float py = photons.pos_y[i];
-                        float pz = photons.pos_z[i];
-                        ofs << "v " << (px - SZ) << " " << (py - SZ * 0.577f) << " " << pz << "\n";
-                        ofs << "v " << (px + SZ) << " " << (py - SZ * 0.577f) << " " << pz << "\n";
-                        ofs << "v " << px        << " " << (py + SZ * 1.155f) << " " << pz << "\n";
-                    }
-
-                    // Scene faces
-                    ofs << "\nusemtl scene_grey\n";
-                    ofs << "g scene_mesh\n";
-                    for (size_t t = 0; t < scene.triangles.size(); ++t) {
-                        size_t base = t * 3 + 1;
-                        ofs << "f " << base << " " << (base+1) << " " << (base+2) << "\n";
-                    }
-
-                    // Photon faces
-                    ofs << "\ng photons\n";
-                    size_t photon_v_base = scene.triangles.size() * 3;
-                    for (int bin = 0; bin < NUM_LAMBDA; ++bin) {
-                        bool header_written = false;
-                        size_t export_idx = 0;
-                        for (size_t i = 0; i < photons.size(); i += DEBUG_OBJ_PHOTON_STRIDE, ++export_idx) {
-                            if (photons.lambda_bin[i] != bin) continue;
-                            if (!header_written) {
-                                ofs << "usemtl photon_" << bin << "\n";
-                                header_written = true;
-                            }
-                            size_t base = photon_v_base + export_idx * 3 + 1;
-                            ofs << "f " << base << " " << (base+1) << " " << (base+2) << "\n";
-                        }
-                    }
-
-                    ofs.flush();
-                    ofs.close();
-                    std::cout << "[OBJ Export] Saved: " << obj_file
-                              << " (" << scene.triangles.size() << " scene tris, "
-                              << num_export << " photon tris)\n";
-                } else {
-                    std::cerr << "[OBJ Export] Failed to open " << obj_file << "\n";
-                }
             }
 
             g_app.render_requested = false;
@@ -697,6 +651,9 @@ static void run_interactive(
             // Check if done
             if (g_app.render_spp_done >= g_app.render_spp_total) {
                 std::cout << "\n[Render] Done!\n";
+
+                // Print GPU kernel profiling summary
+                optix_renderer.print_kernel_profiling();
 
                 FrameBuffer final_fb;
                 optix_renderer.download_framebuffer(final_fb);
@@ -766,6 +723,22 @@ static void run_interactive(
             optix_renderer.render_debug_frame(
                 camera, frame, g_app.debug.current_mode, 1);
             optix_renderer.download_framebuffer(display_fb);
+
+            // Optional photon overlay in interactive debug mode.
+            // Note: caustic map separation is not implemented yet, so
+            // only photon points/global map use the current photon set.
+            if (g_app.debug.show_photon_points || g_app.debug.show_global_map) {
+                const PhotonSoA& photons = optix_renderer.photons();
+                if (photons.size() > 0) {
+                    overlay_photon_points(
+                        display_fb,
+                        camera,
+                        photons,
+                        g_app.debug.spectral_coloring,
+                        2.0f);
+                }
+            }
+
             frame++;
         }
 
@@ -787,6 +760,15 @@ static void run_interactive(
         if (g_app.debug.show_help_overlay) {
             render_help_overlay(win_w, win_h, g_app.debug);
         }
+
+        // Draw hover-cell overlay (when map mode toggles are active and
+        // mouse is released for inspection).
+        render_hover_cell_overlay(
+            win_w, win_h,
+            camera,
+            g_app.debug,
+            optix_renderer,
+            g_app.mouse_captured);
 
         glfwSwapBuffers(window);
     }
@@ -811,6 +793,11 @@ int main(int argc, char* argv[]) {
     if (!load_obj(opt.scene_file, scene)) {
         std::cerr << "[Error] Failed to load scene: " << opt.scene_file << "\n";
         return 1;
+    }
+
+    // Normalise non-reference scenes to Cornell-Box coordinate frame
+    if (!SCENE_IS_REFERENCE) {
+        scene.normalize_to_reference();
     }
 
     scene.build_bvh();

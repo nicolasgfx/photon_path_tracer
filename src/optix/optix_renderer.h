@@ -148,8 +148,10 @@ public:
     // -- Rendering ----------------------------------------------------
 
     /// Launch a single frame of the debug viewer (1 spp, progressive)
+    /// @param shadow_rays  If true, debug_first_hit casts shadow rays (for NEE PNG)
     void render_debug_frame(const Camera& camera, int frame_number,
-                            RenderMode mode, int spp = 1);
+                            RenderMode mode, int spp = 1,
+                            bool shadow_rays = false);
 
     /// Launch the full final render (multi-spp, blocking)
     void render_final(const Camera& camera, const RenderConfig& config);
@@ -177,6 +179,10 @@ public:
     void resize(int w, int h);
     void clear_buffers();  ///< Zero accumulation buffers (camera moved)
     bool is_initialised() const { return initialised_; }
+
+    /// Download GPU kernel profiling data and print a summary.
+    /// Call after the final render completes.
+    void print_kernel_profiling() const;
 
     /// Access the stored photon data and hash grid (available after
     /// trace_photons() completes)
@@ -221,6 +227,13 @@ private:
     DeviceBuffer d_nee_direct_buffer_;       // float [W*H*NUM_LAMBDA]
     DeviceBuffer d_photon_indirect_buffer_;  // float [W*H*NUM_LAMBDA]
 
+    // GPU kernel profiling buffers (long long [W*H] each)
+    DeviceBuffer d_prof_total_;
+    DeviceBuffer d_prof_ray_trace_;
+    DeviceBuffer d_prof_nee_;
+    DeviceBuffer d_prof_photon_gather_;
+    DeviceBuffer d_prof_bsdf_;
+
     // Scene geometry (device)
     DeviceBuffer d_vertices_;
     DeviceBuffer d_normals_;
@@ -264,6 +277,9 @@ private:
     PhotonSoA stored_photons_;
     HashGrid  stored_grid_;
 
+    // Host-side scene triangles for debug ray picking/hover inspection.
+    std::vector<Triangle> host_triangles_;
+
     int  width_       = DEFAULT_IMAGE_WIDTH;
     int  height_      = DEFAULT_IMAGE_HEIGHT;
     bool initialised_ = false;
@@ -292,12 +308,26 @@ inline void OptixRenderer::resize(int w, int h) {
     d_nee_direct_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
     d_photon_indirect_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
 
+    // Profiling buffers
+    d_prof_total_.alloc(pixels * sizeof(long long));
+    d_prof_ray_trace_.alloc(pixels * sizeof(long long));
+    d_prof_nee_.alloc(pixels * sizeof(long long));
+    d_prof_photon_gather_.alloc(pixels * sizeof(long long));
+    d_prof_bsdf_.alloc(pixels * sizeof(long long));
+
     // Zero the buffers
     CUDA_CHECK(cudaMemset(d_spectrum_buffer_.d_ptr, 0, d_spectrum_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
     CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr,     0, d_srgb_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+
+    // Profiling buffers
+    CUDA_CHECK(cudaMemset(d_prof_total_.d_ptr, 0, d_prof_total_.bytes));
+    CUDA_CHECK(cudaMemset(d_prof_ray_trace_.d_ptr, 0, d_prof_ray_trace_.bytes));
+    CUDA_CHECK(cudaMemset(d_prof_nee_.d_ptr, 0, d_prof_nee_.bytes));
+    CUDA_CHECK(cudaMemset(d_prof_photon_gather_.d_ptr, 0, d_prof_photon_gather_.bytes));
+    CUDA_CHECK(cudaMemset(d_prof_bsdf_.d_ptr, 0, d_prof_bsdf_.bytes));
 }
 
 /// Zero the accumulation buffers without reallocating (for camera movement)
@@ -312,6 +342,16 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     if (d_photon_indirect_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+    if (d_prof_total_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_prof_total_.d_ptr, 0, d_prof_total_.bytes));
+    if (d_prof_ray_trace_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_prof_ray_trace_.d_ptr, 0, d_prof_ray_trace_.bytes));
+    if (d_prof_nee_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_prof_nee_.d_ptr, 0, d_prof_nee_.bytes));
+    if (d_prof_photon_gather_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_prof_photon_gather_.d_ptr, 0, d_prof_photon_gather_.bytes));
+    if (d_prof_bsdf_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_prof_bsdf_.d_ptr, 0, d_prof_bsdf_.bytes));
 }
 
 inline void OptixRenderer::download_framebuffer(FrameBuffer& fb) const {

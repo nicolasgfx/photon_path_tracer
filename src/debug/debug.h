@@ -37,7 +37,7 @@ struct DebugState {
     bool show_mis_weights     = false;  // F8
     bool spectral_coloring    = false;  // F9
 
-    bool show_help_overlay    = true;   // H to toggle
+    bool show_help_overlay    = false;  // H to toggle
 
     RenderMode current_mode   = RenderMode::Full;
 
@@ -197,15 +197,16 @@ inline bool handle_debug_key(int key, DebugState& state) {
     switch (key) {
         case KEY_F1:
             state.toggle_photon_points();
-            std::cout << "[Debug] F1  Photon points: " << on_off(state.show_photon_points) << "  (planned)\n";
+            std::cout << "[Debug] F1  Photon points: " << on_off(state.show_photon_points) << "\n";
             return true;
         case KEY_F2:
             state.toggle_global_map();
-            std::cout << "[Debug] F2  Global map: " << on_off(state.show_global_map) << "  (planned)\n";
+            std::cout << "[Debug] F2  Global map: " << on_off(state.show_global_map) << "\n";
             return true;
         case KEY_F3:
             state.toggle_caustic_map();
-            std::cout << "[Debug] F3  Caustic map: " << on_off(state.show_caustic_map) << "  (planned)\n";
+            std::cout << "[Debug] F3  Caustic map: " << on_off(state.show_caustic_map)
+                      << "  (unavailable: no separate caustic map yet)\n";
             return true;
         case KEY_F4:
             state.toggle_hash_grid();

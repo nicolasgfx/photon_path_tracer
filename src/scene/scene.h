@@ -5,9 +5,11 @@
 #include "scene/triangle.h"
 #include "scene/material.h"
 #include "core/spectrum.h"
+#include "core/config.h"
 #include "core/alias_table.h"
 #include <vector>
 #include <string>
+#include <iostream>
 
 // ── BVH Node ────────────────────────────────────────────────────────
 struct BVHNode {
@@ -55,6 +57,12 @@ struct Scene {
     // ── Build emissive triangle distribution ────────────────────────
     void build_emissive_distribution();
 
+    // ── Normalize geometry to reference frame ───────────────────────
+    // Translates scene centre to SCENE_REF_CENTER and scales the
+    // longest axis to SCENE_REF_EXTENT.  Call AFTER load, BEFORE
+    // build_bvh().  Skipped when SCENE_IS_REFERENCE == true.
+    void normalize_to_reference();
+
     // ── CPU ray intersection (BVH traversal) ────────────────────────
     HitRecord intersect(const Ray& ray) const;
 
@@ -69,6 +77,45 @@ private:
 };
 
 // ── Implementation ──────────────────────────────────────────────────
+
+// Normalise the scene so its bounding box matches the Cornell-Box
+// reference frame: centred at SCENE_REF_CENTER, longest axis =
+// SCENE_REF_EXTENT (1.0).  Vertex positions AND normals (normals are
+// direction-only, so only positions are transformed).
+inline void Scene::normalize_to_reference() {
+    if (triangles.empty()) return;
+
+    // 1. Compute current AABB
+    AABB bb;
+    for (const auto& t : triangles) {
+        bb.expand(t.v0);
+        bb.expand(t.v1);
+        bb.expand(t.v2);
+    }
+
+    float3 cur_center = bb.center();
+    float3 ext        = bb.extent();
+    float  longest    = fmaxf(fmaxf(ext.x, ext.y), ext.z);
+
+    if (longest < 1e-12f) return;  // degenerate
+
+    float  scale = SCENE_REF_EXTENT / longest;
+    float3 ref_c = make_f3(0.f, 0.f, 0.f);  // SCENE_REF_CENTER
+
+    std::cout << "[Scene] Normalising: centre ("
+              << cur_center.x << ", " << cur_center.y << ", "
+              << cur_center.z << ")  extent ("
+              << ext.x << ", " << ext.y << ", " << ext.z
+              << ")  scale " << scale << "\n";
+
+    // 2. Apply: p' = (p - cur_center) * scale + ref_center
+    for (auto& t : triangles) {
+        t.v0 = (t.v0 - cur_center) * scale + ref_c;
+        t.v1 = (t.v1 - cur_center) * scale + ref_c;
+        t.v2 = (t.v2 - cur_center) * scale + ref_c;
+        // Normals are pure directions — no transformation needed.
+    }
+}
 
 inline void Scene::build_emissive_distribution() {
     emissive_tri_indices.clear();

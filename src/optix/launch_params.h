@@ -52,7 +52,9 @@ struct LaunchParams {
     int    frame_number;
     int    render_mode;          // one of RENDER_MODE_* constants
     int    is_final_render;      // 0 = debug first-hit, 1 = full path tracing
-    int    nee_light_samples;    // M: number of shadow-ray samples per hitpoint
+    int    debug_shadow_rays;    // 1 = debug_first_hit casts shadow rays (NEE PNG)
+    int    nee_light_samples;    // M: shadow-ray samples at bounce 0
+    int    nee_deep_samples;     // shadow-ray samples at bounce >= 1
 
     // Scene geometry (device pointers)
     float3*   vertices;          // [num_tris * 3]
@@ -106,6 +108,15 @@ struct LaunchParams {
     float*    out_photon_flux;
     unsigned int* out_photon_count;  // atomic counter (device)
     int       max_stored_photons;
+
+    // ── GPU kernel profiling (per-pixel clock64 accumulators) ────────
+    // Each buffer is [width * height] long long values.
+    // Set to nullptr to disable profiling.
+    long long* prof_total;           // total kernel time per pixel
+    long long* prof_ray_trace;       // time in optixTrace (primary + bounces)
+    long long* prof_nee;             // time in NEE direct lighting
+    long long* prof_photon_gather;   // time in photon density estimation
+    long long* prof_bsdf;            // time in BSDF eval + continuation
 
 #ifdef PPT_USE_OPTIX
     OptixTraversableHandle traversable;

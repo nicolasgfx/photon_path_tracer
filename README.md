@@ -21,10 +21,20 @@ A physically-based spectral renderer combining **photon mapping** and
   normals, material ID, and depth visualisation modes
 - **Hashed uniform grid** -- fast photon lookup with Epanechnikov
   kernel and surface consistency filtering
-- **Multiple BSDF models** -- Lambertian, mirror, glass (Fresnel),
-  GGX glossy
+- **Material system in codebase** -- Lambertian, mirror, glass,
+  GlossyMetal definitions are present; current OptiX runtime path
+  focuses on Lambertian + mirror-style specular reflections
 - **Comprehensive test suite** -- 152 unit tests covering all core
   components
+
+### Runtime scope (current OptiX path)
+
+- Direct lighting: NEE with shadow rays
+- Indirect lighting: photon density estimation (single photon map)
+- Component outputs: `out_nee_direct.png`, `out_photon_indirect.png`,
+  `out_combined.png`
+- Debug caustic toggle exists, but a separate caustic photon map/output
+  is not implemented yet
 
 ---
 
@@ -89,14 +99,48 @@ run.bat clean        # Delete build directory
 The renderer starts in an **interactive debug window**. Press keys to
 switch visualisation modes and trigger the final render.
 
-### Key Bindings
+### Controls
 
-| Key       | Action                                        |
-|-----------|-----------------------------------------------|
-| **R**     | Start full path tracing render -> PNG output   |
-| **TAB**   | Cycle render mode (full / normals / material / depth) |
-| **F1-F9** | Debug overlay toggles                         |
-| **ESC/Q** | Quit                                          |
+#### Camera / window controls
+
+| Input | Action |
+|---|---|
+| **W/A/S/D** | Move camera forward / left / back / right |
+| **SPACE / Left Ctrl** | Move camera up / down |
+| **Mouse move** | Look around (when mouse is captured) |
+| **Left Shift** | Faster movement (3x speed) |
+| **M** | Toggle mouse capture/release |
+| **Left click** | Re-capture mouse when released |
+| **ESC** or **Q** | If mouse captured: release it. If already released: quit |
+
+#### Render controls
+
+| Key | Action |
+|---|---|
+| **R** | Start full path tracing render and save PNG outputs |
+| **TAB** | Cycle render mode: `Full` -> `DirectOnly` -> `IndirectOnly` -> `PhotonMap` -> `Normals` -> `MaterialID` -> `Depth` |
+| **H** | Toggle help overlay |
+
+#### Debug toggles
+
+| Key | Action |
+|---|---|
+| **F1** | Toggle photon points overlay |
+| **F2** | Toggle global-map overlay |
+| **F3** | Toggle caustic-map selection (separate caustic map is not implemented yet) |
+| **F4** | Toggle hash-grid debug flag |
+| **F5** | Toggle photon-direction debug flag |
+| **F6** | Toggle PDF debug flag |
+| **F7** | Toggle gather-radius debug flag |
+| **F8** | Toggle MIS-weight debug flag |
+| **F9** | Toggle spectral coloring for photon overlay |
+
+#### Hover-cell inspection
+
+- Release mouse capture with **M**.
+- Enable a map toggle (**F2** global or **F3** caustic selector).
+- Move cursor over the image to view hover panel data:
+  cell index, photon count, flux sum/avg, dominant wavelength.
 
 ### Command-Line Options
 

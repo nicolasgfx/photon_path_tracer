@@ -123,6 +123,9 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
         else if (keyword == "illum") {
             int illum;
             ss >> illum;
+            // Don't let illum override an already-set Emissive type
+            // (Ke line may have been parsed before illum)
+            if (current->type == MaterialType::Emissive) continue;
             switch (illum) {
                 case 0: case 1:
                     current->type = MaterialType::Lambertian;
