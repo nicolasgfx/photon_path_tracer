@@ -165,6 +165,10 @@ public:
     /// it to the device.  Called once after trace_photons().
     void build_cell_bin_grid();
 
+    /// Build the dense 3D cell-bin grid from VOLUME photons and upload.
+    /// Called once after trace_photons() when volume is enabled.
+    void build_volume_cell_bin_grid();
+
     /// Read back the sRGB buffer from the device
     void download_framebuffer(FrameBuffer& fb) const;
 
@@ -202,6 +206,11 @@ public:
     size_t cell_bin_grid_bytes_for_test() const { return d_cell_bin_grid_.bytes; }
     /// Test hook: access the host-side cell-bin grid.
     const CellBinGrid& cell_bin_grid_for_test() const { return cell_bin_grid_; }
+
+    /// Test hooks for volume photon grid.
+    size_t vol_cell_bin_grid_bytes_for_test() const { return d_vol_cell_bin_grid_.bytes; }
+    const CellBinGrid& vol_cell_bin_grid_for_test() const { return vol_cell_bin_grid_; }
+    const PhotonSoA& volume_photons() const { return volume_photons_; }
 
     void cleanup();
 
@@ -256,8 +265,11 @@ private:
     // Test hook: last launch params copied on host (for unit/integration tests)
     LaunchParams last_launch_params_host_ = {};
 
-    // Dense 3D cell-bin grid
+    // Dense 3D cell-bin grid (surface photons)
     DeviceBuffer d_cell_bin_grid_;          // PhotonBin [total_cells*PHOTON_BIN_COUNT]
+
+    // Dense 3D cell-bin grid (volume photons)
+    DeviceBuffer d_vol_cell_bin_grid_;      // PhotonBin [total_cells*PHOTON_BIN_COUNT]
 
     // Scene geometry (device)
     DeviceBuffer d_vertices_;
@@ -290,6 +302,12 @@ private:
     DeviceBuffer d_out_photon_lambda_, d_out_photon_flux_;
     DeviceBuffer d_out_photon_count_;
 
+    // Volume photon output buffers (device -- written by __raygen__photon_trace)
+    DeviceBuffer d_out_vol_photon_pos_x_, d_out_vol_photon_pos_y_, d_out_vol_photon_pos_z_;
+    DeviceBuffer d_out_vol_photon_wi_x_,  d_out_vol_photon_wi_y_,  d_out_vol_photon_wi_z_;
+    DeviceBuffer d_out_vol_photon_lambda_, d_out_vol_photon_flux_;
+    DeviceBuffer d_out_vol_photon_count_;
+
     // SBT record buffers
     DeviceBuffer d_raygen_record_;
     DeviceBuffer d_raygen_photon_record_;
@@ -309,6 +327,11 @@ private:
     // Host-side cell-bin grid (kept after build for save/test access)
     CellBinGrid cell_bin_grid_;
     bool cell_grid_uploaded_ = false;
+
+    // Volume photon storage and cell-bin grid
+    PhotonSoA volume_photons_;
+    CellBinGrid vol_cell_bin_grid_;
+    bool vol_cell_grid_uploaded_ = false;
 
     int  width_       = DEFAULT_IMAGE_WIDTH;
     int  height_      = DEFAULT_IMAGE_HEIGHT;

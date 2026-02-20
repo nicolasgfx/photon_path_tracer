@@ -21,10 +21,23 @@ struct DensityEstimatorConfig {
     float  caustic_radius = 0.02f;   // Smaller radius for caustics
     float  surface_tau    = 0.01f;   // Surface consistency threshold
     int    num_photons_total = 1;    // For flux normalization (1/N)
-    // NOTE: Epanechnikov kernel removed — incompatible with the dense 3D
-    // cell-bin grid, which pre-aggregates photons without per-query distances.
-    // The estimator always uses a box kernel (uniform weight within radius).
+    bool   use_kernel     = false;   // true = Epanechnikov, false = box kernel
 };
+
+// ── Kernel weight functions ─────────────────────────────────────────
+
+// Box kernel: uniform weight 1 within radius, 0 outside
+inline float box_kernel(float dist2, float r2) {
+    return (dist2 <= r2) ? 1.0f : 0.0f;
+}
+
+// Epanechnikov kernel: W(t) = 1 - t  where t = dist2 / r2, clamped to [0,1]
+// Gives higher weight to nearby photons for a smoother estimate.
+inline float epanechnikov_kernel(float dist2, float r2) {
+    if (dist2 >= r2) return 0.0f;
+    float t = dist2 / r2;
+    return 1.0f - t;
+}
 
 // ── Density estimate at a surface point ─────────────────────────────
 //
@@ -57,7 +70,7 @@ inline Spectrum estimate_photon_density(
     ONB frame = ONB::from_normal(hit_normal);
 
     grid.query(hit_pos, gather_radius, photons,
-        [&](uint32_t idx, float dist2) {
+        [&](uint32_t idx, float /*dist2*/) {
             // Surface consistency filter
             float3 photon_pos = make_f3(photons.pos_x[idx], photons.pos_y[idx], photons.pos_z[idx]);
             float3 diff = photon_pos - hit_pos;

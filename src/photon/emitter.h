@@ -16,14 +16,20 @@
 #include "scene/scene.h"
 #include "bsdf/bsdf.h"
 #include "photon/photon.h"
+#include "core/medium.h"
 
 #include <vector>
+#include <cmath>
 
 struct EmitterConfig {
     int    num_photons       = 1000000;  // Total photons to emit
     int    max_bounces       = 10;       // Max photon bounces
     float  rr_threshold      = 0.95f;    // Russian roulette survival cap
     int    min_bounces_rr    = 3;        // Min bounces before RR
+    bool   volume_enabled    = false;    // Enable volumetric photon tracing
+    float  volume_density    = 0.05f;    // Extinction coefficient
+    float  volume_falloff    = 0.0f;     // Height falloff coefficient
+    float  volume_albedo     = 0.95f;    // Single-scatter albedo
 };
 
 // ── Photon emission from a single emissive triangle ─────────────────
@@ -102,11 +108,16 @@ inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
 inline void trace_photons(const Scene& scene,
                            const EmitterConfig& config,
                            PhotonSoA& global_map,
-                           PhotonSoA& caustic_map) {
+                           PhotonSoA& caustic_map,
+                           PhotonSoA* volume_map = nullptr) {
     global_map.clear();
     caustic_map.clear();
     global_map.reserve(config.num_photons);
     caustic_map.reserve(config.num_photons / 4);
+    if (volume_map) {
+        volume_map->clear();
+        volume_map->reserve(config.num_photons / 4);
+    }
 
     if (scene.emissive_tri_indices.empty()) {
         return;
@@ -124,6 +135,32 @@ inline void trace_photons(const Scene& scene,
         for (int bounce = 0; bounce < config.max_bounces; ++bounce) {
             HitRecord hit = scene.intersect(ray);
             if (!hit.hit) break;
+
+            // ── Volume photon deposit (Beer–Lambert free-flight) ─────
+            if (volume_map && config.volume_enabled && config.volume_density > 0.f) {
+                float seg_t = hit.t;
+                float mid_y = ray.origin.y + ray.direction.y * (seg_t * 0.5f);
+                HomogeneousMedium med = make_rayleigh_medium(
+                    config.volume_density, config.volume_albedo,
+                    config.volume_falloff, mid_y);
+
+                float sig_t_lam = med.sigma_t.value[ep.lambda_bin];
+                if (sig_t_lam > 0.f) {
+                    float u_ff = rng.next_float();
+                    float t_ff = -logf(fmaxf(1.f - u_ff, 1e-12f)) / sig_t_lam;
+                    if (t_ff < seg_t) {
+                        Photon vp;
+                        vp.position = ray.origin + ray.direction * t_ff;
+                        vp.wi = ray.direction * (-1.f);
+                        vp.lambda_bin = ep.lambda_bin;
+                        float sig_s_lam = med.sigma_s.value[ep.lambda_bin];
+                        vp.flux = flux * (sig_s_lam / fmaxf(sig_t_lam, 1e-20f));
+                        volume_map->push_back(vp);
+                    }
+                    // Attenuate photon flux by transmittance
+                    flux *= expf(-sig_t_lam * seg_t);
+                }
+            }
 
             const Material& mat = scene.materials[hit.material_id];
 

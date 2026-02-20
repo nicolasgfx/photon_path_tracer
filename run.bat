@@ -22,9 +22,7 @@ set RUN_ARGS=
 
 REM -- Parse first argument -----------------------------------------------
 if "%1"=="test" (
-    echo [run.bat] Building and running tests...
-    cmake -B %BUILD_DIR% -DPPT_BUILD_TESTS=ON
-    cmake --build %BUILD_DIR% --target ppt_tests --config Debug
+    call build.bat test
     if errorlevel 1 goto :error
     echo.
     echo [run.bat] Running tests...
@@ -33,11 +31,8 @@ if "%1"=="test" (
 )
 
 if "%1"=="build" (
-    echo [run.bat] Building...
-    cmake -B %BUILD_DIR%
-    cmake --build %BUILD_DIR% --config Debug
+    call build.bat
     if errorlevel 1 goto :error
-    echo [run.bat] Build successful.
     goto :done
 )
 
@@ -58,15 +53,9 @@ if "%1"=="clean" (
 REM -- Collect remaining args for the renderer --
 set RUN_ARGS=%1 %2 %3 %4 %5 %6 %7 %8 %9
 
-REM -- Configure --
-echo [run.bat] Configuring (%BUILD_TYPE%)...
-cmake -B %BUILD_DIR%
-if errorlevel 1 goto :error
-
 REM -- Build --
-echo [run.bat] Building (%BUILD_TYPE%)...
-cmake --build %BUILD_DIR% --config %BUILD_TYPE%
-if errorlevel 1 goto :error
+REM call build.bat %BUILD_TYPE%
+REM if errorlevel 1 goto :error
 
 REM -- Run --
 echo.

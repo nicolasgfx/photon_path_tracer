@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
+cmake_policy(SET CMP0141 NEW)
 project(photon_path_tracer LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -143,6 +144,8 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/optix_device.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/launch_params.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/config.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/medium.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/phase_function.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/photon_bins.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/random.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectrum.h"
@@ -196,6 +199,7 @@ if(PPT_BUILD_TESTS)
         tests/test_main.cpp
         tests/feature_speed_test.cpp
         tests/test_ground_truth.cpp
+        tests/test_medium.cpp
         tests/test_per_ray_validation.cpp
         tests/test_pixel_comparison.cpp
         src/scene/obj_loader.cpp
@@ -208,6 +212,7 @@ if(PPT_BUILD_TESTS)
     )
     set_target_properties(ppt_tests PROPERTIES
         CUDA_ARCHITECTURES "75;86;89"
+        MSVC_DEBUG_INFORMATION_FORMAT "Embedded"
     )
     target_include_directories(ppt_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -390,6 +390,7 @@ struct AppState {
     float      yaw   = 0.f;     // horizontal angle
     float      pitch = 0.f;     // vertical angle
     bool       mouse_captured = true;  // start with mouse captured
+    bool       mouse_was_captured = true; // saved state before render
     double     last_mx = 0.0, last_my = 0.0;
     bool       first_mouse = true;
     bool       camera_moved = false;  // flag to reset accumulation
@@ -416,6 +417,13 @@ static void key_callback(GLFWwindow* window, int key,
     if (key == GLFW_KEY_R) {
         g_app.showing_final = false;
         g_app.render_requested = true;
+        // Release mouse cursor during render so the camera stays frozen
+        g_app.mouse_was_captured = g_app.mouse_captured;
+        if (g_app.mouse_captured) {
+            g_app.mouse_captured = false;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            g_app.first_mouse = true;
+        }
         return;
     }
 
@@ -525,7 +533,7 @@ static void run_interactive(
 
         // -- Mouse look -------------------------------------------------
         constexpr float kMouseSens = 0.0005f; // radians per pixel
-        if (g_app.mouse_captured) {
+        if (g_app.mouse_captured && !g_app.rendering) {
             double mx, my;
             glfwGetCursorPos(window, &mx, &my);
             if (g_app.first_mouse) {
@@ -548,7 +556,8 @@ static void run_interactive(
             }
         }
 
-        // -- WASD movement ----------------------------------------------
+        // -- WASD movement (disabled during rendering) ------------------
+        if (!g_app.rendering)
         {
             // Forward direction (camera looks along -w in its frame)
             float3 forward = make_f3(
@@ -725,6 +734,13 @@ static void run_interactive(
                     write_png("output/out_combined.png", combined_fb);
                 }
 
+                // Restore mouse capture state
+                if (g_app.mouse_was_captured) {
+                    g_app.mouse_captured = true;
+                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                    g_app.first_mouse = true;
+                }
+
                 // Reset to debug view
                 g_app.rendering = false;
                 g_app.showing_final = true;
@@ -874,6 +890,13 @@ int main(int argc, char* argv[]) {
     camera.fov_deg  = SCENE_CAM_FOV;
     camera.width    = opt.config.image_width;
     camera.height   = opt.config.image_height;
+
+    // Depth of field (thin-lens) – defaults from config.h
+    camera.dof_enabled    = DEFAULT_DOF_ENABLED;
+    camera.dof_focus_dist = DEFAULT_DOF_FOCUS_DISTANCE;
+    camera.dof_f_number   = DEFAULT_DOF_F_NUMBER;
+    camera.sensor_height  = DEFAULT_DOF_SENSOR_HEIGHT;
+
     camera.update();
 
     // -- OptiX pipeline -----------------------------------------------

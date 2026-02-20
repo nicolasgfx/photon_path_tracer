@@ -1,299 +1,354 @@
 # Spectral Photon + Path Tracing Renderer
 
-A physically-based spectral renderer combining **photon mapping** and
-**path tracing**, running entirely on the GPU via **NVIDIA OptiX** and
-**CUDA**. Features **photon-guided importance sampling** with
-Fibonacci-sphere directional bins for variance reduction.
+> A physically-based GPU renderer combining **photon mapping** and **path tracing**
+> over a full spectral representation — no RGB shortcuts in the light transport.
+
+Built on **NVIDIA OptiX** and **CUDA**. The central innovation is a per-pixel
+**Fibonacci-sphere directional bin cache** that guides both BSDF bounce sampling
+and next-event estimation, measurably reducing variance in indirect illumination.
 
 ![Render Result](output/render.png)
 
 ---
 
-## Features
+## At a Glance
 
-- **Full spectral transport** -- 32 wavelength bins (380--780 nm), no
-  RGB shortcuts in light transport
-- **GPU photon tracing** -- photon emission, scattering, and storage
-  via OptiX raygen programs
-- **GPU path tracing** -- multi-bounce path tracing with
-  next-event estimation and photon density estimation
-- **Photon directional bin cache** -- per-pixel Fibonacci-sphere
-  binning of photon flux distribution (32 bins, 24 bytes each)
-- **Guided BSDF bounce** -- first-bounce directions sampled
-  proportional to cached photon flux (CDF + cone jitter)
-- **Guided NEE** -- shadow rays steered toward lights matching the
-  photon flux distribution (bin-flux-weighted emissive CDF)
-- **Cached density estimation** -- first-sample photon gather cached
-  per pixel, reused across subsequent SPP frames
-- **Stratified sub-pixel sampling** -- 4x4 jittered strata for
-  reduced clumping at 16 SPP
-- **Interactive debug viewer** -- real-time first-hit rendering with
-  normals, material ID, depth, and photon overlay modes
-- **Hashed uniform grid** -- fast photon lookup with Epanechnikov
-  kernel and surface consistency filtering
-- **Visibility-weighted photon attenuation** -- NEE shadow-ray
-  visibility modulates photon density, preserving contact shadows
-- **GPU kernel profiling** -- per-pixel clock64() timers for
-  ray trace, NEE, photon gather, and BSDF breakdown
-- **Material system** -- Lambertian, mirror, glass, glossy
-  definitions present; OptiX runtime focuses on Lambertian + mirror
-- **Comprehensive test suite** -- 163 unit tests covering all core
-  components including photon bins, guided bounce, and stratified
-  sampling
+| What                        | How                                                             |
+|-----------------------------|-----------------------------------------------------------------|
+| Light transport             | Full spectral — 32 wavelength bins, 380–780 nm                 |
+| Photon tracing              | OptiX raygen program, 1 M photons, cosine-weighted emission     |
+| Path tracing                | Multi-bounce NEE + photon density estimation, Russian roulette  |
+| Variance reduction          | Fibonacci-sphere bin cache guides BSDF bounce and NEE           |
+| Photon lookup               | Hashed uniform grid, Epanechnikov kernel, plane-distance filter |
+| Sub-pixel sampling          | 4×4 stratified jittered strata (16 SPP default)                 |
+| Debug / preview             | Interactive GLFW viewer, 7 render modes, 9 overlay toggles      |
+| Test coverage               | 163 GoogleTest unit tests across all core components            |
 
-### Component Outputs
+---
 
-Each full render produces:
+## How It Works
 
-| File                             | Contents                    |
-|----------------------------------|-----------------------------|
-| `output/render.png`              | Final combined render       |
-| `output/out_nee_direct.png`      | NEE direct lighting only    |
-| `output/out_photon_indirect.png` | Photon indirect only        |
-| `output/out_combined.png`        | NEE + photon (spectral sum) |
-| `output/out_debug_nee.png`       | Single-frame NEE preview    |
+### Rendering Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  STARTUP                                                        │
+│                                                                 │
+│  OBJ/MTL scene ──► Normalise to [-0.5,0.5]³                    │
+│       │                                                         │
+│       ▼                                                         │
+│  Build BVH (GAS) + emitter CDF                                  │
+│       │                                                         │
+│       ▼                                                         │
+│  OptiX pipeline init ──► upload geometry, materials, emitters   │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│  PHOTON PASS  (GPU → CPU → GPU)                                 │
+│                                                                 │
+│  OptiX raygen: emit 1M photons ──► scatter / store at diffuse   │
+│       │                                                         │
+│       ▼                                                         │
+│  Download positions + flux ──► build hashed uniform grid (CPU)  │
+│       │                                                         │
+│       ▼                                                         │
+│  Upload grid to device                                          │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│  INTERACTIVE VIEWER  (GLFW loop, 1 spp/frame)                   │
+│                                                                 │
+│  first-hit + NEE (direct lighting only)                         │
+│  TAB: cycle render modes   F1-F9: toggle overlays               │
+│                                                                 │
+│  Press R ──────────────────────────────────────────────────────►│
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│  FULL RENDER  (R key)                                           │
+│                                                                 │
+│  1. NEE debug PNG (single frame, all shadow rays)               │
+│  2. Bin population pass ──► per-pixel Fibonacci-sphere bins     │
+│  3. Progressive SPP loop:                                       │
+│       camera ray                                                │
+│       ├─ specular bounce (up to max depth)                      │
+│       └─ diffuse hit ──► guided NEE  +  photon density est.     │
+│              │                    │                             │
+│              │              [frame 0] cache density → reuse     │
+│              ▼                                                  │
+│         accumulate spectral radiance                            │
+│  4. PNG output  (render + NEE direct + photon indirect +        │
+│                  combined + per-pixel profiling data)           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Photon Bin Cache — The Key Optimisation
+
+After the photon pass, a **per-pixel cache** is built by tracing center rays
+to their first diffuse hit and gathering nearby photons into 32 Fibonacci-sphere
+directional bins (24 bytes each, ~604 MB at 1024×768).
+
+```
+  Per-pixel hemisphere
+  ┌──────────────────────────────────┐
+  │  Fibonacci sphere (N=32 bins)    │
+  │                                  │
+  │   · · ·  ┌─── bin k ───┐ · · ·  │
+  │          │ flux  float  │        │
+  │          │ dir_x float  │        │
+  │          │ dir_y float  │        │
+  │          │ dir_z float  │        │
+  │          │ weight float │        │
+  │          │ count int    │        │
+  │          └──────────────┘        │
+  └──────────────────────────────────┘
+```
 
 ---
 
 ## Requirements
 
-| Component            | Minimum Version                   |
-|----------------------|-----------------------------------|
-| **NVIDIA GPU**       | Turing architecture (sm_75) or newer |
-| **CUDA Toolkit**     | 12.x                             |
-| **NVIDIA OptiX SDK** | 7.x or 9.x                       |
-| **CMake**            | 3.24                              |
-| **C++ Standard**     | C++17                             |
-| **OS**               | Windows 10+ (MSVC 2022) or Linux  |
-| **VRAM**             | 12 GB recommended (bin cache ~604 MB at 1024x768) |
+| Component       | Minimum                              | Notes                              |
+|-----------------|--------------------------------------|------------------------------------|
+| NVIDIA GPU      | Turing (sm_75) or newer             | Required — no CPU fallback         |
+| CUDA Toolkit    | 12.x                                |                                    |
+| NVIDIA OptiX    | 7.x or 9.x                          | `OptiX_INSTALL_DIR` must be set    |
+| CMake           | 3.24                                |                                    |
+| C++ Standard    | C++17                               |                                    |
+| OS              | Windows 10+ (MSVC 2022)             |                                    |
+| VRAM            | 12 GB recommended                   | Bin cache alone is ~604 MB         |
 
-> **OptiX is mandatory.** There is no CPU fallback. The build will
-> fail if `OptiX_INSTALL_DIR` is not set.
+> **OptiX is mandatory.** The build will fail immediately if `OptiX_INSTALL_DIR`
+> is not set as an environment variable or CMake cache entry.
 
 ---
 
 ## Build
 
-### 1. Set the OptiX SDK path
+### Step 1 — Point CMake at the OptiX SDK
 
-```bash
-# Environment variable (recommended)
+```bat
+:: Set once in your environment (persists across sessions)
 set OptiX_INSTALL_DIR=C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.1.0
+```
 
-# Or pass directly to CMake
+Or pass it directly on the CMake command line:
+
+```bat
 cmake -B build -DOptiX_INSTALL_DIR="C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.1.0"
 ```
 
-### 2. Configure and build
-
-```bash
-cmake -B build
-cmake --build build --config Debug
-```
-
-### 3. Run
-
-```bash
-# Interactive debug viewer (default scene from config.h)
-build\Debug\photon_tracer.exe
-
-# Custom scene with options
-build\Debug\photon_tracer.exe scenes/my_scene.obj --spp 64 --photons 1000000
-```
-
-### Quick script (Windows)
+### Step 2 — Configure and Build
 
 ```bat
-run.bat              # Build & run interactive viewer
-run.bat test         # Build & run unit tests
-run.bat release      # Build & run in Release mode
-run.bat clean        # Delete build directory
+:: Configure
+cmake -B build
+
+:: Debug build (default for development)
+cmake --build build --config Debug
+
+:: Release build (full optimisation)
+cmake --build build --config Release
+```
+
+Build artifacts land in `build\Debug\` or `build\Release\`.  
+The CUDA PTX file is compiled via the `optix_ptx` target and placed in `build\ptx\`.
+
+### Step 3 — Run
+
+```bat
+:: Interactive debug viewer (active scene set via #define in src\core\config.h)
+build\Debug\photon_tracer.exe
+
+:: Override defaults at the command line
+build\Debug\photon_tracer.exe --spp 32 --photons 2000000 --radius 0.04 --output output\my_render.png
+```
+
+### Windows Quick Script
+
+```bat
+run.bat              # Configure, build Debug, and launch viewer
+run.bat test         # Build Debug and run the full test suite
+run.bat release      # Build Release and launch viewer
+run.bat clean        # Delete the build directory
 ```
 
 ---
 
-## Usage
+## Command-Line Options
 
-The renderer starts in an **interactive debug window**. Press keys to
-switch visualisation modes and trigger the final render.
-
-### Controls
-
-#### Camera / window controls
-
-| Input | Action |
-|---|---|
-| **W/A/S/D** | Move camera forward / left / back / right |
-| **SPACE / Left Ctrl** | Move camera up / down |
-| **Mouse move** | Look around (when mouse is captured) |
-| **Left Shift** | Faster movement (3x speed) |
-| **M** | Toggle mouse capture/release |
-| **Left click** | Re-capture mouse when released |
-| **ESC** or **Q** | If mouse captured: release it. If already released: quit |
-
-#### Render controls
-
-| Key | Action |
-|---|---|
-| **R** | Start full path tracing render (NEE debug PNG -> bin population -> progressive SPP -> PNG output) |
-| **TAB** | Cycle render mode: `Full` -> `DirectOnly` -> `IndirectOnly` -> `PhotonMap` -> `Normals` -> `MaterialID` -> `Depth` |
-| **H** | Toggle help overlay |
-
-#### Debug toggles
-
-| Key | Action |
-|---|---|
-| **F1** | Toggle photon points overlay |
-| **F2** | Toggle global-map overlay |
-| **F3** | Toggle caustic-map selector (separate caustic map not yet implemented) |
-| **F4** | Toggle hash-grid debug flag |
-| **F5** | Toggle photon-direction debug flag |
-| **F6** | Toggle PDF debug flag |
-| **F7** | Toggle gather-radius debug flag |
-| **F8** | Toggle MIS-weight debug flag |
-| **F9** | Toggle spectral coloring for photon overlay |
-
-#### Hover-cell inspection
-
-- Release mouse capture with **M**.
-- Enable a map toggle (**F2** global or **F3** caustic selector).
-- Move cursor over the image to view hover panel data:
-  cell index, photon count, flux sum/avg, dominant wavelength.
-
-### Command-Line Options
-
-| Option         | Description                          | Default          |
-|----------------|--------------------------------------|------------------|
-| `--width W`    | Image width                          | 1024             |
-| `--height H`   | Image height                         | 768              |
-| `--spp N`      | Samples per pixel (final render)     | 16               |
-| `--photons N`  | Number of photons                    | 1000000          |
-| `--radius R`   | Photon gather radius                 | 0.05             |
-| `--output FILE`| Output file path                     | output/render.png|
-| `--mode MODE`  | Render mode: full, direct, indirect, photon, normals, material, depth | full |
+| Option          | Description                                                    | Default            |
+|-----------------|----------------------------------------------------------------|--------------------|
+| `--width W`     | Output image width (pixels)                                    | 1024               |
+| `--height H`    | Output image height (pixels)                                   | 768                |
+| `--spp N`       | Samples per pixel for the final render                         | 16                 |
+| `--photons N`   | Number of photons to trace                                     | 1000000            |
+| `--radius R`    | Photon gather radius (scene units)                             | 0.05               |
+| `--output FILE` | Output PNG path                                                | output/render.png  |
+| `--mode MODE`   | `full` \| `direct` \| `indirect` \| `photon` \| `normals` \| `material` \| `depth` | full |
 
 ---
 
-## Rendering Pipeline
+## Output Files
+
+A completed render writes:
+
+| File                           | Contents                              |
+|--------------------------------|---------------------------------------|
+| `output/render.png`            | Final combined render                 |
+| `output/out_nee_direct.png`    | Direct lighting (NEE) only            |
+| `output/out_photon_indirect.png` | Photon indirect illumination only   |
+| `output/out_combined.png`      | NEE + photon spectral sum             |
+| `output/out_debug_nee.png`     | Single-frame NEE preview (pre-render) |
+
+---
+
+## Interactive Viewer
+
+The renderer opens in a **real-time debug window** running at 1 spp/frame with
+direct lighting. Use it to position the camera, inspect scene geometry, and
+verify photon map quality before committing to a full render.
+
+### Camera Controls
+
+| Input              | Action                                        |
+|--------------------|-----------------------------------------------|
+| **W / A / S / D**  | Move forward / left / back / right            |
+| **Space / Ctrl**   | Move up / down                                |
+| **Mouse**          | Look around (when captured)                   |
+| **Shift**          | 3× movement speed                             |
+| **M**              | Toggle mouse capture                          |
+| **Left click**     | Re-capture mouse when released                |
+| **ESC / Q**        | Release mouse, or quit if already released    |
+
+### Render Controls
+
+| Key     | Action                                                                 |
+|---------|------------------------------------------------------------------------|
+| **R**   | Launch full path tracing render                                        |
+| **TAB** | Cycle mode: `Full` → `DirectOnly` → `IndirectOnly` → `PhotonMap` → `Normals` → `MaterialID` → `Depth` |
+| **H**   | Toggle help overlay                                                    |
+
+### Debug Overlays (F-keys)
+
+| Key  | Overlay                      | Key  | Overlay                  |
+|------|------------------------------|------|--------------------------|
+| F1   | Photon points                | F6   | PDFs                     |
+| F2   | Global photon map            | F7   | Gather radius sphere     |
+| F3   | Caustic map selector         | F8   | MIS weights              |
+| F4   | Hash grid debug              | F9   | Spectral colouring       |
+| F5   | Photon directions            |      |                          |
+
+**Hover-cell inspection:** Release the mouse (M), enable F2 or F3, then move
+the cursor over the image to see cell index, photon count, flux sum/average,
+and dominant wavelength in the overlay panel.
+
+---
+
+## Tests
+
+163 unit tests via GoogleTest v1.14.0, covering every core subsystem.
+
+```bat
+run.bat test                             :: Quick script
+
+:: Or manually
+cmake --build build --config Debug
+build\Debug\ppt_tests.exe
+build\Debug\ppt_tests.exe --gtest_filter="Photon*"   :: run a subset
+```
+
+**Coverage includes:**
 
 ```
-1. Scene Load (OBJ + MTL) -> normalise to [-0.5, 0.5]^3
-2. Build BVH + emissive distribution
-3. OptiX init -> build GAS -> upload scene + emitter data
-4. GPU photon trace (1M photons) -> hash grid (CPU) -> upload
-5. Interactive debug viewer (GLFW, 1 spp first-hit)
-6. (R key) -> NEE debug PNG -> populate bin cache -> progressive render
-7. PNG output (render + component decomposition + profiling)
+Math & Geometry        Vector math, ONB, coordinate transforms, ray-triangle
+                       intersection, AABB intersection
+Spectral               Arithmetic, CIE XYZ colour matching, blackbody emission
+Sampling               RNG quality, cosine/uniform hemisphere, triangle,
+                       MIS power heuristic (2-way + 3-way), alias table
+BSDF                   Fresnel (Schlick, dielectric, TIR), GGX VNDF,
+                       evaluation, sampling, reciprocity, energy conservation
+Photon Map             Hash grid build/query, Epanechnikov kernel,
+                       surface consistency filter, density estimator
+Photon Bins            Fibonacci sphere coverage (N=8,16,32), nearest-bin
+                       queries, hemisphere coverage, bin solid angle,
+                       population, centroid normalisation, struct size (24 B)
+Stratified Sampling    4×4 sub-pixel strata coverage
+OptiX Integration      Init, GAS build, scene upload, debug frame output,
+                       normals mode, final render validation, framebuffer resize
 ```
-
-### Photon Directional Bins
-
-The key innovation: per-pixel Fibonacci-sphere bins cache the photon
-flux distribution at each pixel's first diffuse hit. This enables:
-
-- **Guided BSDF bounce (B1):** Sample continuation direction from
-  bin flux CDF with cone jitter, steering paths toward bright regions.
-- **Guided NEE (B2):** Re-weight emissive triangle CDF using bin
-  flux alignment (alpha=5.0), steering shadow rays toward lights that
-  actually contribute indirect illumination.
-- **Cached density (A1):** Cache the first-sample photon density
-  gather per pixel, eliminating redundant hash-grid lookups.
-- **Stratified sampling (B3):** 4x4 sub-pixel strata reduce
-  clumping at 16 SPP.
 
 ---
 
 ## Project Structure
 
 ```
-src/
-  main.cpp                     Entry point, GLFW loop
-  core/                        Types, spectrum, config, RNG, photon bins
-  bsdf/                        BSDF models (Lambertian, mirror, glass, GGX)
-  scene/                       OBJ/MTL loader, scene structure, BVH
-  renderer/                    CPU renderer, camera, MIS, path tracer kernels
-  photon/                      Photon structures, hash grid, emitter, density
-  optix/                       OptiX device programs and host pipeline
-  debug/                       Debug visualisation state and key bindings
-tests/
-  test_main.cpp                163 unit tests (GoogleTest)
-scenes/                        Test scenes (Cornell box, conference, etc.)
-doc/
-  architecture/                Detailed architecture documentation
-  prompts/                     Design specification documents
+photon_path_tracer/
+├── src/
+│   ├── main.cpp                      Entry point, argument parsing, GLFW event loop
+│   ├── core/
+│   │   ├── types.h                   Vec3, Ray, and shared POD types
+│   │   ├── spectrum.h                Spectral arithmetic, CIE XYZ, blackbody
+│   │   ├── config.h                  Compile-time scene selection + render constants
+│   │   ├── random.h                  PCG RNG
+│   │   ├── photon_bins.h             PhotonBin struct, Fibonacci sphere utilities
+│   │   ├── photon_density_cache.h    Per-pixel cached spectral density (A1)
+│   │   ├── guided_nee.h              Bin-flux-weighted emissive CDF (B2)
+│   │   ├── nee_sampling.h            Standard NEE sampling helpers
+│   │   ├── cell_bin_grid.h           Cell-level photon binning grid
+│   │   ├── cdf.h                     Generic CDF build + sample
+│   │   ├── alias_table.h             Alias method for O(1) discrete sampling
+│   │   ├── medium.h                  Participating medium (volumetric) data
+│   │   ├── phase_function.h          Henyey-Greenstein phase function
+│   │   ├── font_overlay.h            Debug text overlay rendering
+│   │   └── test_data_io.h            Ground-truth data helpers for tests
+│   ├── bsdf/
+│   │   └── bsdf.h                    Lambertian, mirror, glass, GGX VNDF
+│   ├── scene/
+│   │   ├── scene.h                   Scene graph, emitter list
+│   │   ├── material.h                Material definitions
+│   │   ├── triangle.h                Triangle + BVH primitives
+│   │   ├── obj_loader.h / .cpp       Wavefront OBJ + MTL parser
+│   ├── renderer/
+│   │   ├── renderer.h / .cpp         Host render loop, framebuffer management
+│   │   ├── camera.h                  Perspective camera, ray generation
+│   │   ├── mis.h                     MIS power heuristic (2-way + 3-way)
+│   │   ├── direct_light.h / .cu      Direct lighting kernel
+│   │   └── path_tracer.cu            Full path tracing CUDA kernel
+│   ├── photon/
+│   │   ├── photon.h                  Photon SoA storage layout
+│   │   ├── emitter.h / .cu           Emitter sampling, CDF construction
+│   │   ├── hash_grid.h / .cu         Hashed uniform grid build + query
+│   │   └── density_estimator.h       Epanechnikov kernel density estimation
+│   ├── optix/
+│   │   ├── optix_device.cu           All OptiX raygen / closesthit programs
+│   │   ├── optix_renderer.h / .cpp   Host pipeline: SBT, GAS, launch params
+│   │   ├── launch_params.h           GPU/CPU shared launch parameter struct
+│   │   └── adaptive_sampling.h / .cu Per-pixel noise metric + convergence mask
+│   └── debug/
+│       └── debug.h                   Visualisation mode state, key bindings
+├── tests/
+│   ├── test_main.cpp                 Core unit tests (163 cases, GoogleTest)
+│   ├── test_medium.cpp               Participating medium tests
+│   ├── test_ground_truth.cpp         Reference image ground-truth comparisons
+│   ├── test_pixel_comparison.cpp     Per-pixel render validation
+│   ├── test_per_ray_validation.cpp   Individual ray correctness checks
+│   └── feature_speed_test.cpp        Feature timing / performance benchmarks
+├── scenes/                           Cornell box, conference, living room, etc.
+├── doc/
+│   └── architecture/                 Full architecture documentation
+├── CMakeLists.txt
+└── run.bat                           Build, run, test, and clean helper
 ```
-
----
-
-## Scene Selection
-
-Scenes are selected at compile time via `#define` in `src/core/config.h`:
-
-| Scene             | Define               | Notes                          |
-|-------------------|----------------------|--------------------------------|
-| Cornell Box       | `SCENE_CORNELL_BOX`  | Reference frame (no normalise) |
-| Conference Room   | `SCENE_CONFERENCE`   | Default scene                  |
-| Living Room       | `SCENE_LIVING_ROOM`  | Complex indoor scene           |
-| Breakfast Room    | `SCENE_BREAKFAST_ROOM` | Complex indoor scene         |
-| Sibenik Cathedral | `SCENE_SIBENIK`      | Large architectural scene      |
-
-All non-reference scenes are automatically normalised to the Cornell
-Box coordinate frame at load time.
-
----
-
-## Tests
-
-The project includes 163 unit tests built with GoogleTest v1.14.0:
-
-```bash
-# Build and run tests
-run.bat test
-
-# Or manually
-cmake --build build --config Debug
-build\Debug\ppt_tests.exe
-```
-
-Test coverage includes:
-
-- Vector math, ONB, coordinate transforms
-- Spectral arithmetic, CIE colour matching, blackbody emission
-- RNG distribution quality
-- Cosine/uniform hemisphere sampling, triangle sampling
-- MIS power heuristic (2-way and 3-way)
-- Alias table construction and sampling
-- Ray-triangle intersection (hit, miss, edge cases)
-- AABB ray intersection
-- Fresnel equations (Schlick, dielectric, TIR)
-- GGX microfacet model (normalisation, Smith geometry, VNDF)
-- BSDF evaluation, sampling, reciprocity, energy conservation
-- Hash grid build/query, distance filtering
-- Density estimator with surface consistency filtering
-- Epanechnikov and box kernel evaluation
-- Camera ray generation
-- Cornell box scene loading and BVH validation
-- Photon tracing, position bounds, flux validation
-- Photon density on known geometry
-- Fibonacci sphere coverage (N=8, 16, 32) and nearest-bin queries
-- Hemisphere coverage and bin solid angle distribution
-- Bin population and centroid normalisation
-- Stratified sub-pixel coverage (4x4 strata)
-- PhotonBin struct size validation (24 bytes)
-- OptiX initialisation, accel build, scene upload
-- OptiX debug frame rendering (non-zero output)
-- OptiX normals mode visualisation
-- OptiX final render validation
-- OptiX framebuffer resize
 
 ---
 
 ## Architecture
 
-See [doc/architecture/architecture.md](doc/architecture/architecture.md)
-for a detailed description of the rendering pipeline, mathematical
-foundations (rendering equation, Monte Carlo estimators, guided NEE,
-density estimation), strengths, and limitations.
+[doc/architecture/architecture.md](doc/architecture/architecture.md) covers the
+full rendering pipeline in detail: rendering equation, Monte Carlo estimators,
+guided NEE derivation, Fibonacci-sphere binning, density estimation, and the
+rationale behind each design decision.
 
 ---
 

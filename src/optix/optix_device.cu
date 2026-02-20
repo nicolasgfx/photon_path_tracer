@@ -30,6 +30,8 @@
 #include "core/cdf.h"
 #include "core/nee_sampling.h"
 #include "core/guided_nee.h"
+#include "core/medium.h"
+#include "core/phase_function.h"
 
 // ---------------------------------------------------------------------
 // Module-local implementation constants
@@ -1107,10 +1109,189 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
     PhotonBinDirs bin_dirs;
     if (have_cell_grid) bin_dirs.init(params.photon_bin_count);
 
+    // Pre-check volume availability
+    const bool have_volume = (params.volume_enabled != 0 && params.volume_density > 0.f);
+    const bool have_vol_grid = (params.vol_cell_grid_valid == 1
+                                && params.vol_cell_bin_grid != nullptr);
+
     for (int bounce = 0; bounce <= params.max_bounces; ++bounce) {
         long long t0 = clock64();
         TraceResult hit = trace_radiance(origin, direction);
         result.clk_ray_trace += clock64() - t0;
+
+        // ── Participating medium: transmittance + in-scattering ─────
+        if (have_volume) {
+            float t_end = hit.hit ? hit.t : params.volume_max_t;
+            if (t_end > 0.f) {
+                float mid_y = origin.y + direction.y * (t_end * 0.5f);
+                HomogeneousMedium med = make_rayleigh_medium(
+                    params.volume_density, params.volume_albedo,
+                    params.volume_falloff, mid_y);
+
+                int N_vs = params.volume_samples;
+                float inv_N = 1.f / (float)N_vs;
+
+                for (int vs = 0; vs < N_vs; ++vs) {
+                    float u_t = (vs + rng.next_float()) * inv_N;
+                    float t_sample = u_t * t_end;
+                    float3 x = origin + direction * t_sample;
+
+                    // Transmittance from camera/path origin to sample point
+                    Spectrum T_cam;
+                    for (int i = 0; i < NUM_LAMBDA; ++i)
+                        T_cam.value[i] = expf(-med.sigma_t.value[i] * t_sample);
+
+                    // ── Volume NEE: shadow ray to a light ────────────
+                    if (params.num_emissive > 0) {
+                        // Sample a light
+                        float xi_light = rng.next_float();
+                        int local_idx = binary_search_cdf(
+                            params.emissive_cdf, params.num_emissive, xi_light);
+                        if (local_idx >= params.num_emissive)
+                            local_idx = params.num_emissive - 1;
+                        uint32_t tri_idx = params.emissive_tri_indices[local_idx];
+
+                        // PDF for chosen triangle (mixture)
+                        float pdf_power;
+                        if (local_idx == 0) pdf_power = params.emissive_cdf[0];
+                        else pdf_power = params.emissive_cdf[local_idx]
+                                       - params.emissive_cdf[local_idx - 1];
+                        float pdf_light = pdf_power; // simplified (no uniform mix for medium NEE)
+
+                        // Sample point on triangle
+                        float3 lv0 = params.vertices[tri_idx * 3 + 0];
+                        float3 lv1 = params.vertices[tri_idx * 3 + 1];
+                        float3 lv2 = params.vertices[tri_idx * 3 + 2];
+                        float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+                        float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
+                        float3 le1 = lv1 - lv0;
+                        float3 le2 = lv2 - lv0;
+                        float3 ln = normalize(cross(le1, le2));
+                        float  area = length(cross(le1, le2)) * 0.5f;
+
+                        float3 to_light = light_pos - x;
+                        float dist2 = dot(to_light, to_light);
+                        float dist  = sqrtf(fmaxf(dist2, 1e-12f));
+                        float3 wi   = to_light * (1.f / dist);
+
+                        float cos_l = -dot(wi, ln);
+                        if (cos_l > 0.f && pdf_light > 0.f) {
+                            // Shadow test
+                            bool occluded = trace_shadow(x, wi, dist - OPTIX_SCENE_EPSILON);
+                            if (!occluded) {
+                                float geom = cos_l / dist2;
+                                float pdf_pos = 1.f / area;
+                                float pdf_total = pdf_light * pdf_pos;
+
+                                // Phase function
+                                float cos_theta = dot(wi, direction * (-1.f));
+                                float phase = rayleigh_phase(cos_theta);
+
+                                // Transmittance from sample to light
+                                Spectrum T_light;
+                                for (int i = 0; i < NUM_LAMBDA; ++i)
+                                    T_light.value[i] = expf(-med.sigma_t.value[i] * dist);
+
+                                uint32_t lmat = params.material_ids[tri_idx];
+                                Spectrum Le = dev_get_Le(lmat);
+
+                                for (int i = 0; i < NUM_LAMBDA; ++i) {
+                                    float contrib = t_end * inv_N
+                                        * T_cam.value[i]
+                                        * med.sigma_s.value[i]
+                                        * phase
+                                        * T_light.value[i]
+                                        * Le.value[i] * geom
+                                        / fmaxf(pdf_total, 1e-12f);
+                                    Spectrum c = Spectrum::zero();
+                                    c.value[i] = throughput.value[i] * contrib;
+                                    result.combined += c;
+                                    if (in_indirect) result.photon_indirect += c;
+                                    else             result.nee_direct      += c;
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Volume photon grid gather (trilinear) ────────
+                    if (have_vol_grid) {
+                        float3 wo = direction * (-1.f);
+                        float cs = params.vol_cell_grid_cell_size;
+                        float cell_vol = cs * cs * cs;
+                        // 3×3×3 scatter during build → effective volume = 27 cells
+                        float gather_vol = 27.f * cell_vol;
+                        float inv_Nph = 1.f / fmaxf((float)params.num_photons, 1.f);
+
+                        // Trilinear cell-centre coordinates
+                        float fx = (x.x - params.vol_cell_grid_min_x) / cs - 0.5f;
+                        float fy = (x.y - params.vol_cell_grid_min_y) / cs - 0.5f;
+                        float fz = (x.z - params.vol_cell_grid_min_z) / cs - 0.5f;
+
+                        int ix0 = (int)floorf(fx);
+                        int iy0 = (int)floorf(fy);
+                        int iz0 = (int)floorf(fz);
+                        float tx = fx - (float)ix0;
+                        float ty = fy - (float)iy0;
+                        float tz = fz - (float)iz0;
+
+                        int dx = params.vol_cell_grid_dim_x;
+                        int dy = params.vol_cell_grid_dim_y;
+                        int dz = params.vol_cell_grid_dim_z;
+
+                        // Loop over 8 trilinear corners
+                        for (int cz = 0; cz <= 1; ++cz) {
+                            for (int cy = 0; cy <= 1; ++cy) {
+                                for (int cx = 0; cx <= 1; ++cx) {
+                                    int ixx = ix0 + cx;
+                                    int iyy = iy0 + cy;
+                                    int izz = iz0 + cz;
+                                    // Skip out-of-bounds cells
+                                    if (ixx < 0 || ixx >= dx) continue;
+                                    if (iyy < 0 || iyy >= dy) continue;
+                                    if (izz < 0 || izz >= dz) continue;
+
+                                    float wx = cx ? tx : (1.f - tx);
+                                    float wy = cy ? ty : (1.f - ty);
+                                    float wz = cz ? tz : (1.f - tz);
+                                    float w  = wx * wy * wz;
+                                    if (w <= 0.f) continue;
+
+                                    int cell = ixx + iyy * dx + izz * dx * dy;
+                                    const PhotonBin* vbins =
+                                        &params.vol_cell_bin_grid[
+                                            cell * params.photon_bin_count];
+
+                                    for (int k = 0; k < params.photon_bin_count; ++k) {
+                                        if (vbins[k].count == 0) continue;
+                                        float cos_theta = dot(wo, make_f3(
+                                            vbins[k].dir_x,
+                                            vbins[k].dir_y,
+                                            vbins[k].dir_z));
+                                        float phase = rayleigh_phase(cos_theta);
+                                        float bin_flux = vbins[k].flux;
+                                        float norm = bin_flux * phase * inv_Nph
+                                            * w / fmaxf(gather_vol, 1e-20f);
+                                        for (int i = 0; i < NUM_LAMBDA; ++i) {
+                                            float contrib = t_end * inv_N
+                                                * T_cam.value[i] * norm;
+                                            result.combined.value[i] +=
+                                                throughput.value[i] * contrib;
+                                            if (in_indirect)
+                                                result.photon_indirect.value[i] +=
+                                                    throughput.value[i] * contrib;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Apply transmittance to throughput for this segment
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    throughput.value[i] *= expf(-med.sigma_t.value[i] * t_end);
+            }
+        }
 
         if (!hit.hit) break;
 
@@ -1300,12 +1481,48 @@ extern "C" __global__ void __raygen__render() {
         float u = ((float)px + jx) / (float)params.width;
         float v = ((float)py + jy) / (float)params.height;
 
-        float3 origin    = params.cam_pos;
-        float3 direction = normalize(
+        // Focus-plane target for this pixel sample
+        float3 focus_target =
             params.cam_lower_left
             + params.cam_horizontal * u
-            + params.cam_vertical * v
-            - params.cam_pos);
+            + params.cam_vertical * v;
+
+        // Focus-range jitter: widen the razor-thin focus plane into a slab.
+        // Per-sample we shift the focus target along the pinhole ray by a
+        // random offset within [-range/2, +range/2], so objects inside the
+        // slab stay acceptably sharp while distant objects still blur.
+        if (params.cam_focus_range > 0.f && params.cam_focus_dist > 0.f) {
+            float range_jitter = (rng.next_float() - 0.5f) * params.cam_focus_range;
+            float scale = (params.cam_focus_dist + range_jitter) / params.cam_focus_dist;
+            // Rescale the offset from camera to keep the target on the
+            // jittered focus plane along the same viewing direction.
+            focus_target = params.cam_pos
+                         + (focus_target - params.cam_pos) * scale;
+        }
+
+        float3 origin;
+        float3 direction;
+        if (params.cam_lens_radius > 0.f) {
+            // Thin-lens DOF: sample circular aperture
+            float lu1 = rng.next_float();
+            float lu2 = rng.next_float();
+            float a = 2.f * lu1 - 1.f;
+            float b = 2.f * lu2 - 1.f;
+            float dr, dphi;
+            if (a == 0.f && b == 0.f) { dr = 0.f; dphi = 0.f; }
+            else if (a * a > b * b) { dr = a; dphi = (PI / 4.f) * (b / a); }
+            else                    { dr = b; dphi = (PI / 2.f) - (PI / 4.f) * (a / b); }
+            float dx = dr * cosf(dphi);
+            float dy = dr * sinf(dphi);
+            float3 lens_offset = (params.cam_u * dx + params.cam_v * dy)
+                                 * params.cam_lens_radius;
+            origin    = params.cam_pos + lens_offset;
+            direction = normalize(focus_target - origin);
+        } else {
+            // Pinhole
+            origin    = params.cam_pos;
+            direction = normalize(focus_target - params.cam_pos);
+        }
 
         if (params.is_final_render) {
             PathTraceResult ptr = full_path_trace(origin, direction, rng, pixel_idx, s, params.samples_per_pixel);
@@ -1485,6 +1702,49 @@ extern "C" __global__ void __raygen__photon_trace() {
         if (!hit.hit) break;
 
         uint32_t hit_mat = hit.material_id;
+
+        // ── Volume photon deposit (Beer–Lambert free-flight) ───────
+        // Along the ray segment [origin → hit.position], sample a
+        // free-flight distance using Beer–Lambert.  If the scatter
+        // event falls before the surface hit, deposit a volume photon.
+        if (params.volume_enabled && params.volume_density > 0.f && hit.hit) {
+            float seg_t = hit.t;
+            float mid_y = origin.y + direction.y * (seg_t * 0.5f);
+            HomogeneousMedium med = make_rayleigh_medium(
+                params.volume_density, params.volume_albedo,
+                params.volume_falloff, mid_y);
+
+            float sig_t_lam = med.sigma_t.value[lambda_bin];
+            if (sig_t_lam > 0.f) {
+                // Sample free-flight distance: t_ff = -ln(1-u) / σ_t
+                float u_ff = rng.next_float();
+                float t_ff = -logf(fmaxf(1.f - u_ff, 1e-12f)) / sig_t_lam;
+
+                if (t_ff < seg_t) {
+                    // Scatter event inside the medium — deposit volume photon
+                    float3 vol_pos = origin + direction * t_ff;
+                    float sig_s_lam = med.sigma_s.value[lambda_bin];
+                    // Volume photon flux: photon flux * (σ_s / σ_t)
+                    // (σ_s / σ_t = albedo, probability of scatter vs absorb)
+                    float vol_flux = flux * (sig_s_lam / fmaxf(sig_t_lam, 1e-20f));
+
+                    uint32_t vslot = atomicAdd(params.out_vol_photon_count, 1u);
+                    if (vslot < (uint32_t)params.max_stored_vol_photons) {
+                        params.out_vol_photon_pos_x[vslot]  = vol_pos.x;
+                        params.out_vol_photon_pos_y[vslot]  = vol_pos.y;
+                        params.out_vol_photon_pos_z[vslot]  = vol_pos.z;
+                        params.out_vol_photon_wi_x[vslot]   = -direction.x;
+                        params.out_vol_photon_wi_y[vslot]   = -direction.y;
+                        params.out_vol_photon_wi_z[vslot]   = -direction.z;
+                        params.out_vol_photon_lambda[vslot]  = (uint16_t)lambda_bin;
+                        params.out_vol_photon_flux[vslot]    = vol_flux;
+                    }
+                }
+
+                // Attenuate photon flux by transmittance over this segment
+                flux *= expf(-sig_t_lam * seg_t);
+            }
+        }
 
         // Skip emissive surfaces
         if (dev_is_emissive(hit_mat)) break;

@@ -346,6 +346,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     auto t_phase_start = std::chrono::high_resolution_clock::now();
     auto t_lap = t_phase_start;
 
+    gather_radius_ = config.gather_radius;   // keep member in sync with config
+
     int num_photons = config.num_photons;
     int max_stored  = num_photons * DEFAULT_MAX_BOUNCES; // upper bound on stored photons
 
@@ -361,6 +363,18 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_out_photon_lambda_.alloc(max_stored * sizeof(uint16_t));
     d_out_photon_flux_.alloc(max_stored * sizeof(float));
     d_out_photon_count_.alloc_zero(sizeof(unsigned int)); // zero the counter
+
+    // Allocate volume photon output buffers
+    int max_vol_stored = max_stored / 2; // conservative upper bound
+    d_out_vol_photon_pos_x_.alloc(max_vol_stored * sizeof(float));
+    d_out_vol_photon_pos_y_.alloc(max_vol_stored * sizeof(float));
+    d_out_vol_photon_pos_z_.alloc(max_vol_stored * sizeof(float));
+    d_out_vol_photon_wi_x_.alloc(max_vol_stored * sizeof(float));
+    d_out_vol_photon_wi_y_.alloc(max_vol_stored * sizeof(float));
+    d_out_vol_photon_wi_z_.alloc(max_vol_stored * sizeof(float));
+    d_out_vol_photon_lambda_.alloc(max_vol_stored * sizeof(uint16_t));
+    d_out_vol_photon_flux_.alloc(max_vol_stored * sizeof(float));
+    d_out_vol_photon_count_.alloc_zero(sizeof(unsigned int));
 
     // Build launch params for photon trace
     LaunchParams lp = {};
@@ -398,6 +412,26 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.out_photon_flux    = d_out_photon_flux_.as<float>();
     lp.out_photon_count   = d_out_photon_count_.as<unsigned int>();
     lp.max_stored_photons = max_stored;
+
+    // Volume photon output buffers
+    lp.out_vol_photon_pos_x  = d_out_vol_photon_pos_x_.as<float>();
+    lp.out_vol_photon_pos_y  = d_out_vol_photon_pos_y_.as<float>();
+    lp.out_vol_photon_pos_z  = d_out_vol_photon_pos_z_.as<float>();
+    lp.out_vol_photon_wi_x   = d_out_vol_photon_wi_x_.as<float>();
+    lp.out_vol_photon_wi_y   = d_out_vol_photon_wi_y_.as<float>();
+    lp.out_vol_photon_wi_z   = d_out_vol_photon_wi_z_.as<float>();
+    lp.out_vol_photon_lambda = d_out_vol_photon_lambda_.as<uint16_t>();
+    lp.out_vol_photon_flux   = d_out_vol_photon_flux_.as<float>();
+    lp.out_vol_photon_count  = d_out_vol_photon_count_.as<unsigned int>();
+    lp.max_stored_vol_photons = max_vol_stored;
+
+    // Volume params for photon medium interaction
+    lp.volume_enabled  = config.volume_enabled ? 1 : 0;
+    lp.volume_density  = config.volume_density;
+    lp.volume_falloff  = config.volume_falloff;
+    lp.volume_albedo   = config.volume_albedo;
+    lp.volume_samples  = config.volume_samples;
+    lp.volume_max_t    = config.volume_max_t;
 
     // Upload params
     d_launch_params_.alloc(sizeof(LaunchParams));
@@ -520,6 +554,47 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
         std::printf("[Timing] Cell grid build:   %8.1f ms\n", ms);
+        t_lap = t_now;
+    }
+
+    // ── Download and process volume photons ──────────────────────────
+    if (config.volume_enabled && config.volume_density > 0.f) {
+        unsigned int vol_count = 0;
+        CUDA_CHECK(cudaMemcpy(&vol_count, d_out_vol_photon_count_.d_ptr,
+                               sizeof(unsigned int), cudaMemcpyDeviceToHost));
+        if ((int)vol_count > max_vol_stored)
+            vol_count = (unsigned int)max_vol_stored;
+
+        std::cout << "[OptiX] GPU photon trace stored " << vol_count << " volume photons\n";
+
+        if (vol_count > 0) {
+            volume_photons_.resize(vol_count);
+            CUDA_CHECK(cudaMemcpy(volume_photons_.pos_x.data(),  d_out_vol_photon_pos_x_.d_ptr,  vol_count*sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(volume_photons_.pos_y.data(),  d_out_vol_photon_pos_y_.d_ptr,  vol_count*sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(volume_photons_.pos_z.data(),  d_out_vol_photon_pos_z_.d_ptr,  vol_count*sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(volume_photons_.wi_x.data(),   d_out_vol_photon_wi_x_.d_ptr,   vol_count*sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(volume_photons_.wi_y.data(),   d_out_vol_photon_wi_y_.d_ptr,   vol_count*sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(volume_photons_.wi_z.data(),   d_out_vol_photon_wi_z_.d_ptr,   vol_count*sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(volume_photons_.lambda_bin.data(), d_out_vol_photon_lambda_.d_ptr, vol_count*sizeof(uint16_t), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(volume_photons_.flux.data(),   d_out_vol_photon_flux_.d_ptr,   vol_count*sizeof(float), cudaMemcpyDeviceToHost));
+
+            // Precompute bin indices for volume photons
+            PhotonBinDirs bin_dirs;
+            bin_dirs.init(PHOTON_BIN_COUNT);
+            volume_photons_.bin_idx.resize(vol_count);
+            for (size_t i = 0; i < vol_count; ++i) {
+                float3 wi = make_f3(volume_photons_.wi_x[i],
+                                    volume_photons_.wi_y[i],
+                                    volume_photons_.wi_z[i]);
+                volume_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+            }
+
+            build_volume_cell_bin_grid();
+        }
+    }
+
+    {
+        auto t_now = std::chrono::high_resolution_clock::now();
         double total = std::chrono::duration<double, std::milli>(t_now - t_phase_start).count();
         std::printf("[Timing] Photon total:      %8.1f ms\n", total);
     }
@@ -559,7 +634,13 @@ static void fill_common_params(
     const DeviceBuffer& prof_bsdf,
     const DeviceBuffer& cell_bin_grid_buf,
     const CellBinGrid&  cell_grid,
-    bool                cell_grid_uploaded)
+    bool                cell_grid_uploaded,
+    // ── Volume participating-medium params ──
+    bool volume_enabled, float volume_density, float volume_falloff,
+    float volume_albedo, int volume_samples, float volume_max_t,
+    const DeviceBuffer& vol_cell_bin_grid_buf,
+    const CellBinGrid&  vol_cell_grid,
+    bool                vol_cell_grid_uploaded)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -590,6 +671,9 @@ static void fill_common_params(
     p.cam_lower_left  = camera.lower_left;
     p.cam_horizontal  = camera.horizontal;
     p.cam_vertical    = camera.vertical;
+    p.cam_lens_radius = camera.lens_radius;
+    p.cam_focus_dist  = camera.dof_focus_dist;
+    p.cam_focus_range = camera.dof_focus_range;
 
     p.vertices     = const_cast<float3*>(vertices.as<float3>());
     p.normals      = const_cast<float3*>(normals.as<float3>());
@@ -645,6 +729,26 @@ static void fill_common_params(
     p.cell_grid_dim_x   = cell_grid.dim_x;
     p.cell_grid_dim_y   = cell_grid.dim_y;
     p.cell_grid_dim_z   = cell_grid.dim_z;
+
+    // ── Participating medium ─────────────────────────────────────────
+    p.volume_enabled = volume_enabled ? 1 : 0;
+    p.volume_density = volume_density;
+    p.volume_falloff = volume_falloff;
+    p.volume_albedo  = volume_albedo;
+    p.volume_samples = volume_samples;
+    p.volume_max_t   = volume_max_t;
+
+    // Volume cell-bin grid
+    p.vol_cell_bin_grid = vol_cell_bin_grid_buf.d_ptr
+        ? reinterpret_cast<PhotonBin*>(vol_cell_bin_grid_buf.d_ptr) : nullptr;
+    p.vol_cell_grid_valid     = vol_cell_grid_uploaded ? 1 : 0;
+    p.vol_cell_grid_min_x     = vol_cell_grid.min_x;
+    p.vol_cell_grid_min_y     = vol_cell_grid.min_y;
+    p.vol_cell_grid_min_z     = vol_cell_grid.min_z;
+    p.vol_cell_grid_cell_size = vol_cell_grid.cell_size;
+    p.vol_cell_grid_dim_x     = vol_cell_grid.dim_x;
+    p.vol_cell_grid_dim_y     = vol_cell_grid.dim_y;
+    p.vol_cell_grid_dim_z     = vol_cell_grid.dim_z;
 }
 
 // =====================================================================
@@ -672,7 +776,10 @@ void OptixRenderer::render_debug_frame(
         DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(),
-        d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_);
+        d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
+        DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
+        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
+        d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
 
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
@@ -726,7 +833,10 @@ void OptixRenderer::render_one_spp(
         d_nee_direct_buffer_, d_photon_indirect_buffer_,
         d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
         d_prof_photon_gather_, d_prof_bsdf_,
-        d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_);
+        d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
+        DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
+        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
+        d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
 
     lp.samples_per_pixel  = 1;
     lp.max_bounces        = max_bounces;
@@ -809,6 +919,61 @@ void OptixRenderer::build_cell_bin_grid()
 }
 
 // =====================================================================
+// build_volume_cell_bin_grid() -- build dense 3D grid from volume photons
+// =====================================================================
+void OptixRenderer::build_volume_cell_bin_grid()
+{
+    if (volume_photons_.size() == 0) {
+        std::cout << "[VolGrid] No volume photons — skipping grid build.\n";
+        vol_cell_grid_uploaded_ = false;
+        return;
+    }
+
+    // Ensure bin_idx is populated
+    if (volume_photons_.bin_idx.size() != volume_photons_.size()) {
+        PhotonBinDirs bin_dirs;
+        bin_dirs.init(PHOTON_BIN_COUNT);
+        volume_photons_.bin_idx.resize(volume_photons_.size());
+        for (size_t i = 0; i < volume_photons_.size(); ++i) {
+            float3 wi = make_f3(volume_photons_.wi_x[i],
+                                volume_photons_.wi_y[i],
+                                volume_photons_.wi_z[i]);
+            volume_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+        }
+    }
+
+    std::cout << "[VolGrid] Building dense 3D volume cell-bin grid ("
+              << PHOTON_BIN_COUNT << " bins/cell)...\n";
+    std::cout.flush();
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    vol_cell_bin_grid_.build(volume_photons_, gather_radius_, PHOTON_BIN_COUNT);
+
+    size_t total_cells = (size_t)vol_cell_bin_grid_.dim_x * vol_cell_bin_grid_.dim_y * vol_cell_bin_grid_.dim_z;
+    size_t total_bins  = total_cells * PHOTON_BIN_COUNT;
+    size_t bytes       = total_bins * sizeof(PhotonBin);
+
+    auto t_build = std::chrono::high_resolution_clock::now();
+    double ms_build = std::chrono::duration<double, std::milli>(t_build - t_start).count();
+
+    std::printf("[VolGrid] Grid: %d x %d x %d = %zu cells  (%.2f MB, %.1f ms)\n",
+                vol_cell_bin_grid_.dim_x, vol_cell_bin_grid_.dim_y, vol_cell_bin_grid_.dim_z,
+                total_cells, (double)bytes / (1024.0 * 1024.0), ms_build);
+
+    // Upload to device
+    d_vol_cell_bin_grid_.alloc(bytes);
+    CUDA_CHECK(cudaMemcpy(d_vol_cell_bin_grid_.d_ptr, vol_cell_bin_grid_.bins.data(),
+                          bytes, cudaMemcpyHostToDevice));
+
+    vol_cell_grid_uploaded_ = true;
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double ms_total = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    std::printf("[VolGrid] Upload done: %.1f ms total\n", ms_total);
+}
+
+// =====================================================================
 // render_final() -- full path tracing (is_final_render = 1)
 // =====================================================================
 void OptixRenderer::render_final(
@@ -852,7 +1017,10 @@ void OptixRenderer::render_final(
             d_nee_direct_buffer_, d_photon_indirect_buffer_,
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
-            d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_);
+            d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
+            config.volume_enabled, config.volume_density, config.volume_falloff,
+            config.volume_albedo, config.volume_samples, config.volume_max_t,
+            d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
 
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;

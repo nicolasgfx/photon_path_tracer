@@ -1268,7 +1268,7 @@ TEST(HashGrid, DenseRegion_HighPhotonDensity) {
     // Query at center should find all photons (all within radius)
     int count = 0;
     grid.query(make_f3(0, 0, 0), radius, photons,
-        [&](uint32_t idx, float dist2) {
+        [&](uint32_t /*idx*/, float dist2) {
             EXPECT_LE(dist2, radius * radius + kTol);
             count++;
         });

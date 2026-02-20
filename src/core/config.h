@@ -13,8 +13,8 @@
 // ── Active scene (switch here) ─────────────────────────────────────
 // Uncomment exactly ONE of these:
 //#define SCENE_CORNELL_BOX
-#define SCENE_CONFERENCE
-//#define SCENE_LIVING_ROOM
+//#define SCENE_CONFERENCE
+#define SCENE_LIVING_ROOM
 //#define SCENE_BREAKFAST_ROOM
 //#define SCENE_SIBENIK
 
@@ -34,7 +34,7 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 768;
 //   - Preview:  1–4 spp
 //   - Default:  16 spp (good balance)
 //   - Final:    64–256 spp depending on noise tolerance
-constexpr int   DEFAULT_SPP            = 64;   // samples per pixel
+constexpr int   DEFAULT_SPP            = 32;  // samples per pixel
 constexpr int   DEFAULT_MAX_BOUNCES    = 4;    // path depth
 constexpr int   DEFAULT_MIN_BOUNCES_RR = 3;    // start Russian roulette after this
 constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
@@ -44,8 +44,8 @@ constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
 //   - Preview:  50k–200k photons, radius 0.07–0.12
 //   - Default:  500k photons,     radius 0.05
 //   - Final:    1M–5M photons,    radius 0.02–0.05
-constexpr int   DEFAULT_NUM_PHOTONS    = 10000000;
-constexpr float DEFAULT_GATHER_RADIUS  = 0.3f;
+constexpr int   DEFAULT_NUM_PHOTONS    = 5000000;
+constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.02f;
 
 // Photon emission distribution tweak (variance reduction):
@@ -66,8 +66,8 @@ constexpr bool  DEBUG_PHOTON_SINGLE_BOUNCE = false;
 //   - Preview:  1
 //   - Default:  4
 //   - Final:    8–16 for softer shadows (scene dependent)
-constexpr int   DEFAULT_NEE_LIGHT_SAMPLES = 16;
-constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 8;  // bounces >= 1 (throughput attenuated)
+constexpr int   DEFAULT_NEE_LIGHT_SAMPLES = 64;
+constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 4;  // bounces >= 1 (throughput attenuated)
 
 // ── Integrator toggles ──────────────────────────────────────────────
 // Recommendation:
@@ -97,6 +97,29 @@ constexpr bool  ADAPTIVE_NOISE_USE_DIRECT_ONLY = false;
 // high-flux directions while keeping a cosine fallback for robustness.
 constexpr float DEFAULT_GUIDED_BSDF_MIX = 0.50f; // default 0.8
 
+// ── Participating medium (volumetric scattering / crepuscular rays) ──
+// Physically-based Rayleigh scattering in air (σ_s ∝ 1/λ⁴).
+// Set DEFAULT_VOLUME_ENABLED = true to activate.
+// Density controls overall optical thickness; falloff adds exponential
+// height decay  ρ(y) = ρ₀ · exp(-k·(y - y₀))  with k = falloff.
+constexpr bool  DEFAULT_VOLUME_ENABLED     = true;
+constexpr float DEFAULT_VOLUME_DENSITY     = 0.01f;    // base extinction scale (subtle haze)
+constexpr float DEFAULT_VOLUME_FALLOFF     = 0.0f;    // height falloff coefficient (0 = homogeneous)
+constexpr float DEFAULT_VOLUME_ALBEDO      = 0.95f;   // σ_s / σ_t (single-scatter albedo)
+constexpr int   DEFAULT_VOLUME_SAMPLES     = 2;       // medium samples per ray segment
+constexpr float DEFAULT_VOLUME_MAX_T       = 2.0f;    // max march distance (miss rays, scene units)
+
+// ── Depth of Field (thin-lens camera) ────────────────────────────────
+// Physically-based DOF via stochastic lens sampling.
+// Exposure is kept constant regardless of aperture (artist-friendly).
+// Set DEFAULT_DOF_ENABLED = true to activate.
+constexpr bool  DEFAULT_DOF_ENABLED        = true;
+constexpr float DEFAULT_DOF_FOCUS_DISTANCE = 0.1f;   // scene units (distance to focus plane)
+constexpr float DEFAULT_DOF_F_NUMBER       = 15.0f;   // f-stop (lower = more blur)
+constexpr float DEFAULT_DOF_SENSOR_HEIGHT  = 0.024f; // 24 mm full-frame sensor height
+constexpr float DEFAULT_DOF_FOCUS_RANGE    = 0.5f;   // scene units: depth of the in-focus slab
+                                                     // 0 = razor-thin plane, >0 = wider sharp zone
+
 // ── Photon directional bins (guided NEE / caching) ──────────────────
 // Higher counts can improve guidance but increase memory/time.
 // Recommendation: 32 is a good default.
@@ -115,9 +138,10 @@ constexpr int   MAX_PHOTON_BIN_COUNT  = 32;
 // =====================================================================
 
 // Stratified sub-pixel sampling grid.
-// Only used when `DEFAULT_SPP == STRATA_X * STRATA_Y`.
-constexpr int   STRATA_X = 4;
-constexpr int   STRATA_Y = 4;
+// SPP must equal STRATA_X × STRATA_Y for exactly one sample per stratum per render.
+// 8×8 = 64 matches DEFAULT_SPP=64: each pixel stratum is visited once per frame.
+constexpr int   STRATA_X = 8;
+constexpr int   STRATA_Y = 8;
 
 // Photon gather surface-consistency threshold (plane distance along normal).
 // Higher = more photons accepted across nearby surfaces (smoother but more bias).
@@ -134,8 +158,8 @@ constexpr float DEFAULT_SURFACE_TAU = 0.02f;
   constexpr const char* SCENE_OBJ_PATH        = "cornell_box/cornellbox.obj";
   constexpr const char* SCENE_DISPLAY_NAME     = "Cornell Box";
   constexpr bool  SCENE_IS_REFERENCE           = true;   // already in ref frame
-  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  2.5f };
-  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 40.0f;
   constexpr float SCENE_CAM_SPEED              = 0.5f;
 
@@ -143,8 +167,8 @@ constexpr float DEFAULT_SURFACE_TAU = 0.02f;
   constexpr const char* SCENE_OBJ_PATH        = "conference/conference.obj";
   constexpr const char* SCENE_DISPLAY_NAME     = "Conference Room";
   constexpr bool  SCENE_IS_REFERENCE           = false;
-  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  2.5f };
-  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 50.0f;
   constexpr float SCENE_CAM_SPEED              = 0.5f;
 
@@ -152,8 +176,8 @@ constexpr float DEFAULT_SURFACE_TAU = 0.02f;
   constexpr const char* SCENE_OBJ_PATH        = "living_room/living_room.obj";
   constexpr const char* SCENE_DISPLAY_NAME     = "Living Room";
   constexpr bool  SCENE_IS_REFERENCE           = false;
-  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  2.5f };
-  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 50.0f;
   constexpr float SCENE_CAM_SPEED              = 0.5f;
 
@@ -161,8 +185,8 @@ constexpr float DEFAULT_SURFACE_TAU = 0.02f;
   constexpr const char* SCENE_OBJ_PATH        = "breakfast_room/breakfast_room.obj";
   constexpr const char* SCENE_DISPLAY_NAME     = "Breakfast Room";
   constexpr bool  SCENE_IS_REFERENCE           = false;
-  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  2.5f };
-  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 50.0f;
   constexpr float SCENE_CAM_SPEED              = 0.5f;
 
@@ -170,8 +194,8 @@ constexpr float DEFAULT_SURFACE_TAU = 0.02f;
   constexpr const char* SCENE_OBJ_PATH        = "sibenik/sibenik.obj";
   constexpr const char* SCENE_DISPLAY_NAME     = "Sibenik Cathedral";
   constexpr bool  SCENE_IS_REFERENCE           = false;
-  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  2.5f };
-  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 50.0f;
   constexpr float SCENE_CAM_SPEED              = 0.5f;
 

@@ -8,6 +8,7 @@
 #include <sstream>
 #include <iostream>
 #include <unordered_map>
+#include <unordered_set>
 #include <filesystem>
 #include <algorithm>
 #include <cstring>
@@ -65,7 +66,9 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
     }
 
     std::cout << "[MTL] Loading: " << filepath << "\n";
-    Material* current = nullptr;
+    // Use an index instead of a raw pointer so reallocation of scene.materials
+    // never leaves us with a dangling pointer.
+    int current_idx = -1;
 
     std::string line;
     while (std::getline(file, line)) {
@@ -83,22 +86,22 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
 
             Material mat;
             mat.name = name;
-            mat_map[name] = (uint32_t)scene.materials.size();
+            current_idx = (int)scene.materials.size();
+            mat_map[name] = (uint32_t)current_idx;
             scene.materials.push_back(mat);
-            current = &scene.materials.back();
         }
-        else if (!current) {
+        else if (current_idx < 0) {
             continue;
         }
         else if (keyword == "Kd") {
             float r, g, b;
             ss >> r >> g >> b;
-            current->Kd = rgb_to_spectrum_reflectance(r, g, b);
+            scene.materials[current_idx].Kd = rgb_to_spectrum_reflectance(r, g, b);
         }
         else if (keyword == "Ks") {
             float r, g, b;
             ss >> r >> g >> b;
-            current->Ks = rgb_to_spectrum_reflectance(r, g, b);
+            scene.materials[current_idx].Ks = rgb_to_spectrum_reflectance(r, g, b);
         }
         else if (keyword == "Ke") {
             // Emission
@@ -107,42 +110,42 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             if (r > 0.f || g > 0.f || b > 0.f) {
                 // Convert RGB emission to spectral using emission basis
                 // (preserves absolute intensity, no white-normalisation)
-                current->Le = rgb_to_spectrum_emission(r, g, b);
-                current->type = MaterialType::Emissive;
+                scene.materials[current_idx].Le = rgb_to_spectrum_emission(r, g, b);
+                scene.materials[current_idx].type = MaterialType::Emissive;
             }
         }
         else if (keyword == "Ns") {
             float ns;
             ss >> ns;
             // Convert Phong exponent to roughness
-            current->roughness = sqrtf(2.0f / (ns + 2.0f));
+            scene.materials[current_idx].roughness = sqrtf(2.0f / (ns + 2.0f));
         }
         else if (keyword == "Ni") {
-            ss >> current->ior;
+            ss >> scene.materials[current_idx].ior;
         }
         else if (keyword == "illum") {
             int illum;
             ss >> illum;
             // Don't let illum override an already-set Emissive type
             // (Ke line may have been parsed before illum)
-            if (current->type == MaterialType::Emissive) continue;
+            if (scene.materials[current_idx].type == MaterialType::Emissive) continue;
             switch (illum) {
                 case 0: case 1:
-                    current->type = MaterialType::Lambertian;
+                    scene.materials[current_idx].type = MaterialType::Lambertian;
                     break;
                 case 2:
                     // Diffuse + specular
-                    if (current->Ks.max_component() > 0.01f)
-                        current->type = MaterialType::GlossyMetal;
+                    if (scene.materials[current_idx].Ks.max_component() > 0.01f)
+                        scene.materials[current_idx].type = MaterialType::GlossyMetal;
                     break;
                 case 3:
-                    current->type = MaterialType::Mirror;
+                    scene.materials[current_idx].type = MaterialType::Mirror;
                     break;
                 case 4: case 6: case 7:
-                    current->type = MaterialType::Glass;
+                    scene.materials[current_idx].type = MaterialType::Glass;
                     break;
                 case 5:
-                    current->type = MaterialType::Mirror;
+                    scene.materials[current_idx].type = MaterialType::Mirror;
                     break;
                 default:
                     break;
@@ -180,6 +183,7 @@ bool load_obj(const std::string& filepath, Scene& scene) {
     std::vector<float2> texcoords;
 
     std::unordered_map<std::string, uint32_t> mat_map;
+    std::unordered_set<std::string> loaded_mtls;   // track already-loaded MTL paths
     uint32_t current_material = 0;
     bool has_vertex_colors = false;
 
@@ -317,7 +321,12 @@ bool load_obj(const std::string& filepath, Scene& scene) {
             std::getline(ss >> std::ws, mtl_file);
             mtl_file = trim(mtl_file);
             std::string mtl_path = base_dir + "/" + mtl_file;
-            load_mtl(mtl_path, scene, mat_map, base_dir);
+            // Deduplicate: many OBJ files repeat mtllib once per group/object.
+            std::string canonical = fs::weakly_canonical(mtl_path).string();
+            if (loaded_mtls.count(canonical) == 0) {
+                loaded_mtls.insert(canonical);
+                load_mtl(mtl_path, scene, mat_map, base_dir);
+            }
         }
         else if (keyword == "usemtl") {
             std::string name;

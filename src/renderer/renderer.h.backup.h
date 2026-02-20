@@ -168,6 +168,7 @@ public:
     const HashGrid&  global_grid()     const { return global_grid_; }
     const HashGrid&  caustic_grid()    const { return caustic_grid_; }
 
+private:
     // Result of a single traced camera path
     struct TraceResult {
         Spectrum combined;    ///< full radiance (NEE + photon + emission)
@@ -178,8 +179,6 @@ public:
 
     // Trace a single camera path and return spectral radiance
     TraceResult trace_path(Ray ray, PCGRng& rng);
-
-private:
 
     // Debug render modes
     Spectrum render_normals(const HitRecord& hit);
@@ -198,7 +197,6 @@ private:
     HashGrid     global_grid_;
     HashGrid     caustic_grid_;
 
-    // Volume photons
-    PhotonSoA    volume_photons_;
+    // Volume photon cell-bin grid (built from volume photon deposits)
     CellBinGrid  volume_cell_grid_;
 };

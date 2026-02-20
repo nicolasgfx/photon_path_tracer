@@ -8,6 +8,8 @@
 #include "photon/density_estimator.h"
 #include "bsdf/bsdf.h"
 #include "core/random.h"
+#include "core/medium.h"
+#include "core/phase_function.h"
 
 #include <iostream>
 #include <chrono>
@@ -27,8 +29,15 @@ void Renderer::build_photon_maps() {
     emitter_cfg.max_bounces    = config_.max_bounces;
     emitter_cfg.rr_threshold   = config_.rr_threshold;
     emitter_cfg.min_bounces_rr = config_.min_bounces_rr;
+    emitter_cfg.volume_enabled = config_.volume_enabled;
+    emitter_cfg.volume_density = config_.volume_density;
+    emitter_cfg.volume_falloff = config_.volume_falloff;
+    emitter_cfg.volume_albedo  = config_.volume_albedo;
 
-    trace_photons(*scene_, emitter_cfg, global_photons_, caustic_photons_);
+    volume_photons_ = PhotonSoA{};           // reset
+    PhotonSoA* vol_ptr = config_.volume_enabled ? &volume_photons_ : nullptr;
+
+    trace_photons(*scene_, emitter_cfg, global_photons_, caustic_photons_, vol_ptr);
 
     auto t1 = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -37,6 +46,8 @@ void Renderer::build_photon_maps() {
               << ms << " ms\n";
     std::cout << "[Photon] Global map:  " << global_photons_.size() << " stored\n";
     std::cout << "[Photon] Caustic map: " << caustic_photons_.size() << " stored\n";
+    if (vol_ptr)
+        std::cout << "[Photon] Volume map:  " << volume_photons_.size() << " stored\n";
 
     // Build hash grids
     if (global_photons_.size() > 0) {
@@ -49,6 +60,23 @@ void Renderer::build_photon_maps() {
         caustic_grid_.build(caustic_photons_, config_.caustic_radius);
         std::cout << "[Grid] Caustic hash grid built ("
                   << caustic_grid_.table_size << " buckets)\n";
+    }
+
+    // Build volume photon cell-bin grid (stored in volume_photons_ member)
+    if (vol_ptr && volume_photons_.size() > 0) {
+        // Precompute bin indices for volume photons
+        PhotonBinDirs bin_dirs;
+        bin_dirs.init(PHOTON_BIN_COUNT);
+        volume_photons_.bin_idx.resize(volume_photons_.size());
+        for (size_t i = 0; i < volume_photons_.size(); ++i) {
+            float3 wi = make_f3(volume_photons_.wi_x[i],
+                                volume_photons_.wi_y[i],
+                                volume_photons_.wi_z[i]);
+            volume_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+        }
+        volume_cell_grid_.build(volume_photons_, config_.gather_radius, PHOTON_BIN_COUNT);
+        std::cout << "[Grid] Volume cell-bin grid built ("
+                  << volume_cell_grid_.total_cells() << " cells)\n";
     }
 }
 
@@ -66,6 +94,105 @@ Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
 
     for (int bounce = 0; bounce <= config_.max_bounces; ++bounce) {
         HitRecord hit = scene_->intersect(ray);
+
+        // ── Participating medium: transmittance + single scattering ──
+        if (config_.volume_enabled && config_.volume_density > 0.f) {
+            float t_end = hit.hit ? hit.t
+                                 : config_.volume_max_t;
+            if (t_end > 0.f) {
+                // Build medium at midpoint height for falloff
+                float mid_y = ray.origin.y
+                    + ray.direction.y * (t_end * 0.5f);
+                HomogeneousMedium med = make_rayleigh_medium(
+                    config_.volume_density, config_.volume_albedo,
+                    config_.volume_falloff, mid_y);
+
+                // Single-scattering estimate (stratified along segment)
+                int N = config_.volume_samples;
+                float inv_N = 1.f / (float)N;
+                for (int vs = 0; vs < N; ++vs) {
+                    float u_t = (vs + rng.next_float()) * inv_N;
+                    float t_sample = u_t * t_end;
+                    float3 x = ray.origin + ray.direction * t_sample;
+
+                    // Transmittance from camera to sample point
+                    Spectrum T_cam = transmittance(med, t_sample);
+
+                    // NEE: sample a light from this medium point
+                    if (!scene_->emissive_tri_indices.empty()) {
+                        DirectLightSample dls = sample_direct_light(
+                            x, make_f3(0,1,0) /* dummy normal */, *scene_, rng);
+                        if (dls.visible && dls.pdf_light > 0.f) {
+                            // Phase function
+                            float cos_theta = dot(dls.wi,
+                                ray.direction * (-1.f));
+                            float phase = rayleigh_phase(cos_theta);
+
+                            // Transmittance from sample to light
+                            Spectrum T_light = transmittance(med,
+                                dls.distance);
+
+                            // Contribution
+                            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                                float contrib = t_end * inv_N
+                                    * T_cam.value[i]
+                                    * med.sigma_s.value[i]
+                                    * phase
+                                    * T_light.value[i]
+                                    * dls.Li.value[i]
+                                    / fmaxf(dls.pdf_light, 1e-12f);
+                                L_total.value[i] += throughput.value[i]
+                                    * contrib;
+                            }
+                        }
+                    }
+
+                    // Volume photon grid gather (trilinear interpolation)
+                    if (volume_cell_grid_.total_cells() > 0) {
+                        auto tri = volume_cell_grid_.trilinear_cells(x);
+                        if (tri.count > 0) {
+                            float3 wo = ray.direction * (-1.f);
+                            float cell_vol = volume_cell_grid_.cell_size
+                                * volume_cell_grid_.cell_size
+                                * volume_cell_grid_.cell_size;
+                            // Each photon is scattered into a 3×3×3 = 27-cell
+                            // neighborhood during build(), so the effective
+                            // gather volume is 27× the single-cell volume.
+                            float gather_vol = 27.f * cell_vol;
+                            float inv_Nph = 1.0f / (float)config_.num_photons;
+                            for (int ci = 0; ci < tri.count; ++ci) {
+                                float cw = tri.weight[ci];
+                                const PhotonBin* vbins = &volume_cell_grid_.bins[
+                                    (size_t)tri.cell[ci] * PHOTON_BIN_COUNT];
+                                for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
+                                    if (vbins[k].count == 0) continue;
+                                    float cos_theta = dot(wo, make_f3(
+                                        vbins[k].dir_x, vbins[k].dir_y,
+                                        vbins[k].dir_z));
+                                    float phase = rayleigh_phase(cos_theta);
+                                    float bin_flux = vbins[k].flux;
+                                    float norm = bin_flux * phase * inv_Nph
+                                        * cw / fmaxf(gather_vol, 1e-20f);
+                                    for (int i = 0; i < NUM_LAMBDA; ++i) {
+                                        float contrib = t_end * inv_N
+                                            * T_cam.value[i]
+                                            * norm;
+                                        L_total.value[i] += throughput.value[i]
+                                            * contrib;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Apply transmittance to throughput for this segment
+                Spectrum T_seg = transmittance(med, t_end);
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    throughput.value[i] *= T_seg.value[i];
+            }
+        }
+
         if (!hit.hit) break;
 
         const Material& mat = scene_->materials[hit.material_id];

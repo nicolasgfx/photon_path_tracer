@@ -84,6 +84,23 @@ inline HD float3 sample_triangle(float u, float v) {
     return make_f3(alpha, beta, gamma); // barycentric coords
 }
 
+// Concentric disk sampling (Shirley & Chiu)
+// Maps uniform [0,1)² → unit disk with low distortion.
+inline HD float2 sample_concentric_disk(float u1, float u2) {
+    float a = 2.f * u1 - 1.f;
+    float b = 2.f * u2 - 1.f;
+    if (a == 0.f && b == 0.f) return make_f2(0.f, 0.f);
+    float r, phi;
+    if (a * a > b * b) {
+        r   = a;
+        phi = (PI / 4.f) * (b / a);
+    } else {
+        r   = b;
+        phi = (PI / 2.f) - (PI / 4.f) * (a / b);
+    }
+    return make_f2(r * cosf(phi), r * sinf(phi));
+}
+
 // Power heuristic for MIS (beta = 2)
 inline HD float power_heuristic(float pdf_a, float pdf_b) {
     float a2 = pdf_a * pdf_a;

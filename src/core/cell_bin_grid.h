@@ -52,6 +52,58 @@ struct CellBinGrid {
         return ix + iy * dim_x + iz * dim_x * dim_y;
     }
 
+    // ── Position → bins pointer (returns nullptr if grid is empty) ───
+    const PhotonBin* lookup(float3 pos) const {
+        if (bins.empty() || cell_size <= 0.f) return nullptr;
+        int idx = cell_index(pos.x, pos.y, pos.z);
+        return &bins[(size_t)idx * bin_count];
+    }
+
+    // ── Trilinear interpolation helper ───────────────────────────────
+    // Returns up to 8 cell indices and trilinear weights for smooth
+    // volume gather (eliminates hard cell-boundary artifacts).
+    struct TrilinearResult {
+        int   cell[8];
+        float weight[8];
+        int   count = 0;
+    };
+
+    TrilinearResult trilinear_cells(float3 pos) const {
+        TrilinearResult r;
+        r.count = 0;
+        if (bins.empty() || cell_size <= 0.f) return r;
+
+        // Position in cell-centre coordinates (cell centres at 0.5, 1.5, …)
+        float fx = (pos.x - min_x) / cell_size - 0.5f;
+        float fy = (pos.y - min_y) / cell_size - 0.5f;
+        float fz = (pos.z - min_z) / cell_size - 0.5f;
+
+        int ix0 = (int)std::floor(fx);  float tx = fx - ix0;
+        int iy0 = (int)std::floor(fy);  float ty = fy - iy0;
+        int iz0 = (int)std::floor(fz);  float tz = fz - iz0;
+
+        for (int c = 0; c < 8; ++c) {
+            int ix = (c & 1) ? ix0 + 1 : ix0;
+            int iy = (c & 2) ? iy0 + 1 : iy0;
+            int iz = (c & 4) ? iz0 + 1 : iz0;
+            // Clamp to grid bounds
+            ix = std::max(0, std::min(ix, dim_x - 1));
+            iy = std::max(0, std::min(iy, dim_y - 1));
+            iz = std::max(0, std::min(iz, dim_z - 1));
+
+            float wx = (c & 1) ? tx : (1.f - tx);
+            float wy = (c & 2) ? ty : (1.f - ty);
+            float wz = (c & 4) ? tz : (1.f - tz);
+            float w = wx * wy * wz;
+            if (w <= 0.f) continue;
+
+            r.cell[r.count]   = ix + iy * dim_x + iz * dim_x * dim_y;
+            r.weight[r.count] = w;
+            r.count++;
+        }
+        return r;
+    }
+
     // ── Build the dense grid from photon data ────────────────────────
     // `photons` must have bin_idx already precomputed.
     void build(const PhotonSoA& photons, float gather_radius, int num_bins) {

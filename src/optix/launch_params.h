@@ -45,6 +45,9 @@ struct LaunchParams {
     float3 cam_lower_left;
     float3 cam_horizontal;
     float3 cam_vertical;
+    float  cam_lens_radius;  // >0 enables thin-lens DOF
+    float  cam_focus_dist;   // focus distance (scene units), needed for focus-range jitter
+    float  cam_focus_range;  // >0 widens the in-focus zone into a slab
 
     // Rendering parameters
     int    samples_per_pixel;
@@ -111,6 +114,18 @@ struct LaunchParams {
     unsigned int* out_photon_count;  // atomic counter (device)
     int       max_stored_photons;
 
+    // Volume photon output buffers (for __raygen__photon_trace)
+    float*    out_vol_photon_pos_x;
+    float*    out_vol_photon_pos_y;
+    float*    out_vol_photon_pos_z;
+    float*    out_vol_photon_wi_x;
+    float*    out_vol_photon_wi_y;
+    float*    out_vol_photon_wi_z;
+    uint16_t* out_vol_photon_lambda;
+    float*    out_vol_photon_flux;
+    unsigned int* out_vol_photon_count;  // atomic counter (device)
+    int       max_stored_vol_photons;
+
     // ── GPU kernel profiling (per-pixel clock64 accumulators) ────────
     // Each buffer is [width * height] long long values.
     // Set to nullptr to disable profiling.
@@ -126,6 +141,14 @@ struct LaunchParams {
     float*   lum_sum2;      // [width * height]  Σ Y_i²
     uint8_t* active_mask;   // [width * height]  1 = trace this pixel, 0 = skip
 
+    // ── Participating medium (volumetric scattering) ────────────────
+    int   volume_enabled;       // 0 = off, 1 = on
+    float volume_density;       // base extinction scale
+    float volume_falloff;       // exponential height decay (0 = homogeneous)
+    float volume_albedo;        // σ_s / σ_t
+    int   volume_samples;       // medium samples per ray segment
+    float volume_max_t;         // max march distance for miss rays
+
     // ── Dense 3D cell-bin grid (replaces per-pixel bin cache) ────────
     // Precomputed on CPU, uploaded once.  Each grid cell contains
     // PHOTON_BIN_COUNT directional bins with accumulated flux from
@@ -140,6 +163,20 @@ struct LaunchParams {
     int        cell_grid_dim_x;     // grid dimensions
     int        cell_grid_dim_y;
     int        cell_grid_dim_z;
+
+    // ── Dense 3D cell-bin grid for VOLUME photons ────────────────────
+    // Same structure as the surface grid but stores photons deposited
+    // inside the medium (free-flight scattering events).  Used for
+    // multi-scatter volume radiance via phase-function gathering.
+    PhotonBin* vol_cell_bin_grid;        // [vol_grid_total_cells * photon_bin_count]
+    int        vol_cell_grid_valid;      // 1 = grid uploaded, 0 = not available
+    float      vol_cell_grid_min_x;
+    float      vol_cell_grid_min_y;
+    float      vol_cell_grid_min_z;
+    float      vol_cell_grid_cell_size;
+    int        vol_cell_grid_dim_x;
+    int        vol_cell_grid_dim_y;
+    int        vol_cell_grid_dim_z;
 
 #ifdef PPT_USE_OPTIX
     OptixTraversableHandle traversable;

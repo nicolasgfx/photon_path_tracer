@@ -1,8 +1,9 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// camera.h – Pinhole camera model
+// camera.h – Thin-lens camera model (pinhole when lens_radius == 0)
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
+#include "core/config.h"
 #include "core/random.h"
 
 struct Camera {
@@ -14,6 +15,17 @@ struct Camera {
     int    width;
     int    height;
 
+    // ── Depth of field parameters ───────────────────────────────────
+    bool   dof_enabled     = DEFAULT_DOF_ENABLED;
+    float  dof_focus_dist  = DEFAULT_DOF_FOCUS_DISTANCE; // scene units
+    float  dof_f_number    = DEFAULT_DOF_F_NUMBER;
+    float  sensor_height   = DEFAULT_DOF_SENSOR_HEIGHT;  // metres (0.024 = 24 mm)
+    float  dof_focus_range = DEFAULT_DOF_FOCUS_RANGE;    // 0 = thin plane, >0 = in-focus slab depth
+
+    // Derived DOF (computed by update())
+    float  focal_length = 0.f;   // computed from sensor_height + fov_deg
+    float  lens_radius  = 0.f;   // 0 → pinhole
+
     // Derived (call update() after modifying parameters)
     float3 u, v, w;   // Camera frame: w = -look_direction
     float3 lower_left;
@@ -24,16 +36,28 @@ struct Camera {
         float aspect = (float)width / (float)height;
         float theta  = fov_deg * PI / 180.0f;
         float h = tanf(theta * 0.5f);
-        float viewport_h = 2.0f * h;
-        float viewport_w = aspect * viewport_h;
 
+        // Compute camera basis
         w = normalize(position - look_at);
         u = normalize(cross(up, w));
         v = cross(w, u);
 
+        // DOF derived values
+        focal_length = sensor_height / (2.0f * h);  // f = H / (2 tan(fov/2))
+        lens_radius  = dof_enabled ? focal_length / (2.0f * dof_f_number) : 0.f;
+
+        // Build view plane.  When DOF is active the plane sits at the
+        // focus distance so that the focus-plane target is used for
+        // thin-lens ray construction.  When DOF is off (lens_radius==0)
+        // the focus distance factor is 1.0 (unit plane), recovering the
+        // original pinhole math.
+        float focus_factor = (lens_radius > 0.f) ? dof_focus_dist : 1.0f;
+        float viewport_h = 2.0f * h * focus_factor;
+        float viewport_w = aspect * viewport_h;
+
         horizontal = u * viewport_w;
         vertical   = v * viewport_h;
-        lower_left = position - horizontal * 0.5f - vertical * 0.5f - w;
+        lower_left = position - horizontal * 0.5f - vertical * 0.5f - w * focus_factor;
     }
 
     // Generate a ray for pixel (px, py) with jitter for anti-aliasing
@@ -41,9 +65,21 @@ struct Camera {
         float s = ((float)px + rng.next_float()) / (float)width;
         float t = ((float)py + rng.next_float()) / (float)height;
 
+        // Focus-plane target (same whether DOF is on or off)
+        float3 target = lower_left + horizontal * s + vertical * t;
+
         Ray ray;
-        ray.origin    = position;
-        ray.direction = normalize(lower_left + horizontal * s + vertical * t - position);
+        if (lens_radius > 0.f) {
+            // Thin-lens: sample a point on the circular aperture
+            float2 disk = sample_concentric_disk(rng.next_float(), rng.next_float());
+            float3 lens_offset = (u * disk.x + v * disk.y) * lens_radius;
+            ray.origin    = position + lens_offset;
+            ray.direction = normalize(target - ray.origin);
+        } else {
+            // Pinhole (original behaviour)
+            ray.origin    = position;
+            ray.direction = normalize(target - position);
+        }
         return ray;
     }
 
