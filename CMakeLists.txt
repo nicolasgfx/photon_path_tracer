@@ -76,12 +76,16 @@ target_include_directories(photon_tracer PRIVATE
 )
 
 find_package(OpenGL REQUIRED)
+find_package(OpenMP)
 
 target_link_libraries(photon_tracer PRIVATE
     CUDA::cudart
     glfw
     OpenGL::GL
 )
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(photon_tracer PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 # CUDA architecture
 set_target_properties(photon_tracer PROPERTIES
@@ -194,6 +198,9 @@ if(PPT_BUILD_TESTS)
         GTest::gtest_main
         CUDA::cudart
     )
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(ppt_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
     target_compile_features(ppt_tests PRIVATE cxx_std_17)
     target_compile_definitions(ppt_tests PRIVATE
         SCENES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scenes"

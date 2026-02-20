@@ -109,13 +109,13 @@ echo [testruns] Generating summary...
     echo.
 
     REM -- Overall counts
-    echo --- Test Counts ---
+    echo  ~~~ Test Counts ~~~
     findstr /c:"PASSED" "%RUN_DIR%\full_output.txt" | findstr /c:"test"
     findstr /c:"FAILED" "%RUN_DIR%\full_output.txt" | findstr /c:"test"
     echo.
 
     REM -- Pixel comparison metrics (most relevant)
-    echo --- Pixel Comparison (128x128, GT vs Optimized) ---
+    echo  ~~~ Pixel Comparison (128x128, GT vs Optimized) ~~~
     findstr /c:"[NEE-DirectOnly]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[PhotonIndirect]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[Combined   ]" "%RUN_DIR%\full_output.txt"
@@ -123,20 +123,20 @@ echo [testruns] Generating summary...
     echo.
 
     REM -- Shadow & spatial
-    echo --- Shadow & Spatial ---
+    echo  ~~~ Shadow and Spatial ~~~
     findstr /c:"[ShadowIndirect]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[Spatial]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[Decomposition]" "%RUN_DIR%\full_output.txt"
     echo.
 
     REM -- Photon lobe & spectral
-    echo --- Photon Lobe ^& Spectral ---
+    echo  ~~~ Photon Lobe and Spectral ~~~
     findstr /c:"[PhotonLobe]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[SpectralBin]" "%RUN_DIR%\full_output.txt"
     echo.
 
     REM -- Ground truth comparison (existing tests)
-    echo --- Ground Truth Comparison ---
+    echo  ~~~ Ground Truth Comparison ~~~
     findstr /c:"[CenterPixel]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[FullImage]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[Variance]" "%RUN_DIR%\full_output.txt"
@@ -147,14 +147,14 @@ echo [testruns] Generating summary...
     echo.
 
     REM -- Per-ray validation
-    echo --- Per-Ray Validation ---
+    echo  ~~~ Per-Ray Validation ~~~
     findstr /c:"Combined relErr:" "%RUN_DIR%\full_output.txt"
     findstr /c:"[Decomposition]" "%RUN_DIR%\full_output.txt"
     findstr /c:"[SpectralBins]" "%RUN_DIR%\full_output.txt"
     echo.
 
     REM -- Images saved
-    echo --- Comparison Images ---
+    echo  ~~~ Comparison Images ~~~
     findstr /c:"[SaveImages]" "%RUN_DIR%\full_output.txt"
     echo.
 

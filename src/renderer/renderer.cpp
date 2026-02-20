@@ -283,14 +283,16 @@ void Renderer::render_frame() {
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    int total_pixels = config_.image_width * config_.image_height;
-    int progress_step = total_pixels / 20;
+    int height = config_.image_height;
+    int width  = config_.image_width;
+    int spp    = config_.samples_per_pixel;
 
-    for (int y = 0; y < config_.image_height; ++y) {
-        for (int x = 0; x < config_.image_width; ++x) {
-            int pixel_idx = y * config_.image_width + x;
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int pixel_idx = y * width + x;
 
-            for (int s = 0; s < config_.samples_per_pixel; ++s) {
+            for (int s = 0; s < spp; ++s) {
                 PCGRng rng = PCGRng::seed(
                     (uint64_t)pixel_idx * 1000 + s,
                     (uint64_t)pixel_idx + 1);
@@ -298,12 +300,6 @@ void Renderer::render_frame() {
                 Ray ray = camera_.generate_ray(x, y, rng);
                 Spectrum L = trace_path(ray, rng);
                 fb_.accumulate(x, y, L);
-            }
-
-            // Progress reporting
-            if (progress_step > 0 && pixel_idx % progress_step == 0) {
-                float pct = 100.f * (float)pixel_idx / (float)total_pixels;
-                std::cout << "\r[Render] " << (int)pct << "%" << std::flush;
             }
         }
     }

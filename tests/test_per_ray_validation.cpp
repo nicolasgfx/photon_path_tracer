@@ -961,12 +961,15 @@ static AggregateStats run_per_ray_validation(
     double gt_nee_sum = 0, opt_nee_sum = 0;
     double gt_phot_sum = 0, opt_phot_sum = 0;
 
-    const int progress_step = std::max(1, num_rays / 10);
+    // Per-ray results stored for thread-safe parallel access
+    struct RayResult {
+        RayDiagnostic diag;
+        bool has_warning = false;
+    };
+    std::vector<RayResult> ray_results(num_rays);
+
+    #pragma omp parallel for schedule(dynamic, 4)
     for (int i = 0; i < num_rays; ++i) {
-        if (i % progress_step == 0) {
-            std::cout << "[PerRayValidation]  ray " << i << "/" << num_rays
-                      << " (" << (i * 100 / num_rays) << "%)" << std::endl;
-        }
         const auto& r = rays[i];
 
         PCGRng rng_ray = PCGRng::seed(r.seed, (uint64_t)i);
@@ -980,7 +983,13 @@ static AggregateStats run_per_ray_validation(
         auto opt = optimized_trace_steps(
             ray.origin, ray.direction, rng_opt, ds, max_bounces);
 
-        auto diag = diagnose_ray(i, r.px, r.py, gt, opt);
+        ray_results[i].diag = diagnose_ray(i, r.px, r.py, gt, opt);
+        ray_results[i].has_warning = ray_results[i].diag.has_warning();
+    }
+
+    // Sequential reduction over results
+    for (int i = 0; i < num_rays; ++i) {
+        const auto& diag = ray_results[i].diag;
 
         gt_sum     += diag.gt_combined_sum;
         opt_sum    += diag.opt_combined_sum;
@@ -998,7 +1007,7 @@ static AggregateStats run_per_ray_validation(
 
         agg.total_validity_issues += diag.validity_issues;
 
-        if (diag.has_warning()) {
+        if (ray_results[i].has_warning) {
             agg.rays_with_warnings++;
             all_warnings.push_back(diag);
         }

@@ -29,7 +29,6 @@
 #include "core/photon_bins.h"
 #include "core/cdf.h"
 #include "core/nee_sampling.h"
-#include "core/photon_density_cache.h"
 #include "core/guided_nee.h"
 
 // ---------------------------------------------------------------------
@@ -401,117 +400,26 @@ Spectrum dev_estimate_photon_density(
     return L;
 }
 
-// == Hash grid photon gather + local bin population (device-side) =====
-// Same gather loop as dev_estimate_photon_density but also populates
-// local bins using precomputed per-photon bin_idx for O(1) lookup.
+// == Dense cell-bin grid O(1) lookup (device-side) ====================
+// Returns a pointer to the PHOTON_BIN_COUNT precomputed bins for the
+// cell that contains pos, or nullptr if the grid is invalid / pos is
+// outside the grid.
 __forceinline__ __device__
-Spectrum dev_estimate_photon_density_with_bins(
-    float3 pos, float3 normal, float3 wo_local, uint32_t mat_id,
-    float radius,
-    PhotonBin* local_bins, int num_bins, float& total_bin_flux)
-{
-    Spectrum L = Spectrum::zero();
-    total_bin_flux = 0.0f;
-
-    // Zero-initialize local bins
-    for (int k = 0; k < num_bins; ++k) {
-        local_bins[k].flux   = 0.0f;
-        local_bins[k].dir_x  = 0.0f;
-        local_bins[k].dir_y  = 0.0f;
-        local_bins[k].dir_z  = 0.0f;
-        local_bins[k].weight = 0.0f;
-        local_bins[k].count  = 0;
-    }
-
-    if (params.num_photons == 0 || params.grid_table_size == 0) return L;
-
-    float cell_size = params.grid_cell_size;
-    int cx0 = (int)floorf((pos.x - radius) / cell_size);
-    int cy0 = (int)floorf((pos.y - radius) / cell_size);
-    int cz0 = (int)floorf((pos.z - radius) / cell_size);
-    int cx1 = (int)floorf((pos.x + radius) / cell_size);
-    int cy1 = (int)floorf((pos.y + radius) / cell_size);
-    int cz1 = (int)floorf((pos.z + radius) / cell_size);
-
-    float r2 = radius * radius;
-    float inv_area = 1.f / (PI * r2);
-    int count = 0;
-
-    for (int iz = cz0; iz <= cz1; ++iz)
-    for (int iy = cy0; iy <= cy1; ++iy)
-    for (int ix = cx0; ix <= cx1; ++ix) {
-        uint32_t key = dev_hash_cell(ix, iy, iz, params.grid_table_size);
-        uint32_t start = params.grid_cell_start[key];
-        uint32_t end   = params.grid_cell_end[key];
-        if (start == 0xFFFFFFFF) continue;
-
-        for (uint32_t j = start; j < end; ++j) {
-            uint32_t idx = params.grid_sorted_indices[j];
-            float3 pp = make_f3(
-                params.photon_pos_x[idx],
-                params.photon_pos_y[idx],
-                params.photon_pos_z[idx]);
-
-            float3 diff = pos - pp;
-            float d2 = dot(diff, diff);
-            if (d2 > r2) continue;
-
-            float plane_dist = fabsf(dot(diff, normal));
-            if (plane_dist > DEFAULT_SURFACE_TAU) continue;
-
-            float w = 1.f - d2 / r2; // Epanechnikov kernel
-
-            float3 wi_world = make_f3(
-                params.photon_wi_x[idx],
-                params.photon_wi_y[idx],
-                params.photon_wi_z[idx]);
-
-            // Photon density estimation (same as dev_estimate_photon_density)
-            DevONB frame = DevONB::from_normal(normal);
-            float3 wi_local = frame.world_to_local(wi_world);
-            Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local);
-            float flux = params.photon_flux[idx];
-            int bin = params.photon_lambda[idx];
-            L.value[bin] += f.value[bin] * flux * w * inv_area;
-
-            // Local bin population using precomputed bin_idx (O(1))
-            int k = (params.photon_bin_idx != nullptr)
-                  ? (int)params.photon_bin_idx[idx]
-                  : 0;
-            if (k >= num_bins) k = 0;  // safety clamp
-            local_bins[k].flux   += flux * w;
-            local_bins[k].dir_x  += wi_world.x * flux * w;
-            local_bins[k].dir_y  += wi_world.y * flux * w;
-            local_bins[k].dir_z  += wi_world.z * flux * w;
-            local_bins[k].weight += w;
-            local_bins[k].count  += 1;
-
-            count++;
-        }
-    }
-
-    if (count > 0) {
-        float norm = 1.5f / (float)params.num_photons;
-        for (int i = 0; i < NUM_LAMBDA; ++i) L.value[i] *= norm;
-    }
-
-    // Normalize bin centroid directions and compute total flux
-    for (int k = 0; k < num_bins; ++k) {
-        if (local_bins[k].count > 0) {
-            float3 d = make_f3(local_bins[k].dir_x,
-                               local_bins[k].dir_y,
-                               local_bins[k].dir_z);
-            float len = length(d);
-            if (len > 1e-8f) {
-                local_bins[k].dir_x = d.x / len;
-                local_bins[k].dir_y = d.y / len;
-                local_bins[k].dir_z = d.z / len;
-            }
-        }
-        total_bin_flux += local_bins[k].flux;
-    }
-
-    return L;
+const PhotonBin* dev_cell_grid_lookup(float3 pos) {
+    if (params.cell_grid_valid == 0 || params.cell_bin_grid == nullptr)
+        return nullptr;
+    float cs = params.cell_grid_cell_size;
+    if (cs <= 0.0f) return nullptr;
+    int ix = (int)floorf((pos.x - params.cell_grid_min_x) / cs);
+    int iy = (int)floorf((pos.y - params.cell_grid_min_y) / cs);
+    int iz = (int)floorf((pos.z - params.cell_grid_min_z) / cs);
+    // Clamp to grid bounds
+    if (ix < 0) ix = 0; else if (ix >= params.cell_grid_dim_x) ix = params.cell_grid_dim_x - 1;
+    if (iy < 0) iy = 0; else if (iy >= params.cell_grid_dim_y) iy = params.cell_grid_dim_y - 1;
+    if (iz < 0) iz = 0; else if (iz >= params.cell_grid_dim_z) iz = params.cell_grid_dim_z - 1;
+    int cell = ix + iy * params.cell_grid_dim_x
+             + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
+    return &params.cell_bin_grid[cell * params.photon_bin_count];
 }
 
 // == Cone sampling (uniform direction within cone of half-angle) ======
@@ -539,26 +447,27 @@ float3 dev_sample_guided_bounce(
     const PhotonBin* bins, int N, float3 normal,
     const PhotonBinDirs& bin_dirs, PCGRng& rng)
 {
-    // Build CDF from bin fluxes (hemisphere-only bins)
+    // Build CDF from bin fluxes — ONLY positive-hemisphere bins
+    // (bins whose centroid has dot(dir, normal) > 0)
     float cdf[MAX_PHOTON_BIN_COUNT];
     float total = 0.0f;
     for (int k = 0; k < N; ++k) {
         float3 bdir = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
         float cos_n = dot(bdir, normal);
-        if (cos_n <= -PHOTON_BIN_HORIZON_EPS || bins[k].count == 0) {
+        if (cos_n <= 0.0f || bins[k].count == 0) {
             cdf[k] = total;
             continue;
         }
-        total += bins[k].flux * fmaxf(cos_n, 0.0f);
+        total += bins[k].flux * cos_n;
         cdf[k] = total;
     }
 
-    // Fallback to cosine hemisphere if no flux
+    // Fallback to cosine hemisphere if no flux in positive hemisphere
     if (total <= 0.0f) {
         return sample_cosine_hemisphere_dev(rng);
     }
 
-    // Select bin via CDF
+    // Select bin via CDF (highest-flux bins have highest probability)
     float xi = rng.next_float() * total;
     int selected = N - 1;
     for (int k = 0; k < N; ++k) {
@@ -575,157 +484,80 @@ float3 dev_sample_guided_bounce(
 
     // Cone half-angle ≈ arccos(1 - 2/N)
     float cos_half = 1.0f - 2.0f / (float)N;
-    float3 wi = sample_cone_dev(bin_dir, cos_half, rng);
 
-    // Clamp to positive hemisphere
-    if (dot(wi, normal) <= 0.0f) {
-        // Reflect across tangent plane
-        wi = wi - normal * (2.0f * dot(wi, normal));
+    // Sample cone direction; resample if it falls below hemisphere
+    // (only possible for near-horizon bins where cone straddles tangent plane)
+    float3 wi;
+    const int MAX_RESAMPLE = 8;
+    for (int attempt = 0; attempt < MAX_RESAMPLE; ++attempt) {
+        wi = sample_cone_dev(bin_dir, cos_half, rng);
+        if (dot(wi, normal) > 0.0f) return wi;
     }
 
-    return wi;
+    // All resamples went below hemisphere — use bin centroid directly
+    // (it is guaranteed positive-hemisphere by the CDF filter above)
+    return bin_dir;
 }
 
-// == Populate photon bins for a single pixel ==========================
-// Called from __raygen__render when populate_bins_mode = 1.
-// Traces center ray, gathers photons, writes bins to cache.
+// == Guided bounce PDF (solid-angle) =================================
+// Matches dev_sample_guided_bounce():
+//   - Only positive-hemisphere bins participate (dot(dir, normal) > 0)
+//   - Select bin with weight flux * dot(bin_dir, normal)
+//   - Sample uniformly in a cone about that bin's centroid
+//   - Below-hemisphere jitter is rejected (resampled), not reflected
+//
+// The PDF is simply: sum over all bins that could produce wi
+//   p(wi) = Σ_k [ p_select(k) × p_cone(wi | k) ]
+// where p_cone is nonzero only if wi falls within bin k's cone.
 __forceinline__ __device__
-void dev_populate_bins_for_pixel(int pixel_idx, float3 origin, float3 direction) {
-    const int N = params.photon_bin_count;
+float dev_guided_bounce_pdf(
+    float3 wi,
+    const PhotonBin* bins, int N, float3 normal,
+    const PhotonBinDirs& bin_dirs)
+{
+    if (bins == nullptr || N <= 0) return 0.0f;
+    if (dot(wi, normal) <= 0.0f) return 0.0f;
 
-    // Initialize bins to zero
-    PhotonBin bins[MAX_PHOTON_BIN_COUNT];
+    // Cone half-angle used in sampling
+    float cos_half = 1.0f - 2.0f / (float)N;
+    cos_half = fminf(fmaxf(cos_half, -1.0f), 1.0f);
+
+    // Uniform cone PDF = 1 / (2π(1 - cos_half))
+    float cone_omega = TWO_PI * (1.0f - cos_half);
+    if (cone_omega <= 1e-12f) return 0.0f;
+    float pdf_cone = 1.0f / cone_omega;
+
+    // Build selection weights — only positive-hemisphere bins (same as sampler)
+    float total = 0.0f;
     for (int k = 0; k < N; ++k) {
-        bins[k].flux   = 0.0f;
-        bins[k].dir_x  = 0.0f;
-        bins[k].dir_y  = 0.0f;
-        bins[k].dir_z  = 0.0f;
-        bins[k].weight = 0.0f;
-        bins[k].count  = 0;
+        if (bins[k].count == 0) continue;
+        float3 axis = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
+        float len = length(axis);
+        axis = (len > 1e-6f) ? axis * (1.0f / len) : bin_dirs.dirs[k];
+        float cos_n = dot(axis, normal);
+        if (cos_n <= 0.0f) continue;
+        total += bins[k].flux * cos_n;
     }
+    if (total <= 0.0f) return 0.0f;
 
-    // Build Fibonacci bin directions
-    PhotonBinDirs bin_dirs;
-    bin_dirs.init(N);
-
-    // Trace center ray — follow specular bounces to first diffuse hit
-    float3 pos = origin;
-    float3 dir = direction;
-    float3 normal;
-    uint32_t mat_id = 0;
-    bool found_diffuse = false;
-
-    for (int bounce = 0; bounce < 8; ++bounce) {
-        TraceResult hit = trace_radiance(pos, dir);
-        if (!hit.hit) break;
-
-        mat_id = hit.material_id;
-
-        // Skip emissive
-        if (dev_is_emissive(mat_id)) break;
-
-        // Diffuse surface found
-        if (!dev_is_specular(mat_id)) {
-            pos = hit.position;
-            normal = hit.shading_normal;
-            found_diffuse = true;
-            break;
-        }
-
-        // Mirror bounce
-        float3 n = hit.shading_normal;
-        dir = dir - n * (2.f * dot(dir, n));
-        pos = hit.position + n * OPTIX_SCENE_EPSILON;
-    }
-
-    if (!found_diffuse) {
-        // Write empty bins
-        for (int k = 0; k < N; ++k)
-            params.photon_bin_cache[pixel_idx * N + k] = bins[k];
-        return;
-    }
-
-    // Gather photons from hash grid and populate bins
-    if (params.num_photons == 0 || params.grid_table_size == 0) {
-        for (int k = 0; k < N; ++k)
-            params.photon_bin_cache[pixel_idx * N + k] = bins[k];
-        return;
-    }
-
-    float radius = params.gather_radius;
-    float cell_size = params.grid_cell_size;
-    float r2 = radius * radius;
-
-    int cx0 = (int)floorf((pos.x - radius) / cell_size);
-    int cy0 = (int)floorf((pos.y - radius) / cell_size);
-    int cz0 = (int)floorf((pos.z - radius) / cell_size);
-    int cx1 = (int)floorf((pos.x + radius) / cell_size);
-    int cy1 = (int)floorf((pos.y + radius) / cell_size);
-    int cz1 = (int)floorf((pos.z + radius) / cell_size);
-
-    for (int iz = cz0; iz <= cz1; ++iz)
-    for (int iy = cy0; iy <= cy1; ++iy)
-    for (int ix = cx0; ix <= cx1; ++ix) {
-        uint32_t key = dev_hash_cell(ix, iy, iz, params.grid_table_size);
-        uint32_t start = params.grid_cell_start[key];
-        uint32_t end   = params.grid_cell_end[key];
-        if (start == 0xFFFFFFFF) continue;
-
-        for (uint32_t j = start; j < end; ++j) {
-
-            uint32_t idx = params.grid_sorted_indices[j];
-            float3 pp = make_f3(
-                params.photon_pos_x[idx],
-                params.photon_pos_y[idx],
-                params.photon_pos_z[idx]);
-
-            float3 diff = pos - pp;
-            float d2 = dot(diff, diff);
-            if (d2 > r2) continue;
-
-            float plane_dist = fabsf(dot(diff, normal));
-            if (plane_dist > DEFAULT_SURFACE_TAU) continue;
-
-            float w = 1.0f - d2 / r2; // Epanechnikov kernel
-
-            float3 wi_world = make_f3(
-                params.photon_wi_x[idx],
-                params.photon_wi_y[idx],
-                params.photon_wi_z[idx]);
-
-            int k = bin_dirs.find_nearest(wi_world);
-
-            float flux = params.photon_flux[idx];
-            bins[k].flux   += flux * w;
-            bins[k].dir_x  += wi_world.x * flux * w;
-            bins[k].dir_y  += wi_world.y * flux * w;
-            bins[k].dir_z  += wi_world.z * flux * w;
-            bins[k].weight += w;
-            bins[k].count  += 1;
-        }
-    }
-
-    // Normalize centroid directions
+    float pdf = 0.0f;
     for (int k = 0; k < N; ++k) {
-        if (bins[k].count > 0) {
-            float3 d = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
-            float len = length(d);
-            if (len > 1e-8f) {
-                bins[k].dir_x = d.x / len;
-                bins[k].dir_y = d.y / len;
-                bins[k].dir_z = d.z / len;
-            } else {
-                // Fallback to Fibonacci center
-                bins[k].dir_x = bin_dirs.dirs[k].x;
-                bins[k].dir_y = bin_dirs.dirs[k].y;
-                bins[k].dir_z = bin_dirs.dirs[k].z;
-            }
-        }
+        if (bins[k].count == 0) continue;
+        float3 axis = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
+        float len = length(axis);
+        axis = (len > 1e-6f) ? axis * (1.0f / len) : bin_dirs.dirs[k];
+        float cos_n = dot(axis, normal);
+        if (cos_n <= 0.0f) continue;
+
+        float w = bins[k].flux * cos_n;
+        float p_sel = w / total;
+
+        // In-cone check: wi falls within this bin's cone
+        if (dot(axis, wi) >= cos_half)
+            pdf += p_sel * pdf_cone;
     }
 
-    // Write bins to cache
-    for (int k = 0; k < N; ++k)
-        params.photon_bin_cache[pixel_idx * N + k] = bins[k];
+    return pdf;
 }
 
 // == Sample triangle barycentric (device) =============================
@@ -1008,9 +840,23 @@ NeeResult dev_nee_guided(float3 pos, float3 normal, float3 wo_local,
         float p_y_area = p_guided / light_area;
         float p_wi     = p_y_area * dist2 / cos_y;
 
-        // Accumulate f * Le * cos_x / p_wi
+        // MIS vs BSDF sampling (guided/cosine mixture)
+        float w_mis = 1.0f;
+        if (DEFAULT_USE_MIS) {
+            float p_guided_bsdf = fminf(fmaxf(DEFAULT_GUIDED_BSDF_MIX, 0.0f), 1.0f);
+            // Cosine BSDF PDF in local space
+            float pdf_cos = dev_bsdf_pdf(wi_local);
+            // Guided BSDF PDF in world space (only if bins are valid)
+            float pdf_guided = (p_guided_bsdf > 0.0f)
+                ? dev_guided_bounce_pdf(wi, bins, N, normal, bin_dirs)
+                : 0.0f;
+            float pdf_bsdf = p_guided_bsdf * pdf_guided + (1.0f - p_guided_bsdf) * pdf_cos;
+            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
+        }
+
+        // Accumulate MIS-weighted: f * Le * cos_x / p_wi
         for (int i = 0; i < NUM_LAMBDA; ++i) {
-            result.L.value[i] += f.value[i] * Le.value[i]
+            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
                           * cos_x / fmaxf(p_wi, 1e-8f);
         }
     }
@@ -1116,9 +962,16 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
         float p_y_area = p_tri / light_area;
         float p_wi     = p_y_area * dist2 / cos_y;
 
-        // Step G — Accumulate  f * Le * cos_x / p_wi
+        // MIS vs BSDF sampling (cosine hemisphere)
+        float w_mis = 1.0f;
+        if (DEFAULT_USE_MIS) {
+            float pdf_bsdf = dev_bsdf_pdf(wi_local);
+            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
+        }
+
+        // Step G — Accumulate MIS-weighted: f * Le * cos_x / p_wi
         for (int i = 0; i < NUM_LAMBDA; ++i) {
-            result.L.value[i] += f.value[i] * Le.value[i]
+            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
                           * cos_x / fmaxf(p_wi, 1e-8f);
         }
     }
@@ -1126,13 +979,13 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
     // Average over M samples
     if (M > 1) {
         float inv_M = 1.f / (float)M;
-        for (int i = 0; i < NUM_LAMBDA; ++i)
-            result.L.value[i] *= inv_M;
-    }
+		for (int i = 0; i < NUM_LAMBDA; ++i)
+			result.L.value[i] *= inv_M;
+	}
 
     result.visibility = (float)visible_count / (float)M;
     return result;
-}
+	}
 
 // =====================================================================
 // FULL PATH TRACING (final render only)
@@ -1175,18 +1028,14 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
 
     Spectrum throughput = Spectrum::constant(1.0f);
     bool prev_was_specular = true; // treat camera ray as specular for emission
+    bool  last_was_diffuse  = false;
+    float last_pdf_bsdf_dir = 0.0f;
 
     // Pre-load bin directions for guided NEE / bounce.
-    // Available when per-pixel bin cache exists OR per-photon bin_idx is set.
-    const bool use_pixel_bins = (params.photon_bins_valid == 1 && params.photon_bin_cache != nullptr);
-    const bool have_bin_idx   = (params.photon_bin_idx != nullptr);
+    // Used only when the dense cell-bin grid is available.
+    const bool have_cell_grid = (params.cell_grid_valid == 1 && params.cell_bin_grid != nullptr);
     PhotonBinDirs bin_dirs;
-    if (use_pixel_bins || have_bin_idx) bin_dirs.init(params.photon_bin_count);
-
-    // Whether the photon map is available for indirect estimation
-    const bool have_photon_map = (params.num_photons > 0
-                                  && params.grid_table_size > 0
-                                  && params.render_mode != RENDER_MODE_DIRECT_ONLY);
+    if (have_cell_grid) bin_dirs.init(params.photon_bin_count);
 
     for (int bounce = 0; bounce <= params.max_bounces; ++bounce) {
         long long t0 = clock64();
@@ -1197,12 +1046,24 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
 
         uint32_t mat_id = hit.material_id;
 
-        // Emission: count if camera ray or specular bounce (unoccluded path)
+        // Emission:
+        // - camera ray or specular bounce: always count
+        // - diffuse BSDF hit: count with MIS vs light sampling
         if (dev_is_emissive(mat_id)) {
-            if (prev_was_specular) {
-                Spectrum Le_contrib = throughput * dev_get_Le(mat_id);
+            Spectrum Le = dev_get_Le(mat_id);
+            float w_mis = 1.0f;
+            if (!prev_was_specular && last_was_diffuse && DEFAULT_USE_MIS) {
+                float pdf_light = dev_light_pdf(
+                    hit.triangle_id,
+                    hit.geo_normal,
+                    direction,
+                    hit.t);
+                w_mis = mis_weight_2_dev(last_pdf_bsdf_dir, pdf_light);
+            }
+            if (prev_was_specular || last_was_diffuse) {
+                Spectrum Le_contrib = throughput * Le * w_mis;
                 result.combined   += Le_contrib;
-                result.nee_direct += Le_contrib; // attribute to direct
+                result.nee_direct += Le_contrib; // direct component bucket
             }
             break;
         }
@@ -1213,6 +1074,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             direction = direction - n * (2.f * dot(direction, n));
             origin = hit.position + n * OPTIX_SCENE_EPSILON;
             prev_was_specular = true;
+            last_was_diffuse  = false;
+            last_pdf_bsdf_dir = 0.0f;
             continue;
         }
 
@@ -1223,54 +1086,12 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         float3 wo_local = frame.world_to_local(direction * (-1.f));
         if (wo_local.z <= 0.f) break;
 
-        // ── Photon gather + local bins (reordered: before NEE) ────
-        // Build local bins during gather so NEE can use them.
-        PhotonBin local_bins[MAX_PHOTON_BIN_COUNT];
-        float local_total_flux = 0.0f;
+        // ── Cell grid O(1) lookup for directional bins ───────────
         const PhotonBin* active_bins = nullptr;
-        Spectrum L_photon = Spectrum::zero();
-
-        if (have_photon_map) {
+        if (have_cell_grid) {
             long long t_pg = clock64();
-
-            if (should_read_photon_density_cache(
-                    use_pixel_bins, bounce, params.photon_density_cache, params.frame_number))
-            {
-                // Bounce 0 cached density — use per-pixel bin cache for guidance
-                for (int i = 0; i < NUM_LAMBDA; ++i)
-                    L_photon.value[i] = params.photon_density_cache[pixel_idx * NUM_LAMBDA + i];
-                if (use_pixel_bins)
-                    active_bins = &params.photon_bin_cache[pixel_idx * params.photon_bin_count];
-            } else {
-                // Full gather (always on frame 0 at bounce 0, always at bounce>=1)
-                if (have_bin_idx) {
-                    // Gather WITH local bin population (O(1) per photon via bin_idx)
-                    L_photon = dev_estimate_photon_density_with_bins(
-                        hit.position, hit.shading_normal, wo_local, mat_id,
-                        params.gather_radius,
-                        local_bins, params.photon_bin_count, local_total_flux);
-                    if (local_total_flux > 0.0f)
-                        active_bins = local_bins;
-                } else {
-                    // Standard gather without bins
-                    L_photon = dev_estimate_photon_density(
-                        hit.position, hit.shading_normal, wo_local, mat_id,
-                        params.gather_radius);
-                }
-
-                // Cache density for subsequent frames (bounce 0 only)
-                if (should_write_photon_density_cache(
-                        use_pixel_bins, bounce, params.photon_density_cache, params.frame_number))
-                {
-                    for (int i = 0; i < NUM_LAMBDA; ++i)
-                        params.photon_density_cache[pixel_idx * NUM_LAMBDA + i] = L_photon.value[i];
-                }
-            }
+            active_bins = dev_cell_grid_lookup(hit.position);
             result.clk_photon_gather += clock64() - t_pg;
-        } else if (params.render_mode == RENDER_MODE_DIRECT_ONLY) {
-            // DIRECT_ONLY mode: no gather, but still use per-pixel bins at bounce 0
-            if (use_pixel_bins && bounce == 0)
-                active_bins = &params.photon_bin_cache[pixel_idx * params.photon_bin_count];
         }
 
         // ── NEE: Direct lighting via shadow ray ──────────────────
@@ -1293,38 +1114,56 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         }
 
         // ── Apply photon indirect contribution ───────────────────
-        // The photon map captures ALL indirect illumination (≥2 bounces
-        // from the light).  No shadow-visibility modulation: indirect
-        // light IS visible in shadows.  The surface-normal plane filter
-        // in the gather already prevents light leaking through thin
-        // geometry.
-        if (have_photon_map) {
-            Spectrum photon_contrib = throughput * L_photon;
-            result.combined        += photon_contrib;
-            result.photon_indirect += photon_contrib;
+        // NOTE: We intentionally do NOT add a photon-density indirect term
+        // here. We continue the BSDF path (guided by bins when available)
+        // to avoid double-counting indirect illumination.
+
+        // ── BSDF continuation (multi-bounce, guided by bins) ─────────
+        long long t_bsdf = clock64();
+        float p_guided = 0.0f;
+        if (DEFAULT_USE_PHOTON_GUIDED && active_bins != nullptr) {
+            p_guided = fminf(fmaxf(DEFAULT_GUIDED_BSDF_MIX, 0.0f), 1.0f);
         }
 
-        // ── Terminate at first diffuse hit when photon map is active ─
-        // The photon gather at this vertex already represents the
-        // complete indirect contribution.  Continuing the BSDF path
-        // would double-count those indirect paths (photons stored at
-        // vertex_0 already include light going through deeper vertices).
-        if (have_photon_map)
-            break;
-
-        // ── BSDF continuation (multi-bounce, DIRECT_ONLY fallback) ──
-        // Only reached when no photon map is available.
-        long long t_bsdf = clock64();
-        float3 wi_local = sample_cosine_hemisphere_dev(rng);
-        float3 wi_world = frame.local_to_world(wi_local);
+        float3 wi_world;
+        float3 wi_local;
+        if (p_guided > 0.0f && rng.next_float() < p_guided) {
+            wi_world = dev_sample_guided_bounce(
+                active_bins, params.photon_bin_count, hit.shading_normal,
+                bin_dirs, rng);
+            wi_local = frame.world_to_local(wi_world);
+        } else {
+            wi_local = sample_cosine_hemisphere_dev(rng);
+            wi_world = frame.local_to_world(wi_local);
+        }
 
         float cos_theta_b = dot(wi_world, hit.shading_normal);
-        if (cos_theta_b <= 0.f) { result.clk_bsdf += clock64() - t_bsdf; break; }
-
-        Spectrum Kd = dev_get_Kd(mat_id);
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            throughput.value[i] *= Kd.value[i];
+        if (cos_theta_b <= 0.f || wi_local.z <= 0.f) {
+            result.clk_bsdf += clock64() - t_bsdf;
+            break;
         }
+
+        // PDFs for MIS mixture (guided + cosine)
+        float pdf_cos = dev_bsdf_pdf(wi_local);
+        float pdf_guided = (p_guided > 0.0f)
+            ? dev_guided_bounce_pdf(
+                wi_world, active_bins, params.photon_bin_count,
+                hit.shading_normal, bin_dirs)
+            : 0.0f;
+        float pdf_dir = p_guided * pdf_guided + (1.0f - p_guided) * pdf_cos;
+        if (pdf_dir <= 1e-12f) {
+            result.clk_bsdf += clock64() - t_bsdf;
+            break;
+        }
+
+        // Throughput update: f * cos / pdf (Lambertian in dev_bsdf_evaluate)
+        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local);
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            throughput.value[i] *= f.value[i] * cos_theta_b / pdf_dir;
+        }
+
+        last_was_diffuse  = true;
+        last_pdf_bsdf_dir = pdf_dir;
 
         if (bounce >= DEFAULT_MIN_BOUNCES_RR) {
             float p_rr = fminf(DEFAULT_RR_THRESHOLD, throughput.max_component());
@@ -1349,21 +1188,6 @@ extern "C" __global__ void __raygen__render() {
     int px = idx.x;
     int py = idx.y;
     int pixel_idx = py * params.width + px;
-
-    // ── BIN POPULATION MODE ─────────────────────────────────────
-    // Separate launch: trace center ray, gather photons, fill bins.
-    if (params.populate_bins_mode) {
-        float u = ((float)px + 0.5f) / (float)params.width;
-        float v = ((float)py + 0.5f) / (float)params.height;
-        float3 origin    = params.cam_pos;
-        float3 direction = normalize(
-            params.cam_lower_left
-            + params.cam_horizontal * u
-            + params.cam_vertical * v
-            - params.cam_pos);
-        dev_populate_bins_for_pixel(pixel_idx, origin, direction);
-        return;
-    }
 
     // ── NORMAL RENDER PATH ──────────────────────────────────────
 

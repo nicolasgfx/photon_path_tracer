@@ -8,7 +8,6 @@
 #include "core/types.h"
 #include "core/cdf.h"
 #include "core/nee_sampling.h"
-#include "core/photon_density_cache.h"
 #include "core/guided_nee.h"
 
 // ---------------------------------------------------------------------
@@ -64,26 +63,6 @@ TEST(NEE, ShadowSampleCountPolicy) {
     EXPECT_EQ(nee_shadow_sample_count(1, -10, -2), 1);
     EXPECT_EQ(nee_shadow_sample_count(0, -10, 5), 1);
     EXPECT_EQ(nee_shadow_sample_count(2, 5, -10), 1);
-}
-
-// ---------------------------------------------------------------------
-// Photon density cache gating
-// ---------------------------------------------------------------------
-
-TEST(PhotonDensityCache, ReadWriteGating) {
-    float dummy_cache[4] = {0, 0, 0, 0};
-
-    EXPECT_FALSE(should_read_photon_density_cache(false, 0, dummy_cache, 1));
-    EXPECT_FALSE(should_read_photon_density_cache(true,  1, dummy_cache, 1));
-    EXPECT_FALSE(should_read_photon_density_cache(true,  0, nullptr,     1));
-    EXPECT_FALSE(should_read_photon_density_cache(true,  0, dummy_cache, 0));
-    EXPECT_TRUE (should_read_photon_density_cache(true,  0, dummy_cache, 1));
-
-    EXPECT_FALSE(should_write_photon_density_cache(false, 0, dummy_cache, 0));
-    EXPECT_FALSE(should_write_photon_density_cache(true,  1, dummy_cache, 0));
-    EXPECT_FALSE(should_write_photon_density_cache(true,  0, nullptr,     0));
-    EXPECT_FALSE(should_write_photon_density_cache(true,  0, dummy_cache, 1));
-    EXPECT_TRUE (should_write_photon_density_cache(true,  0, dummy_cache, 0));
 }
 
 // ---------------------------------------------------------------------

@@ -284,6 +284,10 @@ void OptixRenderer::upload_photon_data(
     std::cout << "[OptiX] Uploaded " << global_photons.size()
               << " photons to device\n";
     gather_radius_ = gather_radius;
+
+    // Copy into stored_photons_ and build cell-bin grid
+    stored_photons_ = global_photons;
+    build_cell_bin_grid();
 }
 
 // =====================================================================
@@ -505,6 +509,16 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
         std::printf("[Timing] Photon upload:     %8.1f ms\n", ms);
+        t_lap = t_now;
+    }
+
+    // Build dense 3D cell-bin grid from stored photons
+    build_cell_bin_grid();
+
+    {
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] Cell grid build:   %8.1f ms\n", ms);
         double total = std::chrono::duration<double, std::milli>(t_now - t_phase_start).count();
         std::printf("[Timing] Photon total:      %8.1f ms\n", total);
     }
@@ -542,8 +556,9 @@ static void fill_common_params(
     const DeviceBuffer& prof_nee,
     const DeviceBuffer& prof_photon_gather,
     const DeviceBuffer& prof_bsdf,
-    const DeviceBuffer& photon_bin_cache,
-    const DeviceBuffer& photon_density_cache)
+    const DeviceBuffer& cell_bin_grid_buf,
+    const CellBinGrid&  cell_grid,
+    bool                cell_grid_uploaded)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -617,14 +632,18 @@ static void fill_common_params(
 
     p.traversable = gas_handle;
 
-    // Photon directional bin cache
-    p.photon_bin_cache     = photon_bin_cache.d_ptr
-        ? reinterpret_cast<PhotonBin*>(photon_bin_cache.d_ptr) : nullptr;
-    p.photon_density_cache = photon_density_cache.d_ptr
-        ? const_cast<float*>(photon_density_cache.as<float>()) : nullptr;
-    p.photon_bin_count     = PHOTON_BIN_COUNT;
-    p.photon_bins_valid    = 0;  // caller sets to 1 after populate
-    p.populate_bins_mode   = 0;  // caller sets to 1 for bin population pass
+    // Dense cell-bin grid
+    p.cell_bin_grid     = cell_bin_grid_buf.d_ptr
+        ? reinterpret_cast<PhotonBin*>(cell_bin_grid_buf.d_ptr) : nullptr;
+    p.photon_bin_count  = PHOTON_BIN_COUNT;
+    p.cell_grid_valid   = cell_grid_uploaded ? 1 : 0;
+    p.cell_grid_min_x   = cell_grid.min_x;
+    p.cell_grid_min_y   = cell_grid.min_y;
+    p.cell_grid_min_z   = cell_grid.min_z;
+    p.cell_grid_cell_size = cell_grid.cell_size;
+    p.cell_grid_dim_x   = cell_grid.dim_x;
+    p.cell_grid_dim_y   = cell_grid.dim_y;
+    p.cell_grid_dim_z   = cell_grid.dim_z;
 }
 
 // =====================================================================
@@ -652,7 +671,7 @@ void OptixRenderer::render_debug_frame(
         DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(),
-        DeviceBuffer(), DeviceBuffer());
+        d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_);
 
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
@@ -706,7 +725,7 @@ void OptixRenderer::render_one_spp(
         d_nee_direct_buffer_, d_photon_indirect_buffer_,
         d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
         d_prof_photon_gather_, d_prof_bsdf_,
-        d_photon_bin_cache_, d_photon_density_cache_);
+        d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_);
 
     lp.samples_per_pixel  = 1;
     lp.max_bounces        = max_bounces;
@@ -715,8 +734,6 @@ void OptixRenderer::render_one_spp(
     lp.is_final_render    = 1;
     lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
     lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
-    lp.photon_bins_valid  = bins_populated_ ? 1 : 0;
-    lp.populate_bins_mode = 0;
 
     last_launch_params_host_ = lp;
 
@@ -736,70 +753,58 @@ void OptixRenderer::render_one_spp(
 }
 
 // =====================================================================
-// populate_photon_bins() -- fill the directional bin cache (once)
+// build_cell_bin_grid() -- build dense 3D grid on CPU and upload to GPU
 // =====================================================================
-void OptixRenderer::populate_photon_bins(const Camera& camera)
+void OptixRenderer::build_cell_bin_grid()
 {
-    if (!d_photon_bin_cache_.d_ptr) return;
+    if (stored_photons_.size() == 0) {
+        std::cout << "[CellGrid] No photons — skipping grid build.\n";
+        cell_grid_uploaded_ = false;
+        return;
+    }
 
-    std::cout << "[Bins] Populating photon directional bin cache ("
-              << PHOTON_BIN_COUNT << " bins per pixel)...\n";
+    // Ensure bin_idx is populated (needed by CellBinGrid::build)
+    if (stored_photons_.bin_idx.size() != stored_photons_.size()) {
+        PhotonBinDirs bin_dirs;
+        bin_dirs.init(PHOTON_BIN_COUNT);
+        stored_photons_.bin_idx.resize(stored_photons_.size());
+        for (size_t i = 0; i < stored_photons_.size(); ++i) {
+            float3 wi = make_f3(stored_photons_.wi_x[i],
+                                stored_photons_.wi_y[i],
+                                stored_photons_.wi_z[i]);
+            stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+        }
+    }
+
+    std::cout << "[CellGrid] Building dense 3D cell-bin grid ("
+              << PHOTON_BIN_COUNT << " bins/cell)...\n";
+    std::cout.flush();
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
-    LaunchParams lp = {};
-    fill_common_params(lp,
-        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
-        width_, height_, camera,
-        d_vertices_, d_normals_, d_material_ids_,
-        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
-        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
-        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
-        d_photon_lambda_, d_photon_flux_,
-        d_photon_bin_idx_,
-        d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
-        d_emissive_indices_, d_emissive_cdf_,
-        num_emissive_, 0.f,
-        gas_handle_,
-        gather_radius_,
-        DeviceBuffer(), DeviceBuffer(),
-        DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
-        DeviceBuffer(), DeviceBuffer(),
-        d_photon_bin_cache_, d_photon_density_cache_);
+    cell_bin_grid_.build(stored_photons_, gather_radius_, PHOTON_BIN_COUNT);
 
-    lp.samples_per_pixel  = 1;
-    lp.max_bounces        = DEFAULT_MAX_BOUNCES;
-    lp.frame_number       = 0;
-    lp.render_mode        = RENDER_MODE_FULL;
-    lp.is_final_render    = 0;
-    lp.nee_light_samples  = 1;
-    lp.nee_deep_samples   = 1;
-    lp.photon_bins_valid  = 0;
-    lp.populate_bins_mode = 1;  // ← trigger bin population path
+    auto t_build = std::chrono::high_resolution_clock::now();
+    double ms_build = std::chrono::duration<double, std::milli>(t_build - t_start).count();
 
-    last_launch_params_host_ = lp;
+    size_t total_cells = (size_t)cell_bin_grid_.dim_x * cell_bin_grid_.dim_y * cell_bin_grid_.dim_z;
+    size_t total_bins  = total_cells * PHOTON_BIN_COUNT;
+    size_t bytes       = total_bins * sizeof(PhotonBin);
 
-    d_launch_params_.alloc(sizeof(LaunchParams));
-    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
-                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
+    std::printf("[CellGrid] Grid: %d x %d x %d = %zu cells  (%.2f MB, %.1f ms)\n",
+                cell_bin_grid_.dim_x, cell_bin_grid_.dim_y, cell_bin_grid_.dim_z,
+                total_cells, (double)bytes / (1024.0 * 1024.0), ms_build);
 
-    OPTIX_CHECK(optixLaunch(
-        pipeline_,
-        nullptr,
-        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
-        sizeof(LaunchParams),
-        &sbt_,
-        width_, height_, 1));
+    // Upload to device
+    d_cell_bin_grid_.alloc(bytes);
+    CUDA_CHECK(cudaMemcpy(d_cell_bin_grid_.d_ptr, cell_bin_grid_.bins.data(),
+                          bytes, cudaMemcpyHostToDevice));
 
-    CUDA_CHECK(cudaDeviceSynchronize());
+    cell_grid_uploaded_ = true;
 
     auto t_end = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    std::printf("[Bins] Population done: %8.1f ms  (%d bins × %d pixels = %.0f MB)\n",
-                ms, PHOTON_BIN_COUNT, width_ * height_,
-                (double)d_photon_bin_cache_.bytes / (1024.0 * 1024.0));
-
-    bins_populated_ = true;
+    double ms_total = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    std::printf("[CellGrid] Upload done: %.1f ms total\n", ms_total);
 }
 
 // =====================================================================
@@ -839,7 +844,7 @@ void OptixRenderer::render_final(
             d_nee_direct_buffer_, d_photon_indirect_buffer_,
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
-            d_photon_bin_cache_, d_photon_density_cache_);
+            d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_);
 
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
@@ -848,8 +853,6 @@ void OptixRenderer::render_final(
         lp.is_final_render    = 1;  // FINAL: full path tracing
         lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
         lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
-        lp.photon_bins_valid  = bins_populated_ ? 1 : 0;
-        lp.populate_bins_mode = 0;
 
         d_launch_params_.alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,

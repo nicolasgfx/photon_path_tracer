@@ -34,7 +34,7 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 1024;
 //   - Preview:  1–4 spp
 //   - Default:  16 spp (good balance)
 //   - Final:    64–256 spp depending on noise tolerance
-constexpr int   DEFAULT_SPP            = 16;   // samples per pixel
+constexpr int   DEFAULT_SPP            = 32;   // samples per pixel
 constexpr int   DEFAULT_MAX_BOUNCES    = 8;    // path depth
 constexpr int   DEFAULT_MIN_BOUNCES_RR = 3;    // start Russian roulette after this
 constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
@@ -44,7 +44,7 @@ constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
 //   - Preview:  50k–200k photons, radius 0.07–0.12
 //   - Default:  500k photons,     radius 0.05
 //   - Final:    1M–5M photons,    radius 0.02–0.05
-constexpr int   DEFAULT_NUM_PHOTONS    = 2000000;
+constexpr int   DEFAULT_NUM_PHOTONS    = 4000000;
 constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.02f;
 
@@ -66,7 +66,7 @@ constexpr bool  DEBUG_PHOTON_SINGLE_BOUNCE = false;
 //   - Preview:  1
 //   - Default:  4
 //   - Final:    8–16 for softer shadows (scene dependent)
-constexpr int   DEFAULT_NEE_LIGHT_SAMPLES = 8;
+constexpr int   DEFAULT_NEE_LIGHT_SAMPLES = 16;
 constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 1;  // bounces >= 1 (throughput attenuated)
 
 // ── Integrator toggles ──────────────────────────────────────────────
@@ -76,6 +76,12 @@ constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 1;  // bounces >= 1 (throughput atte
 constexpr bool  DEFAULT_USE_MIS           = true;
 constexpr bool  DEFAULT_USE_PHOTON_GUIDED = true;
 
+// Guided BSDF bounce mixture when photon bins are available.
+// Probability of sampling a guided direction vs cosine hemisphere.
+// Used in OptiX device path tracer to steer diffuse bounces toward
+// high-flux directions while keeping a cosine fallback for robustness.
+constexpr float DEFAULT_GUIDED_BSDF_MIX = 0.80f;
+
 // ── Photon directional bins (guided NEE / caching) ──────────────────
 // Higher counts can improve guidance but increase memory/time.
 // Recommendation: 32 is a good default.
@@ -84,6 +90,10 @@ constexpr float PHOTON_BIN_HORIZON_EPS = 0.05f;
 constexpr int   PHOTON_BIN_NEE_TOP_K  = 4;    // top-K bins for guided NEE direction bias
 // Compile-time upper bound for fixed-size arrays (must be >= PHOTON_BIN_COUNT).
 constexpr int   MAX_PHOTON_BIN_COUNT  = 32;
+
+// ── Photon bin disk cache ────────────────────────────────────────────
+// When true, the renderer saves the computed photon bin data as a
+// (Dense cell-bin grid is built automatically during photon tracing.)
 
 // =====================================================================
 // 2) ADVANCED (rarely changed; shared by tests/device)

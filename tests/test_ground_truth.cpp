@@ -680,52 +680,48 @@ static ComparisonStats compare_methods(
 {
     ComparisonStats stats;
 
-    std::vector<double> gt_lums;
-    std::vector<double> opt_lums;
-    gt_lums.reserve(num_rays);
-    opt_lums.reserve(num_rays);
-
     int width  = px_end - px_start;
     int height = py_end - py_start;
     int rays_per_pixel = (width > 0 && height > 0)
                        ? std::max(1, num_rays / (width * height)) : num_rays;
 
-    int count = 0;
-    const int progress_step = std::max(1, num_rays / 10);
-    for (int py = py_start; py < py_end && count < num_rays; ++py) {
-        for (int px = px_start; px < px_end && count < num_rays; ++px) {
-            for (int s = 0; s < rays_per_pixel && count < num_rays; ++s) {
-                if (count % progress_step == 0) {
-                    std::cout << "[GTComparison]      ray " << count << "/" << num_rays
-                              << " (" << (count * 100 / num_rays) << "%)" << std::endl;
-                }
-                uint64_t seed_a = (uint64_t)count * 31 + 12345;
-                uint64_t seed_b = (uint64_t)count + 1;
+    // Pre-compute total work items for indexed parallel access
+    int total_work = 0;
+    for (int py = py_start; py < py_end; ++py)
+        for (int px = px_start; px < px_end; ++px)
+            for (int s = 0; s < rays_per_pixel; ++s)
+                if (total_work < num_rays) total_work++;
 
-                PCGRng rng_ray = PCGRng::seed(seed_a, seed_b);
-                Ray ray = ds.camera.generate_ray(px, py, rng_ray);
+    std::vector<double> gt_lums(total_work, 0.0);
+    std::vector<double> opt_lums(total_work, 0.0);
 
-                // Ground truth (independent RNG for stochastic choices)
-                PCGRng rng_gt = PCGRng::seed(seed_a + 1000000, seed_b);
-                auto gt = ground_truth_path_trace(
-                    ray.origin, ray.direction, rng_gt, ds, max_bounces);
+    #pragma omp parallel for schedule(dynamic, 8)
+    for (int idx = 0; idx < total_work; ++idx) {
+        uint64_t seed_a = (uint64_t)idx * 31 + 12345;
+        uint64_t seed_b = (uint64_t)idx + 1;
 
-                // Optimized (independent RNG)
-                PCGRng rng_opt = PCGRng::seed(seed_a + 2000000, seed_b);
-                auto opt = optimized_path_trace(
-                    ray.origin, ray.direction, rng_opt, ds, max_bounces);
+        // Recover px, py from flat index
+        int rem = idx;
+        int py = py_start + rem / (width * rays_per_pixel);
+        rem %= (width * rays_per_pixel);
+        int px = px_start + rem / rays_per_pixel;
 
-                double gt_lum  = (double)gt.combined.sum();
-                double opt_lum = (double)opt.combined.sum();
+        PCGRng rng_ray = PCGRng::seed(seed_a, seed_b);
+        Ray ray = ds.camera.generate_ray(px, py, rng_ray);
 
-                gt_lums.push_back(gt_lum);
-                opt_lums.push_back(opt_lum);
+        PCGRng rng_gt = PCGRng::seed(seed_a + 1000000, seed_b);
+        auto gt = ground_truth_path_trace(
+            ray.origin, ray.direction, rng_gt, ds, max_bounces);
 
-                count++;
-            }
-        }
+        PCGRng rng_opt = PCGRng::seed(seed_a + 2000000, seed_b);
+        auto opt = optimized_path_trace(
+            ray.origin, ray.direction, rng_opt, ds, max_bounces);
+
+        gt_lums[idx]  = (double)gt.combined.sum();
+        opt_lums[idx] = (double)opt.combined.sum();
     }
 
+    int count = total_work;
     stats.num_samples = count;
     if (count == 0) return stats;
 

@@ -824,12 +824,8 @@ static FullImageResult render_comparison_image(const PixelCmpDataset& ds)
     img.gt_pixels.resize(N);
     img.opt_pixels.resize(N);
 
-    const int progress_step = std::max(1, img.height / 10);
+    #pragma omp parallel for schedule(dynamic, 1)
     for (int py = 0; py < img.height; ++py) {
-        if (py % progress_step == 0) {
-            std::cout << "[PixelComparison]   row " << py << "/" << img.height
-                      << " (" << (py * 100 / img.height) << "%)" << std::endl;
-        }
         for (int px = 0; px < img.width; ++px) {
             PixelResult gt_acc, opt_acc;
 

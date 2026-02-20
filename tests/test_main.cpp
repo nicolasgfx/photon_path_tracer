@@ -58,6 +58,7 @@
 #include "scene/obj_loader.h"
 #include "photon/emitter.h"
 #include "core/photon_bins.h"
+#include "core/cell_bin_grid.h"
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -3015,9 +3016,9 @@ TEST(OptiX, ResizeFramebuffer) {
     EXPECT_EQ(fb8.height, 8);
 }
 
-// -- 36.9 Bin population launch params are correct -------------------
+// -- 36.9 Cell-bin grid built by trace_photons and flags valid --------
 
-TEST(OptiX, PhotonBinsPopulateAndValidityFlags) {
+TEST(OptiX, CellBinGridValidAfterTracePhotons) {
     Scene scene = build_cornell_test_scene();
     if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
 
@@ -3047,55 +3048,62 @@ TEST(OptiX, PhotonBinsPopulateAndValidityFlags) {
 
     optix_renderer.resize(8, 8);
 
-    // Before population, progressive render should not claim bins are valid.
+    // Cell grid should be valid after trace_photons built it via upload_photon_data
+    // (which ends with build_cell_bin_grid inside trace_photons).
+    // Render should propagate cell_grid_valid=1 to launch params.
     optix_renderer.render_one_spp(cam, 0);
     {
         const LaunchParams& lp = optix_renderer.last_launch_params_for_test();
-        EXPECT_EQ(lp.populate_bins_mode, 0);
-        EXPECT_EQ(lp.photon_bins_valid, 0);
-        EXPECT_EQ(lp.is_final_render, 1);
+        EXPECT_EQ(lp.cell_grid_valid, 1);
+        EXPECT_NE(lp.cell_bin_grid, nullptr);
+        EXPECT_GT(lp.cell_grid_dim_x, 0);
+        EXPECT_GT(lp.cell_grid_dim_y, 0);
+        EXPECT_GT(lp.cell_grid_dim_z, 0);
+        EXPECT_GT(lp.cell_grid_cell_size, 0.0f);
     }
 
-    // Population pass must launch with populate_bins_mode=1.
-    optix_renderer.populate_photon_bins(cam);
-    {
-        const LaunchParams& lp = optix_renderer.last_launch_params_for_test();
-        EXPECT_EQ(lp.populate_bins_mode, 1);
-        EXPECT_EQ(lp.photon_bins_valid, 0);
-        EXPECT_EQ(lp.is_final_render, 0);
-        EXPECT_EQ(lp.nee_light_samples, 1);
-        EXPECT_EQ(lp.nee_deep_samples, 1);
-        EXPECT_NE(lp.photon_bin_cache, nullptr);
-        EXPECT_NE(lp.photon_density_cache, nullptr);
-    }
-
-    // After population, progressive render should set photon_bins_valid=1.
-    optix_renderer.render_one_spp(cam, 1);
-    {
-        const LaunchParams& lp = optix_renderer.last_launch_params_for_test();
-        EXPECT_EQ(lp.populate_bins_mode, 0);
-        EXPECT_EQ(lp.photon_bins_valid, 1);
-        EXPECT_EQ(lp.is_final_render, 1);
-        EXPECT_EQ(lp.nee_light_samples, DEFAULT_NEE_LIGHT_SAMPLES);
-        EXPECT_EQ(lp.nee_deep_samples, DEFAULT_NEE_DEEP_SAMPLES);
-    }
+    // The host-side grid should be accessible
+    const CellBinGrid& grid = optix_renderer.cell_bin_grid_for_test();
+    EXPECT_GT(grid.dim_x, 0);
+    EXPECT_GT(grid.dim_y, 0);
+    EXPECT_GT(grid.dim_z, 0);
+    EXPECT_FALSE(grid.bins.empty());
 }
 
-// -- 36.10 Bin/density cache allocation matches resolution -----------
+// -- 36.10 Cell-bin grid allocation is proportional to grid dims ------
 
-TEST(OptiX, PhotonBinCacheAllocationMatchesResolution) {
-    OptixRenderer renderer;
+TEST(OptiX, CellBinGridAllocationMatchesDimensions) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
 
-    const int W = 11;
-    const int H = 13;
-    ASSERT_NO_THROW(renderer.resize(W, H));
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(&scene);
+    Camera cam = Camera::cornell_box_camera(8, 8);
+    cpu_renderer.set_camera(cam);
 
-    const size_t pixels = (size_t)W * (size_t)H;
+    RenderConfig cfg;
+    cfg.image_width = 8;
+    cfg.image_height = 8;
+    cfg.num_photons = 2000;
+    cfg.gather_radius = 0.15f;
+    cfg.caustic_radius = 0.05f;
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
 
-    EXPECT_EQ(renderer.photon_bin_cache_bytes_for_test(),
-              pixels * (size_t)PHOTON_BIN_COUNT * sizeof(PhotonBin));
-    EXPECT_EQ(renderer.photon_density_cache_bytes_for_test(),
-              pixels * (size_t)NUM_LAMBDA * sizeof(float));
+    OptixRenderer optix_renderer;
+    optix_renderer.init();
+    optix_renderer.build_accel(scene);
+    optix_renderer.upload_scene_data(scene);
+    optix_renderer.upload_emitter_data(scene);
+    optix_renderer.upload_photon_data(
+        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
+        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius);
+
+    const CellBinGrid& grid = optix_renderer.cell_bin_grid_for_test();
+    size_t total_cells = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
+    size_t expected = total_cells * PHOTON_BIN_COUNT * sizeof(PhotonBin);
+    EXPECT_EQ(optix_renderer.cell_bin_grid_bytes_for_test(), expected);
 }
 
 // =====================================================================
@@ -3303,6 +3311,103 @@ TEST(PhotonBins, MaxBinCountRespected) {
     PhotonBinDirs dirs;
     dirs.init(MAX_PHOTON_BIN_COUNT + 10);
     EXPECT_EQ(dirs.count, MAX_PHOTON_BIN_COUNT);
+}
+
+// =====================================================================
+//  CellBinGrid Tests
+// =====================================================================
+
+TEST(CellBinGrid, BuildBasic) {
+    // Create a few photons in a known layout and verify grid builds
+    PhotonSoA photons;
+    // 4 photons in a small box
+    photons.pos_x   = {0.0f, 0.1f, 0.2f, 0.3f};
+    photons.pos_y   = {0.0f, 0.0f, 0.0f, 0.0f};
+    photons.pos_z   = {0.0f, 0.0f, 0.0f, 0.0f};
+    photons.wi_x    = {0.0f, 0.0f, 0.0f, 0.0f};
+    photons.wi_y    = {0.0f, 0.0f, 0.0f, 0.0f};
+    photons.wi_z    = {1.0f, 1.0f, 1.0f, 1.0f};
+    photons.lambda_bin = {0, 1, 2, 3};
+    photons.flux    = {1.0f, 2.0f, 3.0f, 4.0f};
+    photons.bin_idx = {0, 1, 2, 3};
+
+    CellBinGrid grid;
+    float gather_radius = 0.1f;
+    grid.build(photons, gather_radius, 8);
+
+    EXPECT_GT(grid.dim_x, 0);
+    EXPECT_GT(grid.dim_y, 0);
+    EXPECT_GT(grid.dim_z, 0);
+    EXPECT_GT(grid.cell_size, 0.0f);
+    EXPECT_EQ(grid.bins.size(),
+              (size_t)grid.dim_x * grid.dim_y * grid.dim_z * 8);
+}
+
+TEST(CellBinGrid, CellIndexClampedAtBounds) {
+    // A trivially small grid should clamp out-of-bounds lookups
+    PhotonSoA photons;
+    photons.pos_x   = {0.0f};
+    photons.pos_y   = {0.0f};
+    photons.pos_z   = {0.0f};
+    photons.wi_x    = {1.0f};
+    photons.wi_y    = {0.0f};
+    photons.wi_z    = {0.0f};
+    photons.lambda_bin = {0};
+    photons.flux    = {1.0f};
+    photons.bin_idx = {0};
+
+    CellBinGrid grid;
+    grid.build(photons, 0.1f, 4);
+
+    // Far outside should still return a valid clamped index
+    int idx_far = grid.cell_index(100.f, 100.f, 100.f);
+    int total = grid.dim_x * grid.dim_y * grid.dim_z;
+    EXPECT_GE(idx_far, 0);
+    EXPECT_LT(idx_far, total);
+
+    int idx_neg = grid.cell_index(-100.f, -100.f, -100.f);
+    EXPECT_GE(idx_neg, 0);
+    EXPECT_LT(idx_neg, total);
+}
+
+TEST(CellBinGrid, ScatterTo27Neighbors) {
+    // Place one photon exactly at cell center; its flux should appear
+    // in the 27 surrounding cells (3×3×3 neighborhood).
+    PhotonSoA photons;
+    photons.pos_x   = {0.0f};
+    photons.pos_y   = {0.0f};
+    photons.pos_z   = {0.0f};
+    photons.wi_x    = {0.0f};
+    photons.wi_y    = {0.0f};
+    photons.wi_z    = {1.0f};
+    photons.lambda_bin = {0};
+    photons.flux    = {5.0f};
+    photons.bin_idx = {0};
+
+    CellBinGrid grid;
+    grid.build(photons, 0.1f, 4);
+
+    // Count cells with non-zero flux in bin 0
+    size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
+    int non_zero_cells = 0;
+    for (size_t c = 0; c < total; ++c) {
+        if (grid.bins[c * 4 + 0].flux > 0.0f)
+            ++non_zero_cells;
+    }
+    // The photon should be scattered into 27 cells (or fewer if grid is small)
+    EXPECT_GE(non_zero_cells, 1);
+    EXPECT_LE(non_zero_cells, 27);
+}
+
+TEST(CellBinGrid, EmptyPhotons) {
+    PhotonSoA photons;
+    CellBinGrid grid;
+    grid.build(photons, 0.1f, 8);
+    // Empty photon store → empty grid
+    EXPECT_EQ(grid.dim_x, 0);
+    EXPECT_EQ(grid.dim_y, 0);
+    EXPECT_EQ(grid.dim_z, 0);
+    EXPECT_TRUE(grid.bins.empty());
 }
 
 // =====================================================================

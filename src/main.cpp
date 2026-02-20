@@ -636,8 +636,9 @@ static void run_interactive(
                 optix_renderer.clear_buffers();
             }
 
-            // ── Populate photon directional bin cache ────────────────
-            optix_renderer.populate_photon_bins(g_app.render_cam);
+            // ── Cell-bin grid is already built by trace_photons() ──
+            // Nothing to do here — the grid is precomputed and uploaded
+            // automatically during the photon tracing phase.
 
             g_app.render_requested = false;
         }

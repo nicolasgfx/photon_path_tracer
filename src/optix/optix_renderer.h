@@ -15,6 +15,7 @@
 #include "renderer/renderer.h"   // RenderConfig, RenderMode, FrameBuffer
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
+#include "core/cell_bin_grid.h"
 #include "optix/launch_params.h"
 
 #include <cuda_runtime.h>
@@ -160,9 +161,9 @@ public:
     void render_one_spp(const Camera& camera, int frame_number,
                         int max_bounces = DEFAULT_MAX_BOUNCES);
 
-    /// Populate the photon directional bin cache (must be called once
-    /// before the first render_one_spp() call in a render sequence).
-    void populate_photon_bins(const Camera& camera);
+    /// Build the dense 3D cell-bin grid from stored photons and upload
+    /// it to the device.  Called once after trace_photons().
+    void build_cell_bin_grid();
 
     /// Read back the sRGB buffer from the device
     void download_framebuffer(FrameBuffer& fb) const;
@@ -197,9 +198,10 @@ public:
     /// (copied on the host just before uploading to the device).
     const LaunchParams& last_launch_params_for_test() const { return last_launch_params_host_; }
 
-    /// Test hook: allocated byte sizes for bin/density caches (after resize()).
-    size_t photon_bin_cache_bytes_for_test() const { return d_photon_bin_cache_.bytes; }
-    size_t photon_density_cache_bytes_for_test() const { return d_photon_density_cache_.bytes; }
+    /// Test hook: allocated byte size for cell-bin grid.
+    size_t cell_bin_grid_bytes_for_test() const { return d_cell_bin_grid_.bytes; }
+    /// Test hook: access the host-side cell-bin grid.
+    const CellBinGrid& cell_bin_grid_for_test() const { return cell_bin_grid_; }
 
     void cleanup();
 
@@ -249,9 +251,8 @@ private:
     // Test hook: last launch params copied on host (for unit/integration tests)
     LaunchParams last_launch_params_host_ = {};
 
-    // Photon directional bin cache
-    DeviceBuffer d_photon_bin_cache_;       // PhotonBin [W*H*PHOTON_BIN_COUNT]
-    DeviceBuffer d_photon_density_cache_;   // float [W*H*NUM_LAMBDA]
+    // Dense 3D cell-bin grid
+    DeviceBuffer d_cell_bin_grid_;          // PhotonBin [total_cells*PHOTON_BIN_COUNT]
 
     // Scene geometry (device)
     DeviceBuffer d_vertices_;
@@ -300,10 +301,13 @@ private:
     // Host-side scene triangles for debug ray picking/hover inspection.
     std::vector<Triangle> host_triangles_;
 
+    // Host-side cell-bin grid (kept after build for save/test access)
+    CellBinGrid cell_bin_grid_;
+    bool cell_grid_uploaded_ = false;
+
     int  width_       = DEFAULT_IMAGE_WIDTH;
     int  height_      = DEFAULT_IMAGE_HEIGHT;
     bool initialised_ = false;
-    bool bins_populated_ = false; // true after populate_photon_bins() called
     int  num_emissive_ = 0;
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
 };
@@ -319,7 +323,7 @@ inline void OptixRenderer::resize(int w, int h) {
     if (w == width_ && h == height_ && d_spectrum_buffer_.d_ptr) return;
     width_  = w;
     height_ = h;
-    bins_populated_ = false; // invalidate bin cache on resize
+    // Cell-bin grid is independent of resolution; don't invalidate here.
 
     size_t pixels = (size_t)w * h;
     d_spectrum_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
@@ -337,10 +341,6 @@ inline void OptixRenderer::resize(int w, int h) {
     d_prof_photon_gather_.alloc(pixels * sizeof(long long));
     d_prof_bsdf_.alloc(pixels * sizeof(long long));
 
-    // Photon directional bin cache
-    d_photon_bin_cache_.alloc(pixels * PHOTON_BIN_COUNT * sizeof(PhotonBin));
-    d_photon_density_cache_.alloc(pixels * NUM_LAMBDA * sizeof(float));
-
     // Zero the buffers
     CUDA_CHECK(cudaMemset(d_spectrum_buffer_.d_ptr, 0, d_spectrum_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
@@ -354,10 +354,6 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_prof_nee_.d_ptr, 0, d_prof_nee_.bytes));
     CUDA_CHECK(cudaMemset(d_prof_photon_gather_.d_ptr, 0, d_prof_photon_gather_.bytes));
     CUDA_CHECK(cudaMemset(d_prof_bsdf_.d_ptr, 0, d_prof_bsdf_.bytes));
-
-    // Photon bin cache
-    CUDA_CHECK(cudaMemset(d_photon_bin_cache_.d_ptr, 0, d_photon_bin_cache_.bytes));
-    CUDA_CHECK(cudaMemset(d_photon_density_cache_.d_ptr, 0, d_photon_density_cache_.bytes));
 }
 
 /// Zero the accumulation buffers without reallocating (for camera movement)
@@ -382,10 +378,6 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_prof_photon_gather_.d_ptr, 0, d_prof_photon_gather_.bytes));
     if (d_prof_bsdf_.d_ptr)
         CUDA_CHECK(cudaMemset(d_prof_bsdf_.d_ptr, 0, d_prof_bsdf_.bytes));
-    if (d_photon_bin_cache_.d_ptr)
-        CUDA_CHECK(cudaMemset(d_photon_bin_cache_.d_ptr, 0, d_photon_bin_cache_.bytes));
-    if (d_photon_density_cache_.d_ptr)
-        CUDA_CHECK(cudaMemset(d_photon_density_cache_.d_ptr, 0, d_photon_density_cache_.bytes));
 }
 
 inline void OptixRenderer::download_framebuffer(FrameBuffer& fb) const {

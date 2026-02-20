@@ -120,12 +120,20 @@ struct LaunchParams {
     long long* prof_photon_gather;   // time in photon density estimation
     long long* prof_bsdf;            // time in BSDF eval + continuation
 
-    // ── Photon directional bin cache ─────────────────────────────────
-    PhotonBin* photon_bin_cache;     // [width * height * photon_bin_count]
-    float*     photon_density_cache; // [width * height * NUM_LAMBDA] cached spectral density
+    // ── Dense 3D cell-bin grid (replaces per-pixel bin cache) ────────
+    // Precomputed on CPU, uploaded once.  Each grid cell contains
+    // PHOTON_BIN_COUNT directional bins with accumulated flux from
+    // the 3×3×3 photon neighbourhood.  O(1) lookup at render time.
+    PhotonBin* cell_bin_grid;        // [grid_total_cells * photon_bin_count]
     int        photon_bin_count;     // runtime copy of PHOTON_BIN_COUNT
-    int        photon_bins_valid;    // 1 = bin cache populated, 0 = need population pass
-    int        populate_bins_mode;   // 1 = this launch does bin population only
+    int        cell_grid_valid;      // 1 = grid uploaded, 0 = not available
+    float      cell_grid_min_x;     // AABB min corner
+    float      cell_grid_min_y;
+    float      cell_grid_min_z;
+    float      cell_grid_cell_size; // cell size (2 × gather_radius)
+    int        cell_grid_dim_x;     // grid dimensions
+    int        cell_grid_dim_y;
+    int        cell_grid_dim_z;
 
 #ifdef PPT_USE_OPTIX
     OptixTraversableHandle traversable;
