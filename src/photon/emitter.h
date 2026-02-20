@@ -139,8 +139,11 @@ inline void trace_photons(const Scene& scene,
                     // Caustic photon: came through specular path
                     caustic_map.push_back(p);
                 }
-                // Always store in global map
-                global_map.push_back(p);
+                // No-direct-deposits rule (§4.3): skip first diffuse hit from light
+                // (direct illumination is handled by NEE in the camera pass)
+                if (bounce > 0) {
+                    global_map.push_back(p);
+                }
 
                 on_caustic_path = false;
             }

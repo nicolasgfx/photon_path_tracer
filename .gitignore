@@ -55,3 +55,8 @@ out/
 
 # Keep the README preview render tracked
 !output/render.png
+
+# Exclude scenes (keep only cornell_box and conference)
+scenes/breakfast_room/
+scenes/living_room/
+scenes/sibenik/

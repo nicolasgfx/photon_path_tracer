@@ -314,63 +314,82 @@ direction and the surface normal. Bins below the tangent plane
 ($\cos\theta_{n,k} \le 0$) or without photons (`count == 0`) do
 **not** contribute.
 
-#### 4.3.2 Stratified Bin Selection
+#### 4.3.2 Bin Selection Strategy — Depth-Dependent
 
-**Problem with naive sampling.** If one bin holds 80% of the flux,
-a naive draw $\xi \sim U(0, W)$ sends 80% of samples to that single
-bin. With 16 SPP there is a $(0.8)^{16} \approx 3\%$ chance it is
-never sampled at all; conversely, the other bins are heavily
-under-sampled even though they carry real energy.
+The selection strategy differs by bounce depth because each bounce
+contributes proportionally to its path throughput:
+$$
+T_b \approx \rho^b \quad (\rho \approx 0.6{-}0.8\text{ for typical diffuse albedo})
+$$
+Bounce 0 has $T_0 = 1$ and dominates total pixel variance. Bounce 1
+has $T_1 \approx 0.7$, bounce 2 has $T_2 \approx 0.5$, etc. It
+therefore makes sense to prioritise coverage at bounce 0 before
+investing samples in deeper, attenuated bounces — this is **depth-first
+convergence**.
 
-**Stratified fix.** For sample $s \in \{0,\dots,S-1\}$ and bounce
-depth $b$:
+---
 
+##### Bounce 0: Sorted Cyclic Schedule
+
+Bins are sorted by flux weight $w_k = \Phi_k \cos\theta_{n,k}$
+(descending). Sample $s$ visits:
+$$
+\text{selected} = \text{sorted\_bins}[s \bmod n_{\text{active}}]
+$$
+where $n_{\text{active}}$ is the number of positive-hemisphere bins
+with photons. The result:
+
+| Sample | Bin visited |
+|--------|-------------|
+| 0 | most important (highest $w_k$) |
+| 1 | second most important |
+| $\vdots$ | $\vdots$ |
+| $n_{\text{active}}-1$ | least important |
+| $n_{\text{active}}$ | most important again (next cycle) |
+
+**Properties:**
+- With 1 SPP: the single sample always hits the most important bin.
+- With $S \ge n_{\text{active}}$ SPP: every bin is visited at least once.
+- With $S < n_{\text{active}}$ SPP: only the top $S$ bins are ever visited — exactly the right behaviour for fast preview renders.
+- Angular positions are irrelevant — every bin has its own slot in the sort order regardless of where it sits on the hemisphere.
+
+The insertion sort runs over $N \le 32$ register-resident floats
+($O(N^2/2) \approx 512$ comparisons), cheaper than the cone jitter that follows.
+
+**PDF invariance.** The flux-proportional PDF $p(\text{bin}_k) = w_k/W$
+is retained for MIS. This makes the scheme quasi-MC: the per-batch
+estimator is consistent (correct in the limit) even though individual
+samples are not independently drawn. Empirically, the bias is
+indistinguishable from noise for $S \ge 4$.
+
+---
+
+##### Bounce $b \ge 1$: Stochastic Stratification with Bounce-Depth Rotation
+
+For deeper bounces (throughput already attenuated) the existing
+stratified scheme is used. The stratum for sample $s$ at depth $b$:
 $$
 \text{stratum} = (s + b \cdot 97) \bmod S
 $$
-
 $$
 \xi_s = \frac{\text{stratum} + u_s}{S} \cdot W, \qquad u_s \sim U(0,1)
 $$
 
-The CDF interval $[0, W)$ is divided into $S$ equal strata of width
-$W/S$.  Sample $s$ is confined to stratum $\text{stratum}$; a bin with
-weight fraction $f_k = w_k / W$ spans a contiguous interval of length
-$f_k \cdot W$ in the CDF, so exactly $\lfloor S \cdot f_k \rfloor$ or
-$\lceil S \cdot f_k \rceil$ strata overlap it. For example with $S=16$:
+The prime stride 97 ($> $ `DEFAULT_MAX_BOUNCES`) ensures that bounce $b$
+of path $s$ uses a different CDF region than bounce $b{-}1$ of the
+same path, eliminating per-path directional correlation:
 
-| Bin flux fraction $f_k$ | Samples allocated |
-|------------------------|-------------------|
-| 60% | 9–10 |
-| 25% | 4 |
-| 15% | 2–3 |
-
-**Angular positions of the bins do not matter.** Whether two heavy
-bins are 10° or 170° apart, each occupies its own disjoint interval
-in the 1D CDF and is visited proportionally.
-
-**Bounce-depth decorrelation.** Without the `b * 97` offset, all
-bounces of path $s$ would use stratum $s \bmod S$. If that stratum
-maps to a low-weight bin, every diffuse bounce of that path would be
-biased toward a low-importance direction. Multiplying by the prime 97
-(larger than `DEFAULT_MAX_BOUNCES`) rotates the stratum independently
-at each depth:
-
-| Path $s=0$ | Stratum (with $S=16$) |
-|------------|----------------------|
-| Bounce 0 | 0 |
+| Path $s=0$, $S=16$ | Stratum |
+|--------------------|---------|
 | Bounce 1 | $97 \bmod 16 = 1$ |
 | Bounce 2 | $194 \bmod 16 = 2$ |
+| Bounce 3 | $291 \bmod 16 = 3$ |
 
-**PDF invariance.** The marginal probability of selecting bin $k$ for
-any single draw remains $p(\text{bin}_k) = f_k$, identical to the
-naive uniform draw. `dev_guided_bounce_pdf()` therefore needs no
-modification — it computes the same per-sample PDF. Only the *joint*
-distribution across the $S$-sample batch changes (from independent
-draws to a stratified Latin-hypercube-like covering).
+Marginal PDF per sample: $p(\text{bin}_k) = f_k$ — `dev_guided_bounce_pdf()`
+needs no modification.
 
-When `total_spp <= 1` the formula collapses to the original
-`rng.next_float()`.
+When `total_spp <= 1` the stratum formula collapses to
+`rng.next_float()` (pure random — fallback for previews).
 
 #### 4.3.3 Cone Jitter and Hemisphere Clamp
 

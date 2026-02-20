@@ -20,22 +20,11 @@ struct DensityEstimatorConfig {
     float  radius         = 0.05f;   // Gather radius
     float  caustic_radius = 0.02f;   // Smaller radius for caustics
     float  surface_tau    = 0.01f;   // Surface consistency threshold
-    bool   use_kernel     = true;    // Use Epanechnikov kernel
     int    num_photons_total = 1;    // For flux normalization (1/N)
+    // NOTE: Epanechnikov kernel removed — incompatible with the dense 3D
+    // cell-bin grid, which pre-aggregates photons without per-query distances.
+    // The estimator always uses a box kernel (uniform weight within radius).
 };
-
-// ── Kernel functions ────────────────────────────────────────────────
-
-// Epanechnikov kernel (optimal for MSE)
-inline HD float epanechnikov_kernel(float dist2, float r2) {
-    float u = dist2 / r2;
-    return (u <= 1.f) ? (1.f - u) : 0.f;
-}
-
-// Box kernel (simplest)
-inline HD float box_kernel(float dist2, float r2) {
-    return (dist2 <= r2) ? 1.f : 0.f;
-}
 
 // ── Density estimate at a surface point ─────────────────────────────
 //
@@ -81,27 +70,17 @@ inline Spectrum estimate_photon_density(
             float3 photon_wi = make_f3(photons.wi_x[idx], photons.wi_y[idx], photons.wi_z[idx]);
             if (dot(photon_wi, hit_normal) <= 0.f) return;
 
-            // Kernel weight
-            float kernel_w = config.use_kernel
-                ? epanechnikov_kernel(dist2, r2)
-                : box_kernel(dist2, r2);
-
             // BSDF evaluation: f_s(x, wi, wo, lambda)
             float3 wi_local = frame.world_to_local(photon_wi);
             Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
 
-            // Accumulate: Phi_i * f_s * kernel / (pi * r^2)
+            // Accumulate: Phi_i * f_s / (pi * r^2 * N)  — box kernel (weight = 1)
             uint16_t bin = photons.lambda_bin[idx];
             float photon_flux = photons.flux[idx] * inv_N;
 
             // Add contribution only for the photon's wavelength bin
-            L_estimate.value[bin] += photon_flux * f.value[bin] * kernel_w * inv_area;
+            L_estimate.value[bin] += photon_flux * f.value[bin] * inv_area;
         });
-
-    // Normalize kernel if using Epanechnikov (integral = 2/3 over disk)
-    if (config.use_kernel) {
-        L_estimate *= 1.5f; // Correction for Epanechnikov normalization
-    }
 
     return L_estimate;
 }

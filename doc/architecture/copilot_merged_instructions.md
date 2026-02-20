@@ -794,59 +794,74 @@ the single cached Spectrum.
 
 ##### 15.4.6.2 Guided BSDF Bounce
 
-Replace `sample_cosine_hemisphere_dev(rng)` with:
+`dev_sample_guided_bounce(bins, N, normal, rng, sample_index, total_spp,
+bounce_depth)` — **implemented in `optix_device.cu`**.
 
+Bin selection is **depth-dependent** to maximise convergence for a
+finite SPP budget.  Path throughput decays as $T_b \approx \rho^b$
+(albedo$^b$), so bounce 0 dominates total pixel variance and should be
+coverage-optimised first (**depth-first convergence**).
+
+**Step 1 — Build hemisphere CDF** (common to both strategies):
 ```
-dev_sample_guided_bounce(bins, N, normal, rng):
-  // Build CDF from bin fluxes (hemisphere only)
-  float cdf[N]
-  total = 0
+for k in 0..N:
+  cos_n = dot(normalize(bins[k].dir_centroid), normal)
+  if cos_n <= 0 or bins[k].count == 0: cdf[k] = total; continue
+  total += bins[k].flux * cos_n
+  cdf[k] = total
+if total <= 0: return sample_cosine_hemisphere(rng)   // fallback
+```
+
+**Step 2 — Select bin (depth-dependent):**
+
+*bounce_depth == 0 — Sorted Cyclic Schedule:*
+```
+// Insertion-sort active bins by w_k = flux_k * cos_n_k  (descending)
+// O(N²/2) ≈ 512 comparisons for N=32, all register-resident
+sorted_k[0..n_active-1] = argsort_descending(w_k)
+selected = sorted_k[sample_index % n_active]
+```
+Sample 0 always visits the most important bin, sample 1 the second,
+etc., cycling after `n_active`.  With S < n_active SPP only the top S
+bins are ever visited — correct for fast previews.
+
+*bounce_depth >= 1 — Stochastic Stratification with Bounce-Depth Rotation:*
+```
+stratum = (sample_index + bounce_depth * 97) % total_spp
+strat_u = (stratum + rng.next_float()) / total_spp
+xi      = strat_u * total
+selected = binary_search(cdf, N, xi)
+```
+Prime stride 97 > DEFAULT_MAX_BOUNCES decorrelates each bounce's
+stratum, eliminating per-path directional bias.
+
+**Step 3 — Cone jitter and hemisphere clamp** (common):
+```
+bin_dir  = normalize(bins[selected].dir_centroid)
+cos_half = 1 - 2/N          // half-angle ≈ arccos(1 - 2/N)
+for attempt in 0..7:
+  wi = sample_cone(bin_dir, cos_half, rng)
+  if dot(wi, normal) > 0: return wi
+return bin_dir               // guaranteed above horizon by CDF filter
+```
+
+**PDF (MIS-compatible, unchanged by either selection strategy):**
+```
+dev_guided_bounce_pdf(wi, bins, N, normal):
+  // p(wi) = Σ_k  p_select(k) * p_cone(wi | k)
+  cos_half = 1 - 2/N
+  pdf_cone = 1 / (2π(1 - cos_half))
+  total    = Σ over positive-hemisphere bins of flux_k * cos_n_k
+  pdf = 0
   for k in 0..N:
-    wi = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z)
-    cos_n = dot(wi, normal)
-    if cos_n <= -PHOTON_BIN_HORIZON_EPS or bins[k].count == 0:
-      cdf[k] = total       // skip bin
-      continue
-    cdf[k] = total + bins[k].flux * max(cos_n, 0)
-    total = cdf[k]
-  
-  if total <= 0: return sample_cosine_hemisphere(rng)   // fallback
-  
-  // Select bin
-  xi = rng.next_float() * total
-  selected_k = binary_search(cdf, N, xi)
-  
-  // Jitter within bin solid angle
-  // Bin solid angle ≈ 4π/N steradians → half-angle ≈ arccos(1 - 2/N)
-  // Generate direction within cone around bin centroid
-  bin_dir = make_f3(bins[selected_k].dir...)
-  half_angle = acosf(1.0f - 2.0f / N)
-  jittered_dir = sample_cone(bin_dir, half_angle, rng)
-  
-  // Clamp to positive hemisphere
-  if dot(jittered_dir, normal) <= 0:
-    jittered_dir = reflect(jittered_dir, normal)
-  
-  return jittered_dir
+    if dot(normalize(bins[k].dir), wi) >= cos_half:
+      p_sel = (bins[k].flux * cos_n_k) / total
+      pdf  += p_sel * pdf_cone
+  return pdf
 ```
-
-The corresponding PDF for MIS:
-```
-dev_guided_pdf(wi, bins, N, normal):
-  k = find_nearest_bin(wi)
-  if bins[k].count == 0: return 0
-  cos_n = dot(bins[k].dir, normal)
-  if cos_n <= -eps: return 0
-  
-  total_flux = sum of active bins flux * max(cos_n, 0)
-  bin_flux = bins[k].flux * max(cos_n, 0)
-  
-  // Probability of selecting this bin × density within cone
-  p_bin = bin_flux / total_flux
-  cone_half = acosf(1 - 2/N)
-  p_cone = 1.0 / (2π(1 - cos(cone_half)))    // uniform cone PDF
-  return p_bin * p_cone
-```
+The marginal probability `p(bin k) = w_k / W` is identical for both
+selection strategies, so `dev_guided_bounce_pdf()` needs no changes.
+`dev_guided_bounce_pdf()` is already implemented and handles both.
 
 ##### 15.4.6.3 Guided NEE
 
@@ -1054,13 +1069,25 @@ TEST(OptiX, BinGuidedRenderConverges)
 2. Cache Spectrum result for reuse across SPP
 3. Verify: output matches baseline (within binning tolerance)
 
-#### Phase 3: Guided BSDF bounce (B1)
-1. Implement `dev_sample_guided_bounce()` using bin flux CDF
-2. Implement cone jittering within selected bin
-3. Implement hemisphere clamping for edge-case bins
-4. Add guided PDF for MIS
-5. MIS weight between guided and cosine hemisphere
+#### Phase 3: Guided BSDF bounce (B1) — **DONE**
+1. ~~Implement `dev_sample_guided_bounce()` using bin flux CDF~~
+2. ~~Implement cone jittering within selected bin~~
+3. ~~Implement hemisphere clamping for edge-case bins~~
+4. ~~Add `dev_guided_bounce_pdf()` for MIS~~
+5. ~~MIS weight between guided and cosine hemisphere~~
 6. Unit tests for PDF, hemisphere coverage
+
+**Additional items completed beyond original plan:**
+- ~~Stratified bin selection across SPP (`sample_index` / `total_spp`)~~
+- ~~Bounce-depth decorrelation via prime stride 97 (`(s + b*97) % S`)~~
+- ~~**Depth-first convergence:** bounce 0 uses sorted cyclic schedule
+  (sample $s$ visits the $s$-th most important bin by flux weight,
+  cycling after `n_active`); bounce $b \ge 1$ uses stochastic
+  stratification. Ensures that with 1 SPP the single sample always
+  hits the most important bin; with $S \ge n_{\text{active}}$ SPP
+  every active bin is visited at least once.~~
+- ~~`bounce_depth` parameter threaded through `full_path_trace()` and
+  the `__raygen__render` call site~~
 
 #### Phase 4: Stratified SPP (B3)
 1. Add STRATA_X/Y to config

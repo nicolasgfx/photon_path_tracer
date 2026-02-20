@@ -348,12 +348,29 @@ Spectrum dev_estimate_photon_density(
 
     float r2 = radius * radius;
     float inv_area = 1.f / (PI * r2);
-    int count = 0;
+    float norm = 1.f / (float)params.num_photons; // 1/N per-photon normalisation
+
+    // Track visited bucket keys to avoid double-processing hash-colliding cells
+    // (same bucket can be reached from multiple distinct (ix,iy,iz) coordinates).
+    uint32_t visited_keys[27];
+    int num_visited = 0;
+
+    // Build ONB once outside the photon loop (reused for every wi transform)
+    DevONB frame = DevONB::from_normal(normal);
 
     for (int iz = cz0; iz <= cz1; ++iz)
     for (int iy = cy0; iy <= cy1; ++iy)
     for (int ix = cx0; ix <= cx1; ++ix) {
         uint32_t key = dev_hash_cell(ix, iy, iz, params.grid_table_size);
+
+        // Skip if this hash bucket was already processed
+        bool already_visited = false;
+        for (int v = 0; v < num_visited; ++v) {
+            if (visited_keys[v] == key) { already_visited = true; break; }
+        }
+        if (already_visited) continue;
+        visited_keys[num_visited++] = key;
+
         uint32_t start = params.grid_cell_start[key];
         uint32_t end   = params.grid_cell_end[key];
         if (start == 0xFFFFFFFF) continue;
@@ -372,30 +389,22 @@ Spectrum dev_estimate_photon_density(
             float plane_dist = fabsf(dot(diff, normal));
             if (plane_dist > DEFAULT_SURFACE_TAU) continue;
 
-            float w = 1.f - d2 / r2; // Epanechnikov kernel
-
+            // Box kernel: uniform weight within radius
             float3 wi_world = make_f3(
                 params.photon_wi_x[idx],
                 params.photon_wi_y[idx],
                 params.photon_wi_z[idx]);
 
-            // photon_wi already points away from surface toward light
-            // (stored as -direction in photon tracer) – do NOT negate
-            DevONB frame = DevONB::from_normal(normal);
+            // photon_wi points away from surface toward light
+            // (stored as -direction in photon tracer) — do NOT negate
             float3 wi_local = frame.world_to_local(wi_world);
 
             Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local);
             float flux = params.photon_flux[idx];
             int bin = params.photon_lambda[idx];
 
-            L.value[bin] += f.value[bin] * flux * w * inv_area;
-            count++;
+            L.value[bin] += f.value[bin] * flux * inv_area * norm;
         }
-    }
-
-    if (count > 0) {
-        float norm = 1.5f / (float)params.num_photons; // 1.5 = Epanechnikov kernel correction
-        for (int i = 0; i < NUM_LAMBDA; ++i) L.value[i] *= norm;
     }
     return L;
 }
@@ -443,17 +452,32 @@ float3 sample_cone_dev(float3 axis, float cos_half_angle, PCGRng& rng) {
 // the selected bin's solid angle.  Falls back to cosine hemisphere if
 // bins carry no flux in the positive hemisphere.
 //
-// sample_index / total_spp — SPP stratification:
-//   Bin selection is stratified across the SPP loop so that each bin is
-//   visited proportionally to its flux, not just on average.  The
-//   marginal PDF of a single sample is unchanged (MIS weights unaffected);
-//   only the joint distribution across S samples improves.  When
-//   total_spp == 1 the formula reduces to the original uniform draw.
+// Bin selection is depth-dependent to maximise per-SPP convergence:
+//
+//   bounce_depth == 0  (throughput = 1, dominant variance contribution):
+//     SORTED CYCLIC SCHEDULE — sample s visits the s-th most important
+//     bin by flux weight w_k = flux_k * cos(theta_n_k), cycling through
+//     all active hemisphere bins.  Sample 0 always hits the top bin,
+//     sample 1 the second, etc.  After n_active samples every bin has
+//     been visited at least once; subsequent cycles repeat in the same
+//     order.  This is depth-first convergence: the first diffuse bounce
+//     (highest throughput) is coverage-optimised before deeper,
+//     attenuated bounces.
+//
+//   bounce_depth >= 1  (throughput <= albedo^b, already attenuated):
+//     STOCHASTIC STRATIFICATION — CDF interval [0,W) is split into S
+//     strata; sample s uses stratum (s + b*97) % S, mixing in the bounce
+//     depth via prime stride 97 > MAX_BOUNCES to break per-bounce
+//     correlation within a single path.
+//
+// In both cases the flux-proportional PDF p(bin k) = w_k/W is used for
+// MIS — unchanged from the baseline so dev_guided_bounce_pdf() needs no
+// modification.
 __forceinline__ __device__
 float3 dev_sample_guided_bounce(
     const PhotonBin* bins, int N, float3 normal,
     const PhotonBinDirs& bin_dirs, PCGRng& rng,
-    int sample_index, int total_spp)
+    int sample_index, int total_spp, int bounce_depth)
 {
     // Build CDF from bin fluxes — ONLY positive-hemisphere bins
     // (bins whose centroid has dot(dir, normal) > 0)
@@ -475,17 +499,44 @@ float3 dev_sample_guided_bounce(
         return sample_cosine_hemisphere_dev(rng);
     }
 
-    // Select bin via CDF — stratified across SPP passes.
-    // For sample s of S, the stratum is [s/S, (s+1)/S) so the jittered
-    // draw covers [0,total] uniformly across the full SPP batch.
-    // Fallback: total_spp <= 1 → pure random (original behaviour).
-    float strat_u = (total_spp > 1)
-        ? ((float)(sample_index % total_spp) + rng.next_float()) / (float)total_spp
-        : rng.next_float();
-    float xi = strat_u * total;
+    // ── Bin selection — strategy depends on bounce depth ─────────────
     int selected = N - 1;
-    for (int k = 0; k < N; ++k) {
-        if (xi <= cdf[k]) { selected = k; break; }
+
+    if (bounce_depth == 0) {
+        // Bounce-0: sorted cyclic schedule.
+        // Build sorted index array by w_k (descending).
+        // Insertion sort, O(N²/2) — negligible for N <= 32.
+        int sorted_k[MAX_PHOTON_BIN_COUNT];
+        int n_sorted = 0;
+        for (int k = 0; k < N; ++k) {
+            float3 bdir = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
+            float cos_n = dot(bdir, normal);
+            if (cos_n <= 0.0f || bins[k].count == 0) continue;
+            float wk = bins[k].flux * cos_n;
+            // Find insertion position (descending)
+            int pos = n_sorted;
+            for (int j = 0; j < n_sorted; ++j) {
+                float3 bjd = make_f3(bins[sorted_k[j]].dir_x,
+                                     bins[sorted_k[j]].dir_y,
+                                     bins[sorted_k[j]].dir_z);
+                if (wk > bins[sorted_k[j]].flux * dot(bjd, normal)) {
+                    pos = j; break;
+                }
+            }
+            for (int j = n_sorted; j > pos; --j) sorted_k[j] = sorted_k[j - 1];
+            sorted_k[pos] = k;
+            n_sorted++;
+        }
+        if (n_sorted > 0) selected = sorted_k[sample_index % n_sorted];
+    } else {
+        // Deeper bounces: stochastic stratification with per-bounce rotation.
+        float strat_u = (total_spp > 1)
+            ? ((float)((sample_index + bounce_depth * 97) % total_spp) + rng.next_float()) / (float)total_spp
+            : rng.next_float();
+        float xi = strat_u * total;
+        for (int k = 0; k < N; ++k) {
+            if (xi <= cdf[k]) { selected = k; break; }
+        }
     }
 
     // Jitter within bin solid angle (cone around bin centroid)
@@ -1042,9 +1093,13 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
     result.clk_bsdf          = 0;
 
     Spectrum throughput = Spectrum::constant(1.0f);
-    bool prev_was_specular = true; // treat camera ray as specular for emission
+    bool  prev_was_specular = true; // treat camera ray as specular for emission
     bool  last_was_diffuse  = false;
     float last_pdf_bsdf_dir = 0.0f;
+    // in_indirect: becomes true after the first diffuse hit has been NEE-sampled.
+    // All radiance arriving after that point is indirect and routed to
+    // photon_indirect so that:  combined == nee_direct + photon_indirect.
+    bool  in_indirect = false;
 
     // Pre-load bin directions for guided NEE / bounce.
     // Used only when the dense cell-bin grid is available.
@@ -1077,8 +1132,9 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             }
             if (prev_was_specular || last_was_diffuse) {
                 Spectrum Le_contrib = throughput * Le * w_mis;
-                result.combined   += Le_contrib;
-                result.nee_direct += Le_contrib; // direct component bucket
+                result.combined += Le_contrib;
+                if (in_indirect) result.photon_indirect += Le_contrib;
+                else             result.nee_direct      += Le_contrib;
             }
             break;
         }
@@ -1124,14 +1180,17 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             result.clk_nee += clock64() - t_nee;
 
             Spectrum nee_contrib = throughput * nee.L;
-            result.combined   += nee_contrib;
-            result.nee_direct += nee_contrib;
+            result.combined += nee_contrib;
+            if (in_indirect) result.photon_indirect += nee_contrib;
+            else             result.nee_direct      += nee_contrib;
         }
 
-        // ── Apply photon indirect contribution ───────────────────
-        // NOTE: We intentionally do NOT add a photon-density indirect term
-        // here. We continue the BSDF path (guided by bins when available)
-        // to avoid double-counting indirect illumination.
+        // After this diffuse hit's NEE all further contributions are indirect
+        in_indirect = true;
+
+        // No separate photon-density term: the BSDF multi-bounce path is the
+        // indirect estimator (guided by bins when available).  Calling the
+        // photon-density gather here AND continuing the path would double-count.
 
         // ── BSDF continuation (multi-bounce, guided by bins) ─────────
         long long t_bsdf = clock64();
@@ -1145,7 +1204,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         if (p_guided > 0.0f && rng.next_float() < p_guided) {
             wi_world = dev_sample_guided_bounce(
                 active_bins, params.photon_bin_count, hit.shading_normal,
-                bin_dirs, rng, sample_index, total_spp);
+                bin_dirs, rng, sample_index, total_spp, bounce);
             wi_local = frame.world_to_local(wi_world);
         } else {
             wi_local = sample_cosine_hemisphere_dev(rng);
@@ -1446,9 +1505,10 @@ extern "C" __global__ void __raygen__photon_trace() {
             }
         }
 
-        // Bounce
+        // Bounce — track single-channel albedo for RR (mirrors: ~1, diffuse: Kd)
+        float rr_albedo = 1.0f;
         if (dev_is_specular(hit_mat)) {
-            // Mirror reflection
+            // Mirror reflection: throughput unchanged, apply threshold cap in RR
             float3 n = hit.shading_normal;
             direction = direction - n * (2.f * dot(direction, n));
             origin = hit.position + n * OPTIX_SCENE_EPSILON;
@@ -1458,15 +1518,16 @@ extern "C" __global__ void __raygen__photon_trace() {
             float3 wi_local = sample_cosine_hemisphere_dev(rng);
             // Throughput for Lambertian: f*cos/pdf = Kd (for single wavelength)
             Spectrum Kd = dev_get_Kd(hit_mat);
-            flux *= Kd.value[lambda_bin];
+            rr_albedo = Kd.value[lambda_bin]; // use actual albedo for RR
+            flux *= rr_albedo;
 
             direction = bounce_frame.local_to_world(wi_local);
             origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
         }
 
-        // Russian roulette
+        // Russian roulette — survival probability proportional to throughput
         if (bounce >= DEFAULT_MIN_BOUNCES_RR) {
-            float p_rr = fminf(DEFAULT_RR_THRESHOLD, 0.5f);
+            float p_rr = fminf(DEFAULT_RR_THRESHOLD, rr_albedo);
             if (rng.next_float() >= p_rr) break;
             flux /= p_rr;
         }
