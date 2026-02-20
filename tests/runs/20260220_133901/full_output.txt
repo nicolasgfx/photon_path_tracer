@@ -1,0 +1,1089 @@
+[==========] Running 220 tests from 33 test suites.
+[----------] Global test environment set-up.
+[----------] 10 tests from VectorMath
+[ RUN      ] VectorMath.Addition
+[       OK ] VectorMath.Addition (0 ms)
+[ RUN      ] VectorMath.Subtraction
+[       OK ] VectorMath.Subtraction (0 ms)
+[ RUN      ] VectorMath.ScalarMultiply
+[       OK ] VectorMath.ScalarMultiply (0 ms)
+[ RUN      ] VectorMath.DotProduct
+[       OK ] VectorMath.DotProduct (0 ms)
+[ RUN      ] VectorMath.CrossProduct
+[       OK ] VectorMath.CrossProduct (0 ms)
+[ RUN      ] VectorMath.Length
+[       OK ] VectorMath.Length (0 ms)
+[ RUN      ] VectorMath.Normalize
+[       OK ] VectorMath.Normalize (0 ms)
+[ RUN      ] VectorMath.Negation
+[       OK ] VectorMath.Negation (0 ms)
+[ RUN      ] VectorMath.PlusEquals
+[       OK ] VectorMath.PlusEquals (0 ms)
+[ RUN      ] VectorMath.FminFmax
+[       OK ] VectorMath.FminFmax (0 ms)
+[----------] 10 tests from VectorMath (0 ms total)
+
+[----------] 4 tests from ONB
+[ RUN      ] ONB.FromUpNormal
+[       OK ] ONB.FromUpNormal (0 ms)
+[ RUN      ] ONB.FromArbitraryNormal
+[       OK ] ONB.FromArbitraryNormal (0 ms)
+[ RUN      ] ONB.RoundTripLocalWorld
+[       OK ] ONB.RoundTripLocalWorld (0 ms)
+[ RUN      ] ONB.NormalMapsToLocalZ
+[       OK ] ONB.NormalMapsToLocalZ (0 ms)
+[----------] 4 tests from ONB (0 ms total)
+
+[----------] 19 tests from Spectrum
+[ RUN      ] Spectrum.ZeroAndConstant
+[       OK ] Spectrum.ZeroAndConstant (0 ms)
+[ RUN      ] Spectrum.Arithmetic
+[       OK ] Spectrum.Arithmetic (0 ms)
+[ RUN      ] Spectrum.PlusEqualsAndTimesEquals
+[       OK ] Spectrum.PlusEqualsAndTimesEquals (0 ms)
+[ RUN      ] Spectrum.SumAndMax
+[       OK ] Spectrum.SumAndMax (0 ms)
+[ RUN      ] Spectrum.LambdaOfBin
+[       OK ] Spectrum.LambdaOfBin (0 ms)
+[ RUN      ] Spectrum.CIE_Y_PeakNear555nm
+[       OK ] Spectrum.CIE_Y_PeakNear555nm (0 ms)
+[ RUN      ] Spectrum.CIE_NonNegativeInVisibleRange
+[       OK ] Spectrum.CIE_NonNegativeInVisibleRange (0 ms)
+[ RUN      ] Spectrum.WhiteSpectrumToSRGB
+[       OK ] Spectrum.WhiteSpectrumToSRGB (0 ms)
+[ RUN      ] Spectrum.ZeroSpectrumToBlack
+[       OK ] Spectrum.ZeroSpectrumToBlack (0 ms)
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_Red
+[       OK ] Spectrum.RGBToSpectrumReflectance_Red (0 ms)
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_Green
+[       OK ] Spectrum.RGBToSpectrumReflectance_Green (0 ms)
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_Blue
+[       OK ] Spectrum.RGBToSpectrumReflectance_Blue (0 ms)
+[ RUN      ] Spectrum.RGBToSpectrumReflectance_NonNegative
+[       OK ] Spectrum.RGBToSpectrumReflectance_NonNegative (0 ms)
+[ RUN      ] Spectrum.BlackbodyPositive
+[       OK ] Spectrum.BlackbodyPositive (0 ms)
+[ RUN      ] Spectrum.BlackbodyPeakWavelength
+[       OK ] Spectrum.BlackbodyPeakWavelength (0 ms)
+[ RUN      ] Spectrum.SRGBGammaLinearizationZero
+[       OK ] Spectrum.SRGBGammaLinearizationZero (0 ms)
+[ RUN      ] Spectrum.SRGBGammaLinearizationOne
+[       OK ] Spectrum.SRGBGammaLinearizationOne (0 ms)
+[ RUN      ] Spectrum.RGBRoundTrip
+[       OK ] Spectrum.RGBRoundTrip (0 ms)
+[ RUN      ] Spectrum.BlackbodyPlanckFormula
+[       OK ] Spectrum.BlackbodyPlanckFormula (0 ms)
+[----------] 19 tests from Spectrum (0 ms total)
+
+[----------] 3 tests from RNG
+[ RUN      ] RNG.UniformDistribution
+[       OK ] RNG.UniformDistribution (0 ms)
+[ RUN      ] RNG.DifferentSeeds
+[       OK ] RNG.DifferentSeeds (0 ms)
+[ RUN      ] RNG.Reproducibility
+[       OK ] RNG.Reproducibility (0 ms)
+[----------] 3 tests from RNG (0 ms total)
+
+[----------] 8 tests from Sampling
+[ RUN      ] Sampling.CosineHemispherePDFIntegratesToOne
+[       OK ] Sampling.CosineHemispherePDFIntegratesToOne (19 ms)
+[ RUN      ] Sampling.CosineHemisphereSamplesOnUnitSphere
+[       OK ] Sampling.CosineHemisphereSamplesOnUnitSphere (0 ms)
+[ RUN      ] Sampling.CosineHemisphereMeanCosTheta
+[       OK ] Sampling.CosineHemisphereMeanCosTheta (2 ms)
+[ RUN      ] Sampling.UniformHemisphereSamplesValid
+[       OK ] Sampling.UniformHemisphereSamplesValid (0 ms)
+[ RUN      ] Sampling.UniformSphereSamplesValid
+[       OK ] Sampling.UniformSphereSamplesValid (0 ms)
+[ RUN      ] Sampling.TriangleSamplingBarycentricValid
+[       OK ] Sampling.TriangleSamplingBarycentricValid (0 ms)
+[ RUN      ] Sampling.TriangleSamplingUniform
+[       OK ] Sampling.TriangleSamplingUniform (0 ms)
+[ RUN      ] Sampling.CosineHemispherePDFIntegration
+[       OK ] Sampling.CosineHemispherePDFIntegration (4 ms)
+[----------] 8 tests from Sampling (28 ms total)
+
+[----------] 8 tests from MIS
+[ RUN      ] MIS.PowerHeuristic2_Symmetric
+[       OK ] MIS.PowerHeuristic2_Symmetric (0 ms)
+[ RUN      ] MIS.PowerHeuristic2_Dominance
+[       OK ] MIS.PowerHeuristic2_Dominance (0 ms)
+[ RUN      ] MIS.PowerHeuristic2_ZeroPDFs
+[       OK ] MIS.PowerHeuristic2_ZeroPDFs (0 ms)
+[ RUN      ] MIS.PowerHeuristic3_Symmetric
+[       OK ] MIS.PowerHeuristic3_Symmetric (0 ms)
+[ RUN      ] MIS.PowerHeuristic3_SumsToOne
+[       OK ] MIS.PowerHeuristic3_SumsToOne (0 ms)
+[ RUN      ] MIS.MISWeight3_Consistent
+[       OK ] MIS.MISWeight3_Consistent (0 ms)
+[ RUN      ] MIS.MISLightSampleContribution
+[       OK ] MIS.MISLightSampleContribution (0 ms)
+[ RUN      ] MIS.MISBSDFSampleContribution
+[       OK ] MIS.MISBSDFSampleContribution (0 ms)
+[----------] 8 tests from MIS (0 ms total)
+
+[----------] 5 tests from AliasTable
+[ RUN      ] AliasTable.UniformWeights
+[       OK ] AliasTable.UniformWeights (0 ms)
+[ RUN      ] AliasTable.SamplingMatchesPDF
+[       OK ] AliasTable.SamplingMatchesPDF (4 ms)
+[ RUN      ] AliasTable.SingleElement
+[       OK ] AliasTable.SingleElement (0 ms)
+[ RUN      ] AliasTable.ZeroWeightElement
+[       OK ] AliasTable.ZeroWeightElement (0 ms)
+[ RUN      ] AliasTable.PDFSumsToOne
+[       OK ] AliasTable.PDFSumsToOne (0 ms)
+[----------] 5 tests from AliasTable (5 ms total)
+
+[----------] 11 tests from Triangle
+[ RUN      ] Triangle.HitCentreOfTriangle
+[       OK ] Triangle.HitCentreOfTriangle (0 ms)
+[ RUN      ] Triangle.MissTriangle
+[       OK ] Triangle.MissTriangle (0 ms)
+[ RUN      ] Triangle.ParallelRay
+[       OK ] Triangle.ParallelRay (0 ms)
+[ RUN      ] Triangle.BehindRay
+[       OK ] Triangle.BehindRay (0 ms)
+[ RUN      ] Triangle.EdgeHit
+[       OK ] Triangle.EdgeHit (0 ms)
+[ RUN      ] Triangle.Area
+[       OK ] Triangle.Area (0 ms)
+[ RUN      ] Triangle.GeometricNormal
+[       OK ] Triangle.GeometricNormal (0 ms)
+[ RUN      ] Triangle.InterpolatePosition
+[       OK ] Triangle.InterpolatePosition (0 ms)
+[ RUN      ] Triangle.DegenerateZeroArea
+[       OK ] Triangle.DegenerateZeroArea (0 ms)
+[ RUN      ] Triangle.CollinearVertices
+[       OK ] Triangle.CollinearVertices (0 ms)
+[ RUN      ] Triangle.InterpolateNormal
+[       OK ] Triangle.InterpolateNormal (0 ms)
+[----------] 11 tests from Triangle (0 ms total)
+
+[----------] 5 tests from AABB
+[ RUN      ] AABB.RayHitsBox
+[       OK ] AABB.RayHitsBox (0 ms)
+[ RUN      ] AABB.RayMissesBox
+[       OK ] AABB.RayMissesBox (0 ms)
+[ RUN      ] AABB.RayInsideBox
+[       OK ] AABB.RayInsideBox (0 ms)
+[ RUN      ] AABB.Expand
+[       OK ] AABB.Expand (0 ms)
+[ RUN      ] AABB.LongestAxis
+[       OK ] AABB.LongestAxis (0 ms)
+[----------] 5 tests from AABB (0 ms total)
+
+[----------] 5 tests from Fresnel
+[ RUN      ] Fresnel.SchlickAtNormalIncidence
+[       OK ] Fresnel.SchlickAtNormalIncidence (0 ms)
+[ RUN      ] Fresnel.SchlickAtGrazingAngle
+[       OK ] Fresnel.SchlickAtGrazingAngle (0 ms)
+[ RUN      ] Fresnel.SchlickMonotonic
+[       OK ] Fresnel.SchlickMonotonic (0 ms)
+[ RUN      ] Fresnel.DielectricNormalIncidence
+[       OK ] Fresnel.DielectricNormalIncidence (0 ms)
+[ RUN      ] Fresnel.DielectricTotalInternalReflection
+[       OK ] Fresnel.DielectricTotalInternalReflection (0 ms)
+[----------] 5 tests from Fresnel (0 ms total)
+
+[----------] 5 tests from GGX
+[ RUN      ] GGX.NormalizationIntegral
+[       OK ] GGX.NormalizationIntegral (2 ms)
+[ RUN      ] GGX.DValueAtNormal
+[       OK ] GGX.DValueAtNormal (0 ms)
+[ RUN      ] GGX.SmithGeometryRange
+[       OK ] GGX.SmithGeometryRange (0 ms)
+[ RUN      ] GGX.VNDFSamplingPDFConsistency
+[       OK ] GGX.VNDFSamplingPDFConsistency (0 ms)
+[ RUN      ] GGX.SmithGSymmetry
+[       OK ] GGX.SmithGSymmetry (0 ms)
+[----------] 5 tests from GGX (2 ms total)
+
+[----------] 9 tests from BSDF
+[ RUN      ] BSDF.LambertianEnergyConservation
+[       OK ] BSDF.LambertianEnergyConservation (7 ms)
+[ RUN      ] BSDF.LambertianPDFConsistency
+[       OK ] BSDF.LambertianPDFConsistency (0 ms)
+[ RUN      ] BSDF.MirrorReflection
+[       OK ] BSDF.MirrorReflection (0 ms)
+[ RUN      ] BSDF.GlassSampleValid
+[       OK ] BSDF.GlassSampleValid (0 ms)
+[ RUN      ] BSDF.GlossyEnergyBound
+[       OK ] BSDF.GlossyEnergyBound (89 ms)
+[ RUN      ] BSDF.GlossyPDFConsistency
+[       OK ] BSDF.GlossyPDFConsistency (0 ms)
+[ RUN      ] BSDF.EvaluateNonNegative
+[       OK ] BSDF.EvaluateNonNegative (0 ms)
+[ RUN      ] BSDF.BelowHemisphereReturnsZero
+[       OK ] BSDF.BelowHemisphereReturnsZero (0 ms)
+[ RUN      ] BSDF.GlossyEnergyAtGrazingAngle
+[       OK ] BSDF.GlossyEnergyAtGrazingAngle (120 ms)
+[----------] 9 tests from BSDF (217 ms total)
+
+[----------] 6 tests from HashGrid
+[ RUN      ] HashGrid.BuildAndQueryBasic
+[       OK ] HashGrid.BuildAndQueryBasic (0 ms)
+[ RUN      ] HashGrid.QueryDistanceFilter
+[       OK ] HashGrid.QueryDistanceFilter (0 ms)
+[ RUN      ] HashGrid.EmptyGrid
+[       OK ] HashGrid.EmptyGrid (0 ms)
+[ RUN      ] HashGrid.AllPhotonsFound
+[       OK ] HashGrid.AllPhotonsFound (0 ms)
+[ RUN      ] HashGrid.CellCoordConsistency
+[       OK ] HashGrid.CellCoordConsistency (0 ms)
+[ RUN      ] HashGrid.NegativeCoordinates
+[       OK ] HashGrid.NegativeCoordinates (0 ms)
+[----------] 6 tests from HashGrid (0 ms total)
+
+[----------] 8 tests from DensityEstimator
+[ RUN      ] DensityEstimator.SurfaceConsistency_PlaneDistReject
+[       OK ] DensityEstimator.SurfaceConsistency_PlaneDistReject (0 ms)
+[ RUN      ] DensityEstimator.SurfaceConsistency_DirectionReject
+[       OK ] DensityEstimator.SurfaceConsistency_DirectionReject (0 ms)
+[ RUN      ] DensityEstimator.ValidPhotonContributes
+[       OK ] DensityEstimator.ValidPhotonContributes (0 ms)
+[ RUN      ] DensityEstimator.BackFacingNearbyTriangleRejected
+[       OK ] DensityEstimator.BackFacingNearbyTriangleRejected (0 ms)
+[ RUN      ] DensityEstimator.ThinWallDoubleSided
+[       OK ] DensityEstimator.ThinWallDoubleSided (0 ms)
+[ RUN      ] DensityEstimator.SameCellDifferentFacingRejected
+[       OK ] DensityEstimator.SameCellDifferentFacingRejected (0 ms)
+[ RUN      ] DensityEstimator.NormalizationFactor
+[       OK ] DensityEstimator.NormalizationFactor (0 ms)
+[ RUN      ] DensityEstimator.EpanechnikovKernelCorrection
+[       OK ] DensityEstimator.EpanechnikovKernelCorrection (0 ms)
+[----------] 8 tests from DensityEstimator (0 ms total)
+
+[----------] 3 tests from Kernel
+[ RUN      ] Kernel.EpanechnikovBoundary
+[       OK ] Kernel.EpanechnikovBoundary (0 ms)
+[ RUN      ] Kernel.EpanechnikovMonotonic
+[       OK ] Kernel.EpanechnikovMonotonic (0 ms)
+[ RUN      ] Kernel.BoxBoundary
+[       OK ] Kernel.BoxBoundary (0 ms)
+[----------] 3 tests from Kernel (0 ms total)
+
+[----------] 2 tests from MISWeights
+[ RUN      ] MISWeights.MISWeight2_NonNegative
+[       OK ] MISWeights.MISWeight2_NonNegative (0 ms)
+[ RUN      ] MISWeights.MISWeight3_NonNegative
+[       OK ] MISWeights.MISWeight3_NonNegative (0 ms)
+[----------] 2 tests from MISWeights (0 ms total)
+
+[----------] 3 tests from ReflectRefract
+[ RUN      ] ReflectRefract.ReflectLocal
+[       OK ] ReflectRefract.ReflectLocal (0 ms)
+[ RUN      ] ReflectRefract.RefractLocalSnellsLaw
+[       OK ] ReflectRefract.RefractLocalSnellsLaw (0 ms)
+[ RUN      ] ReflectRefract.TotalInternalReflection
+[       OK ] ReflectRefract.TotalInternalReflection (0 ms)
+[----------] 3 tests from ReflectRefract (0 ms total)
+
+[----------] 4 tests from Camera
+[ RUN      ] Camera.RayThroughCenter
+[       OK ] Camera.RayThroughCenter (0 ms)
+[ RUN      ] Camera.CornellBoxCameraSetup
+[       OK ] Camera.CornellBoxCameraSetup (0 ms)
+[ RUN      ] Camera.CenterPixelRayDirection
+[       OK ] Camera.CenterPixelRayDirection (0 ms)
+[ RUN      ] Camera.CornerRaysDiverge
+[       OK ] Camera.CornerRaysDiverge (0 ms)
+[----------] 4 tests from Camera (0 ms total)
+
+[----------] 2 tests from PhotonSoA
+[ RUN      ] PhotonSoA.PushBackAndGet
+[       OK ] PhotonSoA.PushBackAndGet (0 ms)
+[ RUN      ] PhotonSoA.ClearWorks
+[       OK ] PhotonSoA.ClearWorks (0 ms)
+[----------] 2 tests from PhotonSoA (0 ms total)
+
+[----------] 2 tests from BSDFReciprocity
+[ RUN      ] BSDFReciprocity.LambertianReciprocity
+[       OK ] BSDFReciprocity.LambertianReciprocity (0 ms)
+[ RUN      ] BSDFReciprocity.GlossyMetalReciprocity
+[       OK ] BSDFReciprocity.GlossyMetalReciprocity (0 ms)
+[----------] 2 tests from BSDFReciprocity (0 ms total)
+
+[----------] 2 tests from GlassFresnel
+[ RUN      ] GlassFresnel.EnergyBalance
+[       OK ] GlassFresnel.EnergyBalance (0 ms)
+[ RUN      ] GlassFresnel.GlassSampleReflectRefractBalance
+[       OK ] GlassFresnel.GlassSampleReflectRefractBalance (0 ms)
+[----------] 2 tests from GlassFresnel (0 ms total)
+
+[----------] 2 tests from FrameBuffer
+[ RUN      ] FrameBuffer.ZeroGivesBlack
+[       OK ] FrameBuffer.ZeroGivesBlack (0 ms)
+[ RUN      ] FrameBuffer.AccumulateAndTonemap
+[       OK ] FrameBuffer.AccumulateAndTonemap (0 ms)
+[----------] 2 tests from FrameBuffer (0 ms total)
+
+[----------] 3 tests from Material
+[ RUN      ] Material.IsEmissive
+[       OK ] Material.IsEmissive (0 ms)
+[ RUN      ] Material.IsSpecular
+[       OK ] Material.IsSpecular (0 ms)
+[ RUN      ] Material.MeanEmission
+[       OK ] Material.MeanEmission (0 ms)
+[----------] 3 tests from Material (0 ms total)
+
+[----------] 15 tests from CornellBox
+[ RUN      ] CornellBox.LoadScene
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.LoadScene (77 ms)
+[ RUN      ] CornellBox.EmissiveDistribution
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.EmissiveDistribution (84 ms)
+[ RUN      ] CornellBox.BVHMatchesBruteForce
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.BVHMatchesBruteForce (102 ms)
+[ RUN      ] CornellBox.CenterRayHitsSomething
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.CenterRayHitsSomething (78 ms)
+[ RUN      ] CornellBox.FloorRayHitsFloor
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.FloorRayHitsFloor (77 ms)
+[ RUN      ] CornellBox.ShadowRayToLight
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.ShadowRayToLight (83 ms)
+[ RUN      ] CornellBox.ShadowRayBlockedByGeometry
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.ShadowRayBlockedByGeometry (77 ms)
+[ RUN      ] CornellBox.EmitterSamplesValid
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.EmitterSamplesValid (77 ms)
+[ RUN      ] CornellBox.DirectLightFromFloor
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.DirectLightFromFloor (79 ms)
+[ RUN      ] CornellBox.DirectLightPDFConsistency
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.DirectLightPDFConsistency (79 ms)
+[ RUN      ] CornellBox.PhotonTracingProducesPhotons
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonTracingProducesPhotons (91 ms)
+[ RUN      ] CornellBox.PhotonPositionsOnSurfaces
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonPositionsOnSurfaces (83 ms)
+[ RUN      ] CornellBox.PhotonFluxPositiveFinite
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonFluxPositiveFinite (85 ms)
+[ RUN      ] CornellBox.PhotonDensityOnFloor
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[       OK ] CornellBox.PhotonDensityOnFloor (220 ms)
+[ RUN      ] CornellBox.SmallRenderProducesValidImage
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 1000 photons in 13.9773 ms
+[Photon] Global map:  2612 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (2612 buckets)
+[Render] 0%[Render] 4%[Render] 9%[Render] 14%[Render] 18%[Render] 23%[Render] 28%[Render] 32%[Render] 37%[Render] 42%[Render] 46%[Render] 51%[Render] 56%[Render] 60%[Render] 65%[Render] 70%[Render] 75%[Render] 79%[Render] 84%[Render] 89%[Render] 93%[Render] 98%[Render] 100%  (0.002671 s, 2 spp)
+[       OK ] CornellBox.SmallRenderProducesValidImage (95 ms)
+[----------] 15 tests from CornellBox (1394 ms total)
+
+[----------] 10 tests from OptiX
+[ RUN      ] OptiX.Initialization
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.Initialization (236 ms)
+[ RUN      ] OptiX.AccelBuild
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.AccelBuild (187 ms)
+[ RUN      ] OptiX.SceneDataUpload
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.SceneDataUpload (189 ms)
+[ RUN      ] OptiX.PhotonDataUpload
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 500 photons in 7.0855 ms
+[Photon] Global map:  1304 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1304 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 1304 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.PhotonDataUpload (200 ms)
+[ RUN      ] OptiX.DebugFrameNonZero
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 10000 photons in 144.121 ms
+[Photon] Global map:  26985 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (26985 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 128 emissive triangles, total power = 0.448031
+[OptiX] Uploaded 26985 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.DebugFrameNonZero (396 ms)
+[ RUN      ] OptiX.NormalsDebugMode
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 100 photons in 1.6577 ms
+[Photon] Global map:  299 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1024 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 299 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.NormalsDebugMode (189 ms)
+[ RUN      ] OptiX.FinalRenderProducesValid
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 500 photons in 6.926 ms
+[Photon] Global map:  1304 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1304 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 128 emissive triangles, total power = 0.448031
+[OptiX] Uploaded 1304 photons to device
+[Render] Starting: 8x8 @ 2 spp (64 pixels)
+[Render] [=========>          ]  50%  1/2 spp  0.0s  ETA 0.0s   [Render] [===================>] 100%  2/2 spp  0.0s  ETA 0.0s   
+[Render] Done in 0.0s  (~2 Mray-bounces/s)
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.FinalRenderProducesValid (195 ms)
+[ RUN      ] OptiX.ResizeFramebuffer
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 100 photons in 1.7 ms
+[Photon] Global map:  299 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1024 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 299 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.ResizeFramebuffer (191 ms)
+[ RUN      ] OptiX.PhotonBinsPopulateAndValidityFlags
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 2000 photons in 28.1 ms
+[Photon] Global map:  5355 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (5355 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 128 emissive triangles, total power = 0.4
+[OptiX] Uploaded 5355 photons to device
+[Bins] Populating photon directional bin cache (32 bins per pixel)...
+[Bins] Population done:      1.0 ms  (32 bins × 64 pixels = 0 MB)
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[       OK ] OptiX.PhotonBinsPopulateAndValidityFlags (223 ms)
+[ RUN      ] OptiX.PhotonBinCacheAllocationMatchesResolution
+[       OK ] OptiX.PhotonBinCacheAllocationMatchesResolution (0 ms)
+[----------] 10 tests from OptiX (2010 ms total)
+
+[----------] 14 tests from PhotonBins
+[ RUN      ] PhotonBins.StructSizeMatchesComment
+[       OK ] PhotonBins.StructSizeMatchesComment (0 ms)
+[ RUN      ] PhotonBins.DirsInitAndNearest
+[       OK ] PhotonBins.DirsInitAndNearest (0 ms)
+[ RUN      ] PhotonBins.DirsInitClampsToMax
+[       OK ] PhotonBins.DirsInitClampsToMax (0 ms)
+[ RUN      ] PhotonBins.FibonacciSphereCoversUnitSphere
+[       OK ] PhotonBins.FibonacciSphereCoversUnitSphere (0 ms)
+[ RUN      ] PhotonBins.FindNearestBinReturnsItself
+[       OK ] PhotonBins.FindNearestBinReturnsItself (0 ms)
+[ RUN      ] PhotonBins.FindNearestBinGeometric
+[       OK ] PhotonBins.FindNearestBinGeometric (0 ms)
+[ RUN      ] PhotonBins.HemisphereCoverage
+[       OK ] PhotonBins.HemisphereCoverage (0 ms)
+[ RUN      ] PhotonBins.BinPopulationBasic
+[       OK ] PhotonBins.BinPopulationBasic (0 ms)
+[ RUN      ] PhotonBins.EmptyBinsHandled
+[       OK ] PhotonBins.EmptyBinsHandled (0 ms)
+[ RUN      ] PhotonBins.CentroidNormalization
+[       OK ] PhotonBins.CentroidNormalization (0 ms)
+[ RUN      ] PhotonBins.StratifiedSubPixelCoverage
+[       OK ] PhotonBins.StratifiedSubPixelCoverage (0 ms)
+[ RUN      ] PhotonBins.BinSolidAngle
+[       OK ] PhotonBins.BinSolidAngle (0 ms)
+[ RUN      ] PhotonBins.PhotonBinSize
+[       OK ] PhotonBins.PhotonBinSize (0 ms)
+[ RUN      ] PhotonBins.MaxBinCountRespected
+[       OK ] PhotonBins.MaxBinCountRespected (0 ms)
+[----------] 14 tests from PhotonBins (0 ms total)
+
+[----------] 3 tests from Cdf
+[ RUN      ] Cdf.BinarySearchBasicBoundaries
+[       OK ] Cdf.BinarySearchBasicBoundaries (0 ms)
+[ RUN      ] Cdf.BinarySearchDegenerateOrSmallN
+[       OK ] Cdf.BinarySearchDegenerateOrSmallN (0 ms)
+[ RUN      ] Cdf.BinarySearchWithPlateaus
+[       OK ] Cdf.BinarySearchWithPlateaus (0 ms)
+[----------] 3 tests from Cdf (0 ms total)
+
+[----------] 1 test from NEE
+[ RUN      ] NEE.ShadowSampleCountPolicy
+[       OK ] NEE.ShadowSampleCountPolicy (0 ms)
+[----------] 1 test from NEE (0 ms total)
+
+[----------] 1 test from PhotonDensityCache
+[ RUN      ] PhotonDensityCache.ReadWriteGating
+[       OK ] PhotonDensityCache.ReadWriteGating (0 ms)
+[----------] 1 test from PhotonDensityCache (0 ms total)
+
+[----------] 3 tests from GuidedNEE
+[ RUN      ] GuidedNEE.FallbackConditions
+[       OK ] GuidedNEE.FallbackConditions (0 ms)
+[ RUN      ] GuidedNEE.BinBoostIsNormalizedAndHemisphereGated
+[       OK ] GuidedNEE.BinBoostIsNormalizedAndHemisphereGated (0 ms)
+[ RUN      ] GuidedNEE.WeightFormulaMatchesSpec
+[       OK ] GuidedNEE.WeightFormulaMatchesSpec (0 ms)
+[----------] 3 tests from GuidedNEE (0 ms total)
+
+[----------] 16 tests from GroundTruthComparison
+[ RUN      ] GroundTruthComparison.DatasetIsValid
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[Dataset] Loaded REAL data from D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Dataset] Cornell Box ready: 13056 tris, 1323113 photons (from DISK), 1323113 grid buckets
+[       OK ] GroundTruthComparison.DatasetIsValid (203 ms)
+[ RUN      ] GroundTruthComparison.DataLoadedFromDisk
+[       OK ] GroundTruthComparison.DataLoadedFromDisk (0 ms)
+[ RUN      ] GroundTruthComparison.HeaderValuesPreserved
+[       OK ] GroundTruthComparison.HeaderValuesPreserved (0 ms)
+[ RUN      ] GroundTruthComparison.BothMethodsProduceFiniteResults
+[       OK ] GroundTruthComparison.BothMethodsProduceFiniteResults (2 ms)
+[ RUN      ] GroundTruthComparison.CenterPixelMeanConverges
+[CenterPixel] GT mean=4.3 Opt mean=4.3 relErr=0.0 N=512
+[       OK ] GroundTruthComparison.CenterPixelMeanConverges (882 ms)
+[ RUN      ] GroundTruthComparison.FullImageMeanConverges
+[FullImage] GT mean=1.0 Opt mean=1.0 relErr=0.0 GT var=2.6 Opt var=2.6 N=2048
+[       OK ] GroundTruthComparison.FullImageMeanConverges (1526 ms)
+[ RUN      ] GroundTruthComparison.OptimizedVarianceNotWorse
+[Variance] GT var=6.3 Opt var=6.0
+[       OK ] GroundTruthComparison.OptimizedVarianceNotWorse (1685 ms)
+[ RUN      ] GroundTruthComparison.DirectLightingAgreement
+[DirectLighting] GT NEE mean=1.9 Opt NEE mean=2.0
+[       OK ] GroundTruthComparison.DirectLightingAgreement (964 ms)
+[ RUN      ] GroundTruthComparison.PhotonIndirectAgreement
+[PhotonIndirect] GT mean=1.9 Opt mean=1.9
+[       OK ] GroundTruthComparison.PhotonIndirectAgreement (876 ms)
+[ RUN      ] GroundTruthComparison.SingleBounceClose
+[SingleBounce] GT mean=3.2 Opt mean=3.2 relErr=0.0
+[       OK ] GroundTruthComparison.SingleBounceClose (1691 ms)
+[ RUN      ] GroundTruthComparison.FullBounceNoBias
+[FullBounce] GT mean=3.9 Opt mean=3.9 relErr=0.0 N=2048
+[       OK ] GroundTruthComparison.FullBounceNoBias (3153 ms)
+[ RUN      ] GroundTruthComparison.EnergyConservation
+[Energy] GT total=655.6 Opt total=646.6 ratio=1.0
+[       OK ] GroundTruthComparison.EnergyConservation (378 ms)
+[ RUN      ] GroundTruthComparison.BinIdxMatchesFindNearest
+[       OK ] GroundTruthComparison.BinIdxMatchesFindNearest (0 ms)
+[ RUN      ] GroundTruthComparison.GatherWithBinsMatchesStandard
+[GatherBins] Standard sum=2.2 WithBins sum=2.2
+[       OK ] GroundTruthComparison.GatherWithBinsMatchesStandard (2 ms)
+[ RUN      ] GroundTruthComparison.SpectralBinAgreement
+[Spectral] Bins with >50% error: 0/32
+[       OK ] GroundTruthComparison.SpectralBinAgreement (414 ms)
+[ RUN      ] GroundTruthComparison.BinaryRoundTrip
+[TestDataIO] Saved D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\roundtrip_test.bin (1323113 global + 0 caustic photons)
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\roundtrip_test.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[       OK ] GroundTruthComparison.BinaryRoundTrip (61 ms)
+[----------] 16 tests from GroundTruthComparison (11844 ms total)
+
+[----------] 15 tests from PerRayValidation
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[PerRayDataset] Ready: 1323113 photons (from DISK)
+[ RUN      ] PerRayValidation.DatasetIsValid
+[       OK ] PerRayValidation.DatasetIsValid (0 ms)
+[ RUN      ] PerRayValidation.NoPhysicalViolationsInRandomRays
+
+======================================================
+  PER-RAY PHYSICAL PATH VALIDATION SUMMARY
+======================================================
+  Total rays tested: 256
+  Rays with warnings: 5 (1.9531%)
+  Physical validity issues: 0
+
+  AGGREGATE MEANS:
+    GT combined mean:  3.6938
+    OPT combined mean: 3.7043
+    Combined relErr:   0.0028
+    NEE relErr:        0.0034
+    Photon relErr:     0.0000
+    Energy ratio:      1.0028
+
+  PER-RAY THRESHOLD EXCEEDANCES:
+    Combined > 0.7000: 0 rays (0.0000%)
+    NEE > 0.8000: 5 rays (1.9531%)
+    Photon > 0.5000: 0 rays (0.0000%)
+
+  TOP 5 WORST RAYS:
+    Ray #56 px=(30,30) GT=2.1534 OPT=3.2218 relErr=0.3316 bounces=1/1
+    Ray #43 px=(32,23) GT=1.2668 OPT=1.7613 relErr=0.2808 bounces=1/1
+    Ray #13 px=(24,17) GT=1.0368 OPT=1.4124 relErr=0.2659 bounces=1/1
+    Ray #248 px=(15,18) GT=0.3492 OPT=0.4633 relErr=0.2462 bounces=1/1
+    Ray #88 px=(28,18) GT=1.3853 OPT=1.6353 relErr=0.1528 bounces=1/1
+======================================================
+
+[       OK ] PerRayValidation.NoPhysicalViolationsInRandomRays (201 ms)
+[ RUN      ] PerRayValidation.ComponentDecompositionHolds
+[Decomposition] GT violations: 0/128  OPT violations: 0/128
+[       OK ] PerRayValidation.ComponentDecompositionHolds (113 ms)
+[ RUN      ] PerRayValidation.AggregateNEEConverges
+[AggNEE] GT mean=2.7389 OPT mean=2.7383 relErr=0.0002
+[       OK ] PerRayValidation.AggregateNEEConverges (428 ms)
+[ RUN      ] PerRayValidation.AggregatePhotonDensityConverges
+[AggPhoton] GT mean=0.6454 OPT mean=0.6454 relErr=0.0000
+[       OK ] PerRayValidation.AggregatePhotonDensityConverges (438 ms)
+[ RUN      ] PerRayValidation.AggregateCombinedConverges
+
+======================================================
+  PER-RAY PHYSICAL PATH VALIDATION SUMMARY
+======================================================
+  Total rays tested: 512
+  Rays with warnings: 11 (2.1484%)
+  Physical validity issues: 0
+
+  AGGREGATE MEANS:
+    GT combined mean:  3.3843
+    OPT combined mean: 3.3837
+    Combined relErr:   0.0002
+    NEE relErr:        0.0002
+    Photon relErr:     0.0000
+    Energy ratio:      0.9998
+
+  PER-RAY THRESHOLD EXCEEDANCES:
+    Combined > 0.7000: 0 rays (0.0000%)
+    NEE > 0.8000: 11 rays (2.1484%)
+    Photon > 0.5000: 0 rays (0.0000%)
+
+  TOP 10 WORST RAYS:
+    Ray #401 px=(19,14) GT=2.0818 OPT=3.9751 relErr=0.4763 bounces=1/1
+    Ray #275 px=(40,11) GT=0.7466 OPT=1.3928 relErr=0.4639 bounces=1/1
+    Ray #372 px=(24,22) GT=1.0612 OPT=1.8895 relErr=0.4383 bounces=1/1
+    Ray #302 px=(15,25) GT=0.8631 OPT=1.5225 relErr=0.4331 bounces=1/1
+    Ray #56 px=(30,30) GT=2.1534 OPT=3.2218 relErr=0.3316 bounces=1/1
+    Ray #400 px=(18,24) GT=0.5838 OPT=0.8351 relErr=0.3009 bounces=1/1
+    Ray #43 px=(32,23) GT=1.2668 OPT=1.7613 relErr=0.2808 bounces=1/1
+    Ray #285 px=(30,25) GT=1.4036 OPT=1.9332 relErr=0.2739 bounces=1/1
+    Ray #13 px=(24,17) GT=1.0368 OPT=1.4124 relErr=0.2659 bounces=1/1
+    Ray #248 px=(15,18) GT=0.3492 OPT=0.4633 relErr=0.2462 bounces=1/1
+======================================================
+
+[       OK ] PerRayValidation.AggregateCombinedConverges (426 ms)
+[ RUN      ] PerRayValidation.EnergyConservationAcrossRandomRays
+[Energy] ratio=0.9998 (GT total=1732.7384 OPT total=1732.4352)
+[       OK ] PerRayValidation.EnergyConservationAcrossRandomRays (421 ms)
+[ RUN      ] PerRayValidation.SpectralBinsNeverMix
+[       OK ] PerRayValidation.SpectralBinsNeverMix (26 ms)
+[ RUN      ] PerRayValidation.FirstHitPhotonDensityAgreement
+[FirstHitPhoton] Tested 64 diffuse first hits, disagreements: 0
+[       OK ] PerRayValidation.FirstHitPhotonDensityAgreement (115 ms)
+[ RUN      ] PerRayValidation.ThroughputDecayIsPhysical
+[Throughput] Tested 256 rays: explosions=0 nonfinite=0 negative=0
+[       OK ] PerRayValidation.ThroughputDecayIsPhysical (203 ms)
+[ RUN      ] PerRayValidation.SingleBouncePhotonAgreesClosely
+[SingleBounce] GT photon=0.5817 OPT photon=0.5817 relErr=0.0000
+[       OK ] PerRayValidation.SingleBouncePhotonAgreesClosely (255 ms)
+[ RUN      ] PerRayValidation.PerSpectralBinAgreement
+[SpectralBins] Bins with >50% error: 0/32
+[       OK ] PerRayValidation.PerSpectralBinAgreement (213 ms)
+[ RUN      ] PerRayValidation.MultiBounceNoBias
+[MultiBounce] GT mean=3.3843 OPT mean=3.3837 relErr=0.0002 energy_ratio=0.9998
+[       OK ] PerRayValidation.MultiBounceNoBias (437 ms)
+[ RUN      ] PerRayValidation.NoDoubleCountingDirectLight
+[WARNING] Ray 103 px=(30,16): photon_indirect (1.6358) >> nee_direct (0.4300) — possible double counting
+[WARNING] Ray 106 px=(23,15): photon_indirect (1.1728) >> nee_direct (0.2525) — possible double counting
+[WARNING] Ray 139 px=(28,15): photon_indirect (1.6592) >> nee_direct (0.5181) — possible double counting
+[WARNING] Ray 229 px=(36,46): photon_indirect (1.3162) >> nee_direct (0.3096) — possible double counting
+[DirectDoubleCount] Suspicious rays: 4/256
+[       OK ] PerRayValidation.NoDoubleCountingDirectLight (123 ms)
+[ RUN      ] PerRayValidation.FullDiagnosticReport
+
+======================================================
+  PER-RAY PHYSICAL PATH VALIDATION SUMMARY
+======================================================
+  Total rays tested: 256
+  Rays with warnings: 5 (1.9531%)
+  Physical validity issues: 0
+
+  AGGREGATE MEANS:
+    GT combined mean:  3.6938
+    OPT combined mean: 3.7043
+    Combined relErr:   0.0028
+    NEE relErr:        0.0034
+    Photon relErr:     0.0000
+    Energy ratio:      1.0028
+
+  PER-RAY THRESHOLD EXCEEDANCES:
+    Combined > 0.7000: 0 rays (0.0000%)
+    NEE > 0.8000: 5 rays (1.9531%)
+    Photon > 0.5000: 0 rays (0.0000%)
+
+  TOP 5 WORST RAYS:
+    Ray #56 px=(30,30) GT=2.1534 OPT=3.2218 relErr=0.3316 bounces=1/1
+    Ray #43 px=(32,23) GT=1.2668 OPT=1.7613 relErr=0.2808 bounces=1/1
+    Ray #13 px=(24,17) GT=1.0368 OPT=1.4124 relErr=0.2659 bounces=1/1
+    Ray #248 px=(15,18) GT=0.3492 OPT=0.4633 relErr=0.2462 bounces=1/1
+    Ray #88 px=(28,18) GT=1.3853 OPT=1.6353 relErr=0.1528 bounces=1/1
+======================================================
+
+
+  DETAILED PER-BOUNCE BREAKDOWN (top 3 worst):
+
+  --- Ray #56 px=(30,30) ---
+    Bounce 0: GT[nee=0.2106 phot=1.9427 T_max=1.0000 mat=6]  OPT[nee=1.2791 phot=1.9427 T_max=1.0000 mat=6]
+
+  --- Ray #43 px=(32,23) ---
+    Bounce 0: GT[nee=0.0000 phot=1.2668 T_max=1.0000 mat=6]  OPT[nee=0.4945 phot=1.2668 T_max=1.0000 mat=6]
+
+  --- Ray #13 px=(24,17) ---
+    Bounce 0: GT[nee=0.0000 phot=1.0368 T_max=1.0000 mat=6]  OPT[nee=0.3755 phot=1.0368 T_max=1.0000 mat=6]
+[       OK ] PerRayValidation.FullDiagnosticReport (203 ms)
+[----------] 15 tests from PerRayValidation (3609 ms total)
+
+[----------] 13 tests from PixelComparison
+[ RUN      ] PixelComparison.DatasetIsValid
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[PixelCmpDataset] Ready: 1323113 photons (128x128 camera) (from DISK)
+[       OK ] PixelComparison.DatasetIsValid (195 ms)
+[ RUN      ] PixelComparison.NEEFirstHitComparison
+[PixelComparison] Rendering 128x128 @ 4 spp (both methods)...
+[PixelComparison] Render complete.
+[NEE-DirectOnly] RMSE=0.0106 PSNR=61.0013dB meanRelErr=0.2928 maxRelErr=526.7668 outlierFrac=0.0061 (5739/16384 lit)
+[       OK ] PixelComparison.NEEFirstHitComparison (52443 ms)
+[ RUN      ] PixelComparison.PhotonIrradianceFirstHit
+[PhotonIndirect] RMSE=0.0000 PSNR=100.0000dB meanRelErr=0.0000 maxRelErr=0.0000 outlierFrac=0.0000 (7692/16384 lit)
+[       OK ] PixelComparison.PhotonIrradianceFirstHit (46 ms)
+[ RUN      ] PixelComparison.CombinedRadianceComparison
+[Combined   ] RMSE=0.0106 PSNR=61.0013dB meanRelErr=0.0534 maxRelErr=1.5313 outlierFrac=0.0000 (7744/16384 lit)
+[       OK ] PixelComparison.CombinedRadianceComparison (47 ms)
+[ RUN      ] PixelComparison.PhotonLobeVsActualDirections
+[PhotonLobe] tested=121 avgCosSim=0.9177 agreeFrac=0.9752
+[       OK ] PixelComparison.PhotonLobeVsActualDirections (224 ms)
+[ RUN      ] PixelComparison.ShadowRegionIndirectFidelity
+[ShadowIndirect] shadow_pixels=2860/16384
+[ShadowIndirect] GT mean=0.0466 Opt mean=0.0466 relErr=0.0000
+[       OK ] PixelComparison.ShadowRegionIndirectFidelity (8 ms)
+[ RUN      ] PixelComparison.SpectralBinPixelError
+[SpectralBin] Per-bin RMSE: 0.001 0.001 0.001 0.001 0.001 0.001 0.001 0.001 ... 0.000 0.000 0.000 0.000 
+[SpectralBin] Bins with >40% normalized RMSE: 0/32
+[       OK ] PixelComparison.SpectralBinPixelError (1 ms)
+[ RUN      ] PixelComparison.GlobalPSNRAndEnergyRatio
+[Global] PSNR=61.001dB energyRatio=1.000 GT_total=1774.247 Opt_total=1773.777
+[       OK ] PixelComparison.GlobalPSNRAndEnergyRatio (46 ms)
+[ RUN      ] PixelComparison.ComponentDecomposition
+[Decomposition] GT bad=0 (0.000%) Opt bad=0 (0.000%)
+[       OK ] PixelComparison.ComponentDecomposition (146 ms)
+[ RUN      ] PixelComparison.SpatialUniformity
+[Spatial] Blocks with >50% difference: 0/16
+[       OK ] PixelComparison.SpatialUniformity (48 ms)
+[ RUN      ] PixelComparison.NoNegativePixels
+[       OK ] PixelComparison.NoNegativePixels (0 ms)
+[ RUN      ] PixelComparison.AllPixelsFinite
+[       OK ] PixelComparison.AllPixelsFinite (4 ms)
+[ RUN      ] PixelComparison.SaveComparisonImages
+[SaveImages] Output directory: D:\Dev\photon_path_tracer\photon_path_tracer\tests\runs\20260220_133901
+[SaveImages] Wrote 10/10 images to D:\Dev\photon_path_tracer\photon_path_tracer\tests\runs\20260220_133901
+[       OK ] PixelComparison.SaveComparisonImages (483 ms)
+[----------] 13 tests from PixelComparison (53697 ms total)
+
+[----------] Global test environment tear-down
+[==========] 220 tests from 33 test suites ran. (73009 ms total)
+[  PASSED  ] 220 tests.

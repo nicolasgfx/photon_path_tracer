@@ -6,7 +6,6 @@ A physically-based spectral renderer combining **photon mapping** and
 Fibonacci-sphere directional bins for variance reduction.
 
 ![Render Result](output/render.png)
-<!-- Replace the image above with an actual render once available -->
 
 ---
 

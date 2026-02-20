@@ -2,20 +2,92 @@
 // ─────────────────────────────────────────────────────────────────────
 // config.h – Central configuration constants for the renderer
 // ─────────────────────────────────────────────────────────────────────
-// All tunable parameters live here so they can be adjusted in one
-// place.  Compile-time constants use constexpr; run-time defaults are
-// plain constants that feed into RenderConfig / EmitterConfig.
+// Keep this file focused on the knobs you actually tweak while iterating.
+// Low-level implementation constants (OptiX pipeline sizes, hash primes,
+// stratification layout, etc.) belong in the owning source files.
 // ─────────────────────────────────────────────────────────────────────
 
-#include <cstdint>
+// NOTE: If you find yourself adding a constant here that is only used in
+// one .cpp/.cu file, prefer making it a file-local constexpr instead.
 
-// ── Active scene (change this to switch) ────────────────────────────
+// ── Active scene (switch here) ─────────────────────────────────────
 // Uncomment exactly ONE of these:
-#define SCENE_CORNELL_BOX
-//#define SCENE_CONFERENCE
+//#define SCENE_CORNELL_BOX
+#define SCENE_CONFERENCE
 //#define SCENE_LIVING_ROOM
- //#define SCENE_BREAKFAST_ROOM
-// #define SCENE_SIBENIK
+//#define SCENE_BREAKFAST_ROOM
+//#define SCENE_SIBENIK
+
+// =====================================================================
+// 1) CHANGE THESE FIRST (crucial iteration knobs)
+// =====================================================================
+
+// ── Output resolution (also used for final PNG) ─────────────────────
+// Recommendation:
+//   - Fast iteration: 512×512 or 800×800
+//   - Final:          1080p+ (expect much slower)
+constexpr int DEFAULT_IMAGE_WIDTH  = 1024;
+constexpr int DEFAULT_IMAGE_HEIGHT = 1024;
+
+// ── Sampling / path depth ───────────────────────────────────────────
+// Recommendation:
+//   - Preview:  1–4 spp
+//   - Default:  16 spp (good balance)
+//   - Final:    64–256 spp depending on noise tolerance
+constexpr int   DEFAULT_SPP            = 16;   // samples per pixel
+constexpr int   DEFAULT_MAX_BOUNCES    = 8;    // path depth
+constexpr int   DEFAULT_MIN_BOUNCES_RR = 3;    // start Russian roulette after this
+constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
+
+// ── Photon mapping (performance ↔ smoothness) ───────────────────────
+// Recommendation:
+//   - Preview:  50k–200k photons, radius 0.07–0.12
+//   - Default:  500k photons,     radius 0.05
+//   - Final:    1M–5M photons,    radius 0.02–0.05
+constexpr int   DEFAULT_NUM_PHOTONS    = 5000000;
+constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;
+constexpr float DEFAULT_CAUSTIC_RADIUS = 0.02f;
+
+// Debug aid: true = photons stop after 1st hit (useful to validate emission)
+constexpr bool  DEBUG_PHOTON_SINGLE_BOUNCE = false;
+
+// ── Direct lighting (NEE) ───────────────────────────────────────────
+// `DEFAULT_NEE_LIGHT_SAMPLES` affects the first bounce the most.
+// Recommendation:
+//   - Preview:  1
+//   - Default:  4
+//   - Final:    8–16 for softer shadows (scene dependent)
+constexpr int   DEFAULT_NEE_LIGHT_SAMPLES = 8;
+constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 1;  // bounces >= 1 (throughput attenuated)
+
+// ── Integrator toggles ──────────────────────────────────────────────
+// Recommendation:
+//   - Leave MIS enabled for most scenes.
+//   - Photon-guided sampling helps convergence once photon bins are populated.
+constexpr bool  DEFAULT_USE_MIS           = true;
+constexpr bool  DEFAULT_USE_PHOTON_GUIDED = true;
+
+// ── Photon directional bins (guided NEE / caching) ──────────────────
+// Higher counts can improve guidance but increase memory/time.
+// Recommendation: 32 is a good default.
+constexpr int   PHOTON_BIN_COUNT      = 32;   // directional bins per pixel (Fibonacci sphere)
+constexpr float PHOTON_BIN_HORIZON_EPS = 0.05f;
+constexpr int   PHOTON_BIN_NEE_TOP_K  = 4;    // top-K bins for guided NEE direction bias
+// Compile-time upper bound for fixed-size arrays (must be >= PHOTON_BIN_COUNT).
+constexpr int   MAX_PHOTON_BIN_COUNT  = 32;
+
+// =====================================================================
+// 2) ADVANCED (rarely changed; shared by tests/device)
+// =====================================================================
+
+// Stratified sub-pixel sampling grid.
+// Only used when `DEFAULT_SPP == STRATA_X * STRATA_Y`.
+constexpr int   STRATA_X = 4;
+constexpr int   STRATA_Y = 4;
+
+// Photon gather surface-consistency threshold (plane distance along normal).
+// Higher = more photons accepted across nearby surfaces (smoother but more bias).
+constexpr float DEFAULT_SURFACE_TAU = 0.02f;
 
 // ── Scene profiles ──────────────────────────────────────────────────
 // Each profile defines: OBJ path (relative to SCENES_DIR), camera
@@ -73,62 +145,6 @@
   #error "No scene selected! Uncomment one SCENE_* define in config.h"
 #endif
 
-// ── Window & display ────────────────────────────────────────────────
-constexpr int   DEFAULT_WINDOW_WIDTH       = 800;
-constexpr int   DEFAULT_WINDOW_HEIGHT      = 800;
-
-// ── Image output ────────────────────────────────────────────────────
-constexpr int   DEFAULT_IMAGE_WIDTH        = 800;
-constexpr int   DEFAULT_IMAGE_HEIGHT       = 800;
-
-// ── Sampling ────────────────────────────────────────────────────────
-constexpr int   DEFAULT_SPP                = 16;     // samples per pixel
-constexpr int   DEFAULT_MAX_BOUNCES        = 8;
-constexpr int   DEFAULT_MIN_BOUNCES_RR     = 3;      // start Russian roulette after this
-constexpr float DEFAULT_RR_THRESHOLD       = 0.95f;
-
-// ── Photon mapping ──────────────────────────────────────────────────
-constexpr int DEFAULT_NUM_PHOTONS        = 1000000;
-constexpr float DEFAULT_GATHER_RADIUS      = 0.05f;
-constexpr float DEFAULT_CAUSTIC_RADIUS     = 0.02f;
-constexpr bool  DEBUG_PHOTON_SINGLE_BOUNCE = false;  // true = photons stop after 1st hit (debugging)
-// DEBUG_CAMERA_SINGLE_BOUNCE removed: use RenderMode::FirstHitOnly instead
-
-// ── NEE (Next Event Estimation) ─────────────────────────────────────
-constexpr int   DEFAULT_NEE_LIGHT_SAMPLES  = 16;   // M: shadow-ray samples at bounce 0 (1=fast, 4-16=soft)
-constexpr int   DEFAULT_NEE_DEEP_SAMPLES   = 4;    // shadow-ray samples at bounce >= 1 (throughput-attenuated)
-
-// ── MIS ─────────────────────────────────────────────────────────────
-constexpr bool  DEFAULT_USE_MIS            = true;
-constexpr bool  DEFAULT_USE_PHOTON_GUIDED  = true;
-
-// ── Hash grid ───────────────────────────────────────────────────────
-constexpr float HASHGRID_CELL_FACTOR       = 2.0f;  // cell_size = factor * radius
-constexpr int   HASHGRID_NEIGHBOUR_RANGE   = 1;     // ±1 → 3×3×3 query
-constexpr uint32_t HASHGRID_PRIME_1        = 73856093u;
-constexpr uint32_t HASHGRID_PRIME_2        = 19349663u;
-constexpr uint32_t HASHGRID_PRIME_3        = 83492791u;
-
-// ── Photon directional bins ─────────────────────────────────────────
-constexpr int   PHOTON_BIN_COUNT           = 32;     // directional bins per pixel (Fibonacci sphere)
-constexpr int   MAX_PHOTON_BIN_COUNT       = 32;     // compile-time upper bound for array size
-constexpr float PHOTON_BIN_HORIZON_EPS     = 0.05f;  // bins below -eps of horizon are skipped
-constexpr int   PHOTON_BIN_NEE_TOP_K      = 4;      // top-K bins for guided NEE direction bias
-
-// ── Stratified sub-pixel sampling ───────────────────────────────────
-constexpr int   STRATA_X                   = 4;      // horizontal strata (STRATA_X * STRATA_Y = SPP)
-constexpr int   STRATA_Y                   = 4;      // vertical strata
-
-// ── Density estimator ───────────────────────────────────────────────
-constexpr float DEFAULT_SURFACE_TAU        = 0.02f;  // plane-distance filter
-constexpr bool  DEFAULT_USE_KERNEL         = true;
-constexpr float PHOTON_SHADOW_FLOOR        = 0.1f;   // min visibility weight for photon gather
-                                                      // 0 = photons fully suppressed in shadow
-                                                      // 1 = no suppression (old behaviour)
-
-// ── Camera ──────────────────────────────────────────────────────────
-constexpr float DEFAULT_CORNELL_FOV        = 40.0f;  // degrees (vertical)
-
 // ── Scene normalisation (Cornell Box = reference frame) ────────────
 // The standard Cornell Box spans [-0.5, 0.5] on every axis, giving a
 // unit cube centred at the origin.  All other scenes are scaled and
@@ -136,27 +152,4 @@ constexpr float DEFAULT_CORNELL_FOV        = 40.0f;  // degrees (vertical)
 // defaults, gather radius, light placement, etc. transfer directly.
 constexpr float SCENE_REF_EXTENT           = 1.0f;   // target longest-axis extent
 constexpr float SCENE_REF_CENTER[]         = { 0.0f, 0.0f, 0.0f };
-
-// ── Scene / geometry ────────────────────────────────────────────────
-constexpr float DEFAULT_RAY_TMIN           = 1e-4f;
-constexpr float DEFAULT_RAY_TMAX           = 1e20f;
-
-// ── Camera movement ─────────────────────────────────────────────────
-constexpr float DEFAULT_CAM_MOVE_SPEED     = 1.0f;    // units/sec
-constexpr float DEFAULT_CAM_MOUSE_SENS     = 0.0005f; // radians/pixel
-
-// ── OptiX ───────────────────────────────────────────────────────────
-constexpr int   OPTIX_NUM_PAYLOAD_VALUES   = 14;    // payloads per trace call
-constexpr int   OPTIX_NUM_ATTRIBUTE_VALUES = 2;     // barycentrics
-constexpr int   OPTIX_MAX_TRACE_DEPTH      = 2;     // radiance + shadow
-constexpr int   OPTIX_STACK_SIZE           = 16384;  // increased for bin arrays on stack
-constexpr float OPTIX_SCENE_EPSILON        = 1e-4f;
-
-// ── CUDA ────────────────────────────────────────────────────────────
-constexpr int   CUDA_BLOCK_SIZE_1D         = 256;
-constexpr int   CUDA_BLOCK_SIZE_2D         = 16;    // 16×16 = 256 threads
-
-// ── Output ──────────────────────────────────────────────────────────
-constexpr const char* DEFAULT_OUTPUT_DIR   = "output";
-constexpr const char* DEFAULT_OUTPUT_EXT   = ".png";
 

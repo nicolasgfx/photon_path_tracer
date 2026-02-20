@@ -271,6 +271,7 @@ private:
     DeviceBuffer d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_;
     DeviceBuffer d_photon_wi_x_,  d_photon_wi_y_,  d_photon_wi_z_;
     DeviceBuffer d_photon_lambda_, d_photon_flux_;
+    DeviceBuffer d_photon_bin_idx_;  // uint8_t [num_photons] precomputed bin index
     DeviceBuffer d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_;
 
     // Emitter data (device -- for GPU photon tracing)

@@ -18,6 +18,29 @@
 #include <optix_stubs.h>
 #include <optix_function_table_definition.h>
 
+// ---------------------------------------------------------------------
+// Module-local implementation constants
+// (kept out of core/config.h to avoid clutter)
+// ---------------------------------------------------------------------
+namespace {
+    // Must match the payload layout documented in optix_device.cu.
+    constexpr int OPTIX_NUM_PAYLOAD_VALUES   = 14;
+    constexpr int OPTIX_NUM_ATTRIBUTE_VALUES = 2;     // barycentrics
+    constexpr int OPTIX_MAX_TRACE_DEPTH      = 2;     // radiance + shadow
+
+    // Conservative stack size: increased for per-ray local arrays.
+    constexpr int OPTIX_STACK_SIZE           = 16384;
+
+    // Ray epsilon to avoid self-intersections.
+    constexpr float OPTIX_SCENE_EPSILON      = 1e-4f;
+
+    // Large tmax avoids clipping long rays in normalized scenes.
+    constexpr float DEFAULT_RAY_TMAX         = 1e20f;
+
+    // HashGrid::build() uses cell_size = radius * 2.0f.
+    constexpr float HASHGRID_CELL_FACTOR     = 2.0f;
+}
+
 // -- Helper: read PTX from file ---------------------------------------
 static std::string read_ptx_file(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary);
@@ -247,6 +270,10 @@ void OptixRenderer::upload_photon_data(
     d_photon_wi_z_.upload(global_photons.wi_z);
     d_photon_lambda_.upload(global_photons.lambda_bin);
     d_photon_flux_.upload(global_photons.flux);
+    if (!global_photons.bin_idx.empty())
+        d_photon_bin_idx_.upload(global_photons.bin_idx);
+    else
+        d_photon_bin_idx_.free();  // no bin_idx available
 
     if (global_grid.sorted_indices.size() > 0) {
         d_grid_sorted_indices_.upload(global_grid.sorted_indices);
@@ -440,6 +467,24 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         t_lap = t_now;
     }
 
+    // Precompute per-photon directional bin index (Fibonacci nearest)
+    {
+        PhotonBinDirs bin_dirs;
+        bin_dirs.init(PHOTON_BIN_COUNT);
+        stored_photons_.bin_idx.resize(stored_count);
+        for (size_t i = 0; i < stored_count; ++i) {
+            float3 wi = make_f3(stored_photons_.wi_x[i],
+                                stored_photons_.wi_y[i],
+                                stored_photons_.wi_z[i]);
+            stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+        }
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] Bin idx precomp:   %8.1f ms  (%u photons)\n",
+                    ms, stored_count);
+        t_lap = t_now;
+    }
+
     // Upload photons + grid back to device
     d_photon_pos_x_.upload(stored_photons_.pos_x);
     d_photon_pos_y_.upload(stored_photons_.pos_y);
@@ -449,6 +494,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_photon_wi_z_.upload(stored_photons_.wi_z);
     d_photon_lambda_.upload(stored_photons_.lambda_bin);
     d_photon_flux_.upload(stored_photons_.flux);
+    d_photon_bin_idx_.upload(stored_photons_.bin_idx);
     d_grid_sorted_indices_.upload(stored_grid_.sorted_indices);
     d_grid_cell_start_.upload(stored_grid_.cell_start);
     d_grid_cell_end_.upload(stored_grid_.cell_end);
@@ -482,6 +528,7 @@ static void fill_common_params(
     const DeviceBuffer& photon_wi_x, const DeviceBuffer& photon_wi_y,
     const DeviceBuffer& photon_wi_z,
     const DeviceBuffer& photon_lambda, const DeviceBuffer& photon_flux,
+    const DeviceBuffer& photon_bin_idx,
     const DeviceBuffer& grid_sorted, const DeviceBuffer& grid_start,
     const DeviceBuffer& grid_end,
     const DeviceBuffer& emissive_idx, const DeviceBuffer& emissive_cdf,
@@ -549,6 +596,8 @@ static void fill_common_params(
     p.photon_wi_z       = const_cast<float*>(photon_wi_z.as<float>());
     p.photon_lambda     = const_cast<uint16_t*>(photon_lambda.as<uint16_t>());
     p.photon_flux       = const_cast<float*>(photon_flux.as<float>());
+    p.photon_bin_idx     = photon_bin_idx.d_ptr
+        ? const_cast<uint8_t*>(photon_bin_idx.as<uint8_t>()) : nullptr;
 
     p.grid_sorted_indices = const_cast<uint32_t*>(grid_sorted.as<uint32_t>());
     p.grid_cell_start     = const_cast<uint32_t*>(grid_start.as<uint32_t>());
@@ -594,6 +643,7 @@ void OptixRenderer::render_debug_frame(
         d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
         d_photon_lambda_, d_photon_flux_,
+        d_photon_bin_idx_,
         d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
@@ -647,6 +697,7 @@ void OptixRenderer::render_one_spp(
         d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
         d_photon_lambda_, d_photon_flux_,
+        d_photon_bin_idx_,
         d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
@@ -705,6 +756,7 @@ void OptixRenderer::populate_photon_bins(const Camera& camera)
         d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
         d_photon_lambda_, d_photon_flux_,
+        d_photon_bin_idx_,
         d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
@@ -778,6 +830,7 @@ void OptixRenderer::render_final(
             d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
             d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
             d_photon_lambda_, d_photon_flux_,
+            d_photon_bin_idx_,
             d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
             d_emissive_indices_, d_emissive_cdf_,
             num_emissive_, 0.f,

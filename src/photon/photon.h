@@ -33,6 +33,10 @@ struct PhotonSoA {
     // Flux
     std::vector<float> flux;
 
+    // Precomputed directional bin index (Fibonacci sphere nearest bin)
+    // Computed on CPU after photon trace, used on device for O(1) bin lookup.
+    std::vector<uint8_t> bin_idx;
+
     size_t size() const { return pos_x.size(); }
 
     void reserve(size_t n) {
@@ -40,6 +44,7 @@ struct PhotonSoA {
         wi_x.reserve(n);       wi_y.reserve(n);       wi_z.reserve(n);
         lambda_bin.reserve(n);
         flux.reserve(n);
+        bin_idx.reserve(n);
     }
 
     void resize(size_t n) {
@@ -47,6 +52,7 @@ struct PhotonSoA {
         wi_x.resize(n);        wi_y.resize(n);        wi_z.resize(n);
         lambda_bin.resize(n);
         flux.resize(n);
+        bin_idx.resize(n);
     }
 
     void push_back(const Photon& p) {
@@ -74,6 +80,7 @@ struct PhotonSoA {
         wi_x.clear();   wi_y.clear();   wi_z.clear();
         lambda_bin.clear();
         flux.clear();
+        bin_idx.clear();
     }
 };
 

@@ -969,3 +969,158 @@ $$
 $$
 
 where $p_{\text{guided}}$ is the bin-flux-weighted solid-angle PDF.
+
+## Ground Truth Testing
+
+```
+ ══════════════════════════════════════════════════════════════════════
+  COMPARISON WORKFLOW: Ground Truth vs Optimized
+ ══════════════════════════════════════════════════════════════════════
+
+                        ┌──────────────────────────┐
+                        │  tests/data/cornell_box.bin  │  Real photon data
+                        │  (binary, ~40MB)             │  from disk
+                        │                              │
+                        │  Created by:                 │
+                        │  1) --save-test-data (GPU)   │
+                        │  2) CPU fallback (bootstrap) │
+                        └──────────────┬───────────────┘
+                                       │
+               ┌───────────────────────┼───────────────────────┐
+               │                       │                       │
+               ▼                       ▼                       ▼
+    ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+    │ src/core/         │   │ src/scene/        │   │ src/photon/       │
+    │  test_data_io.h   │   │  scene.h          │   │  hash_grid.h     │
+    │                   │   │  obj_loader.h     │   │                  │
+    │ load_test_data()  │   │                   │   │ grid.build()     │
+    │ save_test_data()  │   │ load_obj()        │   │ grid.query()     │
+    └────────┬─────────┘   │ scene.build_bvh() │   └────────┬─────────┘
+             │              │ scene.intersect() │            │
+             │              └────────┬─────────┘            │
+             │                       │                      │
+             ▼                       ▼                      ▼
+    ┌──────────────────────────────────────────────────────────────┐
+    │                CornellBoxDataset (singleton)                 │
+    │  tests/test_ground_truth.cpp  &  tests/test_per_ray_validation.cpp
+    │                                                              │
+    │  ┌─ Loaded from binary: ───────────────────────────────────┐ │
+    │  │  PhotonSoA photons       (1.3M photons, 9 SoA arrays)  │ │
+    │  │  TestDataHeader header   (radii, bounces, scene path)   │ │
+    │  └─────────────────────────────────────────────────────────┘ │
+    │  ┌─ Rebuilt deterministically: ────────────────────────────┐ │
+    │  │  Scene scene             (OBJ → BVH → emissive dist)   │ │
+    │  │  HashGrid grid           (from photons + radius)        │ │
+    │  │  PhotonBinDirs bin_dirs  (32 Fibonacci directions)      │ │
+    │  │  vector<uint8_t> bin_idx (precomputed per-photon)       │ │
+    │  │  Camera camera           (64×64 Cornell box preset)     │ │
+    │  └─────────────────────────────────────────────────────────┘ │
+    └──────────────────────────┬───────────────────────────────────┘
+                               │
+                          pick N random rays
+                          (deterministic RNG seeds)
+                               │
+              ┌────────────────┴────────────────┐
+              │                                 │
+              ▼                                 ▼
+ ┌─────────────────────────────┐  ┌─────────────────────────────────┐
+ │  GROUND TRUTH PATH TRACER   │  │  OPTIMIZED PATH TRACER          │
+ │  ground_truth_path_trace()  │  │  optimized_path_trace()         │
+ │  ground_truth_trace_steps() │  │  optimized_trace_steps()        │
+ │                             │  │                                 │
+ │  ┌─ Per Bounce: ──────────┐ │  │  ┌─ Per Bounce: ──────────────┐ │
+ │  │                        │ │  │  │                            │ │
+ │  │ 1. scene.intersect()   │ │  │  │ 1. scene.intersect()       │ │
+ │  │    ↓                   │ │  │  │    ↓                       │ │
+ │  │ 2. Material dispatch   │ │  │  │ 2. Material dispatch       │ │
+ │  │    emissive → Le       │ │  │  │    emissive → Le           │ │
+ │  │    specular → reflect  │ │  │  │    specular → reflect      │ │
+ │  │    diffuse → ↓         │ │  │  │    diffuse → ↓             │ │
+ │  │                        │ │  │  │                            │ │
+ │  │ 3. NEE (standard)     ◄├─┤──┤─►3. NEE (GUIDED by bins)    │ │
+ │  │    sample_direct_light │ │  │  │    opt_nee_guided_step()   │ │
+ │  │    1 shadow ray        │ │  │  │    photon-biased CDF       │ │
+ │  │    alias table PDF     │ │  │  │    4 shadow rays @ b=0     │ │
+ │  │    no MIS              │ │  │  │                            │ │
+ │  │                        │ │  │  │                            │ │
+ │  │ 4. Photon density     ◄├─┤──┤─►4. Photon density + BINS    │ │
+ │  │    estimate_photon_    │ │  │  │    gather_with_bins_step() │ │
+ │  │      density()         │ │  │  │    SAME gather loop        │ │
+ │  │    full hash grid query│ │  │  │    + populate local_bins[] │ │
+ │  │    Epanechnikov kernel │ │  │  │    + shadow floor weight   │ │
+ │  │    per-λ BSDF eval     │ │  │  │                            │ │
+ │  │                        │ │  │  │                            │ │
+ │  │ 5. BSDF bounce        ◄├─┤──┤─►5. BSDF bounce (GUIDED)    │ │
+ │  │    bsdf::sample()      │ │  │  │    opt_guided_bounce_step()│ │
+ │  │    cosine hemisphere   │ │  │  │    flux-proportional CDF   │ │
+ │  │    T *= f·cos/pdf      │ │  │  │    cone jitter + clamp    │ │
+ │  │                        │ │  │  │    T *= Kd (simplified)    │ │
+ │  │ 6. Russian roulette    │ │  │  │ 6. Russian roulette        │ │
+ │  │    p_rr = min(0.95,    │ │  │  │    (same)                  │ │
+ │  │      T.max_component())│ │  │  │                            │ │
+ │  └────────────────────────┘ │  │  └────────────────────────────┘ │
+ │                             │  │                                 │
+ │  Output:                    │  │  Output:                        │
+ │    result.combined          │  │    result.combined              │
+ │    result.nee_direct        │  │    result.nee_direct            │
+ │    result.photon_indirect   │  │    result.photon_indirect       │
+ │                             │  │                                 │
+ │  (test_per_ray_validation   │  │  (test_per_ray_validation       │
+ │   also records per-bounce   │  │   also records per-bounce       │
+ │   BounceStep with validity  │  │   BounceStep with validity      │
+ │   flags at each step)       │  │   flags at each step)           │
+ └──────────────┬──────────────┘  └──────────────┬──────────────────┘
+                │                                 │
+                └────────────┬────────────────────┘
+                             │
+                             ▼
+              ┌──────────────────────────────────┐
+              │         COMPARISON ENGINE         │
+              │  diagnose_ray() / compare_methods()
+              │                                   │
+              │  Per-ray checks:                  │
+              │   • combined relErr < 0.70        │
+              │   • NEE relErr < 0.80             │
+              │   • photon relErr < 0.50          │
+              │   • combined ≈ nee + photon       │
+              │   • all values finite & ≥ 0       │
+              │   • throughput < 1e6 (no explode) │
+              │   • spectral bins don't mix       │
+              │                                   │
+              │  Aggregate checks:                │
+              │   • mean relErr < 0.30            │
+              │   • energy ratio 0.65–1.50        │
+              │   • < 40% rays exceed thresholds  │
+              │                                   │
+              │  Output: warnings for deviations  │
+              │  + per-bounce breakdown of worst   │
+              └──────────────────────────────────┘
+
+
+ ══════════════════════════════════════════════════════════════════════
+  SOURCE FILES
+ ══════════════════════════════════════════════════════════════════════
+
+  Test files (CPU-side comparison):
+    tests/test_ground_truth.cpp       16 tests, aggregate stats
+    tests/test_per_ray_validation.cpp 15 tests, per-ray step-by-step
+
+  Data I/O:
+    src/core/test_data_io.h           Binary save/load PhotonSoA
+
+  Shared physics (header-only, HD = host+device):
+    src/renderer/direct_light.h       sample_direct_light()      [NEE]
+    src/photon/density_estimator.h    estimate_photon_density()   [Gather]
+    src/bsdf/bsdf.h                   bsdf::evaluate/sample()    [BSDF]
+    src/core/photon_bins.h            PhotonBinDirs, PhotonBin   [Bins]
+    src/core/guided_nee.h             guided_nee_bin_boost()      [Guided NEE]
+    src/core/nee_sampling.h           nee_shadow_sample_count()
+    src/photon/hash_grid.h            HashGrid::query()
+    src/scene/scene.h                 Scene::intersect()          [BVH]
+    src/core/spectrum.h               Spectrum[32 bins]
+    src/core/random.h                 PCGRng, cosine hemisphere
+
+  Entry point (data generation):
+    src/main.cpp                      --save-test-data flag
+    
+```

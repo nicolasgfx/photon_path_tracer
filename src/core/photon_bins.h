@@ -23,7 +23,7 @@ struct PhotonBin {
 
 // ── Fibonacci sphere bin directions ─────────────────────────────────
 // Quasi-uniform distribution of N points on S².
-// Stored in a fixed-size array (MAX_PHOTON_BIN_COUNT = 64 upper bound).
+// Stored in a fixed-size array (MAX_PHOTON_BIN_COUNT upper bound).
 
 struct PhotonBinDirs {
     float3 dirs[MAX_PHOTON_BIN_COUNT];
@@ -44,7 +44,7 @@ struct PhotonBinDirs {
     }
 
     /// Find nearest bin for direction wi (brute-force dot product scan).
-    /// O(N) for N ≤ 64 — cheaper than any spatial index for this size.
+    /// O(N) for N ≤ MAX_PHOTON_BIN_COUNT — cheaper than any spatial index for this size.
     HD int find_nearest(float3 wi) const {
         int   best     = 0;
         float best_dot = -2.0f;

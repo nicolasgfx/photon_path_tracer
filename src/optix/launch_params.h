@@ -80,6 +80,7 @@ struct LaunchParams {
     float*    photon_wi_z;
     uint16_t* photon_lambda;
     float*    photon_flux;
+    uint8_t*  photon_bin_idx;      // [num_photons] precomputed Fibonacci bin index
     int       num_photons;
 
     // Hash grid (device pointers)

@@ -52,3 +52,6 @@ out/
 *.png
 *.hdr
 *.exr
+
+# Keep the README preview render tracked
+!output/render.png

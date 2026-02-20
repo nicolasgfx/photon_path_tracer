@@ -31,6 +31,7 @@
 #include "renderer/camera.h"
 #include "debug/debug.h"
 #include "optix/optix_renderer.h"
+#include "core/test_data_io.h"
 
 #include <GLFW/glfw3.h>
 
@@ -328,6 +329,7 @@ static void render_hover_cell_overlay(
 struct Options {
     std::string scene_file;
     std::string output_file = "output/render.png";
+    std::string save_test_data_file;   // if non-empty, dump photons to this binary file
     RenderConfig config;
 };
 
@@ -360,6 +362,8 @@ static Options parse_args(int argc, char* argv[]) {
             else if (mode == "normals")  opt.config.mode = RenderMode::Normals;
             else if (mode == "material") opt.config.mode = RenderMode::MaterialID;
             else if (mode == "depth")    opt.config.mode = RenderMode::Depth;
+        } else if (arg == "--save-test-data" && i + 1 < argc) {
+            opt.save_test_data_file = argv[++i];
         } else if (arg[0] != '-') {
             opt.scene_file = arg;
         }
@@ -374,6 +378,7 @@ struct AppState {
     DebugState debug;
     bool       render_requested = false;  // R key pressed
     bool       rendering        = false;
+    bool       showing_final    = false;  // keep final render on-screen
 
     // Progressive final render state
     int        render_spp_done  = 0;      // samples completed so far
@@ -409,12 +414,14 @@ static void key_callback(GLFWwindow* window, int key,
 
     // "R" -> start final render
     if (key == GLFW_KEY_R) {
+        g_app.showing_final = false;
         g_app.render_requested = true;
         return;
     }
 
     // Left-click or M to toggle mouse capture
     if (key == GLFW_KEY_M) {
+        g_app.showing_final = false;
         g_app.mouse_captured = !g_app.mouse_captured;
         glfwSetInputMode(window, GLFW_CURSOR,
             g_app.mouse_captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
@@ -422,6 +429,8 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
+    // Any debug toggle should return to the interactive debug view.
+    g_app.showing_final = false;
     handle_debug_key(key, g_app.debug);
 }
 
@@ -441,7 +450,7 @@ static void run_interactive(
     OptixRenderer& optix_renderer,
     Camera& camera,
     const Options& opt,
-    const Scene& scene)
+    const Scene& /*scene*/)
 {
     if (!glfwInit()) {
         std::cerr << "[GLFW] Failed to initialize\n";
@@ -515,6 +524,7 @@ static void run_interactive(
         dt = fminf(dt, 0.1f); // clamp to avoid huge jumps
 
         // -- Mouse look -------------------------------------------------
+        constexpr float kMouseSens = 0.0005f; // radians per pixel
         if (g_app.mouse_captured) {
             double mx, my;
             glfwGetCursorPos(window, &mx, &my);
@@ -529,8 +539,8 @@ static void run_interactive(
             g_app.last_my = my;
 
             if (dx != 0.f || dy != 0.f) {
-                g_app.yaw   += dx * DEFAULT_CAM_MOUSE_SENS;
-                g_app.pitch -= dy * DEFAULT_CAM_MOUSE_SENS; // inverted Y
+                g_app.yaw   += dx * kMouseSens;
+                g_app.pitch -= dy * kMouseSens; // inverted Y
                 // Clamp pitch to avoid gimbal lock
                 constexpr float MAX_PITCH = 89.f * PI / 180.f;
                 g_app.pitch = fmaxf(-MAX_PITCH, fminf(MAX_PITCH, g_app.pitch));
@@ -578,11 +588,13 @@ static void run_interactive(
             optix_renderer.clear_buffers();
             frame = 0;
             g_app.camera_moved = false;
+            g_app.showing_final = false;
         }
 
         // Handle "R" key: start progressive final render
         if (g_app.render_requested && !g_app.rendering) {
             g_app.rendering = true;
+            g_app.showing_final = false;
             g_app.render_spp_done  = 0;
             g_app.render_spp_total = opt.config.samples_per_pixel;
             g_app.render_start = std::chrono::high_resolution_clock::now();
@@ -713,36 +725,37 @@ static void run_interactive(
                 }
 
                 // Reset to debug view
-                optix_renderer.resize(win_w, win_h);
-                frame = 0;
                 g_app.rendering = false;
+                g_app.showing_final = true;
                 std::cout << "========================================\n";
                 std::cout << "  Saved: " << opt.output_file << "\n";
                 std::cout << "  Components: out_nee_direct.png, out_photon_indirect.png, out_combined.png\n";
                 std::cout << "========================================\n\n";
             }
         } else {
-            // Normal debug preview (first-hit, 1 spp per iteration)
-            optix_renderer.render_debug_frame(
-                camera, frame, g_app.debug.current_mode, 1);
-            optix_renderer.download_framebuffer(display_fb);
+            if (!g_app.showing_final) {
+                // Normal debug preview (first-hit, 1 spp per iteration)
+                optix_renderer.render_debug_frame(
+                    camera, frame, g_app.debug.current_mode, 1);
+                optix_renderer.download_framebuffer(display_fb);
 
-            // Optional photon overlay in interactive debug mode.
-            // Note: caustic map separation is not implemented yet, so
-            // only photon points/global map use the current photon set.
-            if (g_app.debug.show_photon_points || g_app.debug.show_global_map) {
-                const PhotonSoA& photons = optix_renderer.photons();
-                if (photons.size() > 0) {
-                    overlay_photon_points(
-                        display_fb,
-                        camera,
-                        photons,
-                        g_app.debug.spectral_coloring,
-                        2.0f);
+                // Optional photon overlay in interactive debug mode.
+                // Note: caustic map separation is not implemented yet, so
+                // only photon points/global map use the current photon set.
+                if (g_app.debug.show_photon_points || g_app.debug.show_global_map) {
+                    const PhotonSoA& photons = optix_renderer.photons();
+                    if (photons.size() > 0) {
+                        overlay_photon_points(
+                            display_fb,
+                            camera,
+                            photons,
+                            g_app.debug.spectral_coloring,
+                            2.0f);
+                    }
                 }
-            }
 
-            frame++;
+                frame++;
+            }
         }
 
         // Blit to OpenGL texture
@@ -880,6 +893,22 @@ int main(int argc, char* argv[]) {
         auto tp1 = std::chrono::high_resolution_clock::now();
         double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
         std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n\n";
+
+        // -- Save test data (if requested) ----------------------------
+        if (!opt.save_test_data_file.empty()) {
+            TestDataHeader hdr;
+            hdr.num_photons_cfg = (uint32_t)opt.config.num_photons;
+            hdr.gather_radius   = opt.config.gather_radius;
+            hdr.caustic_radius  = opt.config.caustic_radius;
+            hdr.max_bounces     = (uint32_t)opt.config.max_bounces;
+            hdr.min_bounces_rr  = (uint32_t)opt.config.min_bounces_rr;
+            hdr.rr_threshold    = opt.config.rr_threshold;
+            hdr.scene_path      = SCENE_OBJ_PATH;
+
+            PhotonSoA empty_caustic;  // GPU path has no separate caustic map
+            save_test_data(opt.save_test_data_file,
+                           optix_renderer.photons(), empty_caustic, hdr);
+        }
 
         // -- Interactive debug window (always) ------------------------
         run_interactive(optix_renderer, camera, opt, scene);

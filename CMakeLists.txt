@@ -177,6 +177,9 @@ if(PPT_BUILD_TESTS)
     set(TEST_SOURCES
         tests/test_main.cpp
         tests/feature_speed_test.cpp
+        tests/test_ground_truth.cpp
+        tests/test_per_ray_validation.cpp
+        tests/test_pixel_comparison.cpp
         src/scene/obj_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp

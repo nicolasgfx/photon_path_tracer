@@ -21,6 +21,7 @@
 //   p13    : (reserved)
 // ---------------------------------------------------------------------
 #include <optix.h>
+#include <cstdint>
 #include "optix/launch_params.h"
 #include "core/random.h"
 #include "core/spectrum.h"
@@ -30,6 +31,23 @@
 #include "core/nee_sampling.h"
 #include "core/photon_density_cache.h"
 #include "core/guided_nee.h"
+
+// ---------------------------------------------------------------------
+// Module-local implementation constants
+// (kept out of core/config.h to avoid clutter)
+// ---------------------------------------------------------------------
+namespace {
+    // Ray epsilon to avoid self-intersections.
+    constexpr float OPTIX_SCENE_EPSILON = 1e-4f;
+
+    // Large tmax avoids clipping long rays in normalized scenes.
+    constexpr float DEFAULT_RAY_TMAX = 1e20f;
+
+    // Spatial hashing primes (Teschner et al.). CPU hash grid uses the same values.
+    constexpr uint32_t HASHGRID_PRIME_1 = 73856093u;
+    constexpr uint32_t HASHGRID_PRIME_2 = 19349663u;
+    constexpr uint32_t HASHGRID_PRIME_3 = 83492791u;
+}
 
 extern "C" {
     __constant__ LaunchParams params;
@@ -380,6 +398,119 @@ Spectrum dev_estimate_photon_density(
         float norm = 1.5f / (float)params.num_photons; // 1.5 = Epanechnikov kernel correction
         for (int i = 0; i < NUM_LAMBDA; ++i) L.value[i] *= norm;
     }
+    return L;
+}
+
+// == Hash grid photon gather + local bin population (device-side) =====
+// Same gather loop as dev_estimate_photon_density but also populates
+// local bins using precomputed per-photon bin_idx for O(1) lookup.
+__forceinline__ __device__
+Spectrum dev_estimate_photon_density_with_bins(
+    float3 pos, float3 normal, float3 wo_local, uint32_t mat_id,
+    float radius,
+    PhotonBin* local_bins, int num_bins, float& total_bin_flux)
+{
+    Spectrum L = Spectrum::zero();
+    total_bin_flux = 0.0f;
+
+    // Zero-initialize local bins
+    for (int k = 0; k < num_bins; ++k) {
+        local_bins[k].flux   = 0.0f;
+        local_bins[k].dir_x  = 0.0f;
+        local_bins[k].dir_y  = 0.0f;
+        local_bins[k].dir_z  = 0.0f;
+        local_bins[k].weight = 0.0f;
+        local_bins[k].count  = 0;
+    }
+
+    if (params.num_photons == 0 || params.grid_table_size == 0) return L;
+
+    float cell_size = params.grid_cell_size;
+    int cx0 = (int)floorf((pos.x - radius) / cell_size);
+    int cy0 = (int)floorf((pos.y - radius) / cell_size);
+    int cz0 = (int)floorf((pos.z - radius) / cell_size);
+    int cx1 = (int)floorf((pos.x + radius) / cell_size);
+    int cy1 = (int)floorf((pos.y + radius) / cell_size);
+    int cz1 = (int)floorf((pos.z + radius) / cell_size);
+
+    float r2 = radius * radius;
+    float inv_area = 1.f / (PI * r2);
+    int count = 0;
+
+    for (int iz = cz0; iz <= cz1; ++iz)
+    for (int iy = cy0; iy <= cy1; ++iy)
+    for (int ix = cx0; ix <= cx1; ++ix) {
+        uint32_t key = dev_hash_cell(ix, iy, iz, params.grid_table_size);
+        uint32_t start = params.grid_cell_start[key];
+        uint32_t end   = params.grid_cell_end[key];
+        if (start == 0xFFFFFFFF) continue;
+
+        for (uint32_t j = start; j < end; ++j) {
+            uint32_t idx = params.grid_sorted_indices[j];
+            float3 pp = make_f3(
+                params.photon_pos_x[idx],
+                params.photon_pos_y[idx],
+                params.photon_pos_z[idx]);
+
+            float3 diff = pos - pp;
+            float d2 = dot(diff, diff);
+            if (d2 > r2) continue;
+
+            float plane_dist = fabsf(dot(diff, normal));
+            if (plane_dist > DEFAULT_SURFACE_TAU) continue;
+
+            float w = 1.f - d2 / r2; // Epanechnikov kernel
+
+            float3 wi_world = make_f3(
+                params.photon_wi_x[idx],
+                params.photon_wi_y[idx],
+                params.photon_wi_z[idx]);
+
+            // Photon density estimation (same as dev_estimate_photon_density)
+            DevONB frame = DevONB::from_normal(normal);
+            float3 wi_local = frame.world_to_local(wi_world);
+            Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local);
+            float flux = params.photon_flux[idx];
+            int bin = params.photon_lambda[idx];
+            L.value[bin] += f.value[bin] * flux * w * inv_area;
+
+            // Local bin population using precomputed bin_idx (O(1))
+            int k = (params.photon_bin_idx != nullptr)
+                  ? (int)params.photon_bin_idx[idx]
+                  : 0;
+            if (k >= num_bins) k = 0;  // safety clamp
+            local_bins[k].flux   += flux * w;
+            local_bins[k].dir_x  += wi_world.x * flux * w;
+            local_bins[k].dir_y  += wi_world.y * flux * w;
+            local_bins[k].dir_z  += wi_world.z * flux * w;
+            local_bins[k].weight += w;
+            local_bins[k].count  += 1;
+
+            count++;
+        }
+    }
+
+    if (count > 0) {
+        float norm = 1.5f / (float)params.num_photons;
+        for (int i = 0; i < NUM_LAMBDA; ++i) L.value[i] *= norm;
+    }
+
+    // Normalize bin centroid directions and compute total flux
+    for (int k = 0; k < num_bins; ++k) {
+        if (local_bins[k].count > 0) {
+            float3 d = make_f3(local_bins[k].dir_x,
+                               local_bins[k].dir_y,
+                               local_bins[k].dir_z);
+            float len = length(d);
+            if (len > 1e-8f) {
+                local_bins[k].dir_x = d.x / len;
+                local_bins[k].dir_y = d.y / len;
+                local_bins[k].dir_z = d.z / len;
+            }
+        }
+        total_bin_flux += local_bins[k].flux;
+    }
+
     return L;
 }
 
@@ -1007,6 +1138,17 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
 // FULL PATH TRACING (final render only)
 // Hybrid: NEE (direct) + Photon density estimation (indirect)
 // Returns: combined, nee_direct, photon_indirect components separately
+//
+// Strategy: at the first diffuse hit, NEE captures direct illumination
+// (1-bounce from light) and the photon map captures ALL indirect
+// illumination (≥2-bounce paths).  The BSDF path is NOT continued
+// beyond the first diffuse hit because the photon gather already
+// represents the complete indirect contribution — continuing would
+// double-count those paths.  Specular surfaces are traversed
+// transparently until the first diffuse hit is found.
+//
+// When no photon map is available (DIRECT_ONLY mode), the full
+// multi-bounce BSDF continuation is used as a fallback.
 // =====================================================================
 struct PathTraceResult {
     Spectrum combined;
@@ -1034,10 +1176,17 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
     Spectrum throughput = Spectrum::constant(1.0f);
     bool prev_was_specular = true; // treat camera ray as specular for emission
 
-    // Pre-load bin directions if bins are valid (for guided bounce)
-    const bool use_bins = (params.photon_bins_valid == 1 && params.photon_bin_cache != nullptr);
+    // Pre-load bin directions for guided NEE / bounce.
+    // Available when per-pixel bin cache exists OR per-photon bin_idx is set.
+    const bool use_pixel_bins = (params.photon_bins_valid == 1 && params.photon_bin_cache != nullptr);
+    const bool have_bin_idx   = (params.photon_bin_idx != nullptr);
     PhotonBinDirs bin_dirs;
-    if (use_bins) bin_dirs.init(params.photon_bin_count);
+    if (use_pixel_bins || have_bin_idx) bin_dirs.init(params.photon_bin_count);
+
+    // Whether the photon map is available for indirect estimation
+    const bool have_photon_map = (params.num_photons > 0
+                                  && params.grid_table_size > 0
+                                  && params.render_mode != RENDER_MODE_DIRECT_ONLY);
 
     for (int bounce = 0; bounce <= params.max_bounces; ++bounce) {
         long long t0 = clock64();
@@ -1074,80 +1223,100 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         float3 wo_local = frame.world_to_local(direction * (-1.f));
         if (wo_local.z <= 0.f) break;
 
-        // ── NEE: Direct lighting via shadow ray ──────────────────
-        float nee_visibility = 1.f;  // default: fully lit (no NEE = no occlusion info)
-        if (params.render_mode != RENDER_MODE_INDIRECT_ONLY) {
-            long long t_nee = clock64();
-            NeeResult nee;
-            if (use_bins) {
-                const PhotonBin* pbins = &params.photon_bin_cache[pixel_idx * params.photon_bin_count];
-                nee = dev_nee_guided(
-                    hit.position, hit.shading_normal, wo_local, mat_id, rng, bounce,
-                    pbins, params.photon_bin_count, bin_dirs);
-            } else {
-                nee = dev_nee_direct(
-                    hit.position, hit.shading_normal, wo_local, mat_id, rng, bounce);
-            }
-            result.clk_nee += clock64() - t_nee;
+        // ── Photon gather + local bins (reordered: before NEE) ────
+        // Build local bins during gather so NEE can use them.
+        PhotonBin local_bins[MAX_PHOTON_BIN_COUNT];
+        float local_total_flux = 0.0f;
+        const PhotonBin* active_bins = nullptr;
+        Spectrum L_photon = Spectrum::zero();
 
-            nee_visibility = nee.visibility;
-            Spectrum nee_contrib = throughput * nee.L;
-            result.combined   += nee_contrib;
-            result.nee_direct += nee_contrib;
-        }
-
-        // ── Photon density estimation: Indirect only ─────────────
-        // When bins are valid and this is NOT the first sample (frame>0),
-        // read from cached spectral density.  On frame 0, do full gather
-        // and cache the result for subsequent samples.
-        // PHOTON_SHADOW_FLOOR prevents fully killing indirect light
-        // in deep shadow — some indirect illumination should survive.
-        if (params.render_mode != RENDER_MODE_DIRECT_ONLY) {
+        if (have_photon_map) {
             long long t_pg = clock64();
-            Spectrum L_photon;
 
             if (should_read_photon_density_cache(
-                    use_bins, bounce, params.photon_density_cache, params.frame_number))
+                    use_pixel_bins, bounce, params.photon_density_cache, params.frame_number))
             {
-                // Read from cached spectral density (populated on frame 0)
+                // Bounce 0 cached density — use per-pixel bin cache for guidance
                 for (int i = 0; i < NUM_LAMBDA; ++i)
                     L_photon.value[i] = params.photon_density_cache[pixel_idx * NUM_LAMBDA + i];
+                if (use_pixel_bins)
+                    active_bins = &params.photon_bin_cache[pixel_idx * params.photon_bin_count];
             } else {
-                // Full photon gather (always on frame 0, or when bins not valid)
-                L_photon = dev_estimate_photon_density(
-                    hit.position, hit.shading_normal, wo_local, mat_id,
-                    params.gather_radius);
+                // Full gather (always on frame 0 at bounce 0, always at bounce>=1)
+                if (have_bin_idx) {
+                    // Gather WITH local bin population (O(1) per photon via bin_idx)
+                    L_photon = dev_estimate_photon_density_with_bins(
+                        hit.position, hit.shading_normal, wo_local, mat_id,
+                        params.gather_radius,
+                        local_bins, params.photon_bin_count, local_total_flux);
+                    if (local_total_flux > 0.0f)
+                        active_bins = local_bins;
+                } else {
+                    // Standard gather without bins
+                    L_photon = dev_estimate_photon_density(
+                        hit.position, hit.shading_normal, wo_local, mat_id,
+                        params.gather_radius);
+                }
 
-                // Cache the result for subsequent frames (first bounce only)
+                // Cache density for subsequent frames (bounce 0 only)
                 if (should_write_photon_density_cache(
-                        use_bins, bounce, params.photon_density_cache, params.frame_number))
+                        use_pixel_bins, bounce, params.photon_density_cache, params.frame_number))
                 {
                     for (int i = 0; i < NUM_LAMBDA; ++i)
                         params.photon_density_cache[pixel_idx * NUM_LAMBDA + i] = L_photon.value[i];
                 }
             }
             result.clk_photon_gather += clock64() - t_pg;
+        } else if (params.render_mode == RENDER_MODE_DIRECT_ONLY) {
+            // DIRECT_ONLY mode: no gather, but still use per-pixel bins at bounce 0
+            if (use_pixel_bins && bounce == 0)
+                active_bins = &params.photon_bin_cache[pixel_idx * params.photon_bin_count];
+        }
 
-            float vis_weight = fmaxf(nee_visibility, PHOTON_SHADOW_FLOOR);
-            Spectrum photon_contrib = throughput * L_photon * vis_weight;
+        // ── NEE: Direct lighting via shadow ray ──────────────────
+        if (params.render_mode != RENDER_MODE_INDIRECT_ONLY) {
+            long long t_nee = clock64();
+            NeeResult nee;
+            if (active_bins) {
+                nee = dev_nee_guided(
+                    hit.position, hit.shading_normal, wo_local, mat_id, rng, bounce,
+                    active_bins, params.photon_bin_count, bin_dirs);
+            } else {
+                nee = dev_nee_direct(
+                    hit.position, hit.shading_normal, wo_local, mat_id, rng, bounce);
+            }
+            result.clk_nee += clock64() - t_nee;
+
+            Spectrum nee_contrib = throughput * nee.L;
+            result.combined   += nee_contrib;
+            result.nee_direct += nee_contrib;
+        }
+
+        // ── Apply photon indirect contribution ───────────────────
+        // The photon map captures ALL indirect illumination (≥2 bounces
+        // from the light).  No shadow-visibility modulation: indirect
+        // light IS visible in shadows.  The surface-normal plane filter
+        // in the gather already prevents light leaking through thin
+        // geometry.
+        if (have_photon_map) {
+            Spectrum photon_contrib = throughput * L_photon;
             result.combined        += photon_contrib;
             result.photon_indirect += photon_contrib;
         }
 
-        // ── BSDF continuation (multi-bounce) ─────────────────────
-        // When bins are valid at bounce 0, use guided bounce direction
-        // proportional to bin flux.  Deeper bounces use cosine hemisphere.
+        // ── Terminate at first diffuse hit when photon map is active ─
+        // The photon gather at this vertex already represents the
+        // complete indirect contribution.  Continuing the BSDF path
+        // would double-count those indirect paths (photons stored at
+        // vertex_0 already include light going through deeper vertices).
+        if (have_photon_map)
+            break;
+
+        // ── BSDF continuation (multi-bounce, DIRECT_ONLY fallback) ──
+        // Only reached when no photon map is available.
         long long t_bsdf = clock64();
-        float3 wi_world;
-        if (use_bins && bounce == 0) {
-            const PhotonBin* pbins = &params.photon_bin_cache[pixel_idx * params.photon_bin_count];
-            wi_world = dev_sample_guided_bounce(
-                pbins, params.photon_bin_count, hit.shading_normal, bin_dirs, rng);
-            // Transform to local for throughput computation
-        } else {
-            float3 wi_local = sample_cosine_hemisphere_dev(rng);
-            wi_world = frame.local_to_world(wi_local);
-        }
+        float3 wi_local = sample_cosine_hemisphere_dev(rng);
+        float3 wi_world = frame.local_to_world(wi_local);
 
         float cos_theta_b = dot(wi_world, hit.shading_normal);
         if (cos_theta_b <= 0.f) { result.clk_bsdf += clock64() - t_bsdf; break; }

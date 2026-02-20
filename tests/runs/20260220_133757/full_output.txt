@@ -1,0 +1,547 @@
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 1000 photons in 13.6748 ms
+[Photon] Global map:  2612 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (2612 buckets)
+[Render] 0%[Render] 4%[Render] 9%[Render] 14%[Render] 18%[Render] 23%[Render] 28%[Render] 32%[Render] 37%[Render] 42%[Render] 46%[Render] 51%[Render] 56%[Render] 60%[Render] 65%[Render] 70%[Render] 75%[Render] 79%[Render] 84%[Render] 89%[Render] 93%[Render] 98%[Render] 100%  (0.002643 s, 2 spp)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 500 photons in 6.9373 ms
+[Photon] Global map:  1304 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1304 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 1304 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 10000 photons in 139.621 ms
+[Photon] Global map:  26985 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (26985 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 128 emissive triangles, total power = 0.448031
+[OptiX] Uploaded 26985 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 100 photons in 1.5925 ms
+[Photon] Global map:  299 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1024 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 299 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 500 photons in 7.0729 ms
+[Photon] Global map:  1304 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1304 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 128 emissive triangles, total power = 0.448031
+[OptiX] Uploaded 1304 photons to device
+[Render] Starting: 8x8 @ 2 spp (64 pixels)
+[Render] [=========>          ]  50%  1/2 spp  0.0s  ETA 0.0s   [Render] [===================>] 100%  2/2 spp  0.0s  ETA 0.0s   
+[Render] Done in 0.0s  (~2 Mray-bounces/s)
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 100 photons in 1.6 ms
+[Photon] Global map:  299 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (1024 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 299 photons to device
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Photon] Traced 2000 photons in 29.8 ms
+[Photon] Global map:  5355 stored
+[Photon] Caustic map: 0 stored
+[Grid] Global hash grid built (5355 buckets)
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[OptiX] Context created
+[OptiX] Renderer initialised
+[OptiX] GAS built: 13056 triangles, 304 KB
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-372593-keyc399cdb9b04d575b8bb2a6c7408a366c-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX] Module created from PTX (372593 bytes)
+[OptiX] Program groups created (render + photon trace)
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    18
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   491
+	instruction(s) in entry functions    : 14930
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX] Pipeline created
+[OptiX] SBT built (render + photon trace)
+[OptiX] Uploaded 7 materials, 13056 triangles to device
+[OptiX] Uploaded 128 emissive triangles, total power = 0.4
+[OptiX] Uploaded 5355 photons to device
+[Bins] Populating photon directional bin cache (32 bins per pixel)...
+[Bins] Population done:      1.0 ms  (32 bins × 64 pixels = 0 MB)
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "113.0 MiB"
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[Dataset] Loaded REAL data from D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[Dataset] Cornell Box ready: 13056 tris, 1323113 photons (from DISK), 1323113 grid buckets
+[CenterPixel] GT mean=4.3 Opt mean=4.3 relErr=0.0 N=512
+[FullImage] GT mean=1.0 Opt mean=1.0 relErr=0.0 GT var=2.6 Opt var=2.6 N=2048
+[Variance] GT var=6.3 Opt var=6.0
+[DirectLighting] GT NEE mean=1.9 Opt NEE mean=2.0
+[PhotonIndirect] GT mean=1.9 Opt mean=1.9
+[SingleBounce] GT mean=3.2 Opt mean=3.2 relErr=0.0
+[FullBounce] GT mean=3.9 Opt mean=3.9 relErr=0.0 N=2048
+[Energy] GT total=655.6 Opt total=646.6 ratio=1.0
+[GatherBins] Standard sum=2.2 WithBins sum=2.2
+[Spectral] Bins with >50% error: 0/32
+[TestDataIO] Saved D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\roundtrip_test.bin (1323113 global + 0 caustic photons)
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\roundtrip_test.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[PerRayDataset] Ready: 1323113 photons (from DISK)
+
+======================================================
+  PER-RAY PHYSICAL PATH VALIDATION SUMMARY
+======================================================
+  Total rays tested: 256
+  Rays with warnings: 5 (1.9531%)
+  Physical validity issues: 0
+
+  AGGREGATE MEANS:
+    GT combined mean:  3.6938
+    OPT combined mean: 3.7043
+    Combined relErr:   0.0028
+    NEE relErr:        0.0034
+    Photon relErr:     0.0000
+    Energy ratio:      1.0028
+
+  PER-RAY THRESHOLD EXCEEDANCES:
+    Combined > 0.7000: 0 rays (0.0000%)
+    NEE > 0.8000: 5 rays (1.9531%)
+    Photon > 0.5000: 0 rays (0.0000%)
+
+  TOP 5 WORST RAYS:
+    Ray #56 px=(30,30) GT=2.1534 OPT=3.2218 relErr=0.3316 bounces=1/1
+    Ray #43 px=(32,23) GT=1.2668 OPT=1.7613 relErr=0.2808 bounces=1/1
+    Ray #13 px=(24,17) GT=1.0368 OPT=1.4124 relErr=0.2659 bounces=1/1
+    Ray #248 px=(15,18) GT=0.3492 OPT=0.4633 relErr=0.2462 bounces=1/1
+    Ray #88 px=(28,18) GT=1.3853 OPT=1.6353 relErr=0.1528 bounces=1/1
+======================================================
+
+[Decomposition] GT violations: 0/128  OPT violations: 0/128
+[AggNEE] GT mean=2.7389 OPT mean=2.7383 relErr=0.0002
+[AggPhoton] GT mean=0.6454 OPT mean=0.6454 relErr=0.0000
+
+======================================================
+  PER-RAY PHYSICAL PATH VALIDATION SUMMARY
+======================================================
+  Total rays tested: 512
+  Rays with warnings: 11 (2.1484%)
+  Physical validity issues: 0
+
+  AGGREGATE MEANS:
+    GT combined mean:  3.3843
+    OPT combined mean: 3.3837
+    Combined relErr:   0.0002
+    NEE relErr:        0.0002
+    Photon relErr:     0.0000
+    Energy ratio:      0.9998
+
+  PER-RAY THRESHOLD EXCEEDANCES:
+    Combined > 0.7000: 0 rays (0.0000%)
+    NEE > 0.8000: 11 rays (2.1484%)
+    Photon > 0.5000: 0 rays (0.0000%)
+
+  TOP 10 WORST RAYS:
+    Ray #401 px=(19,14) GT=2.0818 OPT=3.9751 relErr=0.4763 bounces=1/1
+    Ray #275 px=(40,11) GT=0.7466 OPT=1.3928 relErr=0.4639 bounces=1/1
+    Ray #372 px=(24,22) GT=1.0612 OPT=1.8895 relErr=0.4383 bounces=1/1
+    Ray #302 px=(15,25) GT=0.8631 OPT=1.5225 relErr=0.4331 bounces=1/1
+    Ray #56 px=(30,30) GT=2.1534 OPT=3.2218 relErr=0.3316 bounces=1/1
+    Ray #400 px=(18,24) GT=0.5838 OPT=0.8351 relErr=0.3009 bounces=1/1
+    Ray #43 px=(32,23) GT=1.2668 OPT=1.7613 relErr=0.2808 bounces=1/1
+    Ray #285 px=(30,25) GT=1.4036 OPT=1.9332 relErr=0.2739 bounces=1/1
+    Ray #13 px=(24,17) GT=1.0368 OPT=1.4124 relErr=0.2659 bounces=1/1
+    Ray #248 px=(15,18) GT=0.3492 OPT=0.4633 relErr=0.2462 bounces=1/1
+======================================================
+
+[Energy] ratio=0.9998 (GT total=1732.7384 OPT total=1732.4352)
+[FirstHitPhoton] Tested 64 diffuse first hits, disagreements: 0
+[Throughput] Tested 256 rays: explosions=0 nonfinite=0 negative=0
+[SingleBounce] GT photon=0.5817 OPT photon=0.5817 relErr=0.0000
+[SpectralBins] Bins with >50% error: 0/32
+[MultiBounce] GT mean=3.3843 OPT mean=3.3837 relErr=0.0002 energy_ratio=0.9998
+[WARNING] Ray 103 px=(30,16): photon_indirect (1.6358) >> nee_direct (0.4300) — possible double counting
+[WARNING] Ray 106 px=(23,15): photon_indirect (1.1728) >> nee_direct (0.2525) — possible double counting
+[WARNING] Ray 139 px=(28,15): photon_indirect (1.6592) >> nee_direct (0.5181) — possible double counting
+[WARNING] Ray 229 px=(36,46): photon_indirect (1.3162) >> nee_direct (0.3096) — possible double counting
+[DirectDoubleCount] Suspicious rays: 4/256
+
+======================================================
+  PER-RAY PHYSICAL PATH VALIDATION SUMMARY
+======================================================
+  Total rays tested: 256
+  Rays with warnings: 5 (1.9531%)
+  Physical validity issues: 0
+
+  AGGREGATE MEANS:
+    GT combined mean:  3.6938
+    OPT combined mean: 3.7043
+    Combined relErr:   0.0028
+    NEE relErr:        0.0034
+    Photon relErr:     0.0000
+    Energy ratio:      1.0028
+
+  PER-RAY THRESHOLD EXCEEDANCES:
+    Combined > 0.7000: 0 rays (0.0000%)
+    NEE > 0.8000: 5 rays (1.9531%)
+    Photon > 0.5000: 0 rays (0.0000%)
+
+  TOP 5 WORST RAYS:
+    Ray #56 px=(30,30) GT=2.1534 OPT=3.2218 relErr=0.3316 bounces=1/1
+    Ray #43 px=(32,23) GT=1.2668 OPT=1.7613 relErr=0.2808 bounces=1/1
+    Ray #13 px=(24,17) GT=1.0368 OPT=1.4124 relErr=0.2659 bounces=1/1
+    Ray #248 px=(15,18) GT=0.3492 OPT=0.4633 relErr=0.2462 bounces=1/1
+    Ray #88 px=(28,18) GT=1.3853 OPT=1.6353 relErr=0.1528 bounces=1/1
+======================================================
+
+
+  DETAILED PER-BOUNCE BREAKDOWN (top 3 worst):
+
+  --- Ray #56 px=(30,30) ---
+    Bounce 0: GT[nee=0.2106 phot=1.9427 T_max=1.0000 mat=6]  OPT[nee=1.2791 phot=1.9427 T_max=1.0000 mat=6]
+
+  --- Ray #43 px=(32,23) ---
+    Bounce 0: GT[nee=0.0000 phot=1.2668 T_max=1.0000 mat=6]  OPT[nee=0.4945 phot=1.2668 T_max=1.0000 mat=6]
+
+  --- Ray #13 px=(24,17) ---
+    Bounce 0: GT[nee=0.0000 phot=1.0368 T_max=1.0000 mat=6]  OPT[nee=0.3755 phot=1.0368 T_max=1.0000 mat=6]
+[TestDataIO] Loaded D:/Dev/photon_path_tracer/photon_path_tracer\tests\data\cornell_box.bin (1323113 global + 0 caustic photons, scene=cornell_box/cornellbox.obj)
+[OBJ] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.obj
+[MTL] Loading: D:/Dev/photon_path_tracer/photon_path_tracer/scenes/cornell_box/cornellbox.mtl
+[MTL] Loaded 7 materials
+[OBJ] Loaded 7119 vertices, 13056 triangles, 7 materials
+[PixelCmpDataset] Ready: 1323113 photons (128x128 camera) (from DISK)
+[PixelComparison] Rendering 128x128 @ 4 spp (both methods)...
+[PixelComparison] Render complete.
+[NEE-DirectOnly] RMSE=0.0106 PSNR=61.0013dB meanRelErr=0.2928 maxRelErr=526.7668 outlierFrac=0.0061 (5739/16384 lit)
+[PhotonIndirect] RMSE=0.0000 PSNR=100.0000dB meanRelErr=0.0000 maxRelErr=0.0000 outlierFrac=0.0000 (7692/16384 lit)
+[Combined   ] RMSE=0.0106 PSNR=61.0013dB meanRelErr=0.0534 maxRelErr=1.5313 outlierFrac=0.0000 (7744/16384 lit)
+[PhotonLobe] tested=121 avgCosSim=0.9177 agreeFrac=0.9752
+[ShadowIndirect] shadow_pixels=2860/16384
+[ShadowIndirect] GT mean=0.0466 Opt mean=0.0466 relErr=0.0000
+[SpectralBin] Per-bin RMSE: 0.001 0.001 0.001 0.001 0.001 0.001 0.001 0.001 ... 0.000 0.000 0.000 0.000 
+[SpectralBin] Bins with >40% normalized RMSE: 0/32
+[Global] PSNR=61.001dB energyRatio=1.000 GT_total=1774.247 Opt_total=1773.777
+[Decomposition] GT bad=0 (0.000%) Opt bad=0 (0.000%)
+[Spatial] Blocks with >50% difference: 0/16
+[SaveImages] Output directory: D:\Dev\photon_path_tracer\photon_path_tracer\tests\runs\20260220_133757
+[SaveImages] Wrote 10/10 images to D:\Dev\photon_path_tracer\photon_path_tracer\tests\runs\20260220_133757
+[==========] 220 tests from 33 test suites ran. (44849 ms total)
+[  PASSED  ] 220 tests.
