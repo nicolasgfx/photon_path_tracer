@@ -3015,6 +3015,89 @@ TEST(OptiX, ResizeFramebuffer) {
     EXPECT_EQ(fb8.height, 8);
 }
 
+// -- 36.9 Bin population launch params are correct -------------------
+
+TEST(OptiX, PhotonBinsPopulateAndValidityFlags) {
+    Scene scene = build_cornell_test_scene();
+    if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(&scene);
+    Camera cam = Camera::cornell_box_camera(8, 8);
+    cpu_renderer.set_camera(cam);
+
+    RenderConfig cfg;
+    cfg.image_width = 8;
+    cfg.image_height = 8;
+    cfg.num_photons = 2000;
+    cfg.gather_radius = 0.15f;
+    cfg.caustic_radius = 0.05f;
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+
+    OptixRenderer optix_renderer;
+    optix_renderer.init();
+    optix_renderer.build_accel(scene);
+    optix_renderer.upload_scene_data(scene);
+    optix_renderer.upload_emitter_data(scene);
+    optix_renderer.upload_photon_data(
+        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
+        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius);
+
+    optix_renderer.resize(8, 8);
+
+    // Before population, progressive render should not claim bins are valid.
+    optix_renderer.render_one_spp(cam, 0);
+    {
+        const LaunchParams& lp = optix_renderer.last_launch_params_for_test();
+        EXPECT_EQ(lp.populate_bins_mode, 0);
+        EXPECT_EQ(lp.photon_bins_valid, 0);
+        EXPECT_EQ(lp.is_final_render, 1);
+    }
+
+    // Population pass must launch with populate_bins_mode=1.
+    optix_renderer.populate_photon_bins(cam);
+    {
+        const LaunchParams& lp = optix_renderer.last_launch_params_for_test();
+        EXPECT_EQ(lp.populate_bins_mode, 1);
+        EXPECT_EQ(lp.photon_bins_valid, 0);
+        EXPECT_EQ(lp.is_final_render, 0);
+        EXPECT_EQ(lp.nee_light_samples, 1);
+        EXPECT_EQ(lp.nee_deep_samples, 1);
+        EXPECT_NE(lp.photon_bin_cache, nullptr);
+        EXPECT_NE(lp.photon_density_cache, nullptr);
+    }
+
+    // After population, progressive render should set photon_bins_valid=1.
+    optix_renderer.render_one_spp(cam, 1);
+    {
+        const LaunchParams& lp = optix_renderer.last_launch_params_for_test();
+        EXPECT_EQ(lp.populate_bins_mode, 0);
+        EXPECT_EQ(lp.photon_bins_valid, 1);
+        EXPECT_EQ(lp.is_final_render, 1);
+        EXPECT_EQ(lp.nee_light_samples, DEFAULT_NEE_LIGHT_SAMPLES);
+        EXPECT_EQ(lp.nee_deep_samples, DEFAULT_NEE_DEEP_SAMPLES);
+    }
+}
+
+// -- 36.10 Bin/density cache allocation matches resolution -----------
+
+TEST(OptiX, PhotonBinCacheAllocationMatchesResolution) {
+    OptixRenderer renderer;
+
+    const int W = 11;
+    const int H = 13;
+    ASSERT_NO_THROW(renderer.resize(W, H));
+
+    const size_t pixels = (size_t)W * (size_t)H;
+
+    EXPECT_EQ(renderer.photon_bin_cache_bytes_for_test(),
+              pixels * (size_t)PHOTON_BIN_COUNT * sizeof(PhotonBin));
+    EXPECT_EQ(renderer.photon_density_cache_bytes_for_test(),
+              pixels * (size_t)NUM_LAMBDA * sizeof(float));
+}
+
 // =====================================================================
 //  Photon Directional Bins Tests
 // =====================================================================

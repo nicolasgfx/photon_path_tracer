@@ -193,6 +193,14 @@ public:
     const PhotonSoA& photons() const { return stored_photons_; }
     const HashGrid&  grid()    const { return stored_grid_; }
 
+    /// Test hook: returns the last LaunchParams struct used for an OptiX launch
+    /// (copied on the host just before uploading to the device).
+    const LaunchParams& last_launch_params_for_test() const { return last_launch_params_host_; }
+
+    /// Test hook: allocated byte sizes for bin/density caches (after resize()).
+    size_t photon_bin_cache_bytes_for_test() const { return d_photon_bin_cache_.bytes; }
+    size_t photon_density_cache_bytes_for_test() const { return d_photon_density_cache_.bytes; }
+
     void cleanup();
 
 private:
@@ -237,6 +245,9 @@ private:
     DeviceBuffer d_prof_nee_;
     DeviceBuffer d_prof_photon_gather_;
     DeviceBuffer d_prof_bsdf_;
+
+    // Test hook: last launch params copied on host (for unit/integration tests)
+    LaunchParams last_launch_params_host_ = {};
 
     // Photon directional bin cache
     DeviceBuffer d_photon_bin_cache_;       // PhotonBin [W*H*PHOTON_BIN_COUNT]

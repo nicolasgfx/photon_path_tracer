@@ -26,6 +26,10 @@
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "core/photon_bins.h"
+#include "core/cdf.h"
+#include "core/nee_sampling.h"
+#include "core/photon_density_cache.h"
+#include "core/guided_nee.h"
 
 extern "C" {
     __constant__ LaunchParams params;
@@ -603,17 +607,7 @@ float3 sample_triangle_dev(float u1, float u2) {
     return make_f3(alpha, beta, gamma);
 }
 
-// == Binary search in CDF (device) ====================================
-__forceinline__ __device__
-int dev_binary_search_cdf(const float* cdf, int n, float u) {
-    int lo = 0, hi = n - 1;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (cdf[mid] <= u) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
-}
+// NOTE: CDF binary search lives in core/cdf.h (host+device).
 
 // NeeResult: returned by dev_nee_direct (defined below)
 struct NeeResult {
@@ -688,7 +682,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
 
         if (params.num_emissive > 0) {
             float xi = rng.next_float();
-            int local_idx = dev_binary_search_cdf(
+            int local_idx = binary_search_cdf(
                 params.emissive_cdf, params.num_emissive, xi);
             if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
             uint32_t light_tri = params.emissive_tri_indices[local_idx];
@@ -807,14 +801,11 @@ NeeResult dev_nee_guided(float3 pos, float3 normal, float3 wo_local,
         float bin_boost = 0.0f;
         if (d > 1e-6f) {
             float3 wi = to_light * (1.0f / d);
-            // Only boost if light is in positive hemisphere
-            if (dot(wi, normal) > 0.0f) {
-                int k = bin_dirs.find_nearest(wi);
-                bin_boost = bins[k].flux / total_bin_flux;  // normalized [0,1]
-            }
+            bin_boost = guided_nee_bin_boost(
+                wi, normal, bins, N, bin_dirs, total_bin_flux);
         }
 
-        float w = p_orig * (1.0f + NEE_GUIDED_ALPHA * bin_boost);
+        float w = guided_nee_weight(p_orig, bin_boost, NEE_GUIDED_ALPHA);
         guided_total += w;
         guided_cdf[i] = guided_total;
     }
@@ -829,9 +820,8 @@ NeeResult dev_nee_guided(float3 pos, float3 normal, float3 wo_local,
         guided_cdf[i] *= inv_total;
 
     // Sample count (same bounce-dependent logic as standard NEE)
-    const int M_cfg = (bounce == 0) ? params.nee_light_samples
-                                    : params.nee_deep_samples;
-    const int M = (M_cfg > 0) ? M_cfg : 1;
+    const int M = nee_shadow_sample_count(
+        bounce, params.nee_light_samples, params.nee_deep_samples);
     int visible_count = 0;
 
     DevONB frame = DevONB::from_normal(normal);
@@ -839,13 +829,7 @@ NeeResult dev_nee_guided(float3 pos, float3 normal, float3 wo_local,
     for (int s = 0; s < M; ++s) {
         // Sample from guided CDF
         float xi = rng.next_float();
-        int local_idx = 0;
-        for (int i = 0; i < params.num_emissive; ++i) {
-            if (xi <= guided_cdf[i]) { local_idx = i; break; }
-            local_idx = i;
-        }
-        if (local_idx >= params.num_emissive)
-            local_idx = params.num_emissive - 1;
+        int local_idx = binary_search_cdf(guided_cdf, params.num_emissive, xi);
 
         uint32_t light_tri = params.emissive_tri_indices[local_idx];
 
@@ -935,9 +919,8 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
 
     // Bounce-dependent sample count: full samples at bounce 0,
     // reduced at deeper bounces (throughput already attenuated)
-    const int M_cfg = (bounce == 0) ? params.nee_light_samples
-                                    : params.nee_deep_samples;
-    const int M = (M_cfg > 0) ? M_cfg : 1;
+    const int M = nee_shadow_sample_count(
+        bounce, params.nee_light_samples, params.nee_deep_samples);
     int visible_count = 0;   // count of unoccluded shadow samples
 
     // Build shading frame once (reused for every sample)
@@ -946,7 +929,7 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
     for (int s = 0; s < M; ++s) {
         // Step A — Sample emissive triangle from shared CDF
         float xi = rng.next_float();
-        int local_idx = dev_binary_search_cdf(
+        int local_idx = binary_search_cdf(
             params.emissive_cdf, params.num_emissive, xi);
         if (local_idx >= params.num_emissive)
             local_idx = params.num_emissive - 1;
@@ -1123,8 +1106,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             long long t_pg = clock64();
             Spectrum L_photon;
 
-            if (use_bins && bounce == 0 && params.photon_density_cache != nullptr
-                && params.frame_number > 0)
+            if (should_read_photon_density_cache(
+                    use_bins, bounce, params.photon_density_cache, params.frame_number))
             {
                 // Read from cached spectral density (populated on frame 0)
                 for (int i = 0; i < NUM_LAMBDA; ++i)
@@ -1136,8 +1119,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
                     params.gather_radius);
 
                 // Cache the result for subsequent frames (first bounce only)
-                if (use_bins && bounce == 0 && params.photon_density_cache != nullptr
-                    && params.frame_number == 0)
+                if (should_write_photon_density_cache(
+                        use_bins, bounce, params.photon_density_cache, params.frame_number))
                 {
                     for (int i = 0; i < NUM_LAMBDA; ++i)
                         params.photon_density_cache[pixel_idx * NUM_LAMBDA + i] = L_photon.value[i];
@@ -1328,7 +1311,7 @@ extern "C" __global__ void __raygen__photon_trace() {
 
     // 1. Sample emissive triangle via CDF
     float xi = rng.next_float();
-    int local_idx = dev_binary_search_cdf(
+    int local_idx = binary_search_cdf(
         params.emissive_cdf, params.num_emissive, xi);
     if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
     uint32_t tri_idx = params.emissive_tri_indices[local_idx];

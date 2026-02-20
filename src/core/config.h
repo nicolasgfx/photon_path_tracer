@@ -11,8 +11,8 @@
 
 // ── Active scene (change this to switch) ────────────────────────────
 // Uncomment exactly ONE of these:
- //#define SCENE_CORNELL_BOX
-#define SCENE_CONFERENCE
+#define SCENE_CORNELL_BOX
+//#define SCENE_CONFERENCE
 //#define SCENE_LIVING_ROOM
  //#define SCENE_BREAKFAST_ROOM
 // #define SCENE_SIBENIK
@@ -74,12 +74,12 @@
 #endif
 
 // ── Window & display ────────────────────────────────────────────────
-constexpr int   DEFAULT_WINDOW_WIDTH       = 1024;
-constexpr int   DEFAULT_WINDOW_HEIGHT      = 768;
+constexpr int   DEFAULT_WINDOW_WIDTH       = 800;
+constexpr int   DEFAULT_WINDOW_HEIGHT      = 800;
 
 // ── Image output ────────────────────────────────────────────────────
-constexpr int   DEFAULT_IMAGE_WIDTH        = 1024;
-constexpr int   DEFAULT_IMAGE_HEIGHT       = 768;
+constexpr int   DEFAULT_IMAGE_WIDTH        = 800;
+constexpr int   DEFAULT_IMAGE_HEIGHT       = 800;
 
 // ── Sampling ────────────────────────────────────────────────────────
 constexpr int   DEFAULT_SPP                = 16;     // samples per pixel
@@ -95,8 +95,8 @@ constexpr bool  DEBUG_PHOTON_SINGLE_BOUNCE = false;  // true = photons stop afte
 // DEBUG_CAMERA_SINGLE_BOUNCE removed: use RenderMode::FirstHitOnly instead
 
 // ── NEE (Next Event Estimation) ─────────────────────────────────────
-constexpr int   DEFAULT_NEE_LIGHT_SAMPLES  = 4;   // M: shadow-ray samples at bounce 0 (1=fast, 4-16=soft)
-constexpr int   DEFAULT_NEE_DEEP_SAMPLES   = 1;    // shadow-ray samples at bounce >= 1 (throughput-attenuated)
+constexpr int   DEFAULT_NEE_LIGHT_SAMPLES  = 16;   // M: shadow-ray samples at bounce 0 (1=fast, 4-16=soft)
+constexpr int   DEFAULT_NEE_DEEP_SAMPLES   = 4;    // shadow-ray samples at bounce >= 1 (throughput-attenuated)
 
 // ── MIS ─────────────────────────────────────────────────────────────
 constexpr bool  DEFAULT_USE_MIS            = true;

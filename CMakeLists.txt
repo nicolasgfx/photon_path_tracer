@@ -172,10 +172,11 @@ if(PPT_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
-    enable_testing()
+    include(CTest)
 
     set(TEST_SOURCES
         tests/test_main.cpp
+        tests/feature_speed_test.cpp
         src/scene/obj_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp

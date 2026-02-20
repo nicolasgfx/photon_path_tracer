@@ -613,6 +613,8 @@ void OptixRenderer::render_debug_frame(
     lp.nee_light_samples = shadow_rays ? DEFAULT_NEE_LIGHT_SAMPLES : 1;
     lp.nee_deep_samples   = shadow_rays ? DEFAULT_NEE_DEEP_SAMPLES  : 1;
 
+    last_launch_params_host_ = lp;
+
     // Upload launch params
     d_launch_params_.alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
@@ -664,6 +666,8 @@ void OptixRenderer::render_one_spp(
     lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
     lp.photon_bins_valid  = bins_populated_ ? 1 : 0;
     lp.populate_bins_mode = 0;
+
+    last_launch_params_host_ = lp;
 
     d_launch_params_.alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
@@ -720,6 +724,8 @@ void OptixRenderer::populate_photon_bins(const Camera& camera)
     lp.nee_deep_samples   = 1;
     lp.photon_bins_valid  = 0;
     lp.populate_bins_mode = 1;  // ← trigger bin population path
+
+    last_launch_params_host_ = lp;
 
     d_launch_params_.alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
