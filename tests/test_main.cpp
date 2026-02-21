@@ -3248,7 +3248,7 @@ TEST(OptiX, FinalRenderProducesValid) {
         cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
         cfg.gather_radius, cfg.caustic_radius);
 
-    optix_renderer.render_final(cam, cfg);
+    optix_renderer.render_final(cam, cfg, scene);
 
     FrameBuffer fb;
     optix_renderer.download_framebuffer(fb);

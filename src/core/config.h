@@ -22,7 +22,6 @@
 //#define SCENE_CORNELL_BOX
 #define SCENE_CONFERENCE
 //#define SCENE_LIVING_ROOM
-//#define SCENE_BREAKFAST_ROOM
 //#define SCENE_SIBENIK
 
 // =====================================================================
@@ -45,6 +44,31 @@ constexpr int STRATA_X = 8;
 constexpr int STRATA_Y = 8;
 
 // =====================================================================
+// §1.1 MULTI-HERO WAVELENGTH TRANSPORT (PBRT v4 style)
+// =====================================================================
+// Each photon carries HERO_WAVELENGTHS wavelength bins instead of 1.
+// The primary (hero) wavelength is sampled from the emitter Le CDF;
+// companion wavelengths are placed at stratified offsets across the
+// spectrum (modular wrap), following Wilkie et al. (2002) / PBRT v4.
+// This multiplies per-bin photon density by ~HERO_WAVELENGTHS with
+// negligible extra cost (ray intersections are shared; only BSDF
+// evaluation is repeated per wavelength).
+//   1 = legacy single-hero  |  4 = recommended (PBRT v4 default)
+constexpr int HERO_WAVELENGTHS = 4;
+
+// =====================================================================
+// §1.2 MULTI-MAP RE-TRACING (SPPM-style decorrelation)
+// =====================================================================
+// In non-SPPM render_final() mode, the photon map is re-traced every
+// MULTI_MAP_SPP_GROUP camera samples.  Each group queries a fresh
+// photon map with a different RNG seed, breaking the correlation that
+// causes rainbow speckle when all SPP samples see the same map.
+//   0 = disabled (single static map, legacy behavior)
+//   1 = re-trace every sample (maximum quality, slowest)
+//   4-8 = recommended balance (re-trace every 4-8 samples)
+constexpr int MULTI_MAP_SPP_GROUP = 4;
+
+// =====================================================================
 // §2  PHOTON PASS — BUDGETS & TRANSPORT (§5)
 // =====================================================================
 
@@ -53,8 +77,8 @@ constexpr int STRATA_Y = 8;
 // longer precomputation.  The photon map carries ALL multi-bounce
 // indirect transport in v2.
 //   Preview: 50k–200k  |  Default: 500k–1M  |  Final: 1M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;  // diffuse indirect photons
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // specular→diffuse caustic photons
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;  // diffuse indirect photons
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 500000;   // specular→diffuse caustic photons
 
 // ── Photon path depth (§5.2) ────────────────────────────────────────
 // Maximum bounce depth for photon rays (the real path tracers in v2).
@@ -179,17 +203,6 @@ constexpr float DEFAULT_DOF_SENSOR_HEIGHT  = 0.024f;  // sensor height in meters
 constexpr float DEFAULT_DOF_FOCUS_RANGE    = 0.2f;    // in-focus slab depth (scene units). 0 = razor-thin
 
 // =====================================================================
-// §7  PHOTON MAP PERSISTENCE (§20)
-// =====================================================================
-// The photon map is a static, view-independent light-field snapshot.
-// Saving it to disk enables instant startup on unchanged scenes.
-// Scene hash auto-invalidation ensures stale caches are never used.
-// P key forces recomputation at runtime (§20.8).
-
-constexpr bool DEFAULT_SAVE_PHOTON_CACHE = true;   // auto-save after tracing
-constexpr bool DEFAULT_LOAD_PHOTON_CACHE = true;   // auto-load if scene hash matches
-
-// =====================================================================
 // §8  PHOTON DIRECTIONAL BINS (§21 — Phase 7 optimization)
 // =====================================================================
 // Fixed-size directional bin cache per pixel (Fibonacci sphere layout).
@@ -263,7 +276,7 @@ constexpr int   DEFAULT_NUM_PHOTONS    = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
   constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 40.0f;
-  constexpr float SCENE_CAM_SPEED              = 0.5f;
+  constexpr float SCENE_CAM_SPEED              = 0.125f;
 
 #elif defined(SCENE_CONFERENCE)
   constexpr const char* SCENE_OBJ_PATH        = "conference/conference.obj";
@@ -272,7 +285,7 @@ constexpr int   DEFAULT_NUM_PHOTONS    = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
   constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 50.0f;
-  constexpr float SCENE_CAM_SPEED              = 0.5f;
+  constexpr float SCENE_CAM_SPEED              = 0.125f;
 
 #elif defined(SCENE_LIVING_ROOM)
   constexpr const char* SCENE_OBJ_PATH        = "living_room/living_room.obj";
@@ -281,16 +294,7 @@ constexpr int   DEFAULT_NUM_PHOTONS    = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
   constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 50.0f;
-  constexpr float SCENE_CAM_SPEED              = 0.5f;
-
-#elif defined(SCENE_BREAKFAST_ROOM)
-  constexpr const char* SCENE_OBJ_PATH        = "breakfast_room/breakfast_room.obj";
-  constexpr const char* SCENE_DISPLAY_NAME     = "Breakfast Room";
-  constexpr bool  SCENE_IS_REFERENCE           = false;
-  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
-  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV                = 50.0f;
-  constexpr float SCENE_CAM_SPEED              = 0.5f;
+  constexpr float SCENE_CAM_SPEED              = 0.125f;
 
 #elif defined(SCENE_SIBENIK)
   constexpr const char* SCENE_OBJ_PATH        = "sibenik/sibnek.obj";
@@ -299,7 +303,7 @@ constexpr int   DEFAULT_NUM_PHOTONS    = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
   constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV                = 50.0f;
-  constexpr float SCENE_CAM_SPEED              = 0.5f;
+  constexpr float SCENE_CAM_SPEED              = 0.125f;
 
 #else
   #error "No scene selected! Uncomment one SCENE_* define in config.h"
@@ -360,53 +364,48 @@ struct SceneProfile {
     }
 };
 
-constexpr int NUM_SCENE_PROFILES = 9;
+constexpr int NUM_SCENE_PROFILES = 8;
 
-// Keys 1–9 map to indices 0–8 (from scenes_description.md)
+// Keys 1–8 map to indices 0–7 (from scenes_description.md)
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     // 1: Cornell Box — low complexity, emitters in MTL
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 40.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 40.0f, 0.125f,
       SceneLightMode::FromMTL, SceneComplexity::Low },
 
     // 2: Conference Room — medium complexity, emitters in MTL
     { "conference/conference.obj",               "Conference Room",   false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.125f,
       SceneLightMode::FromMTL, SceneComplexity::Medium },
 
     // 3: Living Room — medium complexity, emitters in MTL
     { "living_room/living_room.obj",             "Living Room",       false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.125f,
       SceneLightMode::FromMTL, SceneComplexity::Medium },
 
     // 4: Fireplace Room — medium complexity, emitters in MTL
     { "fireplace_room/fireplace_room.obj",       "Fireplace Room",    false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.125f,
       SceneLightMode::FromMTL, SceneComplexity::Medium },
 
-    // 5: Breakfast Room — medium complexity, emitters in MTL
-    { "breakfast_room/The Breakfast Room BS.obj", "Breakfast Room",    false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::FromMTL, SceneComplexity::Medium },
-
-    // 6: Salle de Bain — medium complexity, emitters in MTL
+    // 5: Salle de Bain — medium complexity, emitters in MTL
     { "salle_de_bain/salle_de_bain.obj",         "Salle de Bain",     false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.125f,
       SceneLightMode::FromMTL, SceneComplexity::Medium },
 
-    // 7: Sibenik Cathedral — high complexity, directional light to floor
+    // 6: Sibenik Cathedral — high complexity, directional light to floor
     { "sibenik/sibnek.obj",                      "Sibenik Cathedral",  false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.125f,
       SceneLightMode::DirectionalToFloor, SceneComplexity::High },
 
-    // 8: Sponza — high complexity, spherical environment light
+    // 7: Sponza — high complexity, spherical environment light
     { "sponza/sponza.obj",                       "Sponza",            false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 60.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 60.0f, 0.125f,
       SceneLightMode::SphericalEnv, SceneComplexity::High },
 
-    // 9: Hairball — high complexity, spherical environment light
+    // 8: Hairball — high complexity, spherical environment light
     { "hairball/hairball.obj",                   "Hairball",           false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
+      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.125f,
       SceneLightMode::SphericalEnv, SceneComplexity::High },
 };
 

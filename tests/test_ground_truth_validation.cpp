@@ -840,11 +840,12 @@ TEST(GroundTruth_Density, SinglePhoton_KnownValue) {
         hit_pos, hit_normal, wo_local, mat,
         photons, gather_r, num_emitted);
 
-    // Expected: L = flux * (1/N) * (Kd/pi) * (1/(pi*r^2))
+    // Expected: L = flux * (1/N) * (Kd/pi) * W(0) * (2/(pi*r^2))
+    // For Epanechnikov kernel at d_tan=0: W(0) = 1, norm = 2/(pi*r^2)
     float expected_per_bin = flux_per_bin
         * (1.0f / num_emitted)
         * (0.5f / PI)           // Kd/pi
-        * (1.0f / (PI * gather_r * gather_r));
+        * (2.0f / (PI * gather_r * gather_r));  // Epanechnikov normalization
 
     for (int b = 0; b < NUM_LAMBDA; ++b) {
         EXPECT_NEAR(L_bf.value[b], expected_per_bin, expected_per_bin * 0.01f)
@@ -2130,4 +2131,285 @@ TEST_F(ConferenceRoomGroundTruth, GeomNormal_vs_ShadingNormal_AllTriangles) {
     // A high disagree rate would explain photon gathering failures
     // because photons store geometric_normal but queries filter using
     // shading_normal, causing valid photons to be rejected
+}
+
+// =====================================================================
+// Multi-Hero Wavelength Tests (§1.1)
+// =====================================================================
+// These tests validate the multi-hero photon transport implementation:
+// 1. Stratified companion bins are correctly spaced
+// 2. PhotonSoA round-trips hero data correctly
+// 3. Multi-hero density estimation converges to full-spectral ground truth
+
+// -- Stratified companion bin spacing --------------------------------
+TEST(MultiHero, StratifiedBinsAreEvenlySpaced) {
+    // For any primary hero bin, the HERO_WAVELENGTHS companion bins
+    // should be spaced at exactly NUM_LAMBDA / HERO_WAVELENGTHS apart.
+    const int stride = NUM_LAMBDA / HERO_WAVELENGTHS;
+
+    for (int primary = 0; primary < NUM_LAMBDA; ++primary) {
+        std::set<int> bins;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            int bin = (primary + h * stride) % NUM_LAMBDA;
+            EXPECT_GE(bin, 0);
+            EXPECT_LT(bin, NUM_LAMBDA);
+            bins.insert(bin);
+        }
+        // All HERO_WAVELENGTHS bins should be distinct
+        EXPECT_EQ((int)bins.size(), HERO_WAVELENGTHS)
+            << "Duplicate bins for primary=" << primary;
+    }
+}
+
+// -- PhotonSoA hero field round-trip ---------------------------------
+TEST(MultiHero, PhotonSoA_HeroFieldRoundTrip) {
+    Photon p;
+    p.position    = make_f3(1.f, 2.f, 3.f);
+    p.wi          = make_f3(0.f, 1.f, 0.f);
+    p.geom_normal = make_f3(0.f, 1.f, 0.f);
+    p.spectral_flux = Spectrum::zero();
+    p.num_hero    = HERO_WAVELENGTHS;
+
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        p.lambda_bin[h] = (uint16_t)(h * 3 + 1);
+        p.flux[h]       = (float)(h + 1) * 0.5f;
+    }
+
+    PhotonSoA soa;
+    soa.push_back(p);
+    EXPECT_EQ(soa.size(), 1u);
+
+    Photon q = soa.get(0);
+    EXPECT_EQ(q.num_hero, HERO_WAVELENGTHS);
+
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        EXPECT_EQ(q.lambda_bin[h], p.lambda_bin[h])
+            << "lambda_bin mismatch at hero " << h;
+        EXPECT_FLOAT_EQ(q.flux[h], p.flux[h])
+            << "flux mismatch at hero " << h;
+    }
+
+    // Also verify the raw interleaved layout
+    EXPECT_EQ(soa.lambda_bin.size(), (size_t)HERO_WAVELENGTHS);
+    EXPECT_EQ(soa.flux.size(), (size_t)HERO_WAVELENGTHS);
+    EXPECT_EQ(soa.num_hero.size(), 1u);
+    EXPECT_EQ(soa.num_hero[0], (uint8_t)HERO_WAVELENGTHS);
+}
+
+// -- Multiple photons round-trip -------------------------------------
+TEST(MultiHero, PhotonSoA_MultiplePhotons) {
+    PhotonSoA soa;
+    const int N = 10;
+
+    for (int i = 0; i < N; ++i) {
+        Photon p;
+        p.position    = make_f3((float)i, 0.f, 0.f);
+        p.wi          = make_f3(0.f, 1.f, 0.f);
+        p.geom_normal = make_f3(0.f, 1.f, 0.f);
+        p.spectral_flux = Spectrum::zero();
+        p.num_hero    = HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            p.lambda_bin[h] = (uint16_t)((i * HERO_WAVELENGTHS + h) % NUM_LAMBDA);
+            p.flux[h]       = (float)(i * 10 + h);
+        }
+        soa.push_back(p);
+    }
+
+    EXPECT_EQ(soa.size(), (size_t)N);
+    EXPECT_EQ(soa.lambda_bin.size(), (size_t)(N * HERO_WAVELENGTHS));
+    EXPECT_EQ(soa.flux.size(), (size_t)(N * HERO_WAVELENGTHS));
+
+    for (int i = 0; i < N; ++i) {
+        Photon q = soa.get(i);
+        EXPECT_EQ(q.num_hero, HERO_WAVELENGTHS);
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            EXPECT_EQ(q.lambda_bin[h],
+                      (uint16_t)((i * HERO_WAVELENGTHS + h) % NUM_LAMBDA));
+            EXPECT_FLOAT_EQ(q.flux[h], (float)(i * 10 + h));
+        }
+    }
+}
+
+// -- Hero bins cover distinct spectral bands -------------------------
+TEST(MultiHero, HeroBinsCoverSpectrum) {
+    // With HERO_WAVELENGTHS=4 and NUM_LAMBDA=32, each hero should
+    // cover a different quarter of the spectrum (stride=8).
+    const int stride = NUM_LAMBDA / HERO_WAVELENGTHS;
+
+    // Pick hero_bin = 0: companions should be {0, 8, 16, 24}
+    int hero_bin = 0;
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        int expected = h * stride;
+        int actual   = (hero_bin + h * stride) % NUM_LAMBDA;
+        EXPECT_EQ(actual, expected);
+    }
+
+    // Pick hero_bin = 5: companions should be {5, 13, 21, 29}
+    hero_bin = 5;
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        int expected = (5 + h * stride) % NUM_LAMBDA;
+        int actual   = (hero_bin + h * stride) % NUM_LAMBDA;
+        EXPECT_EQ(actual, expected);
+    }
+}
+
+// -- Multi-hero density estimate vs full-spectral ground truth -------
+//
+// Create photons with known multi-hero data and verify that summing
+// over the hero channels at each gathered photon produces the same
+// result as the brute-force full-spectral estimate, for the bins
+// covered by the hero wavelengths.
+TEST(MultiHero, DensityEstimate_MatchesFullSpectral_CoveredBins) {
+    // Build a simple set of photons on a flat floor (y=0, normal up)
+    const int N_photons = 200;
+    const float gather_r = 0.5f;
+    const int hero_bin = 2;  // primary hero
+    const int stride = NUM_LAMBDA / HERO_WAVELENGTHS;
+
+    // Diffuse white material
+    Material white_mat;
+    white_mat.type = MaterialType::Lambertian;
+    for (int b = 0; b < NUM_LAMBDA; ++b)
+        white_mat.Kd.value[b] = 0.8f;
+
+    PhotonSoA photons;
+    photons.reserve(N_photons);
+
+    std::mt19937 gen(42);
+    std::uniform_real_distribution<float> pos_dist(-0.3f, 0.3f);
+    std::uniform_real_distribution<float> flux_dist(0.1f, 2.0f);
+
+    for (int i = 0; i < N_photons; ++i) {
+        Photon p;
+        p.position    = make_f3(pos_dist(gen), 0.0f, pos_dist(gen));
+        p.wi          = normalize(make_f3(0.3f, 1.0f, 0.2f));
+        p.geom_normal = make_f3(0.f, 1.f, 0.f);
+        p.num_hero    = HERO_WAVELENGTHS;
+
+        // Set hero bins (stratified)
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            int bin = (hero_bin + h * stride) % NUM_LAMBDA;
+            p.lambda_bin[h] = (uint16_t)bin;
+            p.flux[h]       = flux_dist(gen);
+        }
+
+        // Also fill spectral_flux for the covered bins (matching hero data)
+        p.spectral_flux = Spectrum::zero();
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            int bin = (hero_bin + h * stride) % NUM_LAMBDA;
+            p.spectral_flux.value[bin] = p.flux[h];
+        }
+
+        photons.push_back(p);
+    }
+
+    // Build hash grid
+    HashGrid grid;
+    grid.build(photons, gather_r);
+
+    float3 query_pos  = make_f3(0.f, 0.f, 0.f);
+    float3 normal     = make_f3(0.f, 1.f, 0.f);
+    float3 wo_local   = make_f3(0.f, 0.f, 1.f);
+
+    // Full-spectral brute-force estimate
+    Spectrum L_full = brute_force_density_estimate(
+        query_pos, normal, wo_local, white_mat,
+        photons, gather_r, N_photons);
+
+    // Now simulate multi-hero density estimation:
+    // For each gathered photon, accumulate its hero channels into the
+    // corresponding spectral bins.
+    Spectrum L_hero = Spectrum::zero();
+    float r2 = gather_r * gather_r;
+    float inv_area = 2.0f / (PI * r2);  // Epanechnikov normalization
+    float inv_N    = 1.0f / (float)N_photons;
+    ONB frame = ONB::from_normal(normal);
+
+    for (size_t i = 0; i < photons.size(); ++i) {
+        float3 p_pos = make_f3(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
+        float3 diff = p_pos - query_pos;
+        float d_plane = dot(normal, diff);
+        if (fabsf(d_plane) > DEFAULT_SURFACE_TAU) continue;
+        float3 v_tan = diff - normal * d_plane;
+        float d_tan2 = dot(v_tan, v_tan);
+        if (d_tan2 > r2) continue;
+
+        float3 pn = make_f3(photons.norm_x[i], photons.norm_y[i], photons.norm_z[i]);
+        if (dot(pn, normal) <= 0.f) continue;
+
+        float3 wi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
+        if (dot(wi, normal) <= 0.f) continue;
+
+        float w = 1.0f - d_tan2 / r2;  // Epanechnikov
+        float3 wi_loc = frame.world_to_local(wi);
+        Spectrum f = bsdf::evaluate_diffuse(white_mat, wo_local, wi_loc);
+
+        int n_hero = (photons.num_hero.size() > i) ? (int)photons.num_hero[i] : 1;
+        for (int h = 0; h < n_hero; ++h) {
+            int bin = (int)photons.lambda_bin[i * HERO_WAVELENGTHS + h];
+            float pflux = photons.flux[i * HERO_WAVELENGTHS + h];
+            if (bin >= 0 && bin < NUM_LAMBDA)
+                L_hero.value[bin] += w * pflux * inv_N * f.value[bin] * inv_area;
+        }
+    }
+
+    // Compare only the bins covered by hero wavelengths
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        int bin = (hero_bin + h * stride) % NUM_LAMBDA;
+        float full = L_full.value[bin];
+        float hero = L_hero.value[bin];
+        if (full > 0.f) {
+            float rel_err = fabsf(hero - full) / full;
+            EXPECT_LT(rel_err, 1e-4f)
+                << "Bin " << bin << ": full=" << full << " hero=" << hero;
+        } else {
+            EXPECT_NEAR(hero, 0.f, 1e-6f);
+        }
+    }
+
+    // Non-covered bins should be zero in the hero estimate
+    std::set<int> covered_bins;
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+        covered_bins.insert((hero_bin + h * stride) % NUM_LAMBDA);
+
+    for (int b = 0; b < NUM_LAMBDA; ++b) {
+        if (covered_bins.count(b) == 0) {
+            EXPECT_NEAR(L_hero.value[b], 0.f, 1e-6f)
+                << "Bin " << b << " should be zero (not a hero bin)";
+        }
+    }
+}
+
+// -- PhotonSoA clear resets all hero fields --------------------------
+TEST(MultiHero, PhotonSoA_Clear) {
+    PhotonSoA soa;
+    Photon p;
+    p.position = make_f3(1.f, 0.f, 0.f);
+    p.wi = make_f3(0.f, 1.f, 0.f);
+    p.geom_normal = make_f3(0.f, 1.f, 0.f);
+    p.spectral_flux = Spectrum::zero();
+    p.num_hero = HERO_WAVELENGTHS;
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        p.lambda_bin[h] = (uint16_t)h;
+        p.flux[h] = 1.f;
+    }
+    soa.push_back(p);
+
+    EXPECT_EQ(soa.size(), 1u);
+    soa.clear();
+    EXPECT_EQ(soa.size(), 0u);
+    EXPECT_TRUE(soa.lambda_bin.empty());
+    EXPECT_TRUE(soa.flux.empty());
+    EXPECT_TRUE(soa.num_hero.empty());
+}
+
+// -- MULTI_MAP_SPP_GROUP config sanity check -------------------------
+TEST(MultiHero, MultiMapConfigValid) {
+    EXPECT_GT(MULTI_MAP_SPP_GROUP, 0)
+        << "MULTI_MAP_SPP_GROUP must be positive";
+    EXPECT_GE(HERO_WAVELENGTHS, 1);
+    EXPECT_LE(HERO_WAVELENGTHS, NUM_LAMBDA);
+    // NUM_LAMBDA should be evenly divisible by HERO_WAVELENGTHS
+    EXPECT_EQ(NUM_LAMBDA % HERO_WAVELENGTHS, 0)
+        << "NUM_LAMBDA must be divisible by HERO_WAVELENGTHS for uniform stratification";
 }

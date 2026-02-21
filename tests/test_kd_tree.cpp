@@ -24,8 +24,8 @@ static PhotonSoA make_random_photons(int n, uint32_t seed = 42) {
         );
         p.wi = make_f3(0, 1, 0);
         p.geom_normal = make_f3(0, 1, 0);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.lambda_bin[0] = 0;
+        p.flux[0] = 1.0f;
         photons.push_back(p);
     }
     return photons;
@@ -85,8 +85,8 @@ TEST(KDTree, BuildSinglePhoton) {
     p.position = make_f3(1.0f, 2.0f, 3.0f);
     p.wi = make_f3(0, 1, 0);
     p.geom_normal = make_f3(0, 1, 0);
-    p.lambda_bin = 0;
-    p.flux = 1.0f;
+    p.lambda_bin[0] = 0;
+    p.flux[0] = 1.0f;
     photons.push_back(p);
 
     KDTree tree;
@@ -119,8 +119,8 @@ TEST(KDTree, RangeQuerySingle) {
     p.position = make_f3(0.5f, 0.5f, 0.5f);
     p.wi = make_f3(0, 1, 0);
     p.geom_normal = make_f3(0, 1, 0);
-    p.lambda_bin = 0;
-    p.flux = 1.0f;
+    p.lambda_bin[0] = 0;
+    p.flux[0] = 1.0f;
     photons.push_back(p);
 
     KDTree tree;
@@ -204,8 +204,8 @@ TEST(KDTree, KNNSingle) {
     p.position = make_f3(1.0f, 0.0f, 0.0f);
     p.wi = make_f3(0, 1, 0);
     p.geom_normal = make_f3(0, 1, 0);
-    p.lambda_bin = 0;
-    p.flux = 1.0f;
+    p.lambda_bin[0] = 0;
+    p.flux[0] = 1.0f;
     photons.push_back(p);
 
     KDTree tree;
@@ -280,8 +280,8 @@ TEST(KDTree, BoundaryPhotons) {
     Photon p;
     p.wi = make_f3(0, 1, 0);
     p.geom_normal = make_f3(0, 1, 0);
-    p.lambda_bin = 0;
-    p.flux = 1.0f;
+    p.lambda_bin[0] = 0;
+    p.flux[0] = 1.0f;
 
     // Place photon exactly at radius distance
     p.position = make_f3(0.1f, 0.0f, 0.0f);
@@ -359,8 +359,8 @@ TEST(KDTree, AllPhotonsSamePosition) {
         p.position = make_f3(1.0f, 2.0f, 3.0f);
         p.wi = make_f3(0, 1, 0);
         p.geom_normal = make_f3(0, 1, 0);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.lambda_bin[0] = 0;
+        p.flux[0] = 1.0f;
         photons.push_back(p);
     }
 

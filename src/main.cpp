@@ -35,7 +35,6 @@
 #include "debug/debug.h"
 #include "optix/optix_renderer.h"
 #include "core/test_data_io.h"
-#include "photon/photon_io.h"
 
 #include <GLFW/glfw3.h>
 
@@ -159,17 +158,6 @@ static void add_scene_lights(Scene& scene, SceneLightMode mode) {
     scene.build_emissive_distribution();
     std::cout << "[Scene] Added area light ("
               << scene.num_emissive() << " emissive triangles)\n";
-}
-
-// Build PhotonCacheParams from a RenderConfig
-static PhotonCacheParams make_cache_params(const RenderConfig& cfg) {
-    PhotonCacheParams p;
-    p.global_photon_budget  = cfg.global_photon_budget;
-    p.caustic_photon_budget = cfg.caustic_photon_budget;
-    p.max_bounces           = cfg.max_bounces;
-    p.gather_radius         = cfg.gather_radius;
-    p.caustic_radius        = cfg.caustic_radius;
-    return p;
 }
 
 // Apply complexity preset from a scene profile to a RenderConfig
@@ -490,8 +478,6 @@ struct Options {
     std::string scene_file;
     std::string output_file = "output/render.png";
     std::string save_test_data_file;   // if non-empty, dump photons to this binary file
-    std::string photon_file;           // binary photon cache file (v2)
-    bool        force_recompute = false; // ignore cached photon file
     RenderConfig config;
 };
 
@@ -536,10 +522,6 @@ static Options parse_args(int argc, char* argv[]) {
             opt.config.sppm_initial_radius = std::stof(argv[++i]);
             opt.config.sppm_enabled = true;
         // ── v2 CLI flags ────────────────────────────────────────────
-        } else if (arg == "--photon-file" && i + 1 < argc) {
-            opt.photon_file = argv[++i];
-        } else if (arg == "--force-recompute") {
-            opt.force_recompute = true;
         } else if (arg == "--global-photons" && i + 1 < argc) {
             opt.config.global_photon_budget = std::stoi(argv[++i]);
             opt.config.num_photons = opt.config.global_photon_budget;
@@ -889,45 +871,11 @@ static void run_interactive(
                 optix_renderer.upload_scene_data(scene);
                 optix_renderer.upload_emitter_data(scene);
 
-                // ── Try loading cached photon map ──────────────────────
-                bool photons_loaded = false;
-                PhotonCacheParams cache_params = make_cache_params(opt.config);
-                std::string cache_file = photon_cache_path(obj_path, cache_params);
-                uint64_t scene_hash = compute_scene_hash(
-                    std::string(prof.obj_path),
-                    (uint32_t)scene.triangles.size());
-
-                if (DEFAULT_LOAD_PHOTON_CACHE && !opt.force_recompute) {
-                    PhotonSoA loaded_global, loaded_caustic;
-                    if (load_photon_maps(cache_file, scene_hash, cache_params,
-                                         loaded_global, loaded_caustic)) {
-                        HashGrid loaded_grid, loaded_caustic_grid;
-                        loaded_grid.build(loaded_global, opt.config.gather_radius);
-                        loaded_caustic_grid.build(loaded_caustic, opt.config.caustic_radius);
-                        optix_renderer.upload_photon_data(
-                            loaded_global, loaded_grid,
-                            loaded_caustic, loaded_caustic_grid,
-                            opt.config.gather_radius, opt.config.caustic_radius);
-                        photons_loaded = true;
-                        std::cout << "[Photon] Loaded from cache: " << cache_file << "\n";
-                    }
-                }
-
-                double photon_ms = 0.0;
-                if (!photons_loaded) {
-                    // Trace photons on GPU
-                    auto tp0 = std::chrono::high_resolution_clock::now();
-                    optix_renderer.trace_photons(scene, opt.config);
-                    auto tp1 = std::chrono::high_resolution_clock::now();
-                    photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
-
-                    // Auto-save photon cache
-                    if (DEFAULT_SAVE_PHOTON_CACHE) {
-                        PhotonSoA empty_caustic;
-                        save_photon_maps(cache_file, scene_hash, cache_params,
-                                         optix_renderer.photons(), empty_caustic);
-                    }
-                }
+                // ── Trace photons on GPU ───────────────────────────
+                auto tp0 = std::chrono::high_resolution_clock::now();
+                optix_renderer.trace_photons(scene, opt.config);
+                auto tp1 = std::chrono::high_resolution_clock::now();
+                double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
 
                 // Reset camera to scene profile defaults
                 camera.position = make_f3(prof.cam_pos[0], prof.cam_pos[1], prof.cam_pos[2]);
@@ -956,8 +904,7 @@ static void run_interactive(
                 double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                 std::cout << "[Scene] " << prof.display_name << " loaded in "
                           << total_ms << " ms"
-                          << (photons_loaded ? " (photons from cache)"
-                                            : (" (photons: " + std::to_string((int)photon_ms) + " ms)").c_str())
+                          << " (photons: " << (int)photon_ms << " ms)"
                           << "\n";
                 std::cout << "[Scene] " << scene.num_triangles() << " tris, "
                           << scene.num_emissive() << " emissive\n";
@@ -1414,10 +1361,8 @@ int main(int argc, char* argv[]) {
         initial_light_mode = SCENE_PROFILES[1].light_mode;
     #elif defined(SCENE_LIVING_ROOM)
         initial_light_mode = SCENE_PROFILES[2].light_mode;
-    #elif defined(SCENE_BREAKFAST_ROOM)
-        initial_light_mode = SCENE_PROFILES[4].light_mode;
     #elif defined(SCENE_SIBENIK)
-        initial_light_mode = SCENE_PROFILES[6].light_mode;
+        initial_light_mode = SCENE_PROFILES[5].light_mode;
     #endif
     add_scene_lights(scene, initial_light_mode);
 
@@ -1449,51 +1394,14 @@ int main(int argc, char* argv[]) {
         optix_renderer.upload_emitter_data(scene);
         std::cout << "\n";
 
-        // -- GPU photon trace (with auto I/O cache) --------------------
-        bool photons_loaded = false;
-        PhotonCacheParams cache_params = make_cache_params(opt.config);
-        std::string auto_cache_file = photon_cache_path(opt.scene_file, cache_params);
-        // Use explicit --photon-file if provided, otherwise auto-derive
-        std::string cache_file = opt.photon_file.empty() ? auto_cache_file : opt.photon_file;
-        uint64_t scene_hash = compute_scene_hash(
-            std::string(SCENE_OBJ_PATH),
-            (uint32_t)scene.triangles.size());
-
-        if (DEFAULT_LOAD_PHOTON_CACHE && !opt.force_recompute) {
-            PhotonSoA loaded_global, loaded_caustic;
-            if (load_photon_maps(cache_file, scene_hash, cache_params,
-                                 loaded_global, loaded_caustic)) {
-                std::cout << "[Photon] Loaded " << loaded_global.size()
-                          << " photons from cache: " << cache_file << "\n";
-                HashGrid loaded_grid, loaded_caustic_grid;
-                loaded_grid.build(loaded_global, opt.config.gather_radius);
-                loaded_caustic_grid.build(loaded_caustic, opt.config.caustic_radius);
-                optix_renderer.upload_photon_data(
-                    loaded_global, loaded_grid,
-                    loaded_caustic, loaded_caustic_grid,
-                    opt.config.gather_radius, opt.config.caustic_radius);
-                photons_loaded = true;
-            } else {
-                std::cout << "[Photon] Cache miss or param mismatch, retracing...\n";
-            }
-        }
-
-        if (!photons_loaded) {
-            std::cout << "-- GPU Photon Trace --\n";
+        // -- GPU photon trace -----------------------------------------------
+        std::cout << "-- GPU Photon Trace --\n";
+        {
             auto tp0 = std::chrono::high_resolution_clock::now();
             optix_renderer.trace_photons(scene, opt.config);
             auto tp1 = std::chrono::high_resolution_clock::now();
             double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
-            std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n";
-
-            // Auto-save photon cache
-            if (DEFAULT_SAVE_PHOTON_CACHE) {
-                PhotonSoA empty_caustic;
-                save_photon_maps(cache_file, scene_hash, cache_params,
-                                 optix_renderer.photons(), empty_caustic);
-                std::cout << "[Photon] Saved to cache: " << cache_file << "\n";
-            }
-            std::cout << "\n";
+            std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n\n";
         }
 
         // -- Save test data (if requested) ----------------------------
@@ -1520,10 +1428,8 @@ int main(int argc, char* argv[]) {
             g_app.active_scene_index = 1;
         #elif defined(SCENE_LIVING_ROOM)
             g_app.active_scene_index = 2;
-        #elif defined(SCENE_BREAKFAST_ROOM)
-            g_app.active_scene_index = 4;
         #elif defined(SCENE_SIBENIK)
-            g_app.active_scene_index = 6;
+            g_app.active_scene_index = 5;
         #endif
         g_app.active_cam_speed = SCENE_CAM_SPEED;
 

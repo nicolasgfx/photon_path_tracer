@@ -98,11 +98,13 @@ struct LaunchParams {
     float*    photon_norm_x;   // geometric surface normal at photon hit
     float*    photon_norm_y;
     float*    photon_norm_z;
-    uint16_t* photon_lambda;
-    float*    photon_flux;
+    uint16_t* photon_lambda;   // [num_photons * HERO_WAVELENGTHS] wavelength bins
+    float*    photon_flux;     // [num_photons * HERO_WAVELENGTHS] per-hero flux
+    uint8_t*  photon_num_hero; // [num_photons] valid hero count per photon
     uint8_t*  photon_bin_idx;      // [num_photons] precomputed Fibonacci bin index
     int       num_photons;
     int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
+    int       photon_map_seed;     // RNG seed offset for multi-map re-tracing
 
     // Hash grid (device pointers)
     uint32_t* grid_sorted_indices;
@@ -130,8 +132,9 @@ struct LaunchParams {
     float*    out_photon_norm_x;   // geometric normal at photon hit (output)
     float*    out_photon_norm_y;
     float*    out_photon_norm_z;
-    uint16_t* out_photon_lambda;
-    float*    out_photon_flux;
+    uint16_t* out_photon_lambda;   // [max_stored * HERO_WAVELENGTHS]
+    float*    out_photon_flux;     // [max_stored * HERO_WAVELENGTHS]
+    uint8_t*  out_photon_num_hero; // [max_stored] valid hero count per photon
     unsigned int* out_photon_count;  // atomic counter (device)
     int       max_stored_photons;
 

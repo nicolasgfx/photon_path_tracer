@@ -717,10 +717,14 @@ Spectrum dev_estimate_photon_density(
             // Diffuse-only BSDF for density estimation (§6 standard practice).
             // Full Cook-Torrance creates 50x+ variance on glossy surfaces.
             Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
-            float flux = params.photon_flux[idx];
-            int bin = params.photon_lambda[idx];
-
-            L.value[bin] += f.value[bin] * flux * w * inv_area * norm;
+            // Accumulate HERO_WAVELENGTHS bins per photon (multi-hero transport)
+            int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
+            for (int h = 0; h < n_hero; ++h) {
+                float p_flux = params.photon_flux[idx * HERO_WAVELENGTHS + h];
+                int bin = (int)params.photon_lambda[idx * HERO_WAVELENGTHS + h];
+                if (bin >= 0 && bin < NUM_LAMBDA)
+                    L.value[bin] += f.value[bin] * p_flux * w * inv_area * norm;
+            }
         }
     }
     return L;
@@ -1765,6 +1769,8 @@ extern "C" __global__ void __raygen__render() {
 
 // =====================================================================
 // __raygen__photon_trace  -  GPU photon emission and tracing
+//   Multi-hero wavelength transport (PBRT v4 style, §1.1 config.h):
+//   Each photon carries HERO_WAVELENGTHS bins with stratified offsets.
 // =====================================================================
 extern "C" __global__ void __raygen__photon_trace() {
     const uint3 idx = optixGetLaunchIndex();
@@ -1772,23 +1778,20 @@ extern "C" __global__ void __raygen__photon_trace() {
     if (photon_idx >= params.num_photons) return;
     if (params.num_emissive <= 0) return;
 
+    // Incorporate photon_map_seed for multi-map re-tracing (§1.2)
     PCGRng rng = PCGRng::seed(
-        (uint64_t)photon_idx * 7 + 42,
+        (uint64_t)photon_idx * 7 + 42 + (uint64_t)params.photon_map_seed * 0x100000007ULL,
         (uint64_t)photon_idx + 1);
 
     // 1. Sample emissive triangle (mixture: power CDF + uniform)
-    // Power CDF keeps energy proportional; uniform ensures small/rare
-    // emitters still get enough photons for smooth color bleeding.
     const float mix_uniform = fminf(fmaxf(DEFAULT_PHOTON_EMITTER_UNIFORM_MIX, 0.0f), 1.0f);
 
     int local_idx = 0;
     if (mix_uniform > 0.0f && rng.next_float() < mix_uniform) {
-        // Uniform over emissive triangles
         float u = rng.next_float();
         local_idx = (int)(u * (float)params.num_emissive);
         if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
     } else {
-        // Power-proportional CDF
         float xi = rng.next_float();
         local_idx = binary_search_cdf(
             params.emissive_cdf, params.num_emissive, xi);
@@ -1796,7 +1799,6 @@ extern "C" __global__ void __raygen__photon_trace() {
     }
     uint32_t tri_idx = params.emissive_tri_indices[local_idx];
 
-    // Mixture PDF for this triangle
     float pdf_power;
     if (local_idx == 0) pdf_power = params.emissive_cdf[0];
     else pdf_power = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
@@ -1818,21 +1820,35 @@ extern "C" __global__ void __raygen__photon_trace() {
     float  area  = length(cross(e1, e2)) * 0.5f;
     float  pdf_pos = 1.f / area;
 
-    // 4. Sample wavelength from Le
+    // 4. Sample HERO_WAVELENGTHS stratified wavelength bins
+    //    Hero = sampled from Le CDF; companions at stratified offsets
+    //    (Wilkie et al. 2002 / PBRT v4 style)
     Spectrum Le = dev_get_Le(mat_id);
     float Le_sum = 0.f;
     for (int i = 0; i < NUM_LAMBDA; ++i) Le_sum += Le.value[i];
     if (Le_sum <= 0.f) return;
 
+    // Sample primary hero wavelength from Le CDF
     float xi_lambda = rng.next_float() * Le_sum;
-    int lambda_bin = NUM_LAMBDA - 1;
+    int hero_bin = NUM_LAMBDA - 1;
     float cum = 0.f;
     for (int i = 0; i < NUM_LAMBDA; ++i) {
         cum += Le.value[i];
-        if (xi_lambda <= cum) { lambda_bin = i; break; }
+        if (xi_lambda <= cum) { hero_bin = i; break; }
     }
-    float Le_lambda = Le.value[lambda_bin];
-    float pdf_lambda = Le_lambda / Le_sum;
+
+    // Build stratified companion bins
+    int   hero_bins[HERO_WAVELENGTHS];
+    float hero_flux[HERO_WAVELENGTHS];
+    int   num_hero = HERO_WAVELENGTHS;
+
+    hero_bins[0] = hero_bin;
+    for (int h = 1; h < HERO_WAVELENGTHS; ++h) {
+        // Stratified offset: evenly spaced across the spectrum
+        int offset = (h * NUM_LAMBDA) / HERO_WAVELENGTHS;
+        int companion = (hero_bin + offset) % NUM_LAMBDA;
+        hero_bins[h] = companion;
+    }
 
     // 5. Sample cosine hemisphere direction
     float3 local_dir = sample_cosine_hemisphere_dev(rng);
@@ -1841,9 +1857,19 @@ extern "C" __global__ void __raygen__photon_trace() {
     float cos_theta = local_dir.z;
     float pdf_dir = cos_theta * INV_PI;
 
-    // 6. Compute initial photon flux
-    float denom = pdf_tri * pdf_pos * pdf_dir * pdf_lambda;
-    float flux = (denom > 0.f) ? (Le_lambda * cos_theta) / denom : 0.f;
+    // 6. Compute initial flux per hero wavelength
+    //    Each hero channel: flux_h = Le(λ_h) * cos / (pdf_tri * pdf_pos * pdf_dir * pdf_lambda_h)
+    //    pdf_lambda_h for companion channels uses the same Le CDF probability
+    //    as if that bin had been directly sampled: pdf_lambda_h = Le(λ_h) / Le_sum
+    float denom_common = pdf_tri * pdf_pos * pdf_dir;
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        int bin = hero_bins[h];
+        float Le_h = Le.value[bin];
+        float pdf_lambda_h = Le_h / Le_sum;
+        hero_flux[h] = (denom_common * pdf_lambda_h > 0.f)
+                     ? (Le_h * cos_theta) / (denom_common * pdf_lambda_h)
+                     : 0.f;
+    }
 
     // 7. Trace through scene
     float3 origin    = pos + geo_n * OPTIX_SCENE_EPSILON;
@@ -1853,9 +1879,7 @@ extern "C" __global__ void __raygen__photon_trace() {
         TraceResult hit = trace_radiance(origin, direction);
         if (!hit.hit) break;
 
-        // RNG spatial decorrelation (§12 guideline): advance RNG state
-        // based on the spatial cell the photon entered, breaking coherent
-        // patterns among neighbouring photon paths.
+        // RNG spatial decorrelation
         {
             uint32_t cell_key = dev_hash_cell(
                 (int)floorf(hit.position.x / params.grid_cell_size),
@@ -1868,9 +1892,6 @@ extern "C" __global__ void __raygen__photon_trace() {
         uint32_t hit_mat = hit.material_id;
 
         // ── Volume photon deposit (Beer–Lambert free-flight) ───────
-        // Along the ray segment [origin → hit.position], sample a
-        // free-flight distance using Beer–Lambert.  If the scatter
-        // event falls before the surface hit, deposit a volume photon.
         if (params.volume_enabled && params.volume_density > 0.f && hit.hit) {
             float seg_t = hit.t;
             float mid_y = origin.y + direction.y * (seg_t * 0.5f);
@@ -1878,19 +1899,16 @@ extern "C" __global__ void __raygen__photon_trace() {
                 params.volume_density, params.volume_albedo,
                 params.volume_falloff, mid_y);
 
-            float sig_t_lam = med.sigma_t.value[lambda_bin];
+            // Use hero bin 0 for volume scattering decision
+            float sig_t_lam = med.sigma_t.value[hero_bins[0]];
             if (sig_t_lam > 0.f) {
-                // Sample free-flight distance: t_ff = -ln(1-u) / σ_t
                 float u_ff = rng.next_float();
                 float t_ff = -logf(fmaxf(1.f - u_ff, 1e-12f)) / sig_t_lam;
 
                 if (t_ff < seg_t) {
-                    // Scatter event inside the medium — deposit volume photon
                     float3 vol_pos = origin + direction * t_ff;
-                    float sig_s_lam = med.sigma_s.value[lambda_bin];
-                    // Volume photon flux: photon flux * (σ_s / σ_t)
-                    // (σ_s / σ_t = albedo, probability of scatter vs absorb)
-                    float vol_flux = flux * (sig_s_lam / fmaxf(sig_t_lam, 1e-20f));
+                    float sig_s_lam = med.sigma_s.value[hero_bins[0]];
+                    float vol_flux = hero_flux[0] * (sig_s_lam / fmaxf(sig_t_lam, 1e-20f));
 
                     uint32_t vslot = atomicAdd(params.out_vol_photon_count, 1u);
                     if (vslot < (uint32_t)params.max_stored_vol_photons) {
@@ -1900,21 +1918,23 @@ extern "C" __global__ void __raygen__photon_trace() {
                         params.out_vol_photon_wi_x[vslot]   = -direction.x;
                         params.out_vol_photon_wi_y[vslot]   = -direction.y;
                         params.out_vol_photon_wi_z[vslot]   = -direction.z;
-                        params.out_vol_photon_lambda[vslot]  = (uint16_t)lambda_bin;
+                        params.out_vol_photon_lambda[vslot]  = (uint16_t)hero_bins[0];
                         params.out_vol_photon_flux[vslot]    = vol_flux;
                     }
                 }
 
-                // Attenuate photon flux by transmittance over this segment
-                flux *= expf(-sig_t_lam * seg_t);
+                // Attenuate all hero flux by transmittance over this segment
+                for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                    float sig_t_h = med.sigma_t.value[hero_bins[h]];
+                    hero_flux[h] *= expf(-sig_t_h * seg_t);
+                }
             }
         }
 
         // Skip emissive surfaces
         if (dev_is_emissive(hit_mat)) break;
 
-        // Store photon at diffuse surfaces (skip bounce 0 = direct lighting,
-        // which is handled by NEE in the camera render pass).
+        // Store photon at diffuse surfaces (skip bounce 0 = direct lighting)
         if (!dev_is_specular(hit_mat) && bounce > 0) {
             uint32_t slot = atomicAdd(params.out_photon_count, 1u);
             if (slot < (uint32_t)params.max_stored_photons) {
@@ -1927,16 +1947,19 @@ extern "C" __global__ void __raygen__photon_trace() {
                 params.out_photon_norm_x[slot]  = hit.geo_normal.x;
                 params.out_photon_norm_y[slot]  = hit.geo_normal.y;
                 params.out_photon_norm_z[slot]  = hit.geo_normal.z;
-                params.out_photon_lambda[slot]  = (uint16_t)lambda_bin;
-                params.out_photon_flux[slot]    = flux;
+                // Write HERO_WAVELENGTHS bins per photon (interleaved)
+                for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                    params.out_photon_lambda[slot * HERO_WAVELENGTHS + h] = (uint16_t)hero_bins[h];
+                    params.out_photon_flux[slot * HERO_WAVELENGTHS + h]   = hero_flux[h];
+                }
+                params.out_photon_num_hero[slot] = (uint8_t)num_hero;
             }
         }
 
-        // Bounce — track single-channel albedo for RR (mirrors: ~1, diffuse: Kd, glossy: mixed)
+        // Bounce — track per-hero-channel throughput
         float rr_albedo = 1.0f;
         if (dev_is_specular(hit_mat)) {
             if (dev_is_glass(hit_mat)) {
-                // Glass (Fresnel dielectric): reflect or refract
                 float eta = dev_get_ior(hit_mat);
                 float3 n = hit.shading_normal;
                 bool entering = dot(direction, n) < 0.f;
@@ -1962,6 +1985,7 @@ extern "C" __global__ void __raygen__photon_trace() {
                     direction = normalize(refracted);
                     origin = hit.position - outward_normal * OPTIX_SCENE_EPSILON;
                 }
+                // Glass: throughput unchanged (geometric-only), shared path
             } else {
                 // Mirror reflection: throughput unchanged
                 float3 n = hit.shading_normal;
@@ -1969,7 +1993,6 @@ extern "C" __global__ void __raygen__photon_trace() {
                 origin = hit.position + n * OPTIX_SCENE_EPSILON;
             }
         } else if (dev_is_glossy(hit_mat)) {
-            // Glossy: sample Cook-Torrance BSDF (specular + diffuse)
             DevONB bounce_frame = DevONB::from_normal(hit.shading_normal);
             float3 wo_local = bounce_frame.world_to_local(-direction);
             if (wo_local.z <= 0.f) break;
@@ -1977,33 +2000,41 @@ extern "C" __global__ void __raygen__photon_trace() {
             DevBSDFSample bs = dev_bsdf_sample(hit_mat, wo_local, hit.uv, rng);
             if (bs.pdf <= 0.f || bs.wi.z <= 0.f) break;
 
-            // Throughput for single wavelength bin:
-            // f(lambda_bin) * cos(theta) / pdf
-            float cos_theta = bs.wi.z;
-            float throughput_factor = bs.f.value[lambda_bin] * cos_theta / bs.pdf;
-            rr_albedo = fminf(throughput_factor, 1.0f);
-            flux *= throughput_factor;
+            float cos_theta_b = bs.wi.z;
+            // Per-hero-channel throughput
+            float max_throughput = 0.f;
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                float throughput_h = bs.f.value[hero_bins[h]] * cos_theta_b / bs.pdf;
+                hero_flux[h] *= throughput_h;
+                max_throughput = fmaxf(max_throughput, throughput_h);
+            }
+            rr_albedo = fminf(max_throughput, 1.0f);
 
             direction = bounce_frame.local_to_world(bs.wi);
             origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
         } else {
-            // Diffuse: cosine hemisphere sampling
+            // Diffuse: cosine hemisphere sampling, per-hero throughput
             DevONB bounce_frame = DevONB::from_normal(hit.shading_normal);
             float3 wi_local = sample_cosine_hemisphere_dev(rng);
-            // Throughput for Lambertian: f*cos/pdf = Kd (for single wavelength)
             Spectrum Kd = dev_get_Kd(hit_mat, hit.uv);
-            rr_albedo = Kd.value[lambda_bin]; // use actual albedo for RR
-            flux *= rr_albedo;
+            float max_albedo = 0.f;
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                float albedo_h = Kd.value[hero_bins[h]];
+                hero_flux[h] *= albedo_h;
+                max_albedo = fmaxf(max_albedo, albedo_h);
+            }
+            rr_albedo = max_albedo;
 
             direction = bounce_frame.local_to_world(wi_local);
             origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
         }
 
-        // Russian roulette — survival probability proportional to throughput
+        // Russian roulette
         if (bounce >= DEFAULT_MIN_BOUNCES_RR) {
             float p_rr = fminf(DEFAULT_RR_THRESHOLD, rr_albedo);
             if (rng.next_float() >= p_rr) break;
-            flux /= p_rr;
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+                hero_flux[h] /= p_rr;
         }
     }
 }
@@ -2261,9 +2292,14 @@ static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixe
             // Epanechnikov kernel: w = 1 - d_tan²/r² (smooth falloff)
             float w = 1.0f - d_tan2 / r2;
 
-            // Accumulate: w · f_s · Φ per wavelength bin
-            uint16_t bin = params.photon_lambda[idx];
-            phi.value[bin] += w * f.value[bin] * params.photon_flux[idx];
+            // Accumulate HERO_WAVELENGTHS bins per photon (multi-hero transport)
+            int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
+            for (int h = 0; h < n_hero; ++h) {
+                uint16_t bin = params.photon_lambda[idx * HERO_WAVELENGTHS + h];
+                if (bin < NUM_LAMBDA) {
+                    phi.value[bin] += w * f.value[bin] * params.photon_flux[idx * HERO_WAVELENGTHS + h];
+                }
+            }
             ++M;
         }
     }

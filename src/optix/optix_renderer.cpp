@@ -317,6 +317,10 @@ void OptixRenderer::upload_photon_data(
     d_photon_norm_z_.upload(global_photons.norm_z);
     d_photon_lambda_.upload(global_photons.lambda_bin);
     d_photon_flux_.upload(global_photons.flux);
+    if (!global_photons.num_hero.empty())
+        d_photon_num_hero_.upload(global_photons.num_hero);
+    else
+        d_photon_num_hero_.free();
     if (!global_photons.bin_idx.empty())
         d_photon_bin_idx_.upload(global_photons.bin_idx);
     else
@@ -384,7 +388,7 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
 //   4. Upload photons + grid back to device
 // =====================================================================
 void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config,
-                                  float grid_radius_override) {
+                                  float grid_radius_override, int photon_map_seed) {
     if (num_emissive_ <= 0) {
         std::cout << "[OptiX] Skipping photon trace (no emissive triangles)\n";
         return;
@@ -415,8 +419,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_out_photon_norm_x_.alloc(max_stored * sizeof(float));
     d_out_photon_norm_y_.alloc(max_stored * sizeof(float));
     d_out_photon_norm_z_.alloc(max_stored * sizeof(float));
-    d_out_photon_lambda_.alloc(max_stored * sizeof(uint16_t));
-    d_out_photon_flux_.alloc(max_stored * sizeof(float));
+    d_out_photon_lambda_.alloc(max_stored * HERO_WAVELENGTHS * sizeof(uint16_t));
+    d_out_photon_flux_.alloc(max_stored * HERO_WAVELENGTHS * sizeof(float));
+    d_out_photon_num_hero_.alloc(max_stored * sizeof(uint8_t));
     d_out_photon_count_.alloc_zero(sizeof(unsigned int)); // zero the counter
 
     // Allocate volume photon output buffers
@@ -473,6 +478,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.out_photon_norm_z = d_out_photon_norm_z_.as<float>();
     lp.out_photon_lambda  = d_out_photon_lambda_.as<uint16_t>();
     lp.out_photon_flux    = d_out_photon_flux_.as<float>();
+    lp.out_photon_num_hero = d_out_photon_num_hero_.as<uint8_t>();
     lp.out_photon_count   = d_out_photon_count_.as<unsigned int>();
     lp.max_stored_photons = max_stored;
 
@@ -495,6 +501,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.volume_albedo   = config.volume_albedo;
     lp.volume_samples  = config.volume_samples;
     lp.volume_max_t    = config.volume_max_t;
+
+    // Multi-map seed for RNG decorrelation
+    lp.photon_map_seed = photon_map_seed;
 
     // Upload params
     d_launch_params_.alloc(sizeof(LaunchParams));
@@ -549,8 +558,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     CUDA_CHECK(cudaMemcpy(stored_photons_.norm_x.data(), d_out_photon_norm_x_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.norm_y.data(), d_out_photon_norm_y_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.norm_z.data(), d_out_photon_norm_z_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(stored_photons_.lambda_bin.data(), d_out_photon_lambda_.d_ptr, stored_count*sizeof(uint16_t), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(stored_photons_.flux.data(),   d_out_photon_flux_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stored_photons_.lambda_bin.data(), d_out_photon_lambda_.d_ptr, stored_count*HERO_WAVELENGTHS*sizeof(uint16_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stored_photons_.flux.data(),   d_out_photon_flux_.d_ptr,   stored_count*HERO_WAVELENGTHS*sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stored_photons_.num_hero.data(), d_out_photon_num_hero_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToHost));
 
     {
         auto t_now = std::chrono::high_resolution_clock::now();
@@ -602,6 +612,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_photon_norm_z_.upload(stored_photons_.norm_z);
     d_photon_lambda_.upload(stored_photons_.lambda_bin);
     d_photon_flux_.upload(stored_photons_.flux);
+    d_photon_num_hero_.upload(stored_photons_.num_hero);
     d_photon_bin_idx_.upload(stored_photons_.bin_idx);
     d_grid_sorted_indices_.upload(stored_grid_.sorted_indices);
     d_grid_cell_start_.upload(stored_grid_.cell_start);
@@ -772,8 +783,10 @@ static void fill_common_params(
         ? reinterpret_cast<GpuTexDesc*>(tex_descs_buf.d_ptr) : nullptr;
     p.num_textures  = num_textures;
 
-    p.num_photons       = (int)(photon_flux.bytes / sizeof(float));
+    // num_photons = flux bytes / (HERO_WAVELENGTHS * sizeof(float))
+    p.num_photons       = (int)(photon_flux.bytes / (HERO_WAVELENGTHS * sizeof(float)));
     p.num_photons_emitted = num_photons_emitted;
+    p.photon_map_seed   = 0;  // default; overridden by render_final for multi-map
     p.photon_pos_x      = const_cast<float*>(photon_pos_x.as<float>());
     p.photon_pos_y      = const_cast<float*>(photon_pos_y.as<float>());
     p.photon_pos_z      = const_cast<float*>(photon_pos_z.as<float>());
@@ -785,6 +798,7 @@ static void fill_common_params(
     p.photon_norm_z     = photon_norm_z.d_ptr ? const_cast<float*>(photon_norm_z.as<float>()) : nullptr;
     p.photon_lambda     = const_cast<uint16_t*>(photon_lambda.as<uint16_t>());
     p.photon_flux       = const_cast<float*>(photon_flux.as<float>());
+    p.photon_num_hero   = nullptr;  // set by callers that have the buffer
     p.photon_bin_idx     = photon_bin_idx.d_ptr
         ? const_cast<uint8_t*>(photon_bin_idx.as<uint8_t>()) : nullptr;
 
@@ -877,6 +891,7 @@ void OptixRenderer::render_debug_frame(
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
+    lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
 
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
@@ -942,6 +957,7 @@ void OptixRenderer::render_one_spp(
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
+    lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
 
     lp.samples_per_pixel  = 1;
     lp.max_bounces        = max_bounces;
@@ -1094,7 +1110,7 @@ void OptixRenderer::build_volume_cell_bin_grid()
 // render_final() -- full path tracing (is_final_render = 1)
 // =====================================================================
 void OptixRenderer::render_final(
-    const Camera& camera, const RenderConfig& config)
+    const Camera& camera, const RenderConfig& config, const Scene& scene)
 {
     // Reset accumulation
     resize(config.image_width, config.image_height);
@@ -1146,6 +1162,7 @@ void OptixRenderer::render_final(
 
         // Runtime toggle (V key) overrides the RenderConfig value
         lp.volume_enabled = (int)runtime_volume_enabled_;
+        lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
 
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
@@ -1206,8 +1223,16 @@ void OptixRenderer::render_final(
     };
 
     if (!adaptive) {
-        // ── Non-adaptive path (unchanged behaviour) ──────────────────
+        // ── Non-adaptive path ────────────────────────────────────────
+        // §1.2 Multi-map: re-trace photons every MULTI_MAP_SPP_GROUP
+        // samples with a different RNG seed to decorrelate the photon map.
         for (int s = 0; s < total_spp; ++s) {
+            if (MULTI_MAP_SPP_GROUP > 0 && (s % MULTI_MAP_SPP_GROUP) == 0) {
+                int map_seed = s / MULTI_MAP_SPP_GROUP;
+                std::printf("\n[Render] Re-tracing photon map (seed=%d) ...\n", map_seed);
+                trace_photons(scene, config, /*grid_radius_override=*/0.f,
+                              /*photon_map_seed=*/map_seed);
+            }
             launch_pass(s, /*use_mask=*/false);
             print_progress(s + 1, total_spp, /*active=*/-1);
         }
@@ -1215,6 +1240,12 @@ void OptixRenderer::render_final(
         // ── Adaptive path ─────────────────────────────────────────────
         // Phase 1: warmup — render min_spp passes uniformly
         for (int s = 0; s < min_spp; ++s) {
+            if (MULTI_MAP_SPP_GROUP > 0 && (s % MULTI_MAP_SPP_GROUP) == 0) {
+                int map_seed = s / MULTI_MAP_SPP_GROUP;
+                std::printf("\n[Render] Re-tracing photon map (seed=%d) ...\n", map_seed);
+                trace_photons(scene, config, /*grid_radius_override=*/0.f,
+                              /*photon_map_seed=*/map_seed);
+            }
             launch_pass(s, /*use_mask=*/false);
             print_progress(s + 1, max_spp, /*active=*/(int)total_pixels);
         }
@@ -1225,6 +1256,13 @@ void OptixRenderer::render_final(
         const int update_interval = config.adaptive_update_interval;
 
         for (int s = min_spp; s < max_spp; ++s) {
+            // §1.2 Multi-map: re-trace every MULTI_MAP_SPP_GROUP samples
+            if (MULTI_MAP_SPP_GROUP > 0 && (s % MULTI_MAP_SPP_GROUP) == 0) {
+                int map_seed = s / MULTI_MAP_SPP_GROUP;
+                std::printf("\n[Render] Re-tracing photon map (seed=%d) ...\n", map_seed);
+                trace_photons(scene, config, /*grid_radius_override=*/0.f,
+                              /*photon_map_seed=*/map_seed);
+            }
             // Recompute mask at start of adaptive phase and every N passes
             if ((s - min_spp) % update_interval == 0) {
                 AdaptiveParams ap;
@@ -1333,6 +1371,7 @@ void OptixRenderer::render_sppm(
                 d_vol_cell_bin_grid_, vol_cell_bin_grid_, false);
 
             lp.sppm_mode            = 1;  // camera pass
+            lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
             lp.sppm_iteration       = k;
             lp.sppm_photons_per_iter = N_p;
             lp.sppm_alpha           = config.sppm_alpha;
@@ -1415,6 +1454,7 @@ void OptixRenderer::render_sppm(
                 d_vol_cell_bin_grid_, vol_cell_bin_grid_, false);
 
             lp.sppm_mode            = 2;  // gather pass
+            lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
             lp.sppm_iteration       = k;
             lp.sppm_photons_per_iter = N_p;
             lp.sppm_alpha           = config.sppm_alpha;

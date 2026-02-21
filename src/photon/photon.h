@@ -6,6 +6,7 @@
 // to eliminate single-wavelength chromatic noise artifacts.
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
+#include "core/config.h"
 #include "core/spectrum.h"
 #include <vector>
 #include <cstdint>
@@ -17,12 +18,13 @@ struct Photon {
     float3   geom_normal;   // Geometric normal of the surface where the photon was deposited
     Spectrum spectral_flux; // Full spectral radiant flux [W/nm] for all wavelength bins
 
-    // ── Legacy fields (GPU pipeline & compat) ───────────────────────
-    // The GPU emitter writes a single wavelength bin per photon.
+    // ── GPU hero-wavelength fields ───────────────────────────────────
+    // The GPU emitter writes HERO_WAVELENGTHS wavelength bins per photon.
     // CPU emitter fills spectral_flux; these are kept in sync by the
     // SoA push_back / get helpers so both pipelines work.
-    uint16_t lambda_bin = 0;  // Wavelength bin index (GPU path)
-    float    flux       = 0.f;// Scalar flux for that bin (GPU path)
+    uint16_t lambda_bin[HERO_WAVELENGTHS] = {};  // Wavelength bin indices (GPU path)
+    float    flux[HERO_WAVELENGTHS]       = {};  // Scalar flux per hero bin (GPU path)
+    int      num_hero = 1;                       // number of valid hero channels (1..HERO_WAVELENGTHS)
 };
 
 // ── SoA layout for GPU storage ──────────────────────────────────────
@@ -47,12 +49,15 @@ struct PhotonSoA {
     // Full spectral flux: interleaved [photon_0_bin_0, ..., photon_0_bin_N, photon_1_bin_0, ...]
     std::vector<float> spectral_flux;
 
-    // ── Legacy per-photon fields (GPU pipeline) ─────────────────────
-    // GPU emitter produces one wavelength bin + scalar flux per photon.
+    // ── GPU hero-wavelength fields (HERO_WAVELENGTHS per photon) ────
+    // GPU emitter produces HERO_WAVELENGTHS wavelength bins + fluxes
+    // per photon.  Interleaved: [photon0_hero0, photon0_hero1, ...,
+    //                            photon1_hero0, photon1_hero1, ...]
     // CPU emitter fills spectral_flux; these are maintained in parallel
     // so that both the v2 CPU renderer and the GPU renderer work.
-    std::vector<uint16_t> lambda_bin;   // Wavelength bin index per photon
-    std::vector<float>    flux;         // Scalar flux per photon
+    std::vector<uint16_t> lambda_bin;   // [N * HERO_WAVELENGTHS] bin indices
+    std::vector<float>    flux;         // [N * HERO_WAVELENGTHS] per-hero flux
+    std::vector<uint8_t>  num_hero;     // [N] valid hero count per photon
 
     // Precomputed directional bin index (Fibonacci sphere nearest bin)
     // Computed on CPU after photon trace, used on device for O(1) bin lookup.
@@ -85,8 +90,9 @@ struct PhotonSoA {
         wi_x.reserve(n);       wi_y.reserve(n);       wi_z.reserve(n);
         norm_x.reserve(n);     norm_y.reserve(n);     norm_z.reserve(n);
         spectral_flux.reserve(n * NUM_LAMBDA);
-        lambda_bin.reserve(n);
-        flux.reserve(n);
+        lambda_bin.reserve(n * HERO_WAVELENGTHS);
+        flux.reserve(n * HERO_WAVELENGTHS);
+        num_hero.reserve(n);
         bin_idx.reserve(n);
     }
 
@@ -95,8 +101,9 @@ struct PhotonSoA {
         wi_x.resize(n);        wi_y.resize(n);        wi_z.resize(n);
         norm_x.resize(n);      norm_y.resize(n);      norm_z.resize(n);
         spectral_flux.resize(n * NUM_LAMBDA);
-        lambda_bin.resize(n);
-        flux.resize(n);
+        lambda_bin.resize(n * HERO_WAVELENGTHS);
+        flux.resize(n * HERO_WAVELENGTHS);
+        num_hero.resize(n, 1);
         bin_idx.resize(n);
     }
 
@@ -112,8 +119,11 @@ struct PhotonSoA {
         norm_z.push_back(p.geom_normal.z);
         for (int b = 0; b < NUM_LAMBDA; ++b)
             spectral_flux.push_back(p.spectral_flux.value[b]);
-        lambda_bin.push_back(p.lambda_bin);
-        flux.push_back(p.flux);
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            lambda_bin.push_back(p.lambda_bin[h]);
+            flux.push_back(p.flux[h]);
+        }
+        num_hero.push_back((uint8_t)p.num_hero);
     }
 
     Photon get(size_t i) const {
@@ -122,8 +132,12 @@ struct PhotonSoA {
         p.wi            = make_f3(wi_x[i],   wi_y[i],   wi_z[i]);
         p.geom_normal   = make_f3(norm_x[i], norm_y[i], norm_z[i]);
         p.spectral_flux = get_flux(i);
-        p.lambda_bin    = lambda_bin.size() > i ? lambda_bin[i] : 0;
-        p.flux          = flux.size() > i ? flux[i] : 0.f;
+        p.num_hero      = (num_hero.size() > i) ? (int)num_hero[i] : 1;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            size_t idx = i * HERO_WAVELENGTHS + h;
+            p.lambda_bin[h] = (lambda_bin.size() > idx) ? lambda_bin[idx] : 0;
+            p.flux[h]       = (flux.size() > idx) ? flux[idx] : 0.f;
+        }
         return p;
     }
 
@@ -134,6 +148,7 @@ struct PhotonSoA {
         spectral_flux.clear();
         lambda_bin.clear();
         flux.clear();
+        num_hero.clear();
         bin_idx.clear();
     }
 };

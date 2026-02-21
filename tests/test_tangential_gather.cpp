@@ -45,8 +45,8 @@ static PhotonSoA make_wall_photons(int n, uint32_t seed = 42) {
         );
         p.wi = make_f3(0, 1, 0);             // incoming from +Y
         p.geom_normal = make_f3(0, 1, 0);    // upward normal
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.lambda_bin[0] = 0;
+        p.flux[0] = 1.0f;
         photons.push_back(p);
     }
     return photons;
@@ -77,8 +77,8 @@ static PhotonSoA make_corner_photons(int n, uint32_t seed = 42) {
             p.geom_normal = make_f3(0, 0, 1);
         }
         p.wi = normalize(make_f3(0.1f, 0.5f, 0.5f));
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.lambda_bin[0] = 0;
+        p.flux[0] = 1.0f;
         photons.push_back(p);
     }
     return photons;
@@ -98,8 +98,8 @@ static PhotonSoA make_random_3d_photons(int n, uint32_t seed = 42) {
         );
         p.wi = make_f3(0, 1, 0);
         p.geom_normal = make_f3(0, 1, 0);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.lambda_bin[0] = 0;
+        p.flux[0] = 1.0f;
         photons.push_back(p);
     }
     return photons;
@@ -500,14 +500,14 @@ TEST(TangentialGather, TangentialFindsCoplanarNotMissed) {
     p.position = make_f3(0.1f, 0.001f, 0);
     p.wi = make_f3(0, 1, 0);
     p.geom_normal = make_f3(0, 1, 0);
-    p.flux = 1.0f;
+    p.flux[0] = 1.0f;
     photons.push_back(p);
 
     // Photon B: close in 3D but on opposite side of wall (Y = -0.05)
     p.position = make_f3(0.01f, -0.05f, 0);
     p.wi = make_f3(0, 1, 0);
     p.geom_normal = make_f3(0, -1, 0);  // opposite normal
-    p.flux = 1.0f;
+    p.flux[0] = 1.0f;
     photons.push_back(p);
 
     KDTree tree;
@@ -666,7 +666,7 @@ TEST(TangentialGather, SinglePhoton) {
     p.position = make_f3(0.05f, 0.001f, 0);
     p.wi = make_f3(0, 1, 0);
     p.geom_normal = make_f3(0, 1, 0);
-    p.flux = 1.0f;
+    p.flux[0] = 1.0f;
     photons.push_back(p);
 
     KDTree tree;

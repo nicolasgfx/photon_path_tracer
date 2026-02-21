@@ -149,7 +149,8 @@ public:
     ///     config.gather_radius for the hash grid build and GPU cell size.
     ///     Used by SPPM to size cells for the SPPM initial radius.
     void trace_photons(const Scene& scene, const RenderConfig& config,
-                       float grid_radius_override = 0.f);
+                       float grid_radius_override = 0.f,
+                       int photon_map_seed = 0);
 
     // -- Rendering ----------------------------------------------------
 
@@ -160,7 +161,8 @@ public:
                             bool shadow_rays = false);
 
     /// Launch the full final render (multi-spp, blocking)
-    void render_final(const Camera& camera, const RenderConfig& config);
+    void render_final(const Camera& camera, const RenderConfig& config,
+                      const Scene& scene);
 
     /// Launch the SPPM render (iterative photon mapping, blocking).
     /// Each iteration: camera pass → photon trace → gather → update.
@@ -310,6 +312,7 @@ private:
     DeviceBuffer d_photon_wi_x_,  d_photon_wi_y_,  d_photon_wi_z_;
     DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
     DeviceBuffer d_photon_lambda_, d_photon_flux_;
+    DeviceBuffer d_photon_num_hero_;  // uint8_t [num_photons] hero count per photon
     DeviceBuffer d_photon_bin_idx_;  // uint8_t [num_photons] precomputed bin index
     DeviceBuffer d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_;
 
@@ -322,6 +325,7 @@ private:
     DeviceBuffer d_out_photon_wi_x_,  d_out_photon_wi_y_,  d_out_photon_wi_z_;
     DeviceBuffer d_out_photon_norm_x_, d_out_photon_norm_y_, d_out_photon_norm_z_;  // surface normals
     DeviceBuffer d_out_photon_lambda_, d_out_photon_flux_;
+    DeviceBuffer d_out_photon_num_hero_;  // uint8_t [max_stored] hero count per photon
     DeviceBuffer d_out_photon_count_;
 
     // Volume photon output buffers (device -- written by __raygen__photon_trace)
