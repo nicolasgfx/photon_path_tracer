@@ -68,6 +68,26 @@ static constexpr float kTol   = 1e-5f;
 static constexpr float kLoose = 1e-3f;
 static constexpr float kStat  = 0.05f; // 5% tolerance for statistical tests
 
+// ── Helpers for spectral photon creation ────────────────────────────
+// Create a Photon with uniform spectral flux across all bins.
+static Photon make_test_photon(float3 pos, float3 wi, float3 gnorm, float flux_value) {
+    Photon p;
+    p.position      = pos;
+    p.wi            = wi;
+    p.geom_normal   = gnorm;
+    p.spectral_flux = Spectrum::constant(flux_value);
+    return p;
+}
+
+// Set up SoA spectral_flux from per-photon scalar values (uniform across bins).
+static void set_soa_flux_uniform(PhotonSoA& soa, std::initializer_list<float> per_photon_flux) {
+    soa.spectral_flux.clear();
+    for (float f : per_photon_flux) {
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            soa.spectral_flux.push_back(f);
+    }
+}
+
 // (Intentionally omitted: 'approx' helper was unused - use EXPECT_NEAR instead)
 
 // =====================================================================
@@ -1103,8 +1123,7 @@ TEST(HashGrid, BuildAndQueryBasic) {
         Photon p;
         p.position = make_f3((float)i * 0.01f, 0.f, 0.f);
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1131,8 +1150,7 @@ TEST(HashGrid, QueryDistanceFilter) {
     Photon p;
     p.position = make_f3(0.1f, 0.f, 0.f);
     p.wi = make_f3(0, 0, 1);
-    p.lambda_bin = 0;
-    p.flux = 1.0f;
+    p.spectral_flux = Spectrum::constant(1.0f);
     photons.push_back(p);
 
     float radius = 0.05f;
@@ -1177,8 +1195,7 @@ TEST(HashGrid, AllPhotonsFound) {
             (rng.next_float() - 0.5f) * 0.1f,
             (rng.next_float() - 0.5f) * 0.1f);
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1209,8 +1226,7 @@ TEST(HashGrid, DenseCell_ManyPhotonsSameCell) {
             0.1f + rng.next_float() * 0.1f,
             0.1f + rng.next_float() * 0.1f);
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = i % NUM_LAMBDA;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1260,8 +1276,7 @@ TEST(HashGrid, DenseRegion_HighPhotonDensity) {
             r * std::sin(phi) * std::sin(theta),
             r * std::cos(phi));
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = i % NUM_LAMBDA;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1290,8 +1305,7 @@ TEST(HashGrid, HashCollision_MultipleKeysMapToSameBucket) {
         Photon p;
         p.position = make_f3((float)i * 10.0f, 0.0f, 0.0f);
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1332,8 +1346,7 @@ TEST(HashGrid, DenseCell_CorrectSorting) {
             rng.next_float() * 2.0f - 1.0f,
             rng.next_float() * 2.0f - 1.0f);
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = i % NUM_LAMBDA;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1368,8 +1381,7 @@ TEST(HashGrid, DenseCell_NeighborCellQuery) {
                 // Position at cell centers (cell_size = 2*radius = 0.6)
                 p.position = make_f3(x * 0.6f, y * 0.6f, z * 0.6f);
                 p.wi = make_f3(0, 0, 1);
-                p.lambda_bin = 0;
-                p.flux = 1.0f;
+                p.spectral_flux = Spectrum::constant(1.0f);
                 photons.push_back(p);
             }
         }
@@ -1398,8 +1410,7 @@ TEST(HashGrid, DenseCell_EmptyBucketsHandled) {
         Photon p;
         p.position = make_f3(0.0f, 0.0f, (float)i * 0.01f);
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1436,8 +1447,7 @@ TEST(HashGrid, DenseCell_DistanceFilteringAccurate) {
             rng.next_float() * 2.0f - 1.0f,
             rng.next_float() * 2.0f - 1.0f);
         p.wi = make_f3(0, 0, 1);
-        p.lambda_bin = 0;
-        p.flux = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1488,8 +1498,7 @@ TEST(DensityEstimator, SurfaceConsistency_PlaneDistReject) {
     Photon p;
     p.position = make_f3(0.f, 0.f, 0.5f); // 0.5 units above surface
     p.wi = make_f3(0, 0, 1);  // Pointing into surface
-    p.lambda_bin = 0;
-    p.flux = 100.0f;
+    p.spectral_flux = Spectrum::constant(100.0f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -1519,8 +1528,7 @@ TEST(DensityEstimator, SurfaceConsistency_DirectionReject) {
     Photon p;
     p.position = make_f3(0.01f, 0.f, 0.f); // On surface
     p.wi = make_f3(0, 0, -1); // Pointing AWAY from surface (wrong direction)
-    p.lambda_bin = 0;
-    p.flux = 100.0f;
+    p.spectral_flux = Spectrum::constant(100.0f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -1550,8 +1558,7 @@ TEST(DensityEstimator, ValidPhotonContributes) {
     p.position    = make_f3(0.001f, 0.f, 0.f); // Very close to query point on surface
     p.wi          = make_f3(0, 0, 1);   // Pointing away from surface (stored convention)
     p.geom_normal = make_f3(0, 0, 1);   // Surface normal matches query normal
-    p.lambda_bin  = 5;
-    p.flux        = 1.0f;
+    p.spectral_flux = Spectrum::constant(1.0f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -1571,8 +1578,8 @@ TEST(DensityEstimator, ValidPhotonContributes) {
         make_f3(0, 0, 0), make_f3(0, 0, 1),
         make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
 
-    // Lambda bin 5 should have nonzero contribution
-    EXPECT_GT(L[5], 0.f) << "Valid photon should contribute";
+    // All bins should have nonzero contribution (full spectral photon)
+    EXPECT_GT(L.sum(), 0.f) << "Valid photon should contribute";
 }
 
 // =====================================================================
@@ -1610,8 +1617,7 @@ TEST(DensityEstimator, BackFacingNearbyTriangleRejected) {
     //
     p.position = make_f3(0.01f, 0.01f, 0.005f); // Very close, same hash cell
     p.wi = make_f3(0, 0, -1);  // Photon was coming from below (stored as wi)
-    p.lambda_bin = 10;
-    p.flux = 50.0f; // Strong photon — would cause visible artifact if gathered
+    p.spectral_flux = Spectrum::constant(50.0f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -1653,8 +1659,7 @@ TEST(DensityEstimator, ThinWallDoubleSided) {
     p_front.position    = make_f3(0.0f, 0.0f, 0.001f);
     p_front.wi          = make_f3(0, 0, 1);  // away from surface
     p_front.geom_normal = make_f3(0, 0, 1);  // surface faces +Z
-    p_front.lambda_bin  = 3;
-    p_front.flux        = 10.0f;
+    p_front.spectral_flux = Spectrum::constant(10.0f);
     photons.push_back(p_front);
 
     // Back-surface photon (facing opposite to front query normal)
@@ -1662,8 +1667,7 @@ TEST(DensityEstimator, ThinWallDoubleSided) {
     p_back.position    = make_f3(0.0f, 0.0f, -0.001f);
     p_back.wi          = make_f3(0, 0, -1);  // away from back surface
     p_back.geom_normal = make_f3(0, 0, -1);  // surface faces -Z
-    p_back.lambda_bin  = 3;
-    p_back.flux        = 10.0f;
+    p_back.spectral_flux = Spectrum::constant(10.0f);
     photons.push_back(p_back);
 
     HashGrid grid;
@@ -1691,10 +1695,10 @@ TEST(DensityEstimator, ThinWallDoubleSided) {
         make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
 
     // Front query should only see p_front
-    EXPECT_GT(L_front[3], 0.f) << "Front query should see front photon";
+    EXPECT_GT(L_front.sum(), 0.f) << "Front query should see front photon";
 
     // Back query should only see p_back
-    EXPECT_GT(L_back[3], 0.f) << "Back query should see back photon";
+    EXPECT_GT(L_back.sum(), 0.f) << "Back query should see back photon";
 }
 
 TEST(DensityEstimator, SameCellDifferentFacingRejected) {
@@ -1712,8 +1716,7 @@ TEST(DensityEstimator, SameCellDifferentFacingRejected) {
         p.position    = make_f3((float)i * 0.001f, 0.f, 0.0001f);
         p.wi          = make_f3(0, 0, 1);  // away from +Z surface
         p.geom_normal = make_f3(0, 0, 1);  // surface faces up (+Z)
-        p.lambda_bin  = 0;
-        p.flux        = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
     for (int i = 0; i < N_per_side; ++i) {
@@ -1722,8 +1725,7 @@ TEST(DensityEstimator, SameCellDifferentFacingRejected) {
         p.position    = make_f3((float)i * 0.001f, 0.f, -0.0001f);
         p.wi          = make_f3(0, 0, -1);  // away from -Z surface
         p.geom_normal = make_f3(0, 0, -1);  // surface faces down (-Z)
-        p.lambda_bin  = 0;
-        p.flux        = 1.0f;
+        p.spectral_flux = Spectrum::constant(1.0f);
         photons.push_back(p);
     }
 
@@ -1871,8 +1873,7 @@ TEST(PhotonSoA, PushBackAndGet) {
     p.position    = make_f3(1, 2, 3);
     p.wi          = make_f3(4, 5, 6);
     p.geom_normal = make_f3(0, 0, 1);  // upward surface normal
-    p.lambda_bin  = 7;
-    p.flux        = 8.5f;
+    p.spectral_flux = Spectrum::constant(8.5f);
     soa.push_back(p);
 
     EXPECT_EQ(soa.size(), 1u);
@@ -1886,8 +1887,9 @@ TEST(PhotonSoA, PushBackAndGet) {
     EXPECT_NEAR(out.geom_normal.x, 0.f, kTol);
     EXPECT_NEAR(out.geom_normal.y, 0.f, kTol);
     EXPECT_NEAR(out.geom_normal.z, 1.f, kTol);
-    EXPECT_EQ(out.lambda_bin, 7);
-    EXPECT_NEAR(out.flux, 8.5f, kTol);
+    // Check spectral flux round-trips through SoA
+    for (int b = 0; b < NUM_LAMBDA; ++b)
+        EXPECT_NEAR(out.spectral_flux.value[b], 8.5f, kTol);
 
     // Also verify the raw SoA arrays are populated
     EXPECT_NEAR(soa.norm_x[0], 0.f, kTol);
@@ -1900,8 +1902,7 @@ TEST(PhotonSoA, ClearWorks) {
     Photon p;
     p.position = make_f3(0, 0, 0);
     p.wi = make_f3(0, 0, 1);
-    p.lambda_bin = 0;
-    p.flux = 1.f;
+    p.spectral_flux = Spectrum::constant(1.f);
     soa.push_back(p);
     soa.push_back(p);
     EXPECT_EQ(soa.size(), 2u);
@@ -2346,8 +2347,7 @@ TEST(DensityEstimator, NormalizationFactor) {
         p.position    = make_f3(0.001f * i, 0.f, 0.f);
         p.wi          = make_f3(0, 0, 1);
         p.geom_normal = make_f3(0, 0, 1);  // surface normal matches query +Z
-        p.lambda_bin  = bin;
-        p.flux        = flux;
+        p.spectral_flux = Spectrum::constant(flux);
         photons.push_back(p);
     }
 
@@ -2376,9 +2376,9 @@ TEST(DensityEstimator, NormalizationFactor) {
     EXPECT_NEAR(L[bin], expected, expected * 0.01f)
         << "Density estimator normalization incorrect";
 
-    // Other bins should be zero
+    // All bins should have the same value (full spectral photon)
     for (int i = 0; i < NUM_LAMBDA; ++i) {
-        if (i != bin) EXPECT_NEAR(L[i], 0.f, kTol);
+        EXPECT_NEAR(L[i], expected, expected * 0.01f);
     }
 }
 
@@ -2390,8 +2390,7 @@ TEST(DensityEstimator, EpanechnikovKernelCorrection) {
     Photon p;
     p.position = make_f3(0.0001f, 0.f, 0.f); // Very close to center
     p.wi = make_f3(0, 0, 1);
-    p.lambda_bin = 0;
-    p.flux = 1.0f;
+    p.spectral_flux = Spectrum::constant(1.0f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -2419,9 +2418,11 @@ TEST(DensityEstimator, EpanechnikovKernelCorrection) {
         make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
 
     // For a photon very close to center: epan_kernel ≈ 1.0
-    // So L_epan ≈ 1.5 × L_box
-    EXPECT_NEAR(L_epan[0], L_box[0] * 1.5f, L_box[0] * 0.05f)
-        << "Epanechnikov correction factor should be 1.5× for center photon";
+    // v2.1 tangential normalization: box = πr², epan = (π/2)r²
+    // So L_epan ≈ 2.0 × L_box (not 1.5× as in 3D spherical)
+    EXPECT_NEAR(L_epan[0], L_box[0] * 2.0f, L_box[0] * 0.05f)
+        << "Epanechnikov correction factor should be 2.0× for center photon "
+           "(tangential disk normalization)";
 }
 
 // =====================================================================
@@ -2823,12 +2824,9 @@ TEST(CornellBox, EmitterSamplesValid) {
             << "Photon from ceiling light should generally point downward";
 
         // Flux should be positive and finite
-        EXPECT_GT(ep.flux, 0.f) << "Photon flux should be positive";
-        EXPECT_FALSE(std::isnan(ep.flux)) << "Photon flux should not be NaN";
-        EXPECT_FALSE(std::isinf(ep.flux)) << "Photon flux should not be Inf";
-
-        // Wavelength bin should be valid
-        EXPECT_LT(ep.lambda_bin, NUM_LAMBDA);
+        EXPECT_GT(ep.spectral_flux.max_component(), 0.f) << "Photon flux should be positive";
+        EXPECT_FALSE(std::isnan(ep.spectral_flux.sum())) << "Photon flux should not be NaN";
+        EXPECT_FALSE(std::isinf(ep.spectral_flux.sum())) << "Photon flux should not be Inf";
     }
 }
 
@@ -2944,9 +2942,10 @@ TEST(CornellBox, PhotonFluxPositiveFinite) {
     trace_photons(scene, config, global_map, caustic_map);
 
     for (size_t i = 0; i < global_map.size(); ++i) {
-        EXPECT_GT(global_map.flux[i], 0.f) << "Photon flux should be positive";
-        EXPECT_FALSE(std::isnan(global_map.flux[i])) << "Photon flux NaN at " << i;
-        EXPECT_FALSE(std::isinf(global_map.flux[i])) << "Photon flux Inf at " << i;
+        float tf = global_map.total_flux(i);
+        EXPECT_GT(tf, 0.f) << "Photon flux should be positive";
+        EXPECT_FALSE(std::isnan(tf)) << "Photon flux NaN at " << i;
+        EXPECT_FALSE(std::isinf(tf)) << "Photon flux Inf at " << i;
     }
 }
 
@@ -3633,8 +3632,7 @@ TEST(CellBinGrid, BuildBasic) {
     photons.norm_x  = {0.0f, 0.0f, 0.0f, 0.0f};  // surface normal x
     photons.norm_y  = {0.0f, 0.0f, 0.0f, 0.0f};  // surface normal y
     photons.norm_z  = {1.0f, 1.0f, 1.0f, 1.0f};  // surface normal z (upward)
-    photons.lambda_bin = {0, 1, 2, 3};
-    photons.flux    = {1.0f, 2.0f, 3.0f, 4.0f};
+    set_soa_flux_uniform(photons, {1.0f, 2.0f, 3.0f, 4.0f});
     photons.bin_idx = {0, 1, 2, 3};
 
     CellBinGrid grid;
@@ -3661,8 +3659,7 @@ TEST(CellBinGrid, CellIndexClampedAtBounds) {
     photons.norm_x  = {0.0f};
     photons.norm_y  = {0.0f};
     photons.norm_z  = {1.0f};
-    photons.lambda_bin = {0};
-    photons.flux    = {1.0f};
+    set_soa_flux_uniform(photons, {1.0f});
     photons.bin_idx = {0};
 
     CellBinGrid grid;
@@ -3692,8 +3689,7 @@ TEST(CellBinGrid, ScatterTo27Neighbors) {
     photons.norm_x  = {0.0f};
     photons.norm_y  = {0.0f};
     photons.norm_z  = {1.0f};
-    photons.lambda_bin = {0};
-    photons.flux    = {5.0f};
+    set_soa_flux_uniform(photons, {5.0f});
     photons.bin_idx = {0};
 
     CellBinGrid grid;
@@ -3747,16 +3743,14 @@ TEST(PhotonSoA, GeomNormalRoundTrip) {
     p1.position    = make_f3(0, 0, 0);
     p1.wi          = make_f3(0, 1, 0);
     p1.geom_normal = make_f3(0, 0, 1);   // upward surface
-    p1.lambda_bin  = 0;
-    p1.flux        = 1.0f;
+    p1.spectral_flux = Spectrum::constant(1.0f);
     soa.push_back(p1);
 
     Photon p2;
     p2.position    = make_f3(1, 0, 0);
     p2.wi          = make_f3(0, -1, 0);
     p2.geom_normal = make_f3(0, 0, -1);  // downward surface
-    p2.lambda_bin  = 1;
-    p2.flux        = 2.0f;
+    p2.spectral_flux = Spectrum::constant(2.0f);
     soa.push_back(p2);
 
     ASSERT_EQ(soa.size(), 2u);
@@ -3787,8 +3781,7 @@ TEST(PhotonSoA, GeomNormalClearResetsNormArrays) {
     p.position    = make_f3(0, 0, 0);
     p.wi          = make_f3(0, 0, 1);
     p.geom_normal = make_f3(0, 1, 0);
-    p.lambda_bin  = 0;
-    p.flux        = 1.f;
+    p.spectral_flux = Spectrum::constant(1.f);
     soa.push_back(p);
     EXPECT_EQ(soa.size(), 1u);
 
@@ -3817,8 +3810,7 @@ TEST(DensityEstimator, NormalVisibility_BackFacingGeomNormalRejected) {
     p.position    = make_f3(0.f, 0.f, 0.f);
     p.wi          = make_f3(0.f, 0.f, 1.f);   // OLD check would pass
     p.geom_normal = make_f3(0.f, 0.f, -1.f);  // NEW check rejects
-    p.lambda_bin  = 3;
-    p.flux        = 100.f;  // strong photon — would be very visible if leaked
+    p.spectral_flux = Spectrum::constant(100.f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -3849,8 +3841,7 @@ TEST(DensityEstimator, NormalVisibility_FrontFacingGeomNormalAccepted) {
     p.position    = make_f3(0.f, 0.f, 0.f);
     p.wi          = make_f3(0.f, 0.f, 1.f);
     p.geom_normal = make_f3(0.f, 0.f, 1.f);  // same hemisphere → accepted
-    p.lambda_bin  = 5;
-    p.flux        = 1.f;
+    p.spectral_flux = Spectrum::constant(1.f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -3870,7 +3861,7 @@ TEST(DensityEstimator, NormalVisibility_FrontFacingGeomNormalAccepted) {
         make_f3(0, 0, 0), make_f3(0, 0, 1),
         make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
 
-    EXPECT_GT(L[5], 0.f)
+    EXPECT_GT(L.sum(), 0.f)
         << "Front-facing geom_normal must be accepted and contribute irradiance";
 }
 
@@ -3887,8 +3878,7 @@ TEST(DensityEstimator, NormalVisibility_OnlyGeomNormalCheckBlocks) {
     p.position    = make_f3(0.f, 0.f, 0.f);
     p.wi          = make_f3(0.f, 0.f, -1.f);  // pointing downward (toward ceiling query)
     p.geom_normal = make_f3(0.f, 0.f,  1.f);  // photon was on a floor (faces up)
-    p.lambda_bin  = 2;
-    p.flux        = 50.f;
+    p.spectral_flux = Spectrum::constant(50.f);
     photons.push_back(p);
 
     HashGrid grid;
@@ -3924,16 +3914,14 @@ TEST(DensityEstimator, NormalVisibility_ThinWallBothSidesCorrect) {
     front.position    = make_f3(0.f, 0.f, 0.0001f);
     front.wi          = make_f3(0.f, 0.f,  1.f);
     front.geom_normal = make_f3(0.f, 0.f,  1.f);  // front surface
-    front.lambda_bin  = 4;
-    front.flux        = 10.f;
+    front.spectral_flux = Spectrum::constant(10.f);
     photons.push_back(front);
 
     Photon back;
     back.position    = make_f3(0.f, 0.f, -0.0001f);
     back.wi          = make_f3(0.f, 0.f, -1.f);
     back.geom_normal = make_f3(0.f, 0.f, -1.f);   // back surface
-    back.lambda_bin  = 4;
-    back.flux        = 10.f;
+    back.spectral_flux = Spectrum::constant(10.f);
     photons.push_back(back);
 
     HashGrid grid;
@@ -3960,8 +3948,8 @@ TEST(DensityEstimator, NormalVisibility_ThinWallBothSidesCorrect) {
         make_f3(0, 0, 1), mat, photons, grid, config, 0.5f);
 
     // Each side should only see its own photon
-    EXPECT_GT(L_front[4], 0.f) << "Front query should see front photon";
-    EXPECT_GT(L_back[4],  0.f) << "Back query should see back photon";
+    EXPECT_GT(L_front.sum(), 0.f) << "Front query should see front photon";
+    EXPECT_GT(L_back.sum(),  0.f) << "Back query should see back photon";
 
     // Cross-contamination: roughly equal flux so values should be close
     // (not one being drastically larger due to the other side bleeding through)
@@ -3990,8 +3978,7 @@ TEST(CellBinGrid, SinglePhotonNormalPreserved) {
     photons.norm_x  = {expected_n.x};
     photons.norm_y  = {expected_n.y};
     photons.norm_z  = {expected_n.z};
-    photons.lambda_bin = {0};
-    photons.flux    = {2.0f};
+    set_soa_flux_uniform(photons, {2.0f});
     photons.bin_idx = {0};
 
     CellBinGrid grid;
@@ -4027,8 +4014,7 @@ TEST(CellBinGrid, NormalAccumulatedAndNormalized) {
     photons.norm_x  = { 0.0f,  0.0f};
     photons.norm_y  = { 0.0f,  0.0f};
     photons.norm_z  = { 1.0f,  1.0f};
-    photons.lambda_bin = {0, 0};
-    photons.flux    = {3.0f, 7.0f};
+    set_soa_flux_uniform(photons, {3.0f, 7.0f});
     photons.bin_idx = {0, 0};
 
     CellBinGrid grid;
@@ -4066,8 +4052,7 @@ TEST(CellBinGrid, OppositeNormalsCancelToZero) {
     photons.norm_x  = {0.0f, 0.0f};
     photons.norm_y  = {0.0f, 0.0f};
     photons.norm_z  = {1.0f, -1.0f};   // exactly opposite normals
-    photons.lambda_bin = {0, 0};
-    photons.flux    = {5.0f, 5.0f};    // equal flux → perfect cancellation
+    set_soa_flux_uniform(photons, {5.0f, 5.0f});
     photons.bin_idx = {0, 0};           // same bin
 
     CellBinGrid grid;
@@ -4095,8 +4080,7 @@ TEST(CellBinGrid, NormArraysSizeMatchesPositions) {
         p.position    = make_f3((float)i * 0.1f, 0.f, 0.f);
         p.wi          = make_f3(0.f, 0.f, 1.f);
         p.geom_normal = make_f3(0.f, 1.f, 0.f);
-        p.lambda_bin  = (uint16_t)(i % NUM_LAMBDA);
-        p.flux        = 1.f;
+        p.spectral_flux = Spectrum::constant(1.f);
         photons.push_back(p);
     }
     // bin_idx must be set for CellBinGrid
@@ -4215,8 +4199,7 @@ TEST(CornellBox, NormalVisibilityEliminatesLeakage) {
         //   dot(geom_n=(0,0,+1), n=(0,0,-1))=-1≤0 (rejected by geom_n check) → both checks agree.
         p.wi          = make_f3(0.f, 0.f, 1.f);
         p.geom_normal = make_f3(0.f, 0.f, 1.f);   // photon on +Z surface
-        p.lambda_bin  = (uint16_t)(i % NUM_LAMBDA);
-        p.flux        = big_flux;
+        p.spectral_flux = Spectrum::constant(big_flux);
         photons.push_back(p);
     }
 
@@ -4307,7 +4290,7 @@ struct ReferenceCellBinGrid {
             cy = (std::max)(0, (std::min)(cy, dim_y - 1));
             cz = (std::max)(0, (std::min)(cz, dim_z - 1));
             int flat = cx + cy * dim_x + cz * dim_x * dim_y;
-            float flux = photons.flux[i];
+            float flux = photons.total_flux(i);
             cell_normals[flat].x += photons.norm_x[i] * flux;
             cell_normals[flat].y += photons.norm_y[i] * flux;
             cell_normals[flat].z += photons.norm_z[i] * flux;
@@ -4354,7 +4337,7 @@ struct ReferenceCellBinGrid {
                 if (k >= bin_count) k = 0;
 
                 PhotonBin& b = bins[c * bin_count + k];
-                float flux = photons.flux[i];
+                float flux = photons.total_flux(i);
                 b.flux   += flux;
                 b.dir_x  += photons.wi_x[i] * flux;
                 b.dir_y  += photons.wi_y[i] * flux;
@@ -4389,7 +4372,7 @@ struct ReferenceCellBinGrid {
 // Helper: create photons on a planar surface patch
 void add_planar_photons(PhotonSoA& photons, float3 center, float3 normal,
                         float3 wi_dir, int count, float spread,
-                        uint16_t lambda_bin, float flux_each,
+                        uint16_t /*lambda_bin*/, float flux_each,
                         PhotonBinDirs& bin_dirs) {
     // Build a tangent frame for the surface
     float3 tangent, bitangent;
@@ -4405,8 +4388,7 @@ void add_planar_photons(PhotonSoA& photons, float3 center, float3 normal,
         p.position    = center + tangent * u + bitangent * v;
         p.wi          = wi_dir;
         p.geom_normal = normal;
-        p.lambda_bin  = lambda_bin;
-        p.flux        = flux_each;
+        p.spectral_flux = Spectrum::constant(flux_each);
         photons.push_back(p);
     }
     // Precompute bin_idx for newly added photons
@@ -5038,8 +5020,10 @@ TEST(SPPM, GatherBasic) {
         photons.norm_x[i] = 0.f;
         photons.norm_y[i] = 1.f;
         photons.norm_z[i] = 0.f;
-        photons.flux[i] = 10.f;
-        photons.lambda_bin[i] = 0;
+        // Set uniform spectral flux for this photon
+        Spectrum sf = Spectrum::constant(10.f);
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            photons.spectral_flux[i * NUM_LAMBDA + b] = sf.value[b];
     }
 
     // Build hash grid

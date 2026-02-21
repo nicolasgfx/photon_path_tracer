@@ -107,12 +107,14 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             scene.materials[current_idx].Ks = rgb_to_spectrum_reflectance(r, g, b);
         }
         else if (keyword == "Ke") {
-            // Emission
+            // Emission — only treat as emissive when Ke is clearly
+            // intentional (max component > 1.5).  Many exporters write
+            // Ke 0 1 0 or Ke 1 1 1 as default / ambient-colour echo,
+            // which should NOT create a light source.
             float r, g, b;
             ss >> r >> g >> b;
-            if (r > 0.f || g > 0.f || b > 0.f) {
-                // Convert RGB emission to spectral using emission basis
-                // (preserves absolute intensity, no white-normalisation)
+            float ke_max = fmaxf(r, fmaxf(g, b));
+            if (ke_max > 1.5f) {
                 scene.materials[current_idx].Le = rgb_to_spectrum_emission(r, g, b);
                 scene.materials[current_idx].type = MaterialType::Emissive;
             }

@@ -35,6 +35,7 @@
 #include "debug/debug.h"
 #include "optix/optix_renderer.h"
 #include "core/test_data_io.h"
+#include "photon/photon_io.h"
 
 #include <GLFW/glfw3.h>
 
@@ -97,6 +98,100 @@ static bool write_png(const std::string& filename, const FrameBuffer& fb) {
     return ok != 0;
 }
 
+// -- Scene lighting helpers -------------------------------------------
+
+// Add appropriate light sources based on the scene's lighting mode.
+// Called when a scene has no emissive surfaces in the MTL, or when
+// the scene requires a non-standard light type (directional, env).
+static void add_scene_lights(Scene& scene, SceneLightMode mode) {
+    if (mode == SceneLightMode::FromMTL && scene.num_emissive() > 0)
+        return;  // MTL already has lights
+
+    // Fallback: add an area light on the ceiling (works for all modes
+    // as a baseline; directional and spherical are handled specially
+    // by the photon emitter which reads the light_mode field)
+    std::cout << "[Scene] Adding lights (mode: "
+              << (mode == SceneLightMode::FromMTL          ? "FromMTL/fallback" :
+                  mode == SceneLightMode::DirectionalToFloor ? "DirectionalToFloor" :
+                                                              "SphericalEnv")
+              << ")\n";
+
+    Material light_mat;
+    light_mat.name = "__area_light__";
+    light_mat.type = MaterialType::Emissive;
+
+    if (mode == SceneLightMode::SphericalEnv) {
+        // Brighter, warmer light for environment scenes
+        light_mat.Le = blackbody_spectrum(5500.f, 2e-8f);
+    } else if (mode == SceneLightMode::DirectionalToFloor) {
+        // Strong directional-like light for cathedral scenes
+        light_mat.Le = blackbody_spectrum(6500.f, 3e-8f);
+    } else {
+        // Default ceiling area light
+        light_mat.Le = blackbody_spectrum(6500.f, 1e-8f);
+    }
+
+    uint32_t light_mat_id = (uint32_t)scene.materials.size();
+    scene.materials.push_back(light_mat);
+
+    float3 v0 = make_f3(-0.15f,  0.499f, -0.15f);
+    float3 v1 = make_f3( 0.15f,  0.499f, -0.15f);
+    float3 v2 = make_f3( 0.15f,  0.499f,  0.15f);
+    float3 v3 = make_f3(-0.15f,  0.499f,  0.15f);
+    float3 n  = make_f3( 0.0f,  -1.0f,    0.0f);
+
+    Triangle tri1;
+    tri1.v0 = v0; tri1.v1 = v1; tri1.v2 = v2;
+    tri1.n0 = tri1.n1 = tri1.n2 = n;
+    tri1.uv0 = tri1.uv1 = tri1.uv2 = make_f2(0, 0);
+    tri1.material_id = light_mat_id;
+
+    Triangle tri2;
+    tri2.v0 = v0; tri2.v1 = v2; tri2.v2 = v3;
+    tri2.n0 = tri2.n1 = tri2.n2 = n;
+    tri2.uv0 = tri2.uv1 = tri2.uv2 = make_f2(0, 0);
+    tri2.material_id = light_mat_id;
+
+    scene.triangles.push_back(tri1);
+    scene.triangles.push_back(tri2);
+
+    scene.build_bvh();
+    scene.build_emissive_distribution();
+    std::cout << "[Scene] Added area light ("
+              << scene.num_emissive() << " emissive triangles)\n";
+}
+
+// Build PhotonCacheParams from a RenderConfig
+static PhotonCacheParams make_cache_params(const RenderConfig& cfg) {
+    PhotonCacheParams p;
+    p.global_photon_budget  = cfg.global_photon_budget;
+    p.caustic_photon_budget = cfg.caustic_photon_budget;
+    p.max_bounces           = cfg.max_bounces;
+    p.gather_radius         = cfg.gather_radius;
+    p.caustic_radius        = cfg.caustic_radius;
+    return p;
+}
+
+// Apply complexity preset from a scene profile to a RenderConfig
+static void apply_complexity_preset(RenderConfig& cfg, const SceneProfile& prof) {
+    const ComplexityPreset& preset = prof.preset();
+    cfg.global_photon_budget  = preset.global_photon_budget;
+    cfg.caustic_photon_budget = preset.caustic_photon_budget;
+    cfg.num_photons           = preset.global_photon_budget;
+    cfg.gather_radius         = preset.gather_radius;
+    cfg.caustic_radius        = preset.caustic_radius;
+    cfg.samples_per_pixel     = preset.spp;
+    cfg.max_bounces           = preset.photon_max_bounces;
+    std::cout << "[Preset] " << prof.display_name << " ("
+              << (prof.complexity == SceneComplexity::Low  ? "low" :
+                  prof.complexity == SceneComplexity::Medium ? "medium" : "high")
+              << "): " << preset.global_photon_budget << " global, "
+              << preset.caustic_photon_budget << " caustic photons, "
+              << "r=" << preset.gather_radius << ", "
+              << preset.spp << " spp, "
+              << preset.photon_max_bounces << " bounces\n";
+}
+
 // -- Debug overlay (stb_easy_font) ------------------------------------
 
 static void draw_overlay_text(float x, float y, const char* text,
@@ -139,7 +234,7 @@ static void render_help_overlay(int win_w, int win_h,
     // Semi-transparent background box
     float pad   = 10.f;
     float box_w = 280.f;
-    float box_h = 470.f;
+    float box_h = 560.f;
     float bx    = pad;
     float by    = pad;
 
@@ -229,7 +324,7 @@ static void render_help_overlay(int win_w, int win_h,
     }
 
     ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "--- Scenes (1-4) ---", 1.f, 1.f, 0.3f, 1.f);
+    draw_overlay_text(0, ly, "--- Scenes (1-9) ---", 1.f, 1.f, 0.3f, 1.f);
     ly += line_h;
     for (int i = 0; i < NUM_SCENE_PROFILES; ++i) {
         char sbuf[128];
@@ -395,6 +490,8 @@ struct Options {
     std::string scene_file;
     std::string output_file = "output/render.png";
     std::string save_test_data_file;   // if non-empty, dump photons to this binary file
+    std::string photon_file;           // binary photon cache file (v2)
+    bool        force_recompute = false; // ignore cached photon file
     RenderConfig config;
 };
 
@@ -420,7 +517,8 @@ static Options parse_args(int argc, char* argv[]) {
             opt.output_file = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
             std::string mode = argv[++i];
-            if      (mode == "full")     opt.config.mode = RenderMode::Full;
+            if      (mode == "full")     opt.config.mode = RenderMode::Combined;
+            else if (mode == "combined") opt.config.mode = RenderMode::Combined;
             else if (mode == "direct")   opt.config.mode = RenderMode::DirectOnly;
             else if (mode == "indirect") opt.config.mode = RenderMode::IndirectOnly;
             else if (mode == "photon")   opt.config.mode = RenderMode::PhotonMap;
@@ -437,6 +535,24 @@ static Options parse_args(int argc, char* argv[]) {
         } else if (arg == "--sppm-radius" && i + 1 < argc) {
             opt.config.sppm_initial_radius = std::stof(argv[++i]);
             opt.config.sppm_enabled = true;
+        // ── v2 CLI flags ────────────────────────────────────────────
+        } else if (arg == "--photon-file" && i + 1 < argc) {
+            opt.photon_file = argv[++i];
+        } else if (arg == "--force-recompute") {
+            opt.force_recompute = true;
+        } else if (arg == "--global-photons" && i + 1 < argc) {
+            opt.config.global_photon_budget = std::stoi(argv[++i]);
+            opt.config.num_photons = opt.config.global_photon_budget;
+        } else if (arg == "--caustic-photons" && i + 1 < argc) {
+            opt.config.caustic_photon_budget = std::stoi(argv[++i]);
+        } else if (arg == "--spatial" && i + 1 < argc) {
+            std::string sp = argv[++i];
+            if      (sp == "kdtree")   opt.config.use_kdtree = true;
+            else if (sp == "hashgrid") opt.config.use_kdtree = false;
+        } else if (arg == "--knn-k" && i + 1 < argc) {
+            opt.config.knn_k = std::stoi(argv[++i]);
+        } else if (arg == "--max-specular-chain" && i + 1 < argc) {
+            opt.config.max_specular_chain = std::stoi(argv[++i]);
         } else if (arg[0] != '-') {
             opt.scene_file = arg;
         }
@@ -553,13 +669,13 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // Scene switching – keys 1-4
-    if (key >= GLFW_KEY_1 && key <= GLFW_KEY_4 && !g_app.rendering) {
-        int idx = key - GLFW_KEY_1;  // 0-3
-        if (idx != g_app.active_scene_index) {
+    // Scene switching – keys 1-9
+    if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9 && !g_app.rendering) {
+        int idx = key - GLFW_KEY_1;  // 0-8
+        if (idx < NUM_SCENE_PROFILES && idx != g_app.active_scene_index) {
             g_app.scene_switch_requested = idx;
             printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
-        } else {
+        } else if (idx < NUM_SCENE_PROFILES) {
             printf("[Scene] Already on %s\n", SCENE_PROFILES[idx].display_name);
         }
         return;
@@ -619,6 +735,18 @@ static void key_callback(GLFWwindow* window, int key,
             g_app.showing_final  = false;
             return;
         }
+    }
+
+    // P -> retrace photons (rebuild photon map)
+    if (key == GLFW_KEY_P && !g_app.rendering) {
+        g_app.camera_moved  = true;  // reset accumulation
+        g_app.showing_final = false;
+        printf("[Photon] Retrace requested (rebuild photon maps)\n");
+        if (g_active_optix_renderer) {
+            // Will retrace on next frame via the interactive loop
+            g_app.render_requested = false; // cancel any pending render
+        }
+        return;
     }
 
     // Any debug toggle should return to the interactive debug view.
@@ -702,7 +830,7 @@ static void run_interactive(
         std::cout << "      (SPPM mode: " << opt.config.sppm_iterations << " iterations, r="
                   << opt.config.sppm_initial_radius << ")\n";
     std::cout << "  H = toggle help overlay\n";
-    std::cout << "  1-4 = switch scene (Cornell | Conference | Living | Sibenik)\n";
+    std::cout << "  1-9 = switch scene\n";
     std::cout << "  +/- = adjust light brightness (re-traces photons)\n";
     std::cout << "  V = toggle volume scattering | O = toggle DOF | [/] = blur | ,/. = focus dist\n";
 
@@ -736,6 +864,9 @@ static void run_interactive(
             std::cout << "  Loading scene: " << prof.display_name << "\n";
             std::cout << "========================================\n";
 
+            // Apply complexity preset for new scene
+            apply_complexity_preset(opt.config, prof);
+
             // Load new scene
             Scene new_scene;
             auto t0 = std::chrono::high_resolution_clock::now();
@@ -747,39 +878,8 @@ static void run_interactive(
                 new_scene.build_bvh();
                 new_scene.build_emissive_distribution();
 
-                // Add area light if no emissive surfaces
-                if (new_scene.num_emissive() == 0) {
-                    std::cout << "[Scene] No emissive surfaces -- adding area light\n";
-                    Material light_mat;
-                    light_mat.name = "__area_light__";
-                    light_mat.type = MaterialType::Emissive;
-                    light_mat.Le = blackbody_spectrum(6500.f, 1e-8f);
-                    uint32_t light_mat_id = (uint32_t)new_scene.materials.size();
-                    new_scene.materials.push_back(light_mat);
-
-                    float3 v0 = make_f3(-0.15f,  0.499f, -0.15f);
-                    float3 v1 = make_f3( 0.15f,  0.499f, -0.15f);
-                    float3 v2 = make_f3( 0.15f,  0.499f,  0.15f);
-                    float3 v3 = make_f3(-0.15f,  0.499f,  0.15f);
-                    float3 n  = make_f3( 0.0f,  -1.0f,    0.0f);
-
-                    Triangle tri1;
-                    tri1.v0 = v0; tri1.v1 = v1; tri1.v2 = v2;
-                    tri1.n0 = tri1.n1 = tri1.n2 = n;
-                    tri1.uv0 = tri1.uv1 = tri1.uv2 = make_f2(0, 0);
-                    tri1.material_id = light_mat_id;
-
-                    Triangle tri2;
-                    tri2.v0 = v0; tri2.v1 = v2; tri2.v2 = v3;
-                    tri2.n0 = tri2.n1 = tri2.n2 = n;
-                    tri2.uv0 = tri2.uv1 = tri2.uv2 = make_f2(0, 0);
-                    tri2.material_id = light_mat_id;
-
-                    new_scene.triangles.push_back(tri1);
-                    new_scene.triangles.push_back(tri2);
-                    new_scene.build_bvh();
-                    new_scene.build_emissive_distribution();
-                }
+                // Add lights based on scene lighting mode
+                add_scene_lights(new_scene, prof.light_mode);
 
                 // Replace current scene
                 scene = std::move(new_scene);
@@ -789,11 +889,45 @@ static void run_interactive(
                 optix_renderer.upload_scene_data(scene);
                 optix_renderer.upload_emitter_data(scene);
 
-                // Re-trace photons
-                auto tp0 = std::chrono::high_resolution_clock::now();
-                optix_renderer.trace_photons(scene, opt.config);
-                auto tp1 = std::chrono::high_resolution_clock::now();
-                double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+                // ── Try loading cached photon map ──────────────────────
+                bool photons_loaded = false;
+                PhotonCacheParams cache_params = make_cache_params(opt.config);
+                std::string cache_file = photon_cache_path(obj_path, cache_params);
+                uint64_t scene_hash = compute_scene_hash(
+                    std::string(prof.obj_path),
+                    (uint32_t)scene.triangles.size());
+
+                if (DEFAULT_LOAD_PHOTON_CACHE && !opt.force_recompute) {
+                    PhotonSoA loaded_global, loaded_caustic;
+                    if (load_photon_maps(cache_file, scene_hash, cache_params,
+                                         loaded_global, loaded_caustic)) {
+                        HashGrid loaded_grid, loaded_caustic_grid;
+                        loaded_grid.build(loaded_global, opt.config.gather_radius);
+                        loaded_caustic_grid.build(loaded_caustic, opt.config.caustic_radius);
+                        optix_renderer.upload_photon_data(
+                            loaded_global, loaded_grid,
+                            loaded_caustic, loaded_caustic_grid,
+                            opt.config.gather_radius, opt.config.caustic_radius);
+                        photons_loaded = true;
+                        std::cout << "[Photon] Loaded from cache: " << cache_file << "\n";
+                    }
+                }
+
+                double photon_ms = 0.0;
+                if (!photons_loaded) {
+                    // Trace photons on GPU
+                    auto tp0 = std::chrono::high_resolution_clock::now();
+                    optix_renderer.trace_photons(scene, opt.config);
+                    auto tp1 = std::chrono::high_resolution_clock::now();
+                    photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+
+                    // Auto-save photon cache
+                    if (DEFAULT_SAVE_PHOTON_CACHE) {
+                        PhotonSoA empty_caustic;
+                        save_photon_maps(cache_file, scene_hash, cache_params,
+                                         optix_renderer.photons(), empty_caustic);
+                    }
+                }
 
                 // Reset camera to scene profile defaults
                 camera.position = make_f3(prof.cam_pos[0], prof.cam_pos[1], prof.cam_pos[2]);
@@ -821,7 +955,10 @@ static void run_interactive(
                 auto t1 = std::chrono::high_resolution_clock::now();
                 double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                 std::cout << "[Scene] " << prof.display_name << " loaded in "
-                          << total_ms << " ms (photons: " << photon_ms << " ms)\n";
+                          << total_ms << " ms"
+                          << (photons_loaded ? " (photons from cache)"
+                                            : (" (photons: " + std::to_string((int)photon_ms) + " ms)").c_str())
+                          << "\n";
                 std::cout << "[Scene] " << scene.num_triangles() << " tris, "
                           << scene.num_emissive() << " emissive\n";
 
@@ -1269,42 +1406,20 @@ int main(int argc, char* argv[]) {
               << scene.total_emissive_power << "\n\n";
 
     // -- Add light source if none exists ------------------------------
-    if (scene.num_emissive() == 0) {
-        std::cout << "[Scene] No emissive surfaces -- adding area light\n";
-
-        Material light_mat;
-        light_mat.name = "__area_light__";
-        light_mat.type = MaterialType::Emissive;
-        light_mat.Le = blackbody_spectrum(6500.f, 1e-8f);
-        uint32_t light_mat_id = (uint32_t)scene.materials.size();
-        scene.materials.push_back(light_mat);
-
-        float3 v0 = make_f3(-0.15f,  0.499f, -0.15f);
-        float3 v1 = make_f3( 0.15f,  0.499f, -0.15f);
-        float3 v2 = make_f3( 0.15f,  0.499f,  0.15f);
-        float3 v3 = make_f3(-0.15f,  0.499f,  0.15f);
-        float3 n  = make_f3( 0.0f,  -1.0f,    0.0f);
-
-        Triangle tri1;
-        tri1.v0 = v0; tri1.v1 = v1; tri1.v2 = v2;
-        tri1.n0 = tri1.n1 = tri1.n2 = n;
-        tri1.uv0 = tri1.uv1 = tri1.uv2 = make_f2(0, 0);
-        tri1.material_id = light_mat_id;
-
-        Triangle tri2;
-        tri2.v0 = v0; tri2.v1 = v2; tri2.v2 = v3;
-        tri2.n0 = tri2.n1 = tri2.n2 = n;
-        tri2.uv0 = tri2.uv1 = tri2.uv2 = make_f2(0, 0);
-        tri2.material_id = light_mat_id;
-
-        scene.triangles.push_back(tri1);
-        scene.triangles.push_back(tri2);
-
-        scene.build_bvh();
-        scene.build_emissive_distribution();
-        std::cout << "[Scene] Added area light ("
-                  << scene.num_emissive() << " emissive triangles)\n\n";
-    }
+    // Determine initial scene lighting mode from compile-time scene define
+    SceneLightMode initial_light_mode = SceneLightMode::FromMTL;
+    #if defined(SCENE_CORNELL_BOX)
+        initial_light_mode = SCENE_PROFILES[0].light_mode;
+    #elif defined(SCENE_CONFERENCE)
+        initial_light_mode = SCENE_PROFILES[1].light_mode;
+    #elif defined(SCENE_LIVING_ROOM)
+        initial_light_mode = SCENE_PROFILES[2].light_mode;
+    #elif defined(SCENE_BREAKFAST_ROOM)
+        initial_light_mode = SCENE_PROFILES[4].light_mode;
+    #elif defined(SCENE_SIBENIK)
+        initial_light_mode = SCENE_PROFILES[6].light_mode;
+    #endif
+    add_scene_lights(scene, initial_light_mode);
 
     // -- Setup camera (from scene profile) --------------------------
     Camera camera;
@@ -1334,13 +1449,52 @@ int main(int argc, char* argv[]) {
         optix_renderer.upload_emitter_data(scene);
         std::cout << "\n";
 
-        // -- GPU photon trace -----------------------------------------
-        std::cout << "-- GPU Photon Trace --\n";
-        auto tp0 = std::chrono::high_resolution_clock::now();
-        optix_renderer.trace_photons(scene, opt.config);
-        auto tp1 = std::chrono::high_resolution_clock::now();
-        double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
-        std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n\n";
+        // -- GPU photon trace (with auto I/O cache) --------------------
+        bool photons_loaded = false;
+        PhotonCacheParams cache_params = make_cache_params(opt.config);
+        std::string auto_cache_file = photon_cache_path(opt.scene_file, cache_params);
+        // Use explicit --photon-file if provided, otherwise auto-derive
+        std::string cache_file = opt.photon_file.empty() ? auto_cache_file : opt.photon_file;
+        uint64_t scene_hash = compute_scene_hash(
+            std::string(SCENE_OBJ_PATH),
+            (uint32_t)scene.triangles.size());
+
+        if (DEFAULT_LOAD_PHOTON_CACHE && !opt.force_recompute) {
+            PhotonSoA loaded_global, loaded_caustic;
+            if (load_photon_maps(cache_file, scene_hash, cache_params,
+                                 loaded_global, loaded_caustic)) {
+                std::cout << "[Photon] Loaded " << loaded_global.size()
+                          << " photons from cache: " << cache_file << "\n";
+                HashGrid loaded_grid, loaded_caustic_grid;
+                loaded_grid.build(loaded_global, opt.config.gather_radius);
+                loaded_caustic_grid.build(loaded_caustic, opt.config.caustic_radius);
+                optix_renderer.upload_photon_data(
+                    loaded_global, loaded_grid,
+                    loaded_caustic, loaded_caustic_grid,
+                    opt.config.gather_radius, opt.config.caustic_radius);
+                photons_loaded = true;
+            } else {
+                std::cout << "[Photon] Cache miss or param mismatch, retracing...\n";
+            }
+        }
+
+        if (!photons_loaded) {
+            std::cout << "-- GPU Photon Trace --\n";
+            auto tp0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.trace_photons(scene, opt.config);
+            auto tp1 = std::chrono::high_resolution_clock::now();
+            double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+            std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n";
+
+            // Auto-save photon cache
+            if (DEFAULT_SAVE_PHOTON_CACHE) {
+                PhotonSoA empty_caustic;
+                save_photon_maps(cache_file, scene_hash, cache_params,
+                                 optix_renderer.photons(), empty_caustic);
+                std::cout << "[Photon] Saved to cache: " << cache_file << "\n";
+            }
+            std::cout << "\n";
+        }
 
         // -- Save test data (if requested) ----------------------------
         if (!opt.save_test_data_file.empty()) {
@@ -1366,8 +1520,10 @@ int main(int argc, char* argv[]) {
             g_app.active_scene_index = 1;
         #elif defined(SCENE_LIVING_ROOM)
             g_app.active_scene_index = 2;
+        #elif defined(SCENE_BREAKFAST_ROOM)
+            g_app.active_scene_index = 4;
         #elif defined(SCENE_SIBENIK)
-            g_app.active_scene_index = 3;
+            g_app.active_scene_index = 6;
         #endif
         g_app.active_cam_speed = SCENE_CAM_SPEED;
 

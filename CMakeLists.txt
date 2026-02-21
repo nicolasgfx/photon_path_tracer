@@ -55,6 +55,7 @@ set(CORE_SOURCES
     src/scene/obj_loader.cpp
     src/renderer/renderer.cpp
     src/optix/optix_renderer.cpp
+    src/photon/photon_io.cpp
 )
 
 set(CUDA_SOURCES
@@ -197,14 +198,20 @@ if(PPT_BUILD_TESTS)
 
     set(TEST_SOURCES
         tests/test_main.cpp
+        tests/test_kd_tree.cpp
+        tests/test_integration.cpp
+        tests/test_surface_filter.cpp
+        tests/test_tangential_gather.cpp
         tests/feature_speed_test.cpp
         tests/test_ground_truth.cpp
+        tests/test_ground_truth_validation.cpp
         tests/test_medium.cpp
         tests/test_per_ray_validation.cpp
         tests/test_pixel_comparison.cpp
         src/scene/obj_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp
+        src/photon/photon_io.cpp
     )
 
     add_executable(ppt_tests

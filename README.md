@@ -1,11 +1,12 @@
-# Spectral Photon + Path Tracing Renderer
+# Spectral Photon-Centric Renderer
 
-> A physically-based GPU renderer combining **photon mapping** and **path tracing**
+> A physically-based GPU renderer using a **photon-centric** architecture
 > over a full spectral representation — no RGB shortcuts in the light transport.
 
-Built on **NVIDIA OptiX** and **CUDA**. The central innovation is a per-pixel
-**Fibonacci-sphere directional bin cache** that guides both BSDF bounce sampling
-and next-event estimation, measurably reducing variance in indirect illumination.
+Built on **NVIDIA OptiX** and **CUDA**. Camera rays stop at the first diffuse
+hit; all global illumination is carried by the photon map. A **tangential disk
+kernel** eliminates planar blocking artifacts. Photon maps can be precomputed,
+saved to disk, and loaded instantly for interactive camera exploration.
 
 ![Render Result](output/render.png)
 
@@ -13,16 +14,23 @@ and next-event estimation, measurably reducing variance in indirect illumination
 
 ## At a Glance
 
-| What                        | How                                                             |
-|-----------------------------|-----------------------------------------------------------------|
-| Light transport             | Full spectral — 32 wavelength bins, 380–780 nm                 |
-| Photon tracing              | OptiX raygen program, 1 M photons, cosine-weighted emission     |
-| Path tracing                | Multi-bounce NEE + photon density estimation, Russian roulette  |
-| Variance reduction          | Fibonacci-sphere bin cache guides BSDF bounce and NEE           |
-| Photon lookup               | Hashed uniform grid, Epanechnikov kernel, plane-distance filter |
-| Sub-pixel sampling          | 4×4 stratified jittered strata (16 SPP default)                 |
-| Debug / preview             | Interactive GLFW viewer, 7 render modes, 9 overlay toggles      |
-| Test coverage               | 163 GoogleTest unit tests across all core components            |
+| What                        | How                                                                  |
+|-----------------------------|----------------------------------------------------------------------|
+| Light transport             | Full spectral — 32 wavelength bins, 380–780 nm                      |
+| Architecture                | Photon-centric: photon rays carry all indirect transport             |
+| Camera pass                 | First-hit only (specular chain ≤8 bounces to first diffuse)         |
+| Direct lighting             | NEE with coverage-aware stratified sampling                          |
+| Indirect lighting           | Photon density estimation with tangential disk kernel                |
+| Spatial index (CPU)         | KD-tree (arbitrary radius, k-NN adaptive)                           |
+| Spatial index (GPU)         | Hash grid with shell-expansion k-NN                                 |
+| Gather kernel               | Tangential disk (surface distance, not 3D Euclidean)                |
+| Default render mode         | SPPM progressive (Hachisuka & Jensen 2009)                          |
+| Photon persistence          | Binary save/load; filename encodes photon budget + radius; scene & param hashes auto-invalidate |
+| Tone mapping                | ACES Filmic                                                          |
+| Sub-pixel sampling          | 4×4 stratified jittered strata (16 SPP default)                     |
+| Debug / preview             | Interactive GLFW viewer, 5 render modes, 9 overlay toggles          |
+| CPU reference               | Full renderer for validation (physically identical to GPU)           |
+| Test coverage               | Unit tests + CPU↔GPU integration tests (GoogleTest)                 |
 
 ---
 
@@ -37,72 +45,61 @@ and next-event estimation, measurably reducing variance in indirect illumination
 │  OBJ/MTL scene ──► Normalise to [-0.5,0.5]³                    │
 │       │                                                         │
 │       ▼                                                         │
-│  Build BVH (GAS) + emitter CDF                                  │
+│  Build BVH (GAS) + emitter distribution (CDF / alias table)    │
 │       │                                                         │
 │       ▼                                                         │
 │  OptiX pipeline init ──► upload geometry, materials, emitters   │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼─────────────────────────────────┐
-│  PHOTON PASS  (GPU → CPU → GPU)                                 │
+│  PHOTON PASS  (precomputed or cached)                           │
 │                                                                 │
-│  OptiX raygen: emit 1M photons ──► scatter / store at diffuse   │
-│       │                                                         │
-│       ▼                                                         │
-│  Download positions + flux ──► build hashed uniform grid (CPU)  │
-│       │                                                         │
-│       ▼                                                         │
-│  Upload grid to device                                          │
+│  IF photon_cache.bin exists AND scene unchanged:                │
+│     Load photon map + spatial index from cache                  │
+│  ELSE:                                                          │
+│     Emit N photons from lights                                  │
+│     Trace each photon: full BSDF bouncing, Russian roulette     │
+│     Deposit at diffuse hits (lightPathDepth ≥ 2 only)           │
+│     Build spatial index: KD-tree (CPU) / hash grid (GPU)        │
+│     Save to photon_cache.bin                                    │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼─────────────────────────────────┐
-│  INTERACTIVE VIEWER  (GLFW loop, 1 spp/frame)                   │
+│  CAMERA PASS  (first-hit only)                                  │
 │                                                                 │
-│  first-hit + NEE (direct lighting only)                         │
-│  TAB: cycle render modes   F1-F9: toggle overlays               │
+│  For each pixel:                                                │
+│    Trace camera ray → follow specular chain (mirrors, glass)    │
+│    At first diffuse hit:                                        │
+│      NEE  ──► shadow rays to emitters (coverage-aware)          │
+│      Photon gather ──► tangential disk kernel query              │
+│      L = L_direct(NEE) + L_indirect(photon density)             │
 │                                                                 │
-│  Press R ──────────────────────────────────────────────────────►│
-└───────────────────────────────┬─────────────────────────────────┘
-                                │
-┌───────────────────────────────▼─────────────────────────────────┐
-│  FULL RENDER  (R key)                                           │
-│                                                                 │
-│  1. NEE debug PNG (single frame, all shadow rays)               │
-│  2. Bin population pass ──► per-pixel Fibonacci-sphere bins     │
-│  3. Progressive SPP loop:                                       │
-│       camera ray                                                │
-│       ├─ specular bounce (up to max depth)                      │
-│       └─ diffuse hit ──► guided NEE  +  photon density est.     │
-│              │                    │                             │
-│              │              [frame 0] cache density → reuse     │
-│              ▼                                                  │
-│         accumulate spectral radiance                            │
-│  4. PNG output  (render + NEE direct + photon indirect +        │
-│                  combined + per-pixel profiling data)           │
+│  Spectral → CIE XYZ → sRGB → ACES tone map → output            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Photon Bin Cache — The Key Optimisation
+### Key Design Decisions
 
-After the photon pass, a **per-pixel cache** is built by tracing center rays
-to their first diffuse hit and gathering nearby photons into 32 Fibonacci-sphere
-directional bins (24 bytes each, ~604 MB at 1024×768).
+- **Photon rays are the real path tracers.** They carry all indirect
+  illumination: diffuse inter-reflection, caustics, colour bleeding.
+  Camera rays are cheap probes that only find the first visible surface.
 
-```
-  Per-pixel hemisphere
-  ┌──────────────────────────────────┐
-  │  Fibonacci sphere (N=32 bins)    │
-  │                                  │
-  │   · · ·  ┌─── bin k ───┐ · · ·  │
-  │          │ flux  float  │        │
-  │          │ dir_x float  │        │
-  │          │ dir_y float  │        │
-  │          │ dir_z float  │        │
-  │          │ weight float │        │
-  │          │ count int    │        │
-  │          └──────────────┘        │
-  └──────────────────────────────────┘
-```
+- **Tangential disk kernel.** Photon gather uses surface-projected distance
+  instead of 3D Euclidean distance. This eliminates planar blocking artifacts
+  and cross-surface photon leakage. The fix is in the kernel metric, not
+  the spatial data structure.
+
+- **Precomputable photon maps.** The photon map is view-independent and
+  saved as a binary file whose name encodes the photon budget, caustic
+  budget, bounce depth, and gather radius
+  (`photon_cache_<N>g_<N>c_<N>b_<R>r.bin`). Both a scene hash and a
+  parameter hash are embedded in the header; changing any render
+  parameter automatically invalidates the cache. Change the camera
+  freely without recomputing photons. Press **P** to recompute on demand.
+
+- **Dual CPU/GPU renderer.** CPU KD-tree provides ground truth; GPU hash
+  grid provides interactive speed. Both use the same tangential kernel and
+  surface consistency filters. Integration tests verify PSNR parity.
 
 ---
 
@@ -110,13 +107,13 @@ directional bins (24 bytes each, ~604 MB at 1024×768).
 
 | Component       | Minimum                              | Notes                              |
 |-----------------|--------------------------------------|------------------------------------|
-| NVIDIA GPU      | Turing (sm_75) or newer             | Required — no CPU fallback         |
-| CUDA Toolkit    | 12.x                                |                                    |
+| NVIDIA GPU      | Turing (sm_75) or newer              | Required for GPU path              |
+| CUDA Toolkit    | 12.x                                 |                                    |
 | NVIDIA OptiX    | 7.x or 9.x                          | `OptiX_INSTALL_DIR` must be set    |
-| CMake           | 3.24                                |                                    |
-| C++ Standard    | C++17                               |                                    |
-| OS              | Windows 10+ (MSVC 2022)             |                                    |
-| VRAM            | 12 GB recommended                   | Bin cache alone is ~604 MB         |
+| CMake           | 3.24                                 |                                    |
+| C++ Standard    | C++17                                |                                    |
+| OS              | Windows 10+ (MSVC 2022)              |                                    |
+| VRAM            | 8 GB recommended                     |                                    |
 
 > **OptiX is mandatory.** The build will fail immediately if `OptiX_INSTALL_DIR`
 > is not set as an environment variable or CMake cache entry.
@@ -151,13 +148,13 @@ cmake --build build --config Debug
 cmake --build build --config Release
 ```
 
-Build artifacts land in `build\Debug\` or `build\Release\`.  
+Build artifacts land in `build\Debug\` or `build\Release\`.
 The CUDA PTX file is compiled via the `optix_ptx` target and placed in `build\ptx\`.
 
 ### Step 3 — Run
 
 ```bat
-:: Interactive debug viewer (active scene set via #define in src\core\config.h)
+:: Interactive debug viewer
 build\Debug\photon_tracer.exe
 
 :: Override defaults at the command line
@@ -182,10 +179,21 @@ run.bat clean        # Delete the build directory
 | `--width W`     | Output image width (pixels)                                    | 1024               |
 | `--height H`    | Output image height (pixels)                                   | 768                |
 | `--spp N`       | Samples per pixel for the final render                         | 16                 |
-| `--photons N`   | Number of photons to trace                                     | 1000000            |
+| `--photons N`   | Number of photons to trace (global map)                        | 1000000            |
+| `--global-photons N` | Global photon budget (separate from caustic)              | 1000000            |
+| `--caustic-photons N` | Caustic photon budget                                    | 1000000            |
 | `--radius R`    | Photon gather radius (scene units)                             | 0.05               |
 | `--output FILE` | Output PNG path                                                | output/render.png  |
-| `--mode MODE`   | `full` \| `direct` \| `indirect` \| `photon` \| `normals` \| `material` \| `depth` | full |
+| `--mode MODE`   | `combined` \| `direct` \| `indirect` \| `photon` \| `normals` \| `material` \| `depth` | combined |
+| `--photon-file PATH` | Explicit photon cache file path                          | scene_dir/photon_cache.bin |
+| `--force-recompute`  | Ignore cached photon file, always recompute              |                    |
+| `--no-save-photons`  | Do not save photon cache after computation               |                    |
+| `--spatial MODE`      | `kdtree` \| `hashgrid` — spatial index for CPU           | kdtree             |
+| `--adaptive-radius`   | Enable k-NN adaptive gather radius                      |                    |
+| `--deterministic`     | Enable deterministic debug mode (for CPU↔GPU bisection) |                    |
+| `--sppm`              | Enable SPPM mode                                        | enabled by default |
+| `--sppm-iterations N` | SPPM iteration count                                    | 64                 |
+| `--sppm-radius R`     | SPPM initial radius                                     | 0.1                |
 
 ---
 
@@ -193,13 +201,13 @@ run.bat clean        # Delete the build directory
 
 A completed render writes:
 
-| File                           | Contents                              |
-|--------------------------------|---------------------------------------|
-| `output/render.png`            | Final combined render                 |
-| `output/out_nee_direct.png`    | Direct lighting (NEE) only            |
-| `output/out_photon_indirect.png` | Photon indirect illumination only   |
-| `output/out_combined.png`      | NEE + photon spectral sum             |
-| `output/out_debug_nee.png`     | Single-frame NEE preview (pre-render) |
+| File                             | Contents                              |
+|----------------------------------|---------------------------------------|
+| `output/render.png`              | Final combined render                 |
+| `output/out_nee_direct.png`      | Direct lighting (NEE) only            |
+| `output/out_photon_indirect.png` | Photon indirect illumination only     |
+| `output/out_photon_caustic.png`  | Caustic map contribution              |
+| `output/out_combined.png`        | NEE + photon spectral sum             |
 
 ---
 
@@ -219,29 +227,37 @@ verify photon map quality before committing to a full render.
 | **Shift**          | 3× movement speed                             |
 | **M**              | Toggle mouse capture                          |
 | **Left click**     | Re-capture mouse when released                |
-| **ESC**             | Cancel render → release mouse → quit (3-tier)  |
-| **Q**               | Quit immediately                               |
+| **ESC**            | Cancel render → release mouse → quit (3-tier) |
+| **Q**              | Quit immediately                              |
 
 ### Render Controls
 
 | Key        | Action                                                                 |
 |------------|------------------------------------------------------------------------|
-| **R**      | Launch full path tracing render                                        |
+| **R**      | Launch full render (SPPM by default)                                   |
+| **P**      | Recompute photons (re-trace, rebuild index, save cache)                |
 | **ESC**    | Cancel an in-progress render and return to preview                     |
-| **TAB**    | Cycle mode: `Full` → `DirectOnly` → `IndirectOnly` → `PhotonMap` → `Normals` → `MaterialID` → `Depth` |
+| **TAB**    | Cycle mode: `Combined` → `DirectOnly` → `IndirectOnly` → `PhotonMap` → `Normals` → `MaterialID` → `Depth` |
 | **H**      | Toggle help overlay                                                    |
 
 ### Scene Switching
 
-| Key | Scene         |
-|-----|---------------|
-| **1** | Cornell Box |
-| **2** | Conference  |
-| **3** | Living Room |
-| **4** | Sibenik     |
+| Key   | Scene             | Lighting          | Complexity |
+|-------|-------------------|-------------------|------------|
+| **1** | Cornell Box       | MTL emitters      | Low        |
+| **2** | Conference Room   | MTL emitters      | Medium     |
+| **3** | Living Room       | MTL emitters      | Medium     |
+| **4** | Fireplace Room    | MTL emitters      | Medium     |
+| **5** | Breakfast Room    | MTL emitters      | Medium     |
+| **6** | Salle de Bain     | MTL emitters      | Medium     |
+| **7** | Sibenik Cathedral | Directional (sun) | High       |
+| **8** | Sponza            | Spherical env     | High       |
+| **9** | Hairball          | Spherical env     | High       |
 
-Switching scenes rebuilds the acceleration structure, re-traces photons, and
-resets the camera to the scene's default viewpoint.
+Switching scenes rebuilds the acceleration structure, applies a
+complexity-based parameter preset (photon budget, gather radius, SPP,
+bounces), sets the scene's lighting mode, loads the photon cache if a
+matching binary exists, and resets the camera.
 
 ### Light Brightness
 
@@ -250,17 +266,16 @@ resets the camera to the scene's default viewpoint.
 | **+ / =**       | Increase light brightness (+0.1×)      |
 | **- / _**       | Decrease light brightness (−0.1×)      |
 
-Scales all emissive materials uniformly. Photons are automatically re-traced
-after each adjustment. Range: 0.1× – 10.0× (default 1.0×).
+Scales all emissive materials uniformly. Press **P** to recompute photons
+after adjustment. Range: 0.1× – 10.0× (default 1.0×).
 
 ### Effects Toggles
 
 | Key           | Action                                                             |
 |---------------|--------------------------------------------------------------------|
-| **V**         | Toggle volumetric scattering (crepuscular rays)                    |
 | **O**         | Toggle depth of field (thin-lens)                                  |
-| **[ / ]**     | DOF — widen / narrow aperture (⅓-stop steps; lower f = more blur) |
-| **, / .**     | DOF — focus closer / farther (10 % steps)                          |
+| **[ / ]**     | DOF — widen / narrow aperture (⅓-stop steps)                      |
+| **, / .**     | DOF — focus closer / farther (10% steps)                           |
 
 ### Debug Overlays (F-keys)
 
@@ -269,7 +284,7 @@ after each adjustment. Range: 0.1× – 10.0× (default 1.0×).
 | F1   | Photon points                | F6   | PDFs                     |
 | F2   | Global photon map            | F7   | Gather radius sphere     |
 | F3   | Caustic map selector         | F8   | MIS weights              |
-| F4   | Hash grid debug              | F9   | Spectral colouring       |
+| F4   | Hash grid / KD-tree cells    | F9   | Spectral colouring       |
 | F5   | Photon directions            |      |                          |
 
 **Hover-cell inspection:** Release the mouse (M), enable F2 or F3, then move
@@ -280,7 +295,7 @@ and dominant wavelength in the overlay panel.
 
 ## Tests
 
-163 unit tests via GoogleTest v1.14.0, covering every core subsystem.
+Unit tests and integration tests via GoogleTest v1.14.0.
 
 ```bat
 run.bat test                             :: Quick script
@@ -298,17 +313,21 @@ Math & Geometry        Vector math, ONB, coordinate transforms, ray-triangle
                        intersection, AABB intersection
 Spectral               Arithmetic, CIE XYZ colour matching, blackbody emission
 Sampling               RNG quality, cosine/uniform hemisphere, triangle,
-                       MIS power heuristic (2-way + 3-way), alias table
+                       alias table, coverage-aware NEE
 BSDF                   Fresnel (Schlick, dielectric, TIR), GGX VNDF,
                        evaluation, sampling, reciprocity, energy conservation
-Photon Map             Hash grid build/query, Epanechnikov kernel,
-                       surface consistency filter, density estimator
-Photon Bins            Fibonacci sphere coverage (N=8,16,32), nearest-bin
-                       queries, hemisphere coverage, bin solid angle,
-                       population, centroid normalisation, struct size (24 B)
-Stratified Sampling    4×4 sub-pixel strata coverage
+KD-Tree                Build, range query, k-NN, empty, single photon, boundary
+Tangential Kernel      Tangential distance matches analytic for planar geometry
+Surface Filter         Cross-wall photons rejected, same-surface accepted
+Hash Grid              Build/query, Epanechnikov kernel, surface consistency
+Density Estimator      Tangential disk kernel correctness
+Photon Map             Deposition rules, separate global/caustic maps
+SPPM                   Progressive convergence, radius shrinkage
+Integration (CPU↔GPU)  Direct lighting match, photon indirect match,
+                       combined match, energy conservation, PSNR thresholds
 OptiX Integration      Init, GAS build, scene upload, debug frame output,
                        normals mode, final render validation, framebuffer resize
+Stratified Sampling    4×4 sub-pixel strata coverage
 ```
 
 ---
@@ -324,54 +343,61 @@ photon_path_tracer/
 │   │   ├── spectrum.h                Spectral arithmetic, CIE XYZ, blackbody
 │   │   ├── config.h                  Compile-time scene selection + render constants
 │   │   ├── random.h                  PCG RNG
-│   │   ├── photon_bins.h             PhotonBin struct, Fibonacci sphere utilities
-│   │   ├── photon_density_cache.h    Per-pixel cached spectral density (A1)
-│   │   ├── guided_nee.h              Bin-flux-weighted emissive CDF (B2)
-│   │   ├── nee_sampling.h            Standard NEE sampling helpers
-│   │   ├── cell_bin_grid.h           Cell-level photon binning grid
+│   │   ├── sppm.h                    SPPM types, progressive update, reconstruction
+│   │   ├── photon_bins.h             PhotonBin struct, Fibonacci sphere (Phase 7)
+│   │   ├── photon_density_cache.h    Per-pixel cached spectral density
+│   │   ├── guided_nee.h             Bin-flux-weighted emissive CDF
+│   │   ├── nee_sampling.h           NEE sampling helpers
 │   │   ├── cdf.h                     Generic CDF build + sample
-│   │   ├── alias_table.h             Alias method for O(1) discrete sampling
-│   │   ├── medium.h                  Participating medium (volumetric) data
-│   │   ├── phase_function.h          Henyey-Greenstein phase function
-│   │   ├── font_overlay.h            Debug text overlay rendering
-│   │   └── test_data_io.h            Ground-truth data helpers for tests
+│   │   ├── alias_table.h            Alias method for O(1) discrete sampling
+│   │   ├── medium.h                  Participating medium (temporarily disabled)
+│   │   ├── phase_function.h          Henyey-Greenstein phase function (temporarily disabled)
+│   │   ├── font_overlay.h           Debug text overlay rendering
+│   │   └── test_data_io.h           Ground-truth data helpers for tests
 │   ├── bsdf/
 │   │   └── bsdf.h                    Lambertian, mirror, glass, GGX VNDF
 │   ├── scene/
 │   │   ├── scene.h                   Scene graph, emitter list
-│   │   ├── material.h                Material definitions
-│   │   ├── triangle.h                Triangle + BVH primitives
-│   │   ├── obj_loader.h / .cpp       Wavefront OBJ + MTL parser
+│   │   ├── material.h               Material definitions
+│   │   ├── triangle.h               Triangle + BVH primitives
+│   │   └── obj_loader.h / .cpp      Wavefront OBJ + MTL parser
 │   ├── renderer/
-│   │   ├── renderer.h / .cpp         Host render loop, framebuffer management
+│   │   ├── renderer.h / .cpp        CPU reference renderer, RenderConfig, FrameBuffer
 │   │   ├── camera.h                  Perspective camera, ray generation
-│   │   ├── mis.h                     MIS power heuristic (2-way + 3-way)
-│   │   ├── direct_light.h / .cu      Direct lighting kernel
-│   │   └── path_tracer.cu            Full path tracing CUDA kernel
+│   │   ├── mis.h                     MIS weight utilities
+│   │   ├── direct_light.h / .cu     Direct lighting kernel
+│   │   └── path_tracer.cu           CPU/CUDA path tracing kernels
 │   ├── photon/
-│   │   ├── photon.h                  Photon SoA storage layout
-│   │   ├── emitter.h / .cu           Emitter sampling, CDF construction
-│   │   ├── hash_grid.h / .cu         Hashed uniform grid build + query
-│   │   └── density_estimator.h       Epanechnikov kernel density estimation
+│   │   ├── photon.h                  Photon and PhotonSoA structs
+│   │   ├── kd_tree.h                KD-tree build + range query + k-NN (CPU reference)
+│   │   ├── hash_grid.h / .cu        Hashed uniform grid build + query
+│   │   ├── emitter.h / .cu          Emitter sampling, CDF construction
+│   │   ├── density_estimator.h      Tangential disk kernel density estimation
+│   │   ├── surface_filter.h         Surface consistency filter (tangential metric)
+│   │   └── photon_io.h / .cpp       Binary save/load for photon map persistence
 │   ├── optix/
-│   │   ├── optix_device.cu           All OptiX raygen / closesthit programs
-│   │   ├── optix_renderer.h / .cpp   Host pipeline: SBT, GAS, launch params
-│   │   ├── launch_params.h           GPU/CPU shared launch parameter struct
+│   │   ├── optix_device.cu          All OptiX raygen / closesthit programs
+│   │   ├── optix_renderer.h / .cpp  Host pipeline: SBT, GAS, launch params
+│   │   ├── launch_params.h          GPU/CPU shared launch parameter struct
 │   │   └── adaptive_sampling.h / .cu Per-pixel noise metric + convergence mask
 │   └── debug/
 │       └── debug.h                   Visualisation mode state, key bindings
 ├── tests/
-│   ├── test_main.cpp                 Core unit tests (163 cases, GoogleTest)
-│   ├── test_medium.cpp               Participating medium tests
-│   ├── test_ground_truth.cpp         Reference image ground-truth comparisons
-│   ├── test_pixel_comparison.cpp     Per-pixel render validation
-│   ├── test_per_ray_validation.cpp   Individual ray correctness checks
-│   └── feature_speed_test.cpp        Feature timing / performance benchmarks
+│   ├── test_main.cpp                Core unit tests (GoogleTest)
+│   ├── test_kd_tree.cpp             KD-tree unit tests
+│   ├── test_tangential_gather.cpp   Tangential kernel tests
+│   ├── test_surface_filter.cpp      Surface consistency filter tests
+│   ├── test_integration.cpp         CPU↔GPU integration tests
+│   ├── test_ground_truth.cpp        Reference image ground-truth comparisons
+│   ├── test_per_ray_validation.cpp  Individual ray correctness checks
+│   ├── test_pixel_comparison.cpp    Per-pixel render validation
+│   ├── test_medium.cpp              Participating medium tests
+│   └── feature_speed_test.cpp       Performance benchmarks
 ├── scenes/                           Cornell box, conference, living room, etc.
 ├── doc/
-│   └── architecture/                 Full architecture documentation
+│   └── architecture/                Full architecture documentation
 ├── CMakeLists.txt
-└── run.bat                           Build, run, test, and clean helper
+└── run.bat                          Build, run, test, and clean helper
 ```
 
 ---
@@ -379,9 +405,10 @@ photon_path_tracer/
 ## Architecture
 
 [doc/architecture/architecture.md](doc/architecture/architecture.md) covers the
-full rendering pipeline in detail: rendering equation, Monte Carlo estimators,
-guided NEE derivation, Fibonacci-sphere binning, density estimation, and the
-rationale behind each design decision.
+full rendering pipeline in detail: photon-centric design, tangential disk
+kernel, surface-aware gather, NEE with coverage-aware sampling, SPPM
+progressive convergence, KD-tree vs hash grid spatial indices, binary
+photon map persistence, and CPU↔GPU parity testing.
 
 ---
 

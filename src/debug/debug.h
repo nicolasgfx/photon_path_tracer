@@ -107,9 +107,11 @@ inline CellInfo query_cell_info(
     grid.query(world_pos, grid.cell_size, photons,
         [&](uint32_t idx, float /*dist2*/) {
             info.photon_count++;
-            float f = photons.flux[idx];
+            float f = photons.total_flux(idx);
             info.sum_flux += f;
-            flux_spectrum.value[photons.lambda_bin[idx]] += f;
+            Spectrum pf = photons.get_flux(idx);
+            for (int b = 0; b < NUM_LAMBDA; ++b)
+                flux_spectrum.value[b] += pf.value[b];
         });
 
     info.avg_flux = (info.photon_count > 0)
@@ -159,15 +161,14 @@ inline void overlay_photon_points(
         // Color by wavelength or simple white
         int idx = py * fb.width + px;
         if (spectral_color) {
-            // Map wavelength to visible color
-            Spectrum s = Spectrum::zero();
-            s.value[photons.lambda_bin[i]] = point_brightness;
+            // Map spectral flux to visible color
+            Spectrum s = photons.get_flux(i) * point_brightness;
             float3 rgb = spectrum_to_srgb(s);
             fb.srgb[idx * 4 + 0] = (uint8_t)(fminf(rgb.x * 255.f, 255.f));
             fb.srgb[idx * 4 + 1] = (uint8_t)(fminf(rgb.y * 255.f, 255.f));
             fb.srgb[idx * 4 + 2] = (uint8_t)(fminf(rgb.z * 255.f, 255.f));
         } else {
-            float intensity = fminf(photons.flux[i] * point_brightness, 1.f);
+            float intensity = fminf(photons.total_flux(i) * point_brightness, 1.f);
             uint8_t v = (uint8_t)(intensity * 255.f);
             fb.srgb[idx * 4 + 0] = v;
             fb.srgb[idx * 4 + 1] = v;

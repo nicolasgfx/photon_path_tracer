@@ -37,6 +37,13 @@ struct PCGRng {
         float v = next_float();
         return make_f2(u, v);
     }
+
+    // Spatial decorrelation: mix an arbitrary key into the RNG state
+    // to break coherent patterns between neighbouring generators.
+    HD void advance(uint32_t delta) {
+        state += (uint64_t)delta * 6364136223846793005ULL;
+        next_uint();  // consume one step to fully mix
+    }
 };
 
 // ── Sampling utilities ──────────────────────────────────────────────

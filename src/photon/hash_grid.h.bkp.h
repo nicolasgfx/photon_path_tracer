@@ -19,6 +19,7 @@
 #include <numeric>
 #include <cstdint>
 #include <functional>
+#include <queue>
 
 struct HashGrid {
     float    cell_size;
@@ -234,11 +235,9 @@ struct HashGrid {
 
         int3 center_cell = cell_coord(pos);
 
-        // Max-heap via std::vector + push_heap/pop_heap
-        // (avoids #include <queue> which conflicts with CUDA headers)
+        // Max-heap: (tangential_dist2, photon_index)
         using HeapEntry = std::pair<float, uint32_t>;
-        std::vector<HeapEntry> heap;
-        heap.reserve(k + 1);
+        std::priority_queue<HeapEntry> heap;
 
         // Track visited hash keys across all layers
         std::vector<uint32_t> all_visited;
@@ -291,12 +290,10 @@ struct HashGrid {
 
                             float dist2 = tr.d_tan2;
                             if ((int)heap.size() < k) {
-                                heap.push_back({dist2, idx});
-                                std::push_heap(heap.begin(), heap.end());
-                            } else if (dist2 < heap.front().first) {
-                                std::pop_heap(heap.begin(), heap.end());
-                                heap.back() = {dist2, idx};
-                                std::push_heap(heap.begin(), heap.end());
+                                heap.push({dist2, idx});
+                            } else if (dist2 < heap.top().first) {
+                                heap.pop();
+                                heap.push({dist2, idx});
                             }
                         }
                     }
@@ -304,40 +301,23 @@ struct HashGrid {
             }
 
             // Check termination: if we have k photons and the farthest
-            // is closer than the minimum possible tangential distance
-            // from any point outside the currently-expanded box, we're done.
-            //
-            // Correct bound: compute the minimum 3D distance from the query
-            // to the boundary of the (2*extent+1)^3 box of cells, then
-            // subtract tau^2 (since plane distance <= tau for accepted
-            // photons => d_tan^2 >= d_3D^2 - tau^2).
+            // is closer than the minimum possible distance from the next
+            // shell, we're done.
             if ((int)heap.size() >= k) {
-                float box_min_x = (float)(center_cell.x - extent) * cell_size;
-                float box_min_y = (float)(center_cell.y - extent) * cell_size;
-                float box_min_z = (float)(center_cell.z - extent) * cell_size;
-                float box_max_x = (float)(center_cell.x + extent + 1) * cell_size;
-                float box_max_y = (float)(center_cell.y + extent + 1) * cell_size;
-                float box_max_z = (float)(center_cell.z + extent + 1) * cell_size;
-
-                float dx = fminf(pos.x - box_min_x, box_max_x - pos.x);
-                float dy = fminf(pos.y - box_min_y, box_max_y - pos.y);
-                float dz = fminf(pos.z - box_min_z, box_max_z - pos.z);
-                float min_to_boundary = fminf(dx, fminf(dy, dz));
-                float min_tan_dist2 = fmaxf(
-                    min_to_boundary * min_to_boundary - tau * tau, 0.0f);
-
-                if (heap.front().first < min_tan_dist2) {
-                    break;  // No closer photons outside this box
+                float shell_dist = (float)(extent + 1) * cell_size;
+                float shell_dist2 = shell_dist * shell_dist;
+                if (heap.top().first < shell_dist2) {
+                    break;  // No closer photons in outer shells
                 }
             }
         }
 
-        // Extract results (sort by distance ascending)
-        std::sort_heap(heap.begin(), heap.end());
-        out_max_dist2 = heap.empty() ? 0.0f : heap.back().first;
+        // Extract results
+        out_max_dist2 = heap.empty() ? 0.0f : heap.top().first;
         out_indices.resize(heap.size());
-        for (size_t i = 0; i < heap.size(); ++i) {
-            out_indices[i] = heap[i].second;
+        for (int i = (int)heap.size() - 1; i >= 0; --i) {
+            out_indices[i] = heap.top().second;
+            heap.pop();
         }
     }
 

@@ -126,7 +126,17 @@ inline bool read_photons(std::ifstream& f, PhotonSoA& p, uint32_t version = PPTD
         read_vec(f, p.norm_y, (size_t)n);
         read_vec(f, p.norm_z, (size_t)n);
     }
-    // v1: norm arrays left empty; density_estimator guards against this
+
+    // ── Convert legacy lambda_bin + flux → spectral_flux ────────────
+    // Old format stored one wavelength bin + scalar flux per photon.
+    // New v2 code expects spectral_flux (interleaved, NUM_LAMBDA per photon).
+    p.spectral_flux.assign(n * NUM_LAMBDA, 0.f);
+    for (size_t i = 0; i < n; ++i) {
+        int bin = static_cast<int>(p.lambda_bin[i]);
+        if (bin >= 0 && bin < NUM_LAMBDA)
+            p.spectral_flux[i * NUM_LAMBDA + bin] = p.flux[i];
+    }
+
     return f.good();
 }
 

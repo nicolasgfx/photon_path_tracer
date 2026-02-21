@@ -34,6 +34,7 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/density_estimator.h"
+#include "photon/surface_filter.h"
 #include "photon/emitter.h"
 #include "bsdf/bsdf.h"
 
@@ -337,13 +338,9 @@ static Spectrum gather_with_local_bins(
 
     ONB frame = ONB::from_normal(normal);
 
-    ds.grid.query(pos, radius, ds.photons,
+    float tau = effective_tau(DEFAULT_SURFACE_TAU);
+    ds.grid.query_tangential(pos, normal, radius, tau, ds.photons,
         [&](uint32_t idx, float dist2) {
-            float3 pp = make_f3(ds.photons.pos_x[idx], ds.photons.pos_y[idx],
-                                ds.photons.pos_z[idx]);
-            float3 diff = pp - pos;
-            float plane_dist = fabsf(dot(normal, diff));
-            if (plane_dist > DEFAULT_SURFACE_TAU) return;
 
             float3 wi_world = make_f3(ds.photons.wi_x[idx], ds.photons.wi_y[idx],
                                        ds.photons.wi_z[idx]);

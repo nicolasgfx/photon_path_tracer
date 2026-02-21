@@ -261,6 +261,22 @@ inline HD BSDFSample glossy_sample(const Spectrum& Kd, const Spectrum& Ks,
     return s;
 }
 
+// ── Evaluate diffuse-only BSDF (for photon density estimation) ──────
+// Standard photon mapping practice: gather uses only the diffuse
+// component.  The peaked specular lobe creates unbounded variance in
+// fixed-radius kernel estimators, producing visible coloured hotspots.
+
+inline HD Spectrum evaluate_diffuse(const Material& mat, float3 wo, float3 wi) {
+    if (wi.z <= 0.f || wo.z <= 0.f) return Spectrum::zero();
+    switch (mat.type) {
+        case MaterialType::Mirror:
+        case MaterialType::Glass:
+            return Spectrum::zero();   // delta distributions
+        default:
+            return lambertian_f(mat.Kd);
+    }
+}
+
 // ── Evaluate BSDF for given directions ──────────────────────────────
 
 inline HD Spectrum evaluate(const Material& mat, float3 wo, float3 wi) {

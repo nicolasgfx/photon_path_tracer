@@ -38,6 +38,7 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/density_estimator.h"
+#include "photon/surface_filter.h"
 #include "photon/emitter.h"
 #include "bsdf/bsdf.h"
 
@@ -423,33 +424,30 @@ static Spectrum gather_with_bins_step(
     int count = 0;
     ONB frame = ONB::from_normal(normal);
 
-    ds.grid.query(pos, radius, ds.photons,
+    float tau = effective_tau(DEFAULT_SURFACE_TAU);
+    ds.grid.query_tangential(pos, normal, radius, tau, ds.photons,
         [&](uint32_t idx, float dist2) {
-            float3 pp = make_f3(ds.photons.pos_x[idx], ds.photons.pos_y[idx],
-                                ds.photons.pos_z[idx]);
-            float3 diff = pp - pos;
-            float plane_dist = fabsf(dot(normal, diff));
-            if (plane_dist > DEFAULT_SURFACE_TAU) return;
-
             float3 wi_world = make_f3(ds.photons.wi_x[idx], ds.photons.wi_y[idx],
                                        ds.photons.wi_z[idx]);
             if (dot(wi_world, normal) <= 0.f) return;
 
-            // Normal visibility filter (mirrors density_estimator.h)
+            // Normal visibility filter (mirrors density_estimator.h: <= 0.0f)
             if (!ds.photons.norm_x.empty()) {
                 float3 photon_n = make_f3(ds.photons.norm_x[idx], ds.photons.norm_y[idx],
                                           ds.photons.norm_z[idx]);
-                if (dot(photon_n, normal) <= 0.f) return;
+                if (dot(photon_n, normal) <= 0.0f) return;
             }
 
             float3 wi_local = frame.world_to_local(wi_world);
             Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
-            float flux = ds.photons.flux[idx];
-            int bin = ds.photons.lambda_bin[idx];
+            Spectrum sf = ds.photons.get_flux(idx);
             // Box kernel (w=1) — matches estimate_photon_density exactly
-            L.value[bin] += flux * inv_N * f.value[bin] * inv_area;
+            for (int b = 0; b < NUM_LAMBDA; ++b)
+                L.value[b] += sf.value[b] * inv_N * f.value[b] * inv_area;
+            float flux = ds.photons.total_flux(idx);
 
             // Epanechnikov weight for bin population only
+            // dist2 is tangential distance from query_tangential callback
             float w_bin = 1.0f - dist2 / r2;
             int k = (int)ds.photon_bin_idx[idx];
             if (k >= num_bins) k = 0;
@@ -1311,15 +1309,16 @@ TEST_F(PerRayValidation, SpectralBinsNeverMix) {
                 float w = 1.0f - dist2 / r2;
                 float3 wi_local = frame.world_to_local(wi_world);
                 Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
-                float flux = ds.photons.flux[idx];
-                int bin = ds.photons.lambda_bin[idx];
+                Spectrum sf = ds.photons.get_flux(idx);
 
-                // Only contributes to its own lambda bin
-                lambda_has_photon[bin] = true;
-                L_manual.value[bin] += flux * inv_N * f.value[bin] * w * inv_area;
+                // Full spectral: every photon contributes to all bins
+                for (int b = 0; b < NUM_LAMBDA; ++b) {
+                    if (sf.value[b] > 0.f) lambda_has_photon[b] = true;
+                    L_manual.value[b] += sf.value[b] * inv_N * f.value[b] * w * inv_area;
+                }
             });
 
-        // Check: any non-zero L in a lambda bin without photon contribution?
+        // Check: any non-zero L in a lambda bin without photon flux?
         for (int b = 0; b < NUM_LAMBDA; ++b) {
             if (!lambda_has_photon[b] && L_manual.value[b] != 0.f) {
                 mixing_violations++;
@@ -1352,7 +1351,7 @@ TEST_F(PerRayValidation, FirstHitPhotonDensityAgreement) {
     de_cfg.caustic_radius    = DEFAULT_CAUSTIC_RADIUS;
     de_cfg.num_photons_total = ds.num_photons;
     de_cfg.surface_tau       = DEFAULT_SURFACE_TAU;
-    de_cfg.use_kernel        = true;
+    de_cfg.use_kernel        = false;  // Box kernel to match gather_with_bins_step
 
     for (int i = 0; i < NUM_RAYS; ++i) {
         PCGRng rng_ray = PCGRng::seed(rays[i].seed, (uint64_t)i);

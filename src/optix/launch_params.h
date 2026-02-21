@@ -102,6 +102,7 @@ struct LaunchParams {
     float*    photon_flux;
     uint8_t*  photon_bin_idx;      // [num_photons] precomputed Fibonacci bin index
     int       num_photons;
+    int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
 
     // Hash grid (device pointers)
     uint32_t* grid_sorted_indices;
@@ -211,9 +212,9 @@ struct LaunchParams {
     float*    sppm_vp_pos_x;         ///< [W*H] hit position x
     float*    sppm_vp_pos_y;         ///< [W*H] hit position y
     float*    sppm_vp_pos_z;         ///< [W*H] hit position z
-    float*    sppm_vp_norm_x;        ///< [W*H] shading normal x
-    float*    sppm_vp_norm_y;        ///< [W*H] shading normal y
-    float*    sppm_vp_norm_z;        ///< [W*H] shading normal z
+    float*    sppm_vp_norm_x;        ///< [W*H] geometric normal x (for gather filtering)
+    float*    sppm_vp_norm_y;        ///< [W*H] geometric normal y
+    float*    sppm_vp_norm_z;        ///< [W*H] geometric normal z
     float*    sppm_vp_wo_x;          ///< [W*H] outgoing direction (local) x
     float*    sppm_vp_wo_y;          ///< [W*H] outgoing direction (local) y
     float*    sppm_vp_wo_z;          ///< [W*H] outgoing direction (local) z

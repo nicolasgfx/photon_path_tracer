@@ -1,864 +1,577 @@
-# Architecture -- Spectral Photon + Path Tracing Renderer
+# Architecture — Spectral Photon-Centric Renderer (v2.1)
 
 This document describes the complete rendering pipeline, its design
-rationale, mathematical foundations, strengths, weaknesses, and
-intended use.
+rationale, mathematical foundations, and implementation details.
+
+**Architecture version:** v2.1 (photon-centric, surface-aware gather)
 
 ---
 
 ## 1. Overview
 
-The renderer combines **photon mapping** with **Monte Carlo path
-tracing** in a fully spectral framework. All light transport is
-computed over 32 discrete wavelength bins spanning 380--780 nm. The
-entire pipeline runs on the GPU via **NVIDIA OptiX 9.x** for ray
-tracing and **CUDA** for auxiliary kernels. There is no CPU fallback.
+The renderer implements a **photon-centric** architecture where photon rays
+carry the full transport burden and camera rays stop at the first diffuse hit.
+All light transport is computed over 32 discrete wavelength bins spanning
+380–780 nm. The pipeline runs on the GPU via **NVIDIA OptiX 9.x** for ray
+tracing and **CUDA** for auxiliary kernels, with a full **CPU reference
+renderer** for validation.
 
-A key feature is the **photon directional bin cache**: a per-pixel
-Fibonacci-sphere discretisation of the photon flux distribution that
-guides both BSDF bounce directions and next-event estimation (NEE)
-light selection, significantly reducing variance in indirect
-illumination.
+### 1.1 Design Philosophy
 
-### Intended Use
+Camera rays are **cheap probes**: they find the first visible surface point
+(following specular bounces through mirrors/glass) and evaluate direct
+lighting via next-event estimation (NEE). All global illumination — indirect
+diffuse, caustics, colour bleeding — is carried entirely by the photon map,
+which is queried at the camera hit-point.
 
-This is a **private research renderer** focused on physical
-correctness and mathematical clarity. It is not designed for
-production workloads or real-time applications. The emphasis is on:
+Photon rays are the **real path tracers**: they start from light sources and
+bounce through the scene with full spectral transport, sophisticated
+importance sampling, and Russian roulette. The photon distribution encodes
+the complete indirect light field.
 
-- Explicit, auditable estimators.
-- Spectral correctness over speed.
-- Debugging and visualisation of every intermediate quantity.
+### 1.2 Priority Order
 
-### Requirements
+1. **Physical correctness** — unbiased estimators, correct PDFs, no double counting
+2. **Deterministic + debuggable** — component outputs, clear invariants
+3. **Simplicity over performance** — explicit code, correct first
 
-| Component               | Minimum Version       |
-|-------------------------|-----------------------|
-| NVIDIA GPU              | Turing (sm_75) or newer |
-| CUDA Toolkit            | 12.x                 |
-| NVIDIA OptiX SDK        | 7.x / 9.x            |
-| CMake                   | 3.24                  |
-| C++ Standard            | C++17                 |
-| OS                      | Windows 10+ (MSVC) or Linux (GCC/Clang) |
+### 1.3 Intended Use
 
-The `OptiX_INSTALL_DIR` environment variable (or CMake cache
-variable) **must** point to the OptiX SDK. The build will fail with a
-fatal error if it is not set.
+This is a **private research renderer** focused on physical correctness and
+mathematical clarity. It is not designed for production workloads or
+real-time applications.
+
+### 1.4 Requirements
+
+| Component       | Minimum                              | Notes                              |
+|-----------------|--------------------------------------|------------------------------------|
+| NVIDIA GPU      | Turing (sm_75) or newer              | Required for GPU path              |
+| CUDA Toolkit    | 12.x                                 |                                    |
+| NVIDIA OptiX    | 7.x or 9.x                          | `OptiX_INSTALL_DIR` must be set    |
+| CMake           | 3.24                                 |                                    |
+| C++ Standard    | C++17                                |                                    |
+| OS              | Windows 10+ (MSVC 2022)              |                                    |
+| VRAM            | 8 GB recommended                     |                                    |
 
 ---
 
-## 2. Pipeline Stages
+## 2. Non-Negotiable Invariants
 
-The renderer executes the following stages in order:
+- **Never double-count direct lighting.** Direct illumination at camera
+  hit-points is estimated by NEE only. Photon maps must NOT contain
+  first-bounce deposits (`lightPathDepth < 2`).
+- **Every Monte Carlo estimator must divide by its exact sampling PDF.**
+- **Spectral bins never mix during transport.** Convert spectral → RGB only
+  at output.
+- **Photons store radiant flux per wavelength bin** (a power packet), not
+  radiance.
+- **CPU and GPU must produce distributionally equivalent results.** Normal
+  mode uses PSNR / tolerance thresholds; bitwise identity is NOT required.
+- **KD-tree is the CPU reference spatial structure.** Hash grid / uniform
+  grid is the GPU primary structure.
+- **Gather kernel must use tangential (surface) distance, not 3D Euclidean
+  distance.** Photon mapping estimates surface irradiance, not volumetric
+  radiance.
+- **Single-shot density estimation is biased but consistent.** Only SPPM
+  progressive shrinking guarantees asymptotic convergence.
+
+---
+
+## 3. Physical Units & Definitions
+
+Rendering equation (spectral):
+
+$$
+L_o(x, \omega_o, \lambda) = L_e(x, \omega_o, \lambda) + \int_{\Omega} L_i(x, \omega_i, \lambda)\, f_s(x, \omega_i, \omega_o, \lambda)\, \cos\theta_i\, d\omega_i
+$$
+
+| Quantity     | Symbol   | Units                          |
+|------------- |----------|--------------------------------|
+| Radiance     | $L$      | $W/(sr \cdot m^2 \cdot nm)$    |
+| Flux         | $\Phi$   | $W/nm$                         |
+| Irradiance   | $E$      | $W/(m^2 \cdot nm)$             |
+
+A stored photon represents **radiant flux** in one wavelength bin.
+
+### 3.1 Bias Clarification
+
+Single-pass photon density estimation with fixed radius:
+
+$$
+L_{\text{indirect}}(x) = \frac{1}{\pi r^2}\sum_{i} \Phi_i\, f_s
+$$
+
+This estimator is **biased** for fixed $r$. The bias decreases as $r \to 0$
+with $N \to \infty$ (consistency).
+
+- **Single-shot mode**: biased but consistent (acceptable for preview)
+- **SPPM mode**: asymptotically unbiased (Hachisuka & Jensen 2009)
+
+---
+
+## 4. Pipeline Stages
 
 ```
-Scene Load (OBJ + MTL)
-        |
-        v
-  Build BVH (CPU)
-        |
-        v
-  Build Emissive Distribution (CPU)
-        |
-        v
-  OptiX init / build_accel / upload_scene_data / upload_emitter_data
-        |
-        v
-  GPU Photon Trace  (__raygen__photon_trace)
-        |
-        v
-  Download photons -> Build Hash Grid (CPU) -> Upload grid + photons
-        |
-        v
-  Interactive Debug Viewer (first-hit OptiX, GLFW window)
-        |
-        v  (R key)
-  NEE Debug PNG (single-frame shadow ray preview)
-        |
-        v
-  Populate Photon Directional Bin Cache (populate_bins_mode = 1)
-        |
-        v
-  Full Path Tracing  (__raygen__render, is_final_render=1)
-    * Two-pass: bin population pass, then SPP render passes
-    * Guided NEE (B2) + Guided BSDF bounce (B1)
-    * Stratified sub-pixel sampling (B3)
-    * Cached spectral density estimation (A1)
-        |
-        v
-  PNG Output (render, NEE direct, photon indirect, combined)
+1. Load scene → build BVH / OptiX GAS
+2. Build emitter distribution (alias table / CDF over emissive triangles)
+3. ═══ PHOTON PASS ═══  (may be precomputed)
+   a. IF cached photon binary exists AND scene unchanged:
+        Load photon map + spatial index from binary file
+        SKIP steps b–d
+   b. Emit N photons from lights (shared emitter distribution)
+   c. Trace each photon through scene with full bounce logic:
+      - Bounce 0: guided hemisphere/sphere coverage
+      - Bounce 1+: BSDF importance sampling + Russian roulette
+      - Deposit at each qualifying diffuse hit (lightPathDepth ≥ 2)
+   d. Build spatial index (KD-tree on CPU, hash grid on GPU)
+   e. Save photon map + spatial index to binary file (optional)
+4. ═══ CAMERA PASS ═══  (first-hit only, independent of photon pass)
+   a. For each pixel: trace ONE camera ray → find first hit
+   b. Follow specular bounces (mirrors, glass) up to N=8
+   c. At first diffuse hit:
+      - NEE: shadow rays to light sample points
+      - Photon gather: query KD-tree / hash grid within adaptive radius
+      - Combine: L = L_direct(NEE) + L_indirect(photon density)
+   d. Multiply by specular chain throughput
+5. Spectral → RGB conversion (CIE XYZ), ACES filmic tone mapping, output
 ```
 
-### 2.1 Scene Loading
+**Key design principle:** The photon pass and camera pass are **fully
+independent**. The photon map is a static light-field snapshot that can be
+precomputed to any desired quality (millions of photons, many bounces) and
+saved to disk. The camera pass loads this map and renders interactively.
 
-Wavefront OBJ with MTL materials. Materials are mapped to the
-internal spectral representation using `rgb_to_spectrum_reflectance()`
-for diffuse/specular albedos and `blackbody_spectrum()` for emissive
-surfaces whose emission is defined by `Ke` in the MTL file.
+### 4.1 Scene Loading
 
-**Scene normalisation:** All non-reference scenes are scaled and
-translated to fit inside the Cornell Box reference frame
-$([-0.5, 0.5]^3)$, so camera defaults, gather radii, and light
-placement transfer across scenes.
+Wavefront OBJ with MTL materials. Materials are mapped to the internal
+spectral representation using `rgb_to_spectrum_reflectance()` for
+diffuse/specular albedos and `blackbody_spectrum()` for emissive surfaces.
+
+**Scene normalisation:** All non-reference scenes are scaled and translated
+to fit inside the Cornell Box reference frame $([-0.5, 0.5]^3)$.
 
 Supported material types:
 
 | Type        | MTL Cue                | Internal Enum      |
 |-------------|------------------------|--------------------|
 | Lambertian  | default                | `Lambertian`       |
-| Mirror      | `illum 3`, Ks > 0.99  | `Mirror`           |
-| Glass       | `illum 4`, Ni > 1     | `Glass`            |
-| Glossy      | `illum 2`, Ns > 0     | `Glossy`           |
+| Mirror      | `illum 3`, Ks > 0.99   | `Mirror`           |
+| Glass       | `illum 4`, Ni > 1      | `Glass`            |
+| Glossy      | `illum 2`, Ns > 0      | `Glossy`           |
 | Emissive    | `Ke` present           | `Emissive`         |
 
-### 2.2 Acceleration Structure
+### 4.2 Acceleration Structure
 
-A single bottom-level **Geometry Acceleration Structure (GAS)** is
-built from the triangle soup using `optixAccelBuild`. No Instance
-Acceleration Structure (IAS) is used -- all geometry lives in a
-single GAS with `maxTraversableGraphDepth = 1`.
+A single bottom-level **Geometry Acceleration Structure (GAS)** is built
+from the triangle soup using `optixAccelBuild`. No instancing or multi-level
+IAS is used.
 
-Vertex positions and per-vertex normals are stored in SoA layout on
-the device. Triangle indices are implicit (primitive index * 3).
+### 4.3 Emitter Distribution (Shared by Photon Emission + NEE)
 
-### 2.3 Emitter Data
-
-Before photon tracing, a cumulative distribution function (CDF) over
-emissive triangles is built on the CPU and uploaded to the device.
-Each triangle's weight is:
+One distribution over all emissive triangles. Reused for both photon
+emission and NEE shadow ray sampling. Triangle weight:
 
 $$
 w_t = A_t \cdot \bar{L}_{e,t}
 $$
 
-where $A_t$ is the triangle area and $\bar{L}_{e,t}$ is the mean
-spectral emission power across all wavelength bins. The CDF allows
-$O(\log n)$ importance sampling of emissive geometry on the device.
+Implementation: alias table or CDF. Returns `(tri_id, p_tri)`.
 
 ---
 
-## 3. GPU Photon Trace
+## 5. Photon Pass (The Real Path Tracer)
 
-Photon tracing is implemented as the OptiX raygen program
-`__raygen__photon_trace`. It is launched as a **1-D grid** of
-`num_photons` threads (default: 1,000,000).
+### 5.1 Photon Emission
 
-### 3.1 Emission Sampling
+Per photon:
 
-Each thread:
+**A) Sample emissive triangle:** `(tri_id, p_tri)` from the shared
+emitter distribution.
 
-1. Samples an emissive triangle from the CDF.
-2. Samples a point on that triangle via uniform barycentric
-   coordinates:
+**B) Sample uniform point on triangle:**
 
 $$
-\alpha = 1 - \sqrt{u}, \quad
-\beta  = v\sqrt{u},    \quad
-\gamma = 1 - \alpha - \beta
+\alpha = 1-\sqrt{u},\quad \beta = v\sqrt{u},\quad \gamma = 1-\alpha-\beta
 $$
 
-3. Samples a wavelength bin proportional to the triangle's spectral
-   emission:
+PDF: $p_{pos} = 1/A_{tri}$
+
+**C) Sample emission direction:** Cosine-weighted hemisphere around
+triangle normal: $p_{dir}(\omega) = \cos\theta / \pi$
+
+**D) Sample wavelength bin** proportional to emission spectrum:
 
 $$
-p(\lambda_i | x) = \frac{L_e(x,\lambda_i)}{\sum_j L_e(x,\lambda_j)}
+p_{\lambda}(i \mid x) = \frac{L_e(x,\lambda_i)}{\sum_j L_e(x,\lambda_j)}
 $$
 
-4. Samples a cosine-weighted hemisphere direction above the emitting
-   surface.
-
-### 3.2 Photon Flux
-
-The initial flux carried by each photon is:
+**E) Compute initial photon flux:**
 
 $$
-\Phi = \frac{L_e(x,\omega,\lambda)\cos\theta}
-            {p(t) \cdot p(x|t) \cdot p(\omega|x) \cdot p(\lambda|x)}
+\Phi = \frac{\Phi_{\text{total},\lambda}}{N_{\text{photons}}} \cdot \frac{1}{p(\text{tri}, x, \omega, \lambda)}
 $$
 
-where $p(t)$ is the triangle selection PDF (from the CDF), $p(x|t) =
-1/A_t$, $p(\omega|x) = \cos\theta / \pi$, and $p(\lambda|x)$ is the
-spectral PDF above.
+where $\Phi_{\text{total},\lambda} = \pi \sum_t L_e(t,\lambda) \cdot A_t$
+and the combined PDF is $p_{tri} \cdot p_{pos} \cdot p_{dir} \cdot p_{\lambda}$.
 
-### 3.3 Tracing and Storage
+### 5.1.1 Canonical PDFs
 
-Photons are traced through the scene via `optixTrace`. At each
-intersection:
+| PDF | Symbol | Formula | Units |
+|-----|--------|---------|-------|
+| Triangle selection | $p_{tri}$ | $\frac{A_t \cdot \bar{L}_{e,t}}{\sum_s A_s \cdot \bar{L}_{e,s}}$ | dimensionless |
+| Point on triangle | $p_{pos}$ | $1 / A_t$ | $m^{-2}$ |
+| Direction (Lambertian) | $p_{dir}(\omega)$ | $\cos\theta / \pi$ | $sr^{-1}$ |
+| Wavelength bin | $p_{\lambda}$ | $\frac{L_e(x,\lambda_i)}{\sum_j L_e(x,\lambda_j)}$ | dimensionless |
+| Combined | $p_{\text{combined}}$ | $p_{tri} \cdot p_{pos} \cdot p_{dir} \cdot p_{\lambda}$ | $m^{-2} \cdot sr^{-1}$ |
+| NEE: area→solid-angle | $p_\omega$ | $p_A(y) \cdot \frac{\|y-x\|^2}{|\cos\theta_y|}$ | $sr^{-1}$ |
+| NEE: coverage mixture | $p_{\text{select}}$ | $(1-c)\,p_{\text{power}} + c\,p_{\text{area}}$ | dimensionless |
 
-- **Emissive surfaces**: tracing terminates.
-- **Specular surfaces** (mirror/glass): photon continues via ideal
-  reflection; no storage.
-- **Diffuse surfaces**: the photon is stored (at bounce > 0, since
-  direct illumination is handled by NEE), then scattered via
-  cosine-weighted hemisphere sampling. The flux is attenuated by the
-  surface albedo $K_d(\lambda)$.
+### 5.2 Photon Bounce Logic
 
-Storage uses `atomicAdd` on a global counter to append photons into
-pre-allocated SoA output buffers (position, direction, wavelength
-bin, flux).
+#### 5.2.1 Bounce 0 (First Interaction After Emission)
 
-**Russian roulette** is applied after `MIN_BOUNCES_RR` (3) bounces:
+Full coverage of the hemisphere (diffuse/glossy) or full sphere
+(glass/translucent). Strategy: cosine-weighted hemisphere sampling with
+optional guided importance sampling. For glass/translucent surfaces:
+Fresnel-weighted reflection/refraction with full spherical coverage.
+Wavelength-dependent IOR for dispersion.
 
-$$
-p_{rr} = \min(0.95,\; 0.5)
-$$
+#### 5.2.2 Bounce 1+ (Deeper Bounces)
 
-If the photon survives, its flux is divided by $p_{rr}$.
+Standard BSDF importance sampling:
+- Lambertian: cosine hemisphere, throughput *= albedo
+- Mirror: perfect reflection
+- Glass: Fresnel-weighted reflect/refract
+- Glossy: GGX/VNDF sampling
 
-### 3.4 Hash Grid Construction
+Russian roulette after `MIN_BOUNCES_RR` (default 3):
+$p_{continue} = \min(\max_\lambda(T(\lambda)),\, \text{RR\_THRESHOLD})$
 
-After the GPU photon trace completes, the photon data is downloaded
-to the CPU, a **hashed uniform grid** is built, and the result is
-uploaded back to the device.
+#### 5.2.3 Photon Deposition Rule (No Double Counting)
 
-Cell coordinate:
+Deposit when:
+- Hit material is **non-delta** (diffuse/glossy)
+- AND `lightPathDepth >= 2` (skip first hit from light)
+
+Delta (mirror/glass) surfaces: do NOT deposit, but MUST continue bouncing.
+Terminating at delta surfaces prevents caustic formation.
+
+#### 5.2.4 Separate Maps
+
+- **Global photon map**: deposits with `hasSpecularChain == false`
+- **Caustic photon map**: deposits with `hasSpecularChain == true`
+  (uses smaller gather radius for sharper caustics)
+
+`hasSpecularChain == true` means at least one delta BSDF interaction
+occurred along the photon's path from the light source.
+
+### 5.3 Photon Path Decorrelation
+
+#### 5.3.1 Cell-Stratified Bouncing
+
+Divide each hash grid cell's bounce hemisphere into strata. Assign each
+photon landing in the cell to a stratum based on an arrival counter, so
+successive photons in the same cell bounce in different directions.
+
+```cpp
+my_index = atomicAdd(&cell_photon_count[hash(C)], 1);
+stratum  = my_index % num_strata;
+// Fibonacci hemisphere stratification within stratum
+golden_angle = π × (3 - √5)
+θ = acos(sqrt((stratum + ξ₁) / num_strata))
+φ = golden_angle × stratum + ξ₂ × (2π / num_strata)
 ```
-cellCoord = floor(position / cellSize)
+
+The PDF remains $\cos\theta / \pi$ — this is stratified sampling of the
+same distribution. The estimator remains unbiased.
+
+**Config:** `DEFAULT_PHOTON_BOUNCE_STRATA = 64` (set to 0 to disable).
+
+#### 5.3.2 RNG Decorrelation by Spatial Hash
+
+Seed each photon's bounce RNG from a hash of photon index AND hit cell
+coordinate:
+
+```cpp
+uint32_t cell_key = hash_cell(floor(hit_pos / cell_size));
+rng.advance(cell_key * 0x9E3779B9u);
 ```
 
-The cell size is `gather_radius * HASHGRID_CELL_FACTOR` (default
-factor 2.0). Neighbour lookup scans $3 \times 3 \times 3$ cells. The
-grid stores sorted indices plus `cellStart` / `cellEnd` arrays
-indexed by hash.
+| Method | Complexity | Memory | Coverage guarantee | Recommended |
+|--------|-----------|--------|-------------------|-------------|
+| Cell-stratified bouncing | Medium | 1 atomic int / cell | Yes — deterministic | CPU + GPU |
+| RNG spatial hash | Trivial | Zero | Statistical only | GPU fallback |
+
+### 5.4 Photon Transport Throughput Update
+
+$$
+\text{flux} \leftarrow \text{flux} \cdot \frac{f_s \cos\theta}{p(\omega)}
+$$
+
+For Lambertian with cosine sampling: factor = albedo $\rho$.
+
+---
+
+## 6. Spatial Index & Surface-Aware Gather
+
+### 6.1 KD-Tree (CPU Reference)
+
+**Build**: Median-split construction $O(N \log N)$. Split axis cycles or is
+chosen by largest-extent heuristic. Leaf nodes contain $\leq$ `MAX_LEAF`
+photons (8–16).
+
+**Range query**: Recursive descent, pruning by bounding box. No cell-size
+constraint — any radius works. Distance metric is **tangential** (§6.3).
+
+**k-NN query**: Priority-queue k-NN on the KD-tree. Returns k closest
+photons and the tangential distance to the k-th (= adaptive radius).
+
+Implementation: `src/photon/kd_tree.h` (header-only).
+
+### 6.2 Uniform Grid / Hash Grid (GPU Primary)
+
+O(1) build (sort + prefix sum), O(cells) query. Cell size =
+`2 × max_radius`. GPU k-NN via **shell expansion** (§6.5).
+
+The GPU does NOT need a KD-tree. The uniform grid with tangential kernel
+and shell-expansion k-NN achieves the same surface irradiance estimation
+quality as the CPU KD-tree.
 
 Hash function:
 $$
 h(c_x, c_y, c_z) = (c_x \cdot 73856093 \oplus c_y \cdot 19349663 \oplus c_z \cdot 83492791) \bmod T
 $$
 
-where $T$ is the hash table size.
+Implementation: `src/photon/hash_grid.h` + `src/photon/hash_grid.cu`.
 
----
+### 6.3 Tangential Disk Kernel (Mandatory)
 
-## 4. Photon Directional Bin Cache
+**Root cause of planar blocking artifacts:** Using a full 3D spherical
+distance metric for surface irradiance estimation. Photon mapping estimates
+irradiance **on surfaces** — not in volume. A pure 3D sphere kernel gathers
+photons from unrelated surfaces if they fall within $r$.
 
-The photon directional bin cache is the central optimisation of the
-renderer. It pre-computes per-pixel photon flux distributions on the
-unit sphere and uses them for three purposes:
+This is NOT a spatial structure problem. KD-tree, hash grid, and uniform
+grid all exhibit the same artifact if the gather metric is spherical. The
+fix is the kernel metric, not the data structure.
 
-1. **Guided BSDF bounce (B1):** First-bounce directions are sampled
-   proportional to cached photon flux.
-2. **Guided NEE (B2):** Shadow rays are steered toward lights that
-   contribute the most flux at each pixel.
-3. **Cached density estimation (A1):** The first-sample spectral
-   density is cached and reused across subsequent SPP frames.
+**Solution: Replace spherical gather with tangent-plane metric.**
 
-### 4.1 Fibonacci Sphere Binning
-
-The unit sphere $S^2$ is discretised into $N = 32$ quasi-uniform
-directions using the **Fibonacci sphere** construction:
+Given query point $x$ with surface normal $n_x$ and photon position $x_i$:
 
 $$
-\theta_k = \arccos\!\left(1 - \frac{2(k + 0.5)}{N}\right), \quad
-\phi_k = \varphi_g \cdot k
-$$
-
-where $\varphi_g = \pi(3 - \sqrt{5})$ is the golden angle. This
-produces a nearly uniform point distribution on $S^2$ without
-clustering at the poles.
-
-Each bin direction $\mathbf{d}_k$ stores a `PhotonBin` (36 bytes):
-
-| Field    | Type  | Description                                       |
-|----------|-------|---------------------------------------------------|
-| `flux`   | float | Total Epanechnikov-weighted scalar flux           |
-| `dir_x`  | float | Flux-weighted centroid direction $x$              |
-| `dir_y`  | float | Flux-weighted centroid direction $y$              |
-| `dir_z`  | float | Flux-weighted centroid direction $z$              |
-| `weight` | float | Total Epanechnikov weight (for normalisation)     |
-| `count`  | int   | Number of photons accumulated in this bin         |
-| `avg_nx` | float | Flux-weighted average surface normal $x$          |
-| `avg_ny` | float | Flux-weighted average surface normal $y$          |
-| `avg_nz` | float | Flux-weighted average surface normal $z$          |
-
-The `avg_n` fields record the mean geometric normal of the surfaces
-that deposited photons into this bin.  At render time, any bin whose
-`avg_n` faces away from the query-point normal is rejected, preventing
-irradiance from leaking through thin geometry (see §6.5).
-
-**Memory:** 36 bytes × 32 bins × 786,432 pixels (1024×768) = **906 MB**.
-
-### 4.2 Bin Population (`dev_populate_bins_for_pixel`)
-
-For each pixel, the population pass:
-
-1. Traces the center ray, following specular bounces to the first
-   diffuse hit.
-2. Gathers all photons from the hash grid within the gather radius,
-   applying the Epanechnikov kernel, plane-distance filter, and
-   normal visibility check (same-hemisphere test).
-3. For each accepted photon, finds the nearest Fibonacci bin via
-   brute-force dot product scan ($O(N)$ for $N \le 32$) and
-   accumulates:
-   - `flux += photon_flux * w` (Epanechnikov weight)
-   - `dir += wi_world * photon_flux * w` (flux-weighted centroid)
-   - `avg_n += geom_normal * photon_flux` (flux-weighted surface normal)
-   - `weight += w`, `count += 1`
-4. Normalises centroid directions to unit length (falls back to
-   Fibonacci center if degenerate).
-
-The population is launched as a separate OptiX pass
-(`populate_bins_mode = 1`) before the render loop.
-
-### 4.3 Guided BSDF Bounce (B1)
-
-`dev_sample_guided_bounce()` in `optix_device.cu` samples a
-continuation direction proportional to the photon flux CDF, stratified
-across the SPP loop so that finte sample budgets distribute work
-correctly across all bins.
-
-#### 4.3.1 CDF Construction
-
-For each bin $k$ in the positive hemisphere ($\cos\theta_{n,k} > 0$,
-`count > 0`):
-
-$$
-w_k = \Phi_k \cdot \cos\theta_{n,k}, \qquad
-\text{cdf}[k] = \sum_{j \le k} w_j,  \qquad
-W = \text{cdf}[N-1]
-$$
-
-$\Phi_k$ is the bin's accumulated Epanechnikov-weighted scalar flux,
-and $\theta_{n,k}$ is the angle between the flux-weighted centroid
-direction and the surface normal. Bins below the tangent plane
-($\cos\theta_{n,k} \le 0$) or without photons (`count == 0`) do
-**not** contribute.
-
-#### 4.3.2 Bin Selection Strategy — Depth-Dependent
-
-The selection strategy differs by bounce depth because each bounce
-contributes proportionally to its path throughput:
-$$
-T_b \approx \rho^b \quad (\rho \approx 0.6{-}0.8\text{ for typical diffuse albedo})
-$$
-Bounce 0 has $T_0 = 1$ and dominates total pixel variance. Bounce 1
-has $T_1 \approx 0.7$, bounce 2 has $T_2 \approx 0.5$, etc. It
-therefore makes sense to prioritise coverage at bounce 0 before
-investing samples in deeper, attenuated bounces — this is **depth-first
-convergence**.
-
----
-
-##### Bounce 0: Sorted Cyclic Schedule
-
-Bins are sorted by flux weight $w_k = \Phi_k \cos\theta_{n,k}$
-(descending). Sample $s$ visits:
-$$
-\text{selected} = \text{sorted\_bins}[s \bmod n_{\text{active}}]
-$$
-where $n_{\text{active}}$ is the number of positive-hemisphere bins
-with photons. The result:
-
-| Sample | Bin visited |
-|--------|-------------|
-| 0 | most important (highest $w_k$) |
-| 1 | second most important |
-| $\vdots$ | $\vdots$ |
-| $n_{\text{active}}-1$ | least important |
-| $n_{\text{active}}$ | most important again (next cycle) |
-
-**Properties:**
-- With 1 SPP: the single sample always hits the most important bin.
-- With $S \ge n_{\text{active}}$ SPP: every bin is visited at least once.
-- With $S < n_{\text{active}}$ SPP: only the top $S$ bins are ever visited — exactly the right behaviour for fast preview renders.
-- Angular positions are irrelevant — every bin has its own slot in the sort order regardless of where it sits on the hemisphere.
-
-The insertion sort runs over $N \le 32$ register-resident floats
-($O(N^2/2) \approx 512$ comparisons), cheaper than the cone jitter that follows.
-
-**PDF invariance.** The flux-proportional PDF $p(\text{bin}_k) = w_k/W$
-is retained for MIS. This makes the scheme quasi-MC: the per-batch
-estimator is consistent (correct in the limit) even though individual
-samples are not independently drawn. Empirically, the bias is
-indistinguishable from noise for $S \ge 4$.
-
----
-
-##### Bounce $b \ge 1$: Stochastic Stratification with Bounce-Depth Rotation
-
-For deeper bounces (throughput already attenuated) the existing
-stratified scheme is used. The stratum for sample $s$ at depth $b$:
-$$
-\text{stratum} = (s + b \cdot 97) \bmod S
+v = x_i - x, \quad d_{\text{plane}} = n_x \cdot v
 $$
 $$
-\xi_s = \frac{\text{stratum} + u_s}{S} \cdot W, \qquad u_s \sim U(0,1)
+v_{\text{tan}} = v - n_x \, d_{\text{plane}}, \quad d_{\text{tan}}^2 = \|v_{\text{tan}}\|^2
 $$
 
-The prime stride 97 ($> $ `DEFAULT_MAX_BOUNCES`) ensures that bounce $b$
-of path $s$ uses a different CDF region than bounce $b{-}1$ of the
-same path, eliminating per-path directional correlation:
-
-| Path $s=0$, $S=16$ | Stratum |
-|--------------------|---------|
-| Bounce 1 | $97 \bmod 16 = 1$ |
-| Bounce 2 | $194 \bmod 16 = 2$ |
-| Bounce 3 | $291 \bmod 16 = 3$ |
-
-Marginal PDF per sample: $p(\text{bin}_k) = f_k$ — `dev_guided_bounce_pdf()`
-needs no modification.
-
-When `total_spp <= 1` the stratum formula collapses to
-`rng.next_float()` (pure random — fallback for previews).
-
-#### 4.3.3 Cone Jitter and Hemisphere Clamp
-
-After bin selection, a direction is sampled uniformly within a cone
-of half-angle:
-
-$$
-\alpha = \arccos\!\left(1 - \frac{2}{N}\right)
-$$
-
-centered on the normalised flux-centroid of the selected bin. If the
-sampled direction falls below the tangent plane, it is resampled (up
-to 8 attempts); if all attempts fail, the bin centroid direction is
-returned (which is guaranteed above the horizon by the CDF filter).
-
-**Fallback:** If $W = 0$ (no bins have positive-hemisphere flux), the
-function falls back to cosine-weighted hemisphere sampling.
-
-### 4.4 Guided NEE (B2)
-
-Instead of sampling emissive triangles from the power-based CDF
-alone, the guided NEE re-weights each triangle using the photon flux
-distribution:
-
-For each emissive triangle $i$:
-
-$$
-w_i^{\text{guided}} = p_i^{\text{orig}} \cdot \left(1 + \alpha \cdot
-\frac{\Phi_{\text{bin}(i)}}{\Phi_{\text{total}}}\right)
-$$
-
-where:
-- $p_i^{\text{orig}}$ is the original power-proportional CDF weight
-- $\alpha = 5.0$ (`NEE_GUIDED_ALPHA`) controls the flux-boost
-  strength
-- $\Phi_{\text{bin}(i)}$ is the flux of the nearest bin to the
-  direction from the hitpoint to the triangle centroid
-- $\Phi_{\text{total}} = \sum_k \Phi_k$ normalises the bin flux
-
-A temporary CDF is built on the GPU stack (up to 128 emissive
-triangles, `NEE_GUIDED_MAX_EMISSIVE`), sampled, and the modified PDF
-is used in the estimator for correct importance-sampling weighting.
-
-**Fallback conditions** (reverts to standard `dev_nee_direct`):
-- Bins have zero total flux
-- Scene has more than 128 emissive triangles
-
-The remaining NEE logic (bounce-dependent sample count, shadow ray,
-BSDF evaluation, solid-angle PDF conversion) is identical to the
-standard path.
-
-### 4.5 Cached Spectral Density (A1)
-
-On the first SPP frame (`frame_number == 0`), the photon density
-gather result at bounce 0 is written to a per-pixel spectral cache
-(`photon_density_cache`, `float[W*H*NUM_LAMBDA]`). On all subsequent
-frames, the cache is read directly, skipping the full hash-grid
-gather. This amortises the $O(k)$ photon gather cost across SPP.
-
----
-
-## 5. Debug Viewer (Interactive)
-
-The debug viewer is an interactive GLFW window rendering at 1 spp per
-frame via OptiX. It launches the same `__raygen__render` program with
-`is_final_render = 0`, which calls `debug_first_hit()`.
-
-### 5.1 First-Hit Rendering
-
-For each pixel:
-
-1. Trace a primary ray via OptiX.
-2. If the hit is emissive, return $L_e$.
-3. If the hit is specular, follow up to 4 specular bounces.
-4. At the first diffuse hit, perform **next-event estimation** (NEE):
-   sample one emissive triangle, cast a shadow ray, compute direct
-   illumination.
-
-This gives an interactive preview with direct lighting but no global
-illumination, at full frame rate on the GPU.
-
-### 5.2 NEE Debug PNG
-
-When `R` is pressed, before the full render begins, a single-frame
-NEE debug PNG is rendered with full $M$ shadow-ray samples and BSDF
-evaluation. This is saved to `output/out_debug_nee.png` and provides
-a quick direct-lighting preview.
-
-### 5.3 Debug Modes
-
-Switchable via keyboard (TAB to cycle, F-keys for overlays):
-
-| Mode        | Key | Description                          |
-|-------------|-----|--------------------------------------|
-| Full        | TAB | Direct lighting (default debug mode) |
-| Direct Only | TAB | NEE direct only                      |
-| Indirect Only | TAB | Photon indirect only               |
-| Photon Map  | TAB | Photon density visualisation         |
-| Normals     | TAB | Surface normals as RGB               |
-| Material ID | TAB | Distinct colour per material         |
-| Depth       | TAB | Distance to camera (greyscale)       |
-
-### 5.4 Debug Overlays
-
-| Key  | Overlay                             |
-|------|-------------------------------------|
-| F1   | Photon points                       |
-| F2   | Global photon map                   |
-| F3   | Caustic map selector (not yet impl.)|
-| F4   | Hash grid debug                     |
-| F5   | Photon directions                   |
-| F6   | PDFs                                |
-| F7   | Gather radius sphere                |
-| F8   | MIS weights                         |
-| F9   | Spectral colouring                  |
-| H    | Help overlay                        |
-
-### 5.5 Hover-Cell Inspection
-
-With mouse released (M key) and a map toggle enabled (F2/F3), moving
-the cursor over the image displays a panel with: cell index, photon
-count, flux sum/average, and dominant wavelength.
-
----
-
-## 6. Full Path Tracing (R Key)
-
-Pressing **R** triggers the progressive render pipeline:
-
-1. **NEE debug PNG** (single frame, shadow rays enabled)
-2. **Bin population pass** (`populate_photon_bins()`)
-3. **Progressive SPP loop** (`render_one_spp()`, 1 spp per iteration)
-4. **PNG output** (render, components, timing)
-
-### 6.1 Stratified Sub-Pixel Sampling (B3)
-
-When `is_final_render = 1` and `STRATA_X * STRATA_Y > 1`, sub-pixel
-offsets are generated from stratified jittered sampling:
-
-$$
-j_x = \frac{s_x + \xi_x}{S_x}, \quad
-j_y = \frac{s_y + \xi_y}{S_y}
-$$
-
-where $s_x = \text{sample\_index} \bmod S_x$,
-$s_y = (\text{sample\_index} / S_x) \bmod S_y$, and
-$\xi_x, \xi_y \sim U(0,1)$.
-
-Default: $S_x = S_y = 4$, giving $4 \times 4 = 16$ strata matching
-the default 16 SPP.
-
-### 6.2 Path Tracing Algorithm (`full_path_trace`)
-
-For each sample:
-
-1. Trace the camera ray.
-2. At each **specular** hit, follow the ideal reflection and
-   continue.
-3. At each **diffuse** hit:
-   - **NEE (direct lighting):** If bins are valid, use guided NEE
-     (`dev_nee_guided`, §4.4); otherwise, use standard NEE
-     (`dev_nee_direct`). Bounce-dependent sample count: $M=4$ at
-     bounce 0, $M=1$ at bounce $\ge 1$.
-   - **Photon density estimate (indirect):** If bins valid and
-     bounce 0 and frame > 0, read from cached spectral density
-     (§4.5). Otherwise, do full hash-grid gather. Result is
-     attenuated by $\max(v_{\text{NEE}}, \text{PHOTON\_SHADOW\_FLOOR})$
-     where $v_{\text{NEE}}$ is the NEE visibility fraction and
-     `PHOTON_SHADOW_FLOOR = 0.1` prevents fully killing indirect
-     light in deep shadow.
-   - **BSDF continuation:** At bounce 0 with valid bins, use guided
-     bounce (§4.3). At deeper bounces, use cosine-weighted hemisphere
-     sampling.
-4. **Throughput update:** $T_{k+1}(\lambda) = T_k(\lambda) \cdot K_d(\lambda)$
-
-5. **Russian roulette** after `MIN_BOUNCES_RR` (3):
-
-$$
-p_{rr} = \min(0.95,\; \max_\lambda T(\lambda))
-$$
-
-### 6.3 NEE Direct Lighting (`dev_nee_direct`)
-
-Standard power-proportional CDF sampling of emissive triangles:
-
-1. Sample triangle from CDF (binary search).
-2. Sample uniform point on triangle.
-3. Compute direction, cosines, shadow ray.
-4. Evaluate BSDF and emission.
-5. Convert area PDF to solid-angle PDF:
-
-$$
-p(\omega_i) = p_{\text{tri}} \cdot \frac{1}{A_{\text{tri}}} \cdot
-\frac{d^2}{\cos\theta_o}
-$$
-
-6. Accumulate:
-
-$$
-\hat{L}_{\text{NEE}} = \frac{1}{M} \sum_{s=1}^{M}
-\frac{f_s \cdot L_e \cdot \cos\theta_x}{p(\omega_i)}
-$$
-
-The visibility fraction (unoccluded samples / total samples) is
-returned alongside the radiance estimate.
-
-### 6.4 Density Estimator
-
-At each diffuse hit, the photon map contribution is:
-
-$$
-L_o(x,\omega_o,\lambda) \approx
-    \frac{1.5}{\pi r^2 \cdot N_{\text{photons}}}
-    \sum_{i} \Phi_i(\lambda) \,
-    f_s(x,\omega_i,\omega_o,\lambda) \,
-    W(\|x - x_i\|)
-$$
-
-where $r$ is the gather radius, $N_{\text{photons}}$ is the total
-number of emitted photons, 1.5 is the Epanechnikov kernel correction
-factor, and $W$ is the Epanechnikov kernel:
-
-$$
-W(d) = 1 - \frac{d^2}{r^2}
-$$
-
-### 6.5 Surface Consistency Filtering
-
-To avoid cross-surface contamination a photon is accepted only if **all
-three** of the following conditions hold:
-
-1. **Plane-distance check** — $|\langle \mathbf{n}_x, \mathbf{x}_i - \mathbf{x} \rangle| < \tau$
-   ($\tau = $ `DEFAULT_SURFACE_TAU`, default 0.02)
-2. **Radial check** — $\|\mathbf{x} - \mathbf{x}_i\| < r$
-3. **Normal visibility check** (new) — $\langle \mathbf{n}_{\text{photon}}, \mathbf{n}_x \rangle > 0$,
-   where $\mathbf{n}_{\text{photon}}$ is the geometric normal of the
-   surface on which the photon was deposited.
-
-Condition 3 is the primary defence against **irradiance leaking through
-thin walls**.  The plane-distance check (condition 1) already catches
-many such cases, but fails when:
-- the wall is thinner than $\tau$ (common in CAD-style scenes), or
-- `surface_tau` was deliberately set loose for smoother gradients.
-
-A photon deposited on the *back face* of a wall has
-$\mathbf{n}_{\text{photon}}$ pointing opposite to $\mathbf{n}_x$
-(the front-face query normal), so $\langle \mathbf{n}_{\text{photon}},
-\mathbf{n}_x \rangle \le 0$ and the photon is rejected regardless of
-its spatial proximity.
-
-The normal $\mathbf{n}_{\text{photon}}$ is the **geometric** normal at
-the photon hit, stored in `PhotonSoA::norm_x/y/z` (CPU) and
-`params.photon_norm_x/y/z` (device).  For the precomputed
-`CellBinGrid`, the **flux-weighted average** surface normal
-(`PhotonBin::avg_nx/ny/nz`) is compared against the query-point
-normal at O(1) lookup time.
-
-### 6.6 Progressive Accumulation
-
-The spectrum buffer and sample count are accumulated across frames.
-The sRGB output is the running average, tone-mapped per frame via
-CIE XYZ -> sRGB with gamma correction.
-
-### 6.7 Component Outputs
-
-After the full render completes, four PNG files are saved:
-
-| File                        | Contents                           |
-|-----------------------------|------------------------------------|
-| `output/render.png`         | Final combined render              |
-| `output/out_nee_direct.png` | NEE direct lighting only           |
-| `output/out_photon_indirect.png` | Photon indirect only          |
-| `output/out_combined.png`   | NEE + photon (spectral sum)        |
-| `output/out_debug_nee.png`  | Single-frame NEE debug preview     |
-
-### 6.8 GPU Kernel Profiling
-
-Per-pixel `clock64()` timers accumulate across all bounces and
-samples. After the render, `print_kernel_profiling()` prints a
-breakdown of time spent in:
-
-- Ray tracing (`optixTrace`)
-- NEE (shadow rays + light sampling)
-- Photon gather (density estimation)
-- BSDF evaluation + continuation
-
-### 6.9 Adaptive Sampling
-
-Screen-noise adaptive sampling concentrates samples in high-variance
-regions (glossy reflections, shadow boundaries, caustics) and skips
-stable regions once estimated noise falls below a configurable
-threshold, reducing total sample count without visible quality loss.
-
-#### 6.9.1 Noise Metric
-
-The per-pixel noise metric is the **relative standard error** of the
-CIE Y (luminance) component of a chosen radiance signal:
-
-$$
-r_i = \frac{\mathrm{se}_i}{|{\mu}_i| + \varepsilon}, \quad
-\mathrm{se}_i = \sqrt{\frac{\sigma^2_i}{n_i}}, \quad
-\sigma^2_i = \frac{\sum Y_j^2}{n_i} - \left(\frac{\sum Y_j}{n_i}\right)^2
-$$
-
-where $\varepsilon = 10^{-4}$ prevents division by zero in dark
-regions and $n_i$ is the current sample count for pixel $i$.
-
-**Noise signal choice** (`ADAPTIVE_NOISE_USE_DIRECT_ONLY` in
-`config.h`, default `true`):
-
-| Setting | Signal | Variance | Convergence |
-|---------|--------|----------|-------------|
-| `true`  | NEE direct-only luminance $Y_{\text{NEE}}$ | Low (explicit shadow rays, bounded) | Fast — stable within ~4 SPP |
-| `false` | Full path luminance $Y_{\text{combined}}$ | Enormous (Russian roulette, photon gather, specular chains) | May never converge — **broken** |
-
-Using the full combined path radiance as the variance proxy was the
-root cause of the original failure: its per-sample variance is orders
-of magnitude larger than that of the NEE direct component, so
-$\mathrm{se}/\mu$ does not decrease fast enough to fall below the
-threshold at any reasonable SPP. Switching to $Y_{\text{NEE}}$ fixes
-this — direct lighting converges to a stable estimate in a handful of
-samples, and its spatial pattern (bright near lights, dark in shadow)
-is the correct guide for identifying pixels that genuinely need more
-samples.
-
-To avoid isolated quiet pixels surrounded by noisy ones, the active
-mask criterion uses a **neighbourhood maximum** over a
-$(2R+1) \times (2R+1)$ window:
-
-$$
-r_i^{\text{nbr}} = \max_{|dx| \le R,\; |dy| \le R}\; r_{i+\Delta}
-$$
-
-A pixel is marked **active** (continue sampling) if
-$r_i^{\text{nbr}} > \tau$, where $\tau$ =`adaptive_threshold`
-(default 0.02, i.e., 2% relative noise).
-
-#### 6.9.2 Sampling Policy
-
-The adaptive pass proceeds in two phases inside
-`OptixRenderer::render_final()` (GPU path) and
-`Renderer::render_frame()` (CPU path):
-
-| Phase | Pass range | Behaviour |
-|-------|------------|-----------|
-| Warmup | `0` to `min_spp - 1` | All pixels active; mask not evaluated |
-| Adaptive | `min_spp` to `max_spp` | Mask recomputed every `update_interval` passes; converged pixels skipped |
-
-The loop exits early when **no active pixels remain**
-(`active_count == 0`).
-
-Default `RenderConfig` values:
-
-| Field | Default | Notes |
-|-------|---------|-------|
-| `adaptive_sampling` | `false` | Opt-in; uniform sampling when disabled |
-| `adaptive_min_spp` | 4 | Warmup passes (minimum output SPP) |
-| `adaptive_max_spp` | 0 | 0 → inherits `samples_per_pixel` |
-| `adaptive_update_interval` | 1 | Mask refresh period (passes) |
-| `adaptive_threshold` | 0.02 | 2% relative noise target |
-| `adaptive_radius` | 1 | Half-width $R=1$ → 3×3 neighbourhood |
-
-#### 6.9.3 GPU Implementation
-
-Three additional per-pixel device buffers are allocated by
-`OptixRenderer` when adaptive sampling is enabled:
-
-| Buffer | Type | Content |
-|--------|------|---------|
-| `d_lum_sum_` | `float [W×H]` | Running $\sum Y_i$ per pixel |
-| `d_lum_sum2_` | `float [W×H]` | Running $\sum Y_i^2$ per pixel |
-| `d_active_mask_` | `uint8_t [W×H]` | 1 = active (trace), 0 = skip |
-
-Pointers are forwarded to `LaunchParams` (`lum_sum`, `lum_sum2`,
-`active_mask`) and are `nullptr` when adaptive sampling is disabled,
-leaving all non-adaptive launches unaffected.
-
-In `__raygen__render`, two changes are made relative to the
-non-adaptive path:
-
-1. **Early exit** — checked before any tracing:
-   ```cuda
-   if (params.active_mask && params.active_mask[pixel_idx] == 0)
-       return;
-   ```
-2. **Luminance moment accumulation** — after spectrum accumulation,
-   a CIE Y value is computed and added to both running-sum buffers.
-   The source spectrum is chosen by `ADAPTIVE_NOISE_USE_DIRECT_ONLY`:
-   ```cuda
-   const Spectrum& lum_proxy = ADAPTIVE_NOISE_USE_DIRECT_ONLY
-       ? L_nee_accum   // explicit shadow-ray direct; low variance
-       : L_accum;      // full multi-bounce path; high variance (not recommended)
-   ```
-
-The mask-update CUDA kernel `k_update_mask` (in
-`src/optix/adaptive_sampling.cu`, 16×16 blocks) is called via the
-host function `adaptive_update_mask(const AdaptiveParams&)` once
-per `update_interval` passes:
-
-```
-for each pixel i (one thread):
-  n = sample_counts[i]
-  if n < min_spp → active_mask[i] = 1; continue
-  mu     = lum_sum[i] / n
-  var    = lum_sum2[i]/n − mu²
-  r_pix  = sqrt(max(0,var)/n) / (|mu| + 1e−4)
-  r_nbr  = max r over (2R+1)×(2R+1) neighbourhood
-  active_mask[i] = (r_nbr > threshold) ? 1 : 0
-  if active: atomicAdd(active_count, 1)
+The tangential distance $d_{\text{tan}}$ replaces the 3D Euclidean distance
+in **all** gather operations: range queries, k-NN, density estimation.
+
+```cpp
+inline float tangential_distance2(float3 query_pos, float3 query_normal,
+                                   float3 photon_pos) {
+    float3 v = photon_pos - query_pos;
+    float d_plane = dot(query_normal, v);
+    float3 v_tan = v - query_normal * d_plane;
+    return dot(v_tan, v_tan);
+}
 ```
 
-`active_count` is returned to the host; zero triggers early loop
-exit.
+**Which normal:** The tangential metric and plane distance filter use
+**geometric normals** (face normals), not shading normals, for stability
+near triangle edges.
 
-#### 6.9.4 CPU Implementation
+**Effective τ at runtime:**
+```cpp
+float effective_tau = std::max(config.plane_distance_threshold,
+                               PLANE_TAU_EPSILON_FACTOR * config.ray_epsilon);
+```
 
-On the CPU path (`Renderer::render_frame()`), the same policy runs
-with `std::vector<uint8_t>` mask and `std::vector<float>`
-`lum_sum`/`lum_sum2` buffers. A lambda mirrors the GPU
-`k_update_mask` logic. OpenMP parallelism is preserved within each
-per-pass sample loop; the mask update iterates serially between
-passes.
+Implementation: `src/photon/surface_filter.h` + `src/photon/density_estimator.h`.
 
-`Renderer::trace_path()` returns `TraceResult { combined, nee_direct }`
-and `FrameBuffer::accumulate()` accepts an optional `const Spectrum* proxy_L`.
-When `ADAPTIVE_NOISE_USE_DIRECT_ONLY == true`, `nee_direct` is passed as
-the proxy so `lum_sum`/`lum_sum2` track direct-only luminance, identical
-in spirit to the GPU path.
+### 6.4 Surface Consistency Filter
 
-### 6.10 SPPM (Stochastic Progressive Photon Mapping)
+Reject photon $i$ unless ALL conditions pass:
+1. **Tangential distance**: $d_{\text{tan},i}^2 < r^2$
+2. **Plane distance**: $|n_x \cdot (x_i - x)| < \tau$
+3. **Normal compatibility**: $\text{dot}(n_{\text{photon}}, n_{\text{query}}) > 0$
+4. **Direction consistency**: $\text{dot}(\omega_i, n_{\text{query}}) > 0$
 
-An alternative rendering mode based on Hachisuka & Jensen (2009).
-Instead of guided-bounce path tracing with a fixed photon map, SPPM
-rebuilds the photon map every iteration and progressively shrinks a
-per-pixel gather radius to converge both bias and variance.
+Condition 1 uses tangential distance (the primary fix for planar blocking).
+Conditions 2–4 are additional safety filters.
 
-#### 6.10.1 Algorithm
+### 6.5 GPU-Friendly Adaptive k-NN via Grid Shell Expansion
 
-Each SPPM iteration consists of three passes:
+```
+layer = 0
+while found < k:
+    visit all cells at Manhattan distance == layer from query cell
+    for each photon in visited cells:
+        compute tangential distance (§6.3)
+        apply surface consistency filter (§6.4)
+        if passes: update k-NN candidate list
+    layer++
 
-1. **Camera pass** — trace eye paths through specular surfaces (glass
-   via Fresnel routing, mirrors via pure reflection) until the first
-   diffuse hit. Record the "visible point" (position, normal,
-   material, throughput). Evaluate next-event estimation (NEE) at the
-   visible point for the direct-lighting component $L_{\text{direct}}$.
+radius = sqrt(max tangential distance in k-NN list)
+```
 
-2. **Photon pass** — emit $N_p$ photons from lights, trace them
-   through the scene. Reuses the existing `trace_photons()` and
-   hash grid infrastructure.
+Properties: no recursion, no priority queues, no warp divergence, fully GPU
+compatible. Same result as tree-based k-NN (with tangential metric).
 
-3. **Gather pass** — for each pixel with a valid visible point, query
-   the hash grid within the pixel's current radius $r_i$. Count $M_i$
-   photons and accumulate **Epanechnikov-kernel-weighted** BSDF flux:
+**GPU k-NN radius policy:** Clamp to `max_radius` and accept fewer than k
+photons in sparse regions. This introduces bounded bias acceptable for the
+GPU interactive path. CPU KD-tree is unbounded for ground truth.
+
+### 6.6 Density Estimation
+
+At a diffuse camera hitpoint $x$ with outgoing direction $\omega_o$:
 
 $$
-\Phi_{\text{new}} = \sum_{j=1}^{M_i} w_j \cdot f_s(x, \omega_o, \omega_j, \lambda) \cdot \Phi_j(\lambda)
-\quad\text{where}\quad w_j = 1 - \frac{d_j^2}{r_i^2}
+L_{\text{photon}}(x,\omega_o,\lambda) = \frac{1}{\pi r^2}\sum_{i\in N(x)} W(d_{\text{tan},i}, r)\, \Phi_i(\lambda)\, f_s(x,\omega_i,\omega_o,\lambda)
 $$
 
+Where $d_{\text{tan},i}$ is the tangential distance and $W(d, r)$ is the kernel:
+
+| Kernel | Normalisation denominator | Weight $W(d, r)$ |
+|--------|--------------------------|------------------|
+| Box | $\pi r^2$ | $1$ |
+| Epanechnikov | $\frac{\pi}{2} r^2$ | $1 - d_{\text{tan}}^2 / r^2$ |
+
+The area denominator $\pi r^2$ is the tangential disk area. The BSDF $f_s$
+is applied **per-photon** inside the sum, not as an overall multiplier.
+
+### 6.7 Gather Radius Strategy
+
+| Mode | Radius per hitpoint |
+|------|---------------------|
+| Fixed | `config.gather_radius` (same for all pixels) |
+| k-NN adaptive | Find k nearest → radius = tangential distance to k-th |
+| SPPM progressive | Per-pixel shrinking radius (Hachisuka & Jensen 2009) |
+
+Default: **k-NN adaptive** (k ≈ 100) for both CPU and GPU.
+
+### 6.8 Spatial Structure Comparison
+
+| Structure | Dynamic Radius | GPU Friendly | Recommendation |
+|-----------|---------------|--------------|----------------|
+| KD-tree | Yes (unbounded) | Poor (recursion, divergence) | **CPU reference only** |
+| Uniform/Hash Grid | Yes (bounded by max_radius) | **Excellent** | **GPU primary** |
+
+**Conclusion:** Kernel fix > structure change. The tangential disk kernel
+fixes the artifact regardless of spatial structure. The GPU uses the most
+GPU-friendly structure (uniform/hash grid), not the most flexible one
+(KD-tree).
+
+### 6.9 Optional: Triangle ID Filtering
+
+For scenes with clean, watertight geometry, store `triangle_id` per photon
+and accept only photons deposited on the same triangle or smoothing group.
+The tangential kernel + surface consistency filter is sufficient for most
+scenes.
+
+---
+
+## 7. Camera Pass (First-Hit Only)
+
+Camera rays follow **specular-only bounces** (mirror, glass) until the
+first diffuse surface, then evaluate NEE + photon gather. No diffuse
+continuation.
+
+### 7.1 Per Pixel
+
+1. Generate camera ray (with DOF if enabled, stratified sub-pixel jitter)
+2. Trace ray → find first intersection
+3. If miss: background colour / environment
+4. If hit emissive: add emission directly (× specular chain throughput)
+5. If hit **specular (delta) surface** (mirror/glass):
+   - Bounce deterministically (reflect or refract via Fresnel)
+   - Multiply specular chain throughput by BSDF factor
+   - Delta BSDF handling: delta PDFs cancel with the delta measure —
+     treat as deterministic events, do NOT divide by a PDF
+   - Continue until hitting a diffuse surface or exceeding max specular
+     bounces (N=8)
+6. If hit **diffuse/glossy non-emissive surface**:
+   - Evaluate NEE (§7.2) and photon gather (§7.3)
+   - Multiply result by accumulated specular chain throughput
+
+### 7.1.1 Specular Chain Throughput
+
+```
+T = 1.0  // initial throughput
+for each specular bounce:
+    // For perfect mirror:  T *= reflectance(λ)
+    // For glass refract:   T *= transmittance(λ) * (n_i/n_t)²
+    // For glass reflect:   T *= F(θ, λ)  (Fresnel reflectance)
+
+// At diffuse endpoint:
+L_pixel = T * (L_emission + L_direct + L_indirect)
+```
+
+**Critical:** If the specular chain throughput $T$ is omitted, mirrors and
+glass views will have **wrong brightness**.
+
+**Spectral dispersion:** For glass materials with wavelength-dependent IOR,
+the Fresnel reflectance, refraction direction, and transmittance are all
+$\lambda$-dependent. The BSDF sampling and PDF must be computed per
+wavelength bin.
+
+### 7.2 NEE (Direct Lighting)
+
+At the first-hit diffuse/glossy surface point $x$ with outgoing direction
+$\omega_o$ and surface normal $n_x$:
+
+1. Sample M light points from emitter distribution
+2. For each sampled light point $y_j$: cast shadow ray, evaluate BSDF,
+   compute contribution
+3. Average over M samples
+
+**Coverage-aware stratified sampling:**
+
+$$
+p_{\text{select}}(i) = (1 - c) \cdot p_{\text{power}}(i) + c \cdot p_{\text{area}}(i)
+$$
+
+Where $c = 0.3$ (default). Two CDFs: `power_cdf` ($A_t \cdot \bar{L}_{e,t}$)
+and `area_cdf` ($A_t$ only). The mixture PDF is always positive for any
+emissive triangle (at $c > 0$).
+
+**Area-sampling estimator (mandatory):**
+
+$$
+L_{\text{direct}} = \frac{1}{M}\sum_{j=1}^{M} \frac{f_s(x,\omega_j,\omega_o,\lambda)\, L_e(y_j,-\omega_j,\lambda)\, |\cos\theta_x|\, |\cos\theta_y|}{p_A(y_j)\, \|x - y_j\|^2} \cdot V(x, y_j)
+$$
+
+where $p_A(y_j) = p_{tri}(t_j) / A_{t_j}$.
+
+### 7.3 Photon Density Estimation (Indirect Lighting)
+
+Query the photon map (KD-tree or hash grid) at the hit position:
+$L_{\text{indirect}} = L_{\text{photon}}(x, \omega_o, \lambda)$
+
+### 7.4 Final Pixel Radiance
+
+$$
+L_{\text{pixel}} = L_{\text{emission}} + L_{\text{direct}} + L_{\text{indirect}}
+$$
+
+No camera ray continuation. All multi-bounce transport is in the photon map.
+
+---
+
+## 8. SPPM (Progressive Photon Mapping)
+
+SPPM (Hachisuka & Jensen 2009) is the **default render mode**. Each
+iteration:
+
+1. **Camera pass**: trace eye ray to first diffuse hit → visible point.
+   Evaluate NEE at visible point for $L_{\text{direct}}$.
+2. **Photon pass**: emit $N_p$ photons, trace with full bounce logic,
+   build spatial index.
+3. **Gather pass**: for each visible point, query photons within $r_i$
+   using tangential disk kernel. Count $M_i$ photons and accumulate
+   Epanechnikov-kernel-weighted BSDF flux.
 4. **Progressive update** — per pixel:
 
 $$
@@ -871,146 +584,384 @@ $$
 \tau_{\text{new}} = (\tau_i + \Phi_{\text{new}}) \cdot \left(\frac{r_{\text{new}}}{r_i}\right)^2
 $$
 
-5. **Reconstruction** (after $k$ iterations):
+5. **Reconstruct** (after $k$ iterations):
 
 $$
-L(x, \omega_o, \lambda) = \frac{\tau(\lambda)}{(\pi / 2) \cdot r^2 \cdot k \cdot N_p}
+L(x, \omega_o, \lambda) = \frac{\tau(\lambda)}{k_w \cdot r^2 \cdot k \cdot N_p}
     + \frac{L_{\text{direct}}(\lambda)}{k}
 $$
 
-   The denominator uses $\pi r^2 / 2$ (effective Epanechnikov kernel
-   area) instead of a flat-kernel $\pi r^2$.
+   The $k_w$ is $\pi$ for box kernel, $\pi/2$ for Epanechnikov.
 
-The shrinkage parameter $\alpha \in (0,1)$ controls the rate of
-radius reduction. The classic value $\alpha = 2/3$ balances bias
-reduction with variance stability.
+The shrinking radius $r_i$ applies to **tangential distance**, not 3D
+Euclidean. The shrinkage parameter $\alpha \in (0,1)$ defaults to $2/3$.
 
-#### 6.10.2 Configuration
+### 8.1 Configuration
 
-| `RenderConfig` Field | Default | Notes |
-|----------------------|---------|-------|
-| `sppm_enabled` | `false` | Enable SPPM mode |
-| `sppm_iterations` | 64 | Number of camera+photon+gather cycles |
+| Field | Default | Notes |
+|-------|---------|-------|
+| `sppm_iterations` | 64 | Camera+photon+gather cycles |
 | `sppm_alpha` | $2/3$ | Shrinkage factor |
 | `sppm_initial_radius` | 0.1 | Starting gather radius |
 | `sppm_min_radius` | $10^{-5}$ | Floor clamp |
 
-#### 6.10.3 Implementation
+### 8.2 Implementation
 
 - **Core types** (`src/core/sppm.h`): `SPPMPixel`, `SPPMBuffer`,
   `sppm_progressive_update()`, `sppm_reconstruct()`.
 - **CPU gather** (`src/photon/density_estimator.h`): `sppm_gather()`
-  — same surface/normal/direction filters as the standard estimator.
+  — with tangential disk kernel and surface consistency filters.
 - **CPU render loop** (`src/renderer/renderer.cpp`): `render_sppm()`.
-- **GPU camera pass** (`src/optix/optix_device.cu`):
-  `sppm_camera_pass()` — dispatched in `__raygen__render` when
-  `sppm_mode == 1`.
-- **GPU gather pass** (`src/optix/optix_device.cu`):
-  `sppm_gather_pass()` — dispatched when `sppm_mode == 2`. Includes
-  in-place progressive update and tonemap.
+- **GPU camera pass** (`src/optix/optix_device.cu`): `sppm_camera_pass()`.
+- **GPU gather pass** (`src/optix/optix_device.cu`): `sppm_gather_pass()`.
 - **GPU render loop** (`src/optix/optix_renderer.cpp`):
-  `OptixRenderer::render_sppm()` — allocates SoA visible-point
-  buffers, loops iterations, launches camera → photon → gather.
+  `OptixRenderer::render_sppm()`.
 
-Visible-point data uses SoA layout on the GPU (separate buffers for
-position x/y/z, normal x/y/z, wo x/y/z, material ID, UV, throughput,
-valid flag) to match the existing photon SoA convention.
+### 8.3 Hash Grid Sizing for SPPM
 
-#### 6.10.4 Advantages over Fixed-Radius Gather
-
-- Converges to the correct result (consistent estimator).
-- Caustics sharpen progressively as the radius shrinks.
-- No per-pixel neighbour search expansion needed.
-
-#### 6.10.5 Hash Grid Sizing for SPPM
-
-In SPPM mode, `trace_photons()` receives a `grid_radius_override`
-equal to `sppm_initial_radius` (default 0.1). This sets the hash grid
-`cell_size = 2 × sppm_initial_radius = 0.2`, ensuring the 3×3×3 cell
-neighbourhood always covers the maximum per-pixel gather radius. As
-the per-pixel radii shrink over iterations, fewer cells are queried
-per pixel, keeping the gather efficient.
-
-The GPU gather pass uses `visited_keys[64]` (up from 27) for
-robustness when `cell_size` differs from the query radius.
-
-#### 6.10.6 CLI Flags
-
-| Flag             | Description                          |
-|------------------|--------------------------------------|
-| `--sppm`         | Enable SPPM (R key triggers SPPM)    |
-| `--sppm-iterations N` | Set iteration count (implies `--sppm`) |
-| `--sppm-radius R`     | Set initial radius (implies `--sppm`) |
+In SPPM mode, `trace_photons()` receives a `grid_radius_override` equal to
+`sppm_initial_radius`. Cell size = `2 × sppm_initial_radius`, ensuring the
+neighbour search always covers the maximum per-pixel gather radius.
 
 ---
 
-## 7. Spectral Framework
+## 9. Spectral → RGB Output
 
-### 7.1 Representation
+1. Integrate spectrum against CIE XYZ curves (Wyman Gaussian fit)
+2. Convert XYZ → linear sRGB
+3. Tone map: **ACES Filmic** (replaces Reinhard)
+4. Gamma correct (sRGB transfer function)
 
-All colour computation uses a `Spectrum` struct with `NUM_LAMBDA =
-32` float bins covering 380--780 nm (bin width ~12.5 nm). No RGB
-shortcuts are used in the light transport.
-
-### 7.2 CIE Colour Matching
-
-The final spectrum-to-sRGB conversion uses an analytic approximation
-of the CIE 1931 colour matching functions (Wyman et al. Gaussian
-fit). The pipeline is:
-
-$$
-\text{Spectrum} \xrightarrow{\text{CIE XYZ}} (X,Y,Z)
-\xrightarrow{\text{sRGB matrix}} (R,G,B)_{\text{linear}}
-\xrightarrow{\gamma} (R,G,B)_{\text{sRGB}}
-$$
-
-Normalisation: $X, Y, Z$ are divided by $\sum \bar{y}(\lambda)$ so
-that a flat-1.0 spectrum maps to $Y = 1$.
-
-### 7.3 Blackbody Emission
-
-Emissive materials with `Ke` in the MTL file are converted to a
-Planck blackbody spectrum at a configurable colour temperature,
-scaled by the luminance of the `Ke` value.
+Same pipeline for all component buffers. Both CPU and GPU use the identical
+ACES pipeline for fair PSNR comparison.
 
 ---
 
-## 8. BSDF Models
+## 10. BSDF Models
 
 | Model      | $f_s$                            | Sampling PDF                     |
 |------------|----------------------------------|----------------------------------|
-| Lambertian | $K_d / \pi$                       | $\cos\theta / \pi$              |
-| Mirror     | ideal specular reflection         | delta distribution               |
-| Glass      | Fresnel-weighted reflect/refract  | Schlick approximation            |
-| Glossy     | GGX microfacet (Cook-Torrance)   | VNDF sampling (Heitz 2018)       |
+| Lambertian | $K_d / \pi$                      | $\cos\theta / \pi$               |
+| Mirror     | ideal specular reflection         | delta distribution                |
+| Glass      | Fresnel-weighted reflect/refract  | Schlick approximation             |
+| Glossy     | GGX microfacet (Cook-Torrance)   | VNDF sampling (Heitz 2018)        |
 
-All BSDF evaluations and PDFs are spectral: the albedo $K_d(\lambda)$
-or $K_s(\lambda)$ is evaluated per-bin.
-
-**Runtime note:** The OptiX device code currently evaluates only
-**Lambertian** and **mirror** BSDFs. Glossy and glass material types
-fall through to specular bounces (mirror reflection) but do not use
-the full GGX microfacet model on the device.
+All BSDF evaluations are spectral: albedo $K_d(\lambda)$ or $K_s(\lambda)$
+is evaluated per-bin. For glass with wavelength-dependent IOR, Fresnel
+reflectance and refraction angle vary per bin (spectral dispersion).
 
 ---
 
-## 9. OptiX Program Structure
+## 11. Debug / Component Outputs
 
-All device code lives in a single compilation unit
-`src/optix/optix_device.cu`, compiled to PTX via a custom `nvcc`
-command with `--use_fast_math` (not CMake's CUDA object compilation,
-to avoid config-dependent output paths on MSVC).
+### 11.1 Output Files
+
+| File | Contents |
+|------|----------|
+| `out_nee_direct.png` | NEE-only direct component |
+| `out_photon_indirect.png` | Photon density only |
+| `out_combined.png` | Sum of above |
+| `out_photon_caustic.png` | Caustic map contribution |
+
+Multi-frame naming: `frame_NNNN_out_*.png`
+
+### 11.2 Render Modes
+
+| Mode | Description |
+|------|-------------|
+| First-hit debug | Normals / material ID / depth (no photon gather, no NEE) |
+| DirectOnly | NEE direct lighting only (no photon gather) |
+| IndirectOnly | Photon density terms only (no NEE) |
+| Combined | Direct + indirect |
+| PhotonMap | Raw photon density visualisation (heat map) |
+
+### 11.3 Debug Viewer Key Bindings
+
+| Key | Action |
+|-----|--------|
+| F1 | Toggle photon point visualisation |
+| F2 | Toggle global photon map |
+| F3 | Toggle caustic photon map |
+| F4 | Toggle hash grid / KD-tree cell visualisation |
+| F5 | Toggle photon direction arrows |
+| F6 | Toggle PDF display |
+| F7 | Toggle gather radius sphere |
+| F8 | Toggle MIS weights |
+| F9 | Toggle spectral colouring mode |
+| TAB | Cycle render modes |
+| **P** | Recompute photons (re-run photon pass, rebuild spatial index, save binary) |
+| 1–4 | Switch scene |
+| +/− | Adjust light intensity |
+| W/A/S/D | Camera movement |
+| Space/Ctrl | Camera up/down |
+| Mouse | Look around |
+| M | Toggle mouse capture |
+| ESC | Cancel render → release mouse → quit (3-tier) |
+| Q | Quit immediately |
+
+### 11.4 Hover Cell Overlay
+
+When hovering over a spatial cell with mouse released and map toggle enabled
+(F2/F3): cell coordinate, photon count, sum/average flux, dominant
+wavelength, gather radius, map type (global / caustic).
+
+---
+
+## 12. CPU vs GPU: Dual Implementation
+
+### 12.1 Two Implementations
+
+| | CPU Reference | GPU (OptiX) |
+|---|---|---|
+| Purpose | Ground truth, validation | Interactive, production |
+| Spatial index | KD-tree (arbitrary radius) | Uniform grid / hash grid |
+| Photon transport | Identical algorithm | Identical algorithm |
+| Gather | KD-tree range query + tangential kernel | Grid shell-expansion k-NN + tangential kernel |
+| Allowed tweaks | None — exact physics | Approximate kernels, capped photon counts |
+| RNG | PCG, deterministic seed | PCG, same seed → same result |
+
+### 12.2 Shared Code (Header-Only or Templated)
+
+| Component | Location | Shared? |
+|---|---|---|
+| `Spectrum`, `PhotonSoA`, `SPPMPixel` | `src/core/` | Yes |
+| KD-tree build + query | `src/photon/kd_tree.h` | Yes (CPU reference) |
+| Hash grid build | `src/photon/hash_grid.h` | Yes (CPU build); GPU query in CUDA |
+| BSDF evaluate/sample/pdf | `src/bsdf/bsdf.h` | Yes |
+| Emitter sampling | `src/photon/emitter.h` | Yes |
+| Density estimator + surface filter | `src/photon/density_estimator.h` | Yes |
+| SPPM update/reconstruct | `src/core/sppm.h` | Yes |
+
+### 12.3 CPU Reference Renderer
+
+- `Renderer::build_photon_maps()` — trace photons, build KD-tree
+- `Renderer::render_frame()` — first-hit → NEE + photon gather
+- `Renderer::render_sppm()` — iterate: camera pass, photon pass, gather, update
+
+### 12.4 GPU Renderer
+
+- `OptixRenderer::trace_photons()` — GPU photon emission + bounce
+- `OptixRenderer::render_one_spp()` — first-hit, NEE, photon gather via hash grid + tangential kernel
+- `OptixRenderer::render_sppm()` — 3-pass loop
+
+### 12.5 Parity Contract
+
+| Mode | Contract | Verification |
+|------|----------|--------------|
+| **Normal** | Distributionally equivalent results | Integration tests: PSNR thresholds |
+| **Deterministic debug** | Bitwise-reproducible within same platform | `--deterministic` flag |
+
+### 12.6 Allowed GPU Tweaks
+
+The GPU implementation **may**:
+- Use hash grid / uniform grid instead of KD-tree
+- Use shell-expansion k-NN instead of tree-based k-NN
+- Cap photons-per-cell to limit kernel divergence
+- Use box kernel instead of Epanechnikov
+- Use lower photon counts for interactive preview
+
+The GPU implementation **must NOT**:
+- Change the deposition rule (`lightPathDepth ≥ 2`)
+- Change the BSDF formulas or PDFs
+- Mix wavelength bins
+- Include direct lighting in the photon map
+- Use 3D Euclidean distance instead of tangential distance in gather
+- Omit surface consistency filters
+
+---
+
+## 13. Integration Tests (CPU ↔ GPU)
+
+### 13.1 Test Scene
+
+Binary Cornell Box (5 grey/coloured walls, 1 emissive quad). Resolution:
+64×64 for fast testing.
+
+### 13.2 Test Harness
+
+```cpp
+struct IntegrationTestConfig {
+    int    width         = 64;
+    int    height        = 64;
+    int    num_photons   = 100000;
+    float  gather_radius = 0.1f;
+    int    nee_samples   = 16;
+    int    spp           = 16;
+    int    max_bounces   = 4;
+    uint32_t rng_seed    = 42;
+};
+```
+
+### 13.3 Test Cases
+
+| Test | What it validates | Threshold |
+|---|---|---|
+| `CPU_GPU.DirectLightingMatch` | NEE-only renders agree | PSNR > 40 dB |
+| `CPU_GPU.PhotonIndirectMatch` | Photon density agreement | PSNR > 30 dB |
+| `CPU_GPU.CombinedMatch` | Full render agreement | PSNR > 30 dB |
+| `CPU_GPU.SPPMConvergence` | SPPM after 16 iterations | PSNR > 25 dB |
+| `CPU_GPU.CausticMapMatch` | Caustic photon contribution | PSNR > 25 dB |
+| `CPU_GPU.AdaptiveRadiusMatch` | k-NN adaptive radius | PSNR > 25 dB |
+| `CPU_GPU.EnergyConservation` | Total energy within 5% | ratio ∈ [0.95, 1.05] |
+| `CPU_GPU.NoNegativeValues` | No negative radiance | max(min_pixel) ≥ 0 |
+| `CPU_GPU.SpectralBinIsolation` | No cross-bin contamination | exact match |
+| `CPU_GPU.DifferenceImage` | Save diff image for inspection | always pass |
+
+### 13.4 Output Artifacts
+
+Each run saves to `tests/output/integration/`:
+- `cpu_combined.png`, `gpu_combined.png`
+- `cpu_nee.png`, `gpu_nee.png`
+- `cpu_indirect.png`, `gpu_indirect.png`
+- `diff_combined.png` (amplified difference)
+- `integration_report.txt`
+
+---
+
+## 14. Acceptance Tests
+
+1. **Direct-only**: soft shadows converge, brightness stable
+2. **Indirect-only**: no direct-lit hotspot patterns
+3. **Combined**: `combined ≈ nee_direct + photon_indirect + caustic`
+4. **Cornell box**: indirect colour bleeding visible
+5. **Glass caustics**: concentrated patterns in caustic component
+6. **CPU = GPU**: integration tests pass (PSNR thresholds)
+7. **Energy conservation**: within 5% of analytic for simple scenes
+8. **No planar blocking**: smooth irradiance across coplanar walls
+9. **No cross-surface leakage**: tangential + plane distance filter working
+
+---
+
+## 15. Adaptive Sampling
+
+Screen-noise adaptive sampling concentrates samples in high-variance regions
+and skips converged pixels once estimated noise falls below a configurable
+threshold.
+
+### 15.1 Noise Metric
+
+Per-pixel relative standard error of CIE Y (luminance) of the NEE
+direct-only signal:
+
+$$
+r_i = \frac{\mathrm{se}_i}{|\mu_i| + \varepsilon}, \quad \varepsilon = 10^{-4}
+$$
+
+The active mask uses a neighbourhood maximum over a $(2R+1) \times (2R+1)$
+window. A pixel is active if $r_i^{\text{nbr}} > \tau$.
+
+### 15.2 Sampling Policy
+
+| Phase | Pass range | Behaviour |
+|-------|------------|-----------|
+| Warmup | 0 to `min_spp - 1` | All pixels active |
+| Adaptive | `min_spp` to `max_spp` | Mask recomputed; converged pixels skipped |
+
+### 15.3 Configuration
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `adaptive_sampling` | `false` | Opt-in |
+| `adaptive_min_spp` | 4 | Warmup passes |
+| `adaptive_max_spp` | 0 | 0 → inherits `samples_per_pixel` |
+| `adaptive_update_interval` | 1 | Mask refresh period |
+| `adaptive_threshold` | 0.02 | 2% relative noise target |
+| `adaptive_radius` | 1 | Neighbourhood half-width |
+
+### 15.4 Implementation
+
+- **GPU**: Three per-pixel buffers (`d_lum_sum_`, `d_lum_sum2_`,
+  `d_active_mask_`) in `OptixRenderer`. The `k_update_mask` CUDA kernel in
+  `src/optix/adaptive_sampling.cu` computes the mask.
+- **CPU**: Equivalent buffers in `FrameBuffer` with matching logic.
+
+---
+
+## 16. Photon Map Persistence (Binary Save/Load)
+
+### 16.1 Design
+
+The photon pass and camera pass are fully independent. The photon map is a
+static light-field snapshot that can take minutes to hours to compute.
+Saving it enables:
+
+1. **Instant startup** — skip expensive tracing on subsequent launches
+2. **Quality iteration** — precompute with 10M+ photons, render interactively
+3. **Reproducibility** — deterministic snapshot of indirect light field
+4. **Camera independence** — move camera freely without recomputing
+
+### 16.2 Binary Format
+
+```
+┌─── Header (64 bytes) ──────────────────────────────────────────┐
+│  magic: "PHOT", version, scene_hash, num_photons,              │
+│  num_global, num_caustic, num_lambda, gather_radius,           │
+│  max_bounces, rng_seed, flags, reserved                        │
+├─── Photon Data (SoA) ─────────────────────────────────────────┤
+│  pos_x/y/z, wi_x/y/z, norm_x/y/z, flux, lambda_bin, map_type │
+├─── KD-tree Index ───────────────────────────────────────────────┤
+│  nodes[], leaf_indices[]                                        │
+├─── Hash Grid Index (optional) ──────────────────────────────────┤
+│  cell_size, table_size, cell_start[], cell_end[], sorted_idx[] │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+~67 MB per million photons.
+
+### 16.3 Scene Hash
+
+Hash inputs: geometry + materials + emitters + `light_scale`. Camera
+position does NOT invalidate. Uses xxhash64 over .obj + .mtl file contents.
+
+### 16.4 Cache File Location
+
+Saved in the scene folder alongside `.obj` / `.mtl`:
+```
+scenes/cornell_box/
+    CornellBox-Original.obj
+    CornellBox-Original.mtl
+    photon_cache.bin          ← auto-generated
+```
+
+### 16.5 CLI Flags
+
+```
+--photon-file <path>     Explicit photon cache file path
+--force-recompute        Ignore cached photon file
+--no-save-photons        Do not save photon cache
+--photon-budget <N>      Number of photons to emit
+```
+
+### 16.6 Startup Logic
+
+```
+load scene → compute scene hash → check cache validity
+  if valid: load from cache
+  else: trace photons → build index → save cache
+camera pass → render interactively
+```
+
+**P key** triggers full photon recomputation at any time.
+
+Implementation: `src/photon/photon_io.h` + `src/photon/photon_io.cpp`.
+
+---
+
+## 17. OptiX Program Structure
+
+All device code in `src/optix/optix_device.cu`, compiled to PTX via `nvcc`
+with `--use_fast_math`.
 
 ### Programs
 
-| Program                    | Type       | Purpose                             |
-|----------------------------|------------|-------------------------------------|
-| `__raygen__render`         | Ray Gen    | Debug first-hit / full path trace / bin population |
-| `__raygen__photon_trace`   | Ray Gen    | GPU photon emission + tracing       |
-| `__closesthit__radiance`   | Closest-Hit| Unpack geometry at hit point         |
-| `__closesthit__shadow`     | Closest-Hit| Set "occluded" flag                  |
-| `__miss__radiance`         | Miss       | Return zero radiance                 |
-| `__miss__shadow`           | Miss       | Return "not occluded"                |
+| Program                    | Type        | Purpose                              |
+|----------------------------|-------------|--------------------------------------|
+| `__raygen__render`         | Ray Gen     | First-hit camera pass + NEE + gather |
+| `__raygen__photon_trace`   | Ray Gen     | GPU photon emission + tracing        |
+| `__closesthit__radiance`   | Closest-Hit | Unpack geometry at hit point         |
+| `__closesthit__shadow`     | Closest-Hit | Set "occluded" flag                  |
+| `__miss__radiance`         | Miss        | Return zero radiance                 |
+| `__miss__shadow`           | Miss        | Return "not occluded"                |
 
 ### Payload Layout (14 values)
 
@@ -1021,23 +972,18 @@ to avoid config-dependent output paths on MSVC).
 | p6    | Hit distance t         |
 | p7    | Material ID            |
 | p8    | Triangle (primitive) ID|
-| p9    | Hit flag (0=miss, 1=hit)|
-| p10-p12| Geometric normal (float3)|
+| p9    | Hit flag               |
+| p10-p12| Geometric normal      |
 | p13   | Reserved               |
 
 ### SBT (Shader Binding Table)
 
-Two ray types are used:
-
-- **Type 0 -- Radiance**: closest-hit writes full geometry payload.
-- **Type 1 -- Shadow**: closest-hit writes occluded flag; uses
+Two ray types:
+- **Type 0 — Radiance**: closest-hit writes full geometry payload.
+- **Type 1 — Shadow**: closest-hit writes occluded flag; uses
   `OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT`.
 
-The SBT has two raygen records: the default one for rendering and a
-separate one for photon tracing. The photon raygen record is swapped
-in temporarily during `trace_photons()`.
-
-### OptiX Pipeline Configuration
+### Pipeline Configuration
 
 | Parameter                    | Value   |
 |------------------------------|---------|
@@ -1046,249 +992,70 @@ in temporarily during `trace_photons()`.
 | `OPTIX_MAX_TRACE_DEPTH`      | 2       |
 | `OPTIX_STACK_SIZE`           | 16,384  |
 
-The stack size was increased from 2,048 to 16,384 to accommodate
-`PhotonBin[32]` and `PhotonBinDirs` arrays on the GPU thread stack
-during path tracing.
-
 ---
 
-## 10. Source Layout
+## 18. Configuration
 
-```
-src/
-  main.cpp                    Entry point, GLFW loop, arg parsing
-  core/
-    types.h                   float3, Ray, HitRecord, ONB
-    spectrum.h                Spectrum struct, CIE matching, blackbody
-    config.h                  All tunable constants
-    random.h                  PCG32 RNG (host + device)
-    alias_table.h             Alias method for discrete sampling
-    photon_bins.h             PhotonBin struct, PhotonBinDirs (Fibonacci sphere)
-    cell_bin_grid.h           Normal-gated 3D cell → directional bin scatter
-    sppm.h                    SPPM types, progressive update, reconstruction
-    font_overlay.h            Watermark/overlay stamping for PNG output
-  bsdf/
-    bsdf.h                    BSDF evaluation, sampling, PDF
-  scene/
-    scene.h                   Scene struct (triangles, materials, BVH)
-    obj_loader.h / .cpp       Wavefront OBJ + MTL loader
-  renderer/
-    renderer.h / .cpp         CPU renderer, RenderConfig, FrameBuffer
-    camera.h                  Camera (position, FOV, ray generation)
-    mis.h                     MIS weight utilities
-    path_tracer.cu            CPU/CUDA path tracing kernels
-    direct_light.cu / .h      CPU/CUDA direct lighting kernels
-  photon/
-    photon.h                  Photon and PhotonSoA structs
-    hash_grid.h / .cu         Hashed uniform grid (build + query)
-    emitter.h / .cu           CPU photon emission + tracing
-    density_estimator.h       Density estimation utilities
-  optix/
-    optix_renderer.h / .cpp   Host-side OptiX pipeline management
-    optix_device.cu           All OptiX device programs (PTX source)
-    launch_params.h           Shared host/device LaunchParams struct
-    adaptive_sampling.h       AdaptiveParams struct + host entry point
-    adaptive_sampling.cu      k_update_mask CUDA kernel + adaptive_update_mask()
-  debug/
-    debug.h                   Debug key bindings, DebugState
-tests/
-  test_main.cpp               274 unit tests (GoogleTest)
-```
-
----
-
-## 11. Strengths
-
-1. **Full spectral transport.** All light transport is computed over
-   32 wavelength bins. Dispersion, metamerism, and spectral emission
-   are naturally captured without RGB approximations.
-
-2. **GPU-accelerated everywhere.** Photon tracing, path tracing, bin
-   population, and the debug viewer all run on the GPU via OptiX. No
-   CPU fallback means the GPU is always utilised.
-
-3. **Photon-guided importance sampling.** The directional bin cache
-   steers both BSDF bounce directions (B1) and NEE light selection
-   (B2) toward directions where photon flux is concentrated. This
-   significantly reduces variance for indirect illumination.
-
-4. **Cached density estimation.** The first-sample photon gather is
-   cached per pixel, eliminating redundant hash-grid lookups on
-   subsequent SPP frames.
-
-5. **Combined photon + path tracing.** The photon density estimate
-   provides indirect illumination (including colour bleeding and
-   caustics) while NEE handles direct lighting. This converges faster
-   than pure path tracing for scenes with difficult light paths.
-
-6. **Interactive debug viewer.** First-hit OptiX rendering gives
-   instant scene feedback with direct lighting, normals, material
-   IDs, depth visualisation, and photon overlay -- all at GPU speed.
-
-7. **Explicit math.** Every PDF, every Monte Carlo estimator, and
-   every throughput update is written out explicitly. No hidden
-   normalisation, no implicit conventions.
-
-8. **Comprehensive test suite.** 163 unit tests cover vector math,
-   spectral operations, BSDFs, sampling distributions, the hash grid,
-   density estimation, Fibonacci sphere binning, guided bounce,
-   stratified sampling, scene loading, and OptiX integration.
-
-9. **Stratified sampling.** $4 \times 4$ stratified sub-pixel jitter
-   reduces clumping artifacts at 16 SPP.
-
-10. **Visibility-weighted photon attenuation.** NEE shadow-ray
-    visibility modulates the photon density contribution, preserving
-    contact shadows while allowing some indirect illumination via
-    `PHOTON_SHADOW_FLOOR`.
-
-11. **Screen-noise adaptive sampling.** A per-pixel running variance
-    of CIE Y luminance drives a GPU active-mask kernel that
-    concentrates samples in high-variance regions and skips converged
-    pixels, reducing total GPU work without visual quality loss. A
-    warmup phase ensures all pixels receive a minimum sample count
-    before the mask is evaluated.
-
----
-
-## 12. Weaknesses and Limitations
-
-1. **Fixed photon gather radius.** No progressive photon mapping or
-   adaptive radius. The bias from the fixed kernel width does not
-   vanish as sample count increases.
-
-2. **No MIS between NEE and photon estimate.** Direct and indirect
-   contributions are currently summed without multi-strategy MIS
-   weighting, which can introduce variance at transition boundaries.
-
-3. **Lambertian-only in OptiX device code.** The OptiX path tracer
-   currently evaluates only Lambertian BSDFs. Glossy and glass
-   materials fall through to specular bounces (mirror reflection)
-   but do not use the full GGX microfacet model on the device.
-
-4. **Single GAS, no instancing.** The scene is a flat triangle soup
-   with no support for instanced geometry or multi-level acceleration
-   structures.
-
-5. **No texture mapping in OptiX.** Material properties in the OptiX
-   device code are per-material (constant), not per-texel. The OBJ
-   loader supports UV coordinates but they are not sampled on the
-   device.
-
-6. **Hash grid built on CPU.** After the GPU photon trace, photon
-   data is downloaded, the grid is built on the CPU, then re-uploaded.
-   This is a pragmatic choice (grid build is fast) but adds a
-   synchronisation point.
-
-7. **No denoising.** The raw Monte Carlo output is displayed without
-   any AI or bilateral denoiser.
-
-8. **Windows-centric build.** The build system and `run.bat` are
-   tested primarily on Windows with MSVC. Linux builds should work
-   but are not actively validated.
-
-9. **Large VRAM for bin cache.** At 1024x768 with 32 bins, the bin
-   cache alone uses ~604 MB. Higher resolutions or bin counts will
-   require proportionally more VRAM.
-
-10. **Guided NEE stack budget.** The guided NEE builds a temporary
-    CDF on the GPU stack, limited to 128 emissive triangles. Scenes
-    with more than 128 emissive triangles fall back to standard
-    (non-guided) NEE.
-
----
-
-## 13. Configuration
-
-All tunable constants are centralised in `src/core/config.h`:
+All tunable constants in `src/core/config.h`:
 
 ### Sampling & Bounces
 
-| Parameter                | Default     | Description                       |
-|--------------------------|-------------|-----------------------------------|
-| `NUM_LAMBDA`             | 32          | Wavelength bins (380--780 nm)     |
-| `DEFAULT_SPP`            | 16          | Samples per pixel (final render)  |
-| `DEFAULT_MAX_BOUNCES`    | 8           | Maximum path bounces              |
-| `DEFAULT_MIN_BOUNCES_RR` | 3           | Bounces before Russian roulette   |
-| `DEFAULT_RR_THRESHOLD`   | 0.95        | Max RR survival probability       |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `NUM_LAMBDA` | 32 | Wavelength bins (380–780 nm) |
+| `DEFAULT_SPP` | 16 | Samples per pixel |
+| `DEFAULT_MAX_BOUNCES` | 8 | Maximum path bounces |
+| `DEFAULT_MIN_BOUNCES_RR` | 3 | Bounces before Russian roulette |
+| `DEFAULT_RR_THRESHOLD` | 0.95 | Max RR survival probability |
 
 ### Photon Mapping
 
-| Parameter                | Default     | Description                       |
-|--------------------------|-------------|-----------------------------------|
-| `DEFAULT_NUM_PHOTONS`    | 1,000,000   | Photons emitted per trace         |
-| `DEFAULT_GATHER_RADIUS`  | 0.05        | Photon gather radius              |
-| `DEFAULT_CAUSTIC_RADIUS` | 0.02        | Caustic map gather radius         |
-| `HASHGRID_CELL_FACTOR`   | 2.0         | cell_size = factor * radius       |
-| `DEFAULT_SURFACE_TAU`    | 0.02        | Plane-distance filter thickness   |
-| `PHOTON_SHADOW_FLOOR`    | 0.1         | Min visibility weight for photon gather |
-
-### Photon Directional Bins
-
-| Parameter                | Default     | Description                       |
-|--------------------------|-------------|-----------------------------------|
-| `PHOTON_BIN_COUNT`       | 32          | Fibonacci sphere bins per pixel   |
-| `MAX_PHOTON_BIN_COUNT`   | 32          | Compile-time upper bound          |
-| `PHOTON_BIN_HORIZON_EPS` | 0.05        | Bins below $-\epsilon$ of horizon skipped |
-| `PHOTON_BIN_NEE_TOP_K`   | 4           | Top-K bins for guided NEE bias    |
-| `NEE_GUIDED_MAX_EMISSIVE`| 128         | Max emissive tris for stack CDF   |
-| `NEE_GUIDED_ALPHA`       | 5.0         | Flux-boost strength for guided NEE|
-
-### Stratified Sampling
-
-| Parameter                | Default     | Description                       |
-|--------------------------|-------------|-----------------------------------|
-| `STRATA_X`               | 4           | Horizontal strata                 |
-| `STRATA_Y`               | 4           | Vertical strata                   |
-
-### Adaptive Sampling (RenderConfig)
-
-Set on the `RenderConfig` struct passed to `OptixRenderer` and
-`Renderer::render_frame()`:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `adaptive_sampling` | `bool` | `false` | Enable adaptive sampling |
-| `adaptive_min_spp` | `int` | 4 | Warmup passes before mask evaluation |
-| `adaptive_max_spp` | `int` | 0 | Max SPP (0 → `samples_per_pixel`) |
-| `adaptive_update_interval` | `int` | 1 | Passes between mask updates |
-| `adaptive_threshold` | `float` | 0.02 | Relative noise threshold $\tau$ |
-| `adaptive_radius` | `int` | 1 | Neighbourhood half-width $R$ |
-
-Noise signal (compile-time flag in `config.h`):
-
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `ADAPTIVE_NOISE_USE_DIRECT_ONLY` | `true` | Use NEE direct-only luminance as variance proxy; set `false` to use full combined path (not recommended — full-path variance is too large to converge) |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DEFAULT_NUM_PHOTONS` | 1,000,000 | Photons emitted per trace |
+| `DEFAULT_GATHER_RADIUS` | 0.05 | Photon gather radius |
+| `DEFAULT_CAUSTIC_RADIUS` | 0.02 | Caustic map gather radius |
+| `HASHGRID_CELL_FACTOR` | 2.0 | cell_size = factor × radius |
+| `DEFAULT_SURFACE_TAU` | 0.02 | Plane-distance filter thickness |
+| `DEFAULT_PLANE_DISTANCE_THRESHOLD` | 1e-3 | Max plane distance for tangential kernel |
+| `PLANE_TAU_EPSILON_FACTOR` | 10.0 | tau ≥ 10 × ray_epsilon |
+| `DEFAULT_PHOTON_BOUNCE_STRATA` | 64 | Max hemisphere strata for decorrelation |
+| `DEFAULT_GPU_MAX_GATHER_RADIUS` | 0.5 | Max gather radius for GPU grid k-NN |
 
 ### NEE
 
-| Parameter                | Default     | Description                       |
-|--------------------------|-------------|-----------------------------------|
-| `DEFAULT_NEE_LIGHT_SAMPLES` | 4        | Shadow rays at bounce 0           |
-| `DEFAULT_NEE_DEEP_SAMPLES`  | 1        | Shadow rays at bounce >= 1        |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DEFAULT_NEE_LIGHT_SAMPLES` | 4 | Shadow rays at bounce 0 |
+| `DEFAULT_NEE_COVERAGE_FRACTION` | 0.3 | Coverage-aware sampling factor $c$ |
+
+### SPPM
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `sppm_iterations` | 64 | Iteration count |
+| `sppm_alpha` | 2/3 | Shrinkage factor |
+| `sppm_initial_radius` | 0.1 | Starting gather radius |
 
 ### Image & Window
 
-| Parameter                    | Default     | Description                   |
-|------------------------------|-------------|-------------------------------|
-| `DEFAULT_IMAGE_WIDTH`        | 1024        | Output image width            |
-| `DEFAULT_IMAGE_HEIGHT`       | 768         | Output image height           |
-| `DEFAULT_WINDOW_WIDTH`       | 1024        | Debug window width            |
-| `DEFAULT_WINDOW_HEIGHT`      | 768         | Debug window height           |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DEFAULT_IMAGE_WIDTH` | 1024 | Output image width |
+| `DEFAULT_IMAGE_HEIGHT` | 768 | Output image height |
 
 ### OptiX
 
-| Parameter                    | Default     | Description                   |
-|------------------------------|-------------|-------------------------------|
-| `OPTIX_NUM_PAYLOAD_VALUES`   | 14          | Payloads per trace call       |
-| `OPTIX_MAX_TRACE_DEPTH`      | 2           | Ray types (radiance + shadow) |
-| `OPTIX_STACK_SIZE`           | 16,384      | GPU thread stack size (bytes) |
-| `OPTIX_SCENE_EPSILON`       | 1e-4        | Shadow/continuation offset    |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `OPTIX_NUM_PAYLOAD_VALUES` | 14 | Payloads per trace call |
+| `OPTIX_MAX_TRACE_DEPTH` | 2 | Ray types (radiance + shadow) |
+| `OPTIX_STACK_SIZE` | 16,384 | GPU thread stack (bytes) |
+| `OPTIX_SCENE_EPSILON` | 1e-4 | Shadow/continuation offset |
 
 ---
 
-## 14. Key Data Structures
+## 19. Key Data Structures
 
 ### Spectrum
 ```cpp
@@ -1297,369 +1064,245 @@ struct Spectrum {
 };
 ```
 
-### PhotonBin (36 bytes)
-```cpp
-struct PhotonBin {
-    float flux;       // total Epanechnikov-weighted scalar flux
-    float dir_x;      // flux-weighted centroid direction x
-    float dir_y;      // flux-weighted centroid direction y
-    float dir_z;      // flux-weighted centroid direction z
-    float weight;     // total Epanechnikov weight
-    int   count;      // number of photons in this bin
-    float avg_nx;     // flux-weighted average surface normal x
-    float avg_ny;     // flux-weighted average surface normal y
-    float avg_nz;     // flux-weighted average surface normal z
-};
-```
-
-### PhotonBinDirs (Fibonacci sphere)
-```cpp
-struct PhotonBinDirs {
-    float3 dirs[MAX_PHOTON_BIN_COUNT];
-    int    count;
-    void init(int n);                // Fibonacci sphere construction
-    int  find_nearest(float3 wi);    // brute-force dot product scan O(N)
-};
-```
-
 ### Photon (SoA)
 ```cpp
 struct PhotonSoA {
     vector<float> pos_x, pos_y, pos_z;
-    vector<float> wi_x, wi_y, wi_z;       // incoming direction (away from surface)
-    vector<float> norm_x, norm_y, norm_z; // geometric surface normal at photon hit
+    vector<float> wi_x, wi_y, wi_z;       // incoming direction toward surface
+    vector<float> norm_x, norm_y, norm_z;  // geometric surface normal at deposit
     vector<uint16_t> lambda_bin;
     vector<float> flux;
 };
 ```
 
-### LaunchParams (host <-> device)
-Contains all device pointers: framebuffer, scene geometry, materials,
-photon map, hash grid, emitter CDF, camera, rendering flags
-(`is_final_render`, `render_mode`, `samples_per_pixel`),
-profiling timers, photon bin cache pointers
-(`photon_bin_cache`, `photon_density_cache`, `photon_bin_count`,
-`photon_bins_valid`, `populate_bins_mode`), and adaptive sampling
-pointers (`lum_sum`, `lum_sum2`, `active_mask`—all `nullptr` when
-adaptive sampling is disabled).
+**`wi` convention:** Incoming direction **toward the surface** — the
+direction FROM which light arrives. `dot(photon.wi, surface_normal) > 0`.
 
-### AdaptiveParams
+**Normal convention:** **Geometric normals** (face normals), not shading
+normals. Shading normals are used for BSDF evaluation at the query point,
+not for spatial filtering.
+
+### KDTree
 ```cpp
-struct AdaptiveParams {
-    int*     sample_counts;  // [W*H] accumulated sample count per pixel
-    float*   lum_sum;        // [W*H] running Σ Y_i
-    float*   lum_sum2;       // [W*H] running Σ Y_i²
-    uint8_t* active_mask;    // [W*H] output: 1=active, 0=converged
-    int      width;
-    int      height;
-    int      min_spp;        // warmup threshold
-    int      max_spp;        // upper bound
-    float    threshold;      // relative noise τ
-    int      radius;         // neighbourhood half-width R
+struct KDTree {
+    struct Node {
+        int   split_axis;    // 0=x, 1=y, 2=z; -1 = leaf
+        float split_pos;
+        int   left, right;
+    };
+    std::vector<Node>     nodes;
+    std::vector<uint32_t> indices;  // photon indices in leaf order
+
+    void build(const PhotonSoA& photons);
+    // All queries use tangential distance, NOT 3D Euclidean
+    template<typename Callback>
+    void query(float3 pos, float3 normal, float radius,
+               const PhotonSoA& photons, Callback callback) const;
+    void knn(float3 pos, float3 normal, int k, const PhotonSoA& photons,
+             std::vector<uint32_t>& out_indices, float& out_max_dist2) const;
 };
-// Host entry point (adaptive_sampling.cu):
-// int adaptive_update_mask(const AdaptiveParams&);
-// Returns active pixel count (0 → all converged).
 ```
-
-### FrameBuffer (adaptive fields)
-The `FrameBuffer` struct in `renderer.h` carries two additional
-buffers when adaptive sampling is active:
-```cpp
-std::vector<float> lum_sum;   // Σ Y_i  per pixel (CPU path)
-std::vector<float> lum_sum2;  // Σ Y_i² per pixel (CPU path)
-```
-These are allocated to `width * height` on resize and populated
-inside `FrameBuffer::accumulate()` via `spectrum_to_xyz(L).y`.
 
 ### HashGrid
-Hashed uniform grid with `cellStart` / `cellEnd` / `sortedIndices`
-arrays. Hash function uses three large primes:
+```cpp
+// Hashed uniform grid with cellStart/cellEnd/sortedIndices
+// Hash: (cx*73856093 ^ cy*19349663 ^ cz*83492791) % table_size
 ```
-hash(cx,cy,cz) = (cx*73856093 ^ cy*19349663 ^ cz*83492791) % table_size
+
+### SPPMPixel
+```cpp
+struct SPPMPixel {
+    float3 pos, normal, wo;
+    int material_id;
+    float radius;          // current gather radius (tangential)
+    float N;               // accumulated photon count
+    Spectrum tau;           // accumulated flux
+    Spectrum L_direct;      // NEE direct component
+    bool valid;
+};
+```
+
+### LaunchParams
+Contains all device pointers: framebuffer, scene geometry, materials, photon
+map, hash grid, emitter CDF, camera, rendering flags (`is_final_render`,
+`render_mode`), SPPM state, and adaptive sampling pointers.
+
+---
+
+## 20. Source Layout
+
+```
+src/
+  main.cpp                      Entry point, GLFW loop, arg parsing
+  core/
+    types.h                     float3, Ray, HitRecord, ONB
+    spectrum.h                  Spectral arithmetic, CIE XYZ, blackbody
+    config.h                    All tunable constants
+    random.h                    PCG RNG
+    alias_table.h               Alias method for O(1) discrete sampling
+    cdf.h                       Generic CDF build + sample
+    sppm.h                      SPPM types, progressive update, reconstruction
+    photon_bins.h               PhotonBin struct, Fibonacci sphere (Phase 7)
+    photon_density_cache.h      Per-pixel cached spectral density
+    guided_nee.h                Bin-flux-weighted NEE CDF
+    nee_sampling.h              NEE sampling helpers
+    medium.h                    Participating medium (temporarily disabled)
+    phase_function.h            Henyey-Greenstein phase function (temporarily disabled)
+    font_overlay.h              Debug text overlay rendering
+    test_data_io.h              Ground-truth data helpers for tests
+  bsdf/
+    bsdf.h                      Lambertian, mirror, glass, GGX VNDF
+  scene/
+    scene.h                     Scene graph, emitter list
+    material.h                  Material definitions
+    triangle.h                  Triangle + BVH primitives
+    obj_loader.h / .cpp         Wavefront OBJ + MTL parser
+  renderer/
+    renderer.h / .cpp           CPU reference renderer, RenderConfig, FrameBuffer
+    camera.h                    Perspective camera, ray generation
+    mis.h                       MIS weight utilities
+    direct_light.h / .cu        Direct lighting kernel
+    path_tracer.cu              CPU/CUDA path tracing kernels
+  photon/
+    photon.h                    Photon and PhotonSoA structs
+    kd_tree.h                   KD-tree build + range query + k-NN (CPU reference)
+    hash_grid.h / .cu           Hashed uniform grid build + query
+    emitter.h / .cu             Emitter sampling, CDF construction
+    density_estimator.h         Tangential disk kernel density estimation
+    surface_filter.h            Surface consistency filter (tangential metric)
+    photon_io.h / .cpp          Binary save/load for photon map persistence
+  optix/
+    optix_renderer.h / .cpp     Host pipeline: SBT, GAS, launch params
+    optix_device.cu             All OptiX raygen / closesthit programs
+    launch_params.h             GPU/CPU shared launch parameter struct
+    adaptive_sampling.h / .cu   Per-pixel noise metric + convergence mask
+  debug/
+    debug.h                     Visualisation mode state, key bindings
+tests/
+  test_main.cpp                 Core unit tests (GoogleTest)
+  test_kd_tree.cpp              KD-tree unit tests
+  test_tangential_gather.cpp    Tangential kernel tests
+  test_surface_filter.cpp       Surface consistency filter tests
+  test_integration.cpp          CPU↔GPU integration tests
+  test_ground_truth.cpp         Reference image ground-truth comparisons
+  test_per_ray_validation.cpp   Individual ray correctness checks
+  test_pixel_comparison.cpp     Per-pixel render validation
+  test_medium.cpp               Participating medium tests
+  feature_speed_test.cpp        Performance benchmarks
 ```
 
 ---
 
-## 15. Rendering Equation Reference
+## 21. Strengths
 
-The rendering equation solved by the path tracer:
+1. **Full spectral transport.** 32 wavelength bins; dispersion, metamerism,
+   and spectral emission naturally captured without RGB approximations.
 
-$$
-L_o(x, \omega_o, \lambda) = L_e(x, \omega_o, \lambda) +
-    \int_{\mathcal{H}^2} f_s(x, \omega_i, \omega_o, \lambda) \,
-    L_i(x, \omega_i, \lambda) \, \cos\theta_i \, d\omega_i
-$$
+2. **Photon-centric simplicity.** Camera pass is trivial (first-hit + NEE +
+   gather). All algorithmic complexity concentrated in the photon pass.
 
-The Monte Carlo estimator with throughput $T$ at bounce $k$:
+3. **Precomputable photon map.** Binary save/load with scene hash — compute
+   once, render interactively with arbitrary camera positions.
 
-$$
-\hat{L} = \sum_{k=0}^{K} T_k \cdot
-    \left[ L_e^{(k)} + \hat{L}_{\text{NEE}}^{(k)} +
-           \hat{L}_{\text{photon}}^{(k)} \right]
-$$
+4. **Surface-aware gather.** Tangential disk kernel eliminates planar
+   blocking artifacts and cross-surface leakage.
 
-where $\hat{L}_{\text{NEE}}$ is the next-event estimation
-contribution (guided or standard) and $\hat{L}_{\text{photon}}$ is
-the photon density estimate contribution at each diffuse hit along
-the path. The photon contribution is attenuated by
-$\max(v_{\text{NEE}}, 0.1)$ to preserve contact shadows.
+5. **Dual CPU/GPU implementation.** CPU reference renderer provides ground
+   truth; GPU provides interactive speed. Integration tests verify parity.
 
-The guided NEE estimator (B2):
+6. **Adaptive gather radius.** k-NN per hitpoint adapts to local photon
+   density automatically.
 
-$$
-\hat{L}_{\text{NEE,guided}} = \frac{1}{M} \sum_{s=1}^{M}
-\frac{f_s(x, \omega_s, \omega_o, \lambda) \cdot L_e(y_s, \lambda) \cdot
-\cos\theta_x}{p_{\text{guided}}(\omega_s)}
-$$
+7. **SPPM convergence.** Progressive radius shrinking guarantees asymptotic
+   convergence to the correct solution.
 
-where $p_{\text{guided}}$ is the bin-flux-weighted solid-angle PDF.
+8. **Photon path decorrelation.** Cell-stratified bouncing ensures efficient
+   coverage of the hemisphere.
 
-## Ground Truth Testing
+9. **Coverage-aware NEE.** Mixture of power-weighted and area-weighted
+   sampling ensures all emitters get shadow rays.
 
-```
- ══════════════════════════════════════════════════════════════════════
-  COMPARISON WORKFLOW: Ground Truth vs Optimized
- ══════════════════════════════════════════════════════════════════════
+10. **Interactive debug viewer.** Multiple render modes and overlays for
+    inspecting every intermediate quantity.
 
-                        ┌──────────────────────────┐
-                        │  tests/data/cornell_box.bin  │  Real photon data
-                        │  (binary, ~40MB)             │  from disk
-                        │                              │
-                        │  Created by:                 │
-                        │  1) --save-test-data (GPU)   │
-                        │  2) CPU fallback (bootstrap) │
-                        └──────────────┬───────────────┘
-                                       │
-               ┌───────────────────────┼───────────────────────┐
-               │                       │                       │
-               ▼                       ▼                       ▼
-    ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
-    │ src/core/         │   │ src/scene/        │   │ src/photon/       │
-    │  test_data_io.h   │   │  scene.h          │   │  hash_grid.h     │
-    │                   │   │  obj_loader.h     │   │                  │
-    │ load_test_data()  │   │                   │   │ grid.build()     │
-    │ save_test_data()  │   │ load_obj()        │   │ grid.query()     │
-    └────────┬─────────┘   │ scene.build_bvh() │   └────────┬─────────┘
-             │              │ scene.intersect() │            │
-             │              └────────┬─────────┘            │
-             │                       │                      │
-             ▼                       ▼                      ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │                CornellBoxDataset (singleton)                 │
-    │  tests/test_ground_truth.cpp  &  tests/test_per_ray_validation.cpp
-    │                                                              │
-    │  ┌─ Loaded from binary: ───────────────────────────────────┐ │
-    │  │  PhotonSoA photons       (1.3M photons, 9 SoA arrays)  │ │
-    │  │  TestDataHeader header   (radii, bounces, scene path)   │ │
-    │  └─────────────────────────────────────────────────────────┘ │
-    │  ┌─ Rebuilt deterministically: ────────────────────────────┐ │
-    │  │  Scene scene             (OBJ → BVH → emissive dist)   │ │
-    │  │  HashGrid grid           (from photons + radius)        │ │
-    │  │  PhotonBinDirs bin_dirs  (32 Fibonacci directions)      │ │
-    │  │  vector<uint8_t> bin_idx (precomputed per-photon)       │ │
-    │  │  Camera camera           (64×64 Cornell box preset)     │ │
-    │  └─────────────────────────────────────────────────────────┘ │
-    └──────────────────────────┬───────────────────────────────────┘
-                               │
-                          pick N random rays
-                          (deterministic RNG seeds)
-                               │
-              ┌────────────────┴────────────────┐
-              │                                 │
-              ▼                                 ▼
- ┌─────────────────────────────┐  ┌─────────────────────────────────┐
- │  GROUND TRUTH PATH TRACER   │  │  OPTIMIZED PATH TRACER          │
- │  ground_truth_path_trace()  │  │  optimized_path_trace()         │
- │  ground_truth_trace_steps() │  │  optimized_trace_steps()        │
- │                             │  │                                 │
- │  ┌─ Per Bounce: ──────────┐ │  │  ┌─ Per Bounce: ──────────────┐ │
- │  │                        │ │  │  │                            │ │
- │  │ 1. scene.intersect()   │ │  │  │ 1. scene.intersect()       │ │
- │  │    ↓                   │ │  │  │    ↓                       │ │
- │  │ 2. Material dispatch   │ │  │  │ 2. Material dispatch       │ │
- │  │    emissive → Le       │ │  │  │    emissive → Le           │ │
- │  │    specular → reflect  │ │  │  │    specular → reflect      │ │
- │  │    diffuse → ↓         │ │  │  │    diffuse → ↓             │ │
- │  │                        │ │  │  │                            │ │
- │  │ 3. NEE (standard)     ◄├─┤──┤─►3. NEE (GUIDED by bins)    │ │
- │  │    sample_direct_light │ │  │  │    opt_nee_guided_step()   │ │
- │  │    1 shadow ray        │ │  │  │    photon-biased CDF       │ │
- │  │    alias table PDF     │ │  │  │    4 shadow rays @ b=0     │ │
- │  │    no MIS              │ │  │  │                            │ │
- │  │                        │ │  │  │                            │ │
- │  │ 4. Photon density     ◄├─┤──┤─►4. Photon density + BINS    │ │
- │  │    estimate_photon_    │ │  │  │    gather_with_bins_step() │ │
- │  │      density()         │ │  │  │    SAME gather loop        │ │
- │  │    full hash grid query│ │  │  │    + populate local_bins[] │ │
- │  │    Epanechnikov kernel │ │  │  │    + shadow floor weight   │ │
- │  │    per-λ BSDF eval     │ │  │  │                            │ │
- │  │                        │ │  │  │                            │ │
- │  │ 5. BSDF bounce        ◄├─┤──┤─►5. BSDF bounce (GUIDED)    │ │
- │  │    bsdf::sample()      │ │  │  │    opt_guided_bounce_step()│ │
- │  │    cosine hemisphere   │ │  │  │    flux-proportional CDF   │ │
- │  │    T *= f·cos/pdf      │ │  │  │    cone jitter + clamp    │ │
- │  │                        │ │  │  │    T *= Kd (simplified)    │ │
- │  │ 6. Russian roulette    │ │  │  │ 6. Russian roulette        │ │
- │  │    p_rr = min(0.95,    │ │  │  │    (same)                  │ │
- │  │      T.max_component())│ │  │  │                            │ │
- │  └────────────────────────┘ │  │  └────────────────────────────┘ │
- │                             │  │                                 │
- │  Output:                    │  │  Output:                        │
- │    result.combined          │  │    result.combined              │
- │    result.nee_direct        │  │    result.nee_direct            │
- │    result.photon_indirect   │  │    result.photon_indirect       │
- │                             │  │                                 │
- │  (test_per_ray_validation   │  │  (test_per_ray_validation       │
- │   also records per-bounce   │  │   also records per-bounce       │
- │   BounceStep with validity  │  │   BounceStep with validity      │
- │   flags at each step)       │  │   flags at each step)           │
- └──────────────┬──────────────┘  └──────────────┬──────────────────┘
-                │                                 │
-                └────────────┬────────────────────┘
-                             │
-                             ▼
-              ┌──────────────────────────────────┐
-              │         COMPARISON ENGINE         │
-              │  diagnose_ray() / compare_methods()
-              │                                   │
-              │  Per-ray checks:                  │
-              │   • combined relErr < 0.70        │
-              │   • NEE relErr < 0.80             │
-              │   • photon relErr < 0.50          │
-              │   • combined ≈ nee + photon       │
-              │   • all values finite & ≥ 0       │
-              │   • throughput < 1e6 (no explode) │
-              │   • spectral bins don't mix       │
-              │                                   │
-              │  Aggregate checks:                │
-              │   • mean relErr < 0.30            │
-              │   • energy ratio 0.65–1.50        │
-              │   • < 40% rays exceed thresholds  │
-              │                                   │
-              │  Output: warnings for deviations  │
-              │  + per-bounce breakdown of worst   │
-              └──────────────────────────────────┘
+11. **Comprehensive test suite.** Unit tests, integration tests (CPU↔GPU),
+    ground-truth comparisons, and per-ray validation.
 
+---
 
- ══════════════════════════════════════════════════════════════════════
-  SOURCE FILES
- ══════════════════════════════════════════════════════════════════════
+## 22. Weaknesses and Limitations
 
-  Test files (CPU-side comparison):
-    tests/test_ground_truth.cpp       16 tests, aggregate stats
-    tests/test_per_ray_validation.cpp 15 tests, per-ray step-by-step
+1. **No diffuse camera continuation.** All indirect lighting comes from the
+   photon map. Photon map quality directly determines GI quality.
 
-  Data I/O:
-    src/core/test_data_io.h           Binary save/load PhotonSoA
+2. **Single GAS, no instancing.** Flat triangle soup only.
 
-  Shared physics (header-only, HD = host+device):
-    src/renderer/direct_light.h       sample_direct_light()      [NEE]
-    src/photon/density_estimator.h    estimate_photon_density()   [Gather]
-    src/bsdf/bsdf.h                   bsdf::evaluate/sample()    [BSDF]
-    src/core/photon_bins.h            PhotonBinDirs, PhotonBin   [Bins]
-    src/core/guided_nee.h             guided_nee_bin_boost()      [Guided NEE]
-    src/core/nee_sampling.h           nee_shadow_sample_count()
-    src/photon/hash_grid.h            HashGrid::query()
-    src/scene/scene.h                 Scene::intersect()          [BVH]
-    src/core/spectrum.h               Spectrum[32 bins]
-    src/core/random.h                 PCGRng, cosine hemisphere
+3. **No texture mapping in OptiX.** Per-material properties, not per-texel.
 
-  Entry point (data generation):
-    src/main.cpp                      --save-test-data flag
-    
-```
+4. **Hash grid built on CPU.** Photon data downloaded → grid built → reuploaded.
 
-## Light bounces
+5. **No denoising.** Raw Monte Carlo output.
 
-```
-Camera ray
-    │
-    ▼
-┌─────────────────────────────────────────────────────┐
-│  BOUNCE 0  (first diffuse hit)                      │
-│                                                     │
-│  ┌──────────────┐   ┌─────────────────────────────┐ │
-│  │  NEE (direct)│   │  NO photon density term     │ │
-│  │  shadow rays │   │  (intentionally omitted)    │ │
-│  │  → light src │   │                             │ │
-│  └──────────────┘   └─────────────────────────────┘ │
-│                                                     │
-│  ┌──────────────────────────────────────────────────┐│
-│  │  BSDF continuation → pick next bounce direction ││
-│  │  80% guided (by photon bins)                    ││
-│  │  20% cosine hemisphere (random)                 ││
-│  └──────────────────────────────────────────────────┘│
-└──────────────────────────┬──────────────────────────┘
-                           │ throughput *= f·cos/pdf
-                           ▼
-┌─────────────────────────────────────────────────────┐
-│  BOUNCE 1  (second diffuse hit)                     │
-│                                                     │
-│  ┌──────────────┐   ┌─────────────────────────────┐ │
-│  │  NEE (direct)│   │  NO photon density term     │ │
-│  │  guided by   │   │  (intentionally omitted)    │ │
-│  │  local bins  │   │                             │ │
-│  └──────────────┘   └─────────────────────────────┘ │
-│                                                     │
-│  ┌──────────────────────────────────────────────────┐│
-│  │  BSDF continuation → pick next bounce direction ││
-│  │  80% guided / 20% cosine                       ││
-│  └──────────────────────────────────────────────────┘│
-└──────────────────────────┬──────────────────────────┘
-                           │
-                           ▼
-                    ... (up to max_bounces) ...
-                           │
-                           ▼
-                    Hit emissive? → Le × throughput × MIS weight
-                    Miss / RR kill? → path dies with 0
+6. **Windows-centric build.** Tested primarily with MSVC on Windows.
 
-   CEILING (hitpoint)
-       │
-       │  Bounce 0: NEE shadow rays → aim at lights
-       │            (guided bins may point toward exit sign
-       │             if photons from sign landed here)
-       │
-       │  BSDF bounce: 80% chance → bin CDF picks direction
-       │                            toward EXIT SIGN
-       │                20% chance → random cosine direction
-       ▼
-   WALL / FLOOR (bounce 1 hitpoint)
-       │
-       │  NEE → shadow rays to lights (including exit sign)
-       │  If ray hits exit sign: Le_green × throughput → GREEN
-       │
-       │  BSDF bounce continues deeper...
-       ▼
+7. **Volume rendering temporarily disabled.** Surface transport only.
 
+8. **GPU k-NN bounded by max_radius.** Sparse regions may not find k photons.
 
-Camera → Ceiling → (guided bounce toward sign) → EXIT SIGN (emissive)
-                                                      │
-                                                      ▼
-                                              Le = (0, 1, 0) green
-                                              × throughput (albedo of ceiling)
-                                              × MIS weight
-                                              ─────────────────────
-                                              = green contribution
+---
 
+## 23. Common Bugs to Avoid
 
-┌──────────────────────────────────────────────────────┐
-│  p_guided = 0.80  (from DEFAULT_GUIDED_BSDF_MIX)    │
-│                                                      │
-│  roll random ξ ∈ [0,1)                               │
-│  if ξ < 0.80:                                        │
-│     dev_sample_guided_bounce():                      │
-│       1. Build CDF over bins weighted by flux×cos    │
-│       2. Select bin k ~ CDF                          │
-│       3. Jitter within cone half-angle               │
-│       4. Clamp to hemisphere                         │
-│  else:                                               │
-│     sample_cosine_hemisphere():                      │
-│       random direction ~ cos(θ)/π                    │
-│                                                      │
-│  pdf_mix = 0.80 × pdf_guided + 0.20 × pdf_cosine    │
-│  throughput *= f × cos / pdf_mix                     │
-└──────────────────────────────────────────────────────┘
+- Forgetting area→solid-angle Jacobian (`dist² / cos_y`) in NEE
+- Using wrong cosine in Jacobian (must be emitter-side `cos_y`)
+- Depositing photons at first diffuse hit from light (double counts with NEE)
+- Using triangle-uniform instead of power/area-weighted emission
+- Not offsetting shadow/new rays with epsilon
+- Mixing wavelength bins during transport
+- **Using 3D Euclidean distance instead of tangential distance in gather** — causes planar blocking
+- **k-NN using 3D distance** — nearby surfaces inflate radius incorrectly
+- **Missing plane distance filter** — allows cross-wall leakage
+- **Forgetting specular chain throughput** — mirrors/glass views wrong brightness
+- **Terminating photon paths at delta surfaces** — prevents caustic formation
+- **Omitting $N_{\text{photons}}$ in photon flux denominator** — brightness scales with count
+- **Using NEE solid-angle PDF with area-form integrand** (or vice versa)
+- **Using shading normals for tangential metric** — use geometric normals
+- CPU vs GPU: different structures OK, but gather metric must match
 
-```
+---
+
+## 24. Architectural Differences from v1
+
+| Aspect | v1 (Previous) | v2.1 (Current) |
+|--------|---------------|----------------|
+| Camera ray depth | Full path tracing (N bounces) | First hit only (specular chain N≤8 to first diffuse) |
+| Indirect lighting | Photon map + camera BSDF bouncing | Photon map only |
+| MIS | 3-way (NEE + BSDF + photon) | None at camera; standard BSDF in photon rays |
+| Photon bounce strategy | Standard BSDF | Stratified BSDF at bounce 0 |
+| Spatial index | Hash grid only | KD-tree (CPU) + Hash grid (GPU) + tangential kernel |
+| Gather radius | Fixed or SPPM (bounded) | k-NN adaptive per hitpoint (tangential distance) |
+| Gather kernel | 3D spherical | Tangential disk kernel (fixes planar blocking) |
+| Photon precomputation | Recomputes every launch | Binary save/load with scene hash invalidation |
+| Photon budget | Single budget | Separate `global_photon_budget` / `caustic_photon_budget` |
+| Caustic handling | Separate caustic map | Separate caustic map (retained) |
+| Tone mapping | Reinhard | ACES Filmic |
+| Volume rendering | Rayleigh + Beer-Lambert | Temporarily disabled |
+| Default render mode | Progressive accumulation | SPPM progressive (radius shrinkage) |
+| CPU reference | Partial | Full, physically identical to GPU |
+| Integration tests | None (unit only) | CPU↔GPU comparison suite |
+| Cell-bin grid | Used for guided camera bouncing | Deleted (~800 lines) |
+
+---
+
+## 25. Removed / Deprecated Functionality
+
+| Feature | Reason |
+|---------|--------|
+| Camera ray bouncing (bounce > 0) | Replaced by photon-only indirect |
+| MIS 3-way weighting | Camera has no BSDF continuation |
+| Photon-guided camera BSDF sampling | No camera BSDF bounces |
+| `RenderMode::Full` with multi-bounce | Replaced by first-hit + NEE + photon |
+| `dev_sample_guided_bounce()` in camera pass | Photon bounces use standard BSDF |
+| Volume rendering | Temporarily disabled for surface validation |
+| Dense cell-bin grid (`CellBinGrid`) | Deleted. KD-tree handles spatial queries |
+| Obsolete tests (multi-bounce camera, MIS weights, guided bouncing) | Fully deleted, replaced by new tests |

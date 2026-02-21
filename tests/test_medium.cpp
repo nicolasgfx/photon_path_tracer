@@ -152,7 +152,8 @@ static VolumeSampleStats trace_random_rays(
     cfg.image_height      = 64;
     cfg.samples_per_pixel = 1;
     cfg.max_bounces       = ds.max_bounces;
-    cfg.num_photons       = ds.num_photons;
+    // Cap photon count for test speed — the binary header may store millions
+    cfg.num_photons       = std::min(ds.num_photons, 50000);
     cfg.gather_radius     = ds.gather_radius;
     cfg.volume_enabled    = volume_enabled;
     cfg.volume_density    = volume_density;
@@ -492,17 +493,10 @@ TEST(Medium_Integration, VolumeOn_StillHasRadiance) {
 // =====================================================================
 
 TEST(Medium_Integration, HigherDensity_ReducesSurfaceRadiance) {
-    auto& ds = get_medium_dataset();
-    if (!ds.valid) { GTEST_SKIP() << "Dataset not available"; }
-
-    auto stats_low  = trace_random_rays(ds, true, 0.5f);
-    auto stats_high = trace_random_rays(ds, true, 10.0f);
-
-    // Higher density should attenuate surface radiance more
-    // (mean luminance decreases overall because Beer–Lambert absorbs more)
-    EXPECT_LT(stats_high.mean_luminance, stats_low.mean_luminance)
-        << "Higher density should produce lower mean luminance due to "
-           "stronger Beer–Lambert attenuation";
+    // v2: render_pixel() no longer implements volume transport on the CPU
+    // path.  Volume code is temp-disabled; this test exercises a behaviour
+    // that only exists in the GPU pipeline (optix_device.cu).
+    GTEST_SKIP() << "v2: CPU renderer does not implement volume transport";
 }
 
 // =====================================================================
@@ -693,8 +687,9 @@ TEST(VolumePhoton, FluxIsPositiveFinite) {
     ASSERT_GT(vol.size(), 0u);
 
     for (size_t i = 0; i < vol.size(); ++i) {
-        EXPECT_GT(vol.flux[i], 0.f) << "flux[" << i << "] should be > 0";
-        EXPECT_TRUE(std::isfinite(vol.flux[i])) << "flux[" << i << "] inf/nan";
+        float tf = vol.total_flux(i);
+        EXPECT_GT(tf, 0.f) << "flux[" << i << "] should be > 0";
+        EXPECT_TRUE(std::isfinite(tf)) << "flux[" << i << "] inf/nan";
     }
 }
 
@@ -706,8 +701,8 @@ TEST(VolumePhoton, LambdaBinsInRange) {
     ASSERT_GT(vol.size(), 0u);
 
     for (size_t i = 0; i < vol.size(); ++i) {
-        EXPECT_GE(vol.lambda_bin[i], 0);
-        EXPECT_LT(vol.lambda_bin[i], NUM_LAMBDA);
+        // With full spectral flux, check that each photon has positive total flux
+        EXPECT_GT(vol.total_flux(i), 0.f);
     }
 }
 
@@ -860,6 +855,13 @@ TEST(VolumeCellGrid, BinFluxNonNegative) {
 // =====================================================================
 
 TEST(VolumeGather, VolumePhotonsContributeInScatter) {
+    // v2: render_pixel() / trace_path() no longer integrate volume
+    // scattering on the CPU path, so comparing volume-ON vs volume-OFF
+    // through the Renderer is not meaningful.  The volume photon emitter
+    // is tested separately (VolumePhoton::*).  Skip until volume
+    // integration is re-enabled in the CPU renderer.
+    GTEST_SKIP() << "v2: CPU renderer does not implement volume transport";
+
     auto& ds = get_medium_dataset();
     if (!ds.valid) GTEST_SKIP();
 

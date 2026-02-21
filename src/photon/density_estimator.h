@@ -1,13 +1,20 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// density_estimator.h – Photon density estimation (Section 6)
+// density_estimator.h – Photon density estimation (§6, v2.1)
 // ─────────────────────────────────────────────────────────────────────
 //
-// Diffuse estimate (Equation from spec):
-//   L_o(x, wo, lambda) = (1 / (pi * r^2)) * sum_i Phi_i(lambda) * f_s(x, wi, wo, lambda)
+// v2.1: Uses tangential disk kernel (§6.3) for ALL gather operations.
+// 3D spherical distance is NEVER used for density estimation.
 //
-// With optional radial kernel weight W(||x - x_i||)
-// and surface consistency filter.
+// Diffuse estimate (§6.3):
+//   L_o(x, ω_o, λ) = (1 / A_disk) Σ_i W(d_tan_i²) f_s(x, ω_i→ω_o, λ) Φ_i(λ)
+//
+// where:
+//   A_disk = π r² (box kernel) or (π/2) r² (Epanechnikov)
+//   d_tan  = tangential distance on the query's tangent plane
+//   W      = kernel weight function
+//
+// Surface consistency filter (§6.4) is applied BEFORE accumulation.
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
 #include "core/spectrum.h"
@@ -15,42 +22,39 @@
 #include "bsdf/bsdf.h"
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
+#include "photon/surface_filter.h"
 
 struct DensityEstimatorConfig {
     float  radius         = 0.05f;   // Gather radius
     float  caustic_radius = 0.02f;   // Smaller radius for caustics
-    float  surface_tau    = 0.01f;   // Surface consistency threshold
+    float  surface_tau    = 0.02f;   // Surface consistency threshold (§6.4)
     int    num_photons_total = 1;    // For flux normalization (1/N)
     bool   use_kernel     = false;   // true = Epanechnikov, false = box kernel
 };
 
-// ── Kernel weight functions ─────────────────────────────────────────
+// ── Legacy 3D kernel weight functions (kept for tests) ──────────────
 
-// Box kernel: uniform weight 1 within radius, 0 outside
 inline float box_kernel(float dist2, float r2) {
     return (dist2 <= r2) ? 1.0f : 0.0f;
 }
 
-// Epanechnikov kernel: W(t) = 1 - t  where t = dist2 / r2, clamped to [0,1]
-// Gives higher weight to nearby photons for a smoother estimate.
 inline float epanechnikov_kernel(float dist2, float r2) {
     if (dist2 >= r2) return 0.0f;
-    float t = dist2 / r2;
-    return 1.0f - t;
+    return 1.0f - dist2 / r2;
 }
 
 // ── Density estimate at a surface point ─────────────────────────────
 //
 // Returns spectral radiance estimate L_o(x, wo, lambda)
 //
-// Parameters:
-//   hit_pos      – Surface point x
-//   hit_normal   – Surface normal n at x
-//   wo_local     – Outgoing direction in local frame
-//   mat          – Material at x
-//   photons      – Photon map (SoA)
-//   grid         – Hash grid for the photon map
-//   config       – Estimator parameters
+// ── Density estimate at a surface point (§6.3 tangential kernel) ────
+//
+// Returns spectral radiance estimate L_o(x, wo, lambda).
+//
+// v2.1: uses tangential disk distance on the query's tangent plane
+// and the surface consistency filter (§6.4).
+//
+// Full spectral: each photon contributes to ALL wavelength bins.
 
 inline Spectrum estimate_photon_density(
     float3 hit_pos,
@@ -64,44 +68,53 @@ inline Spectrum estimate_photon_density(
 {
     Spectrum L_estimate = Spectrum::zero();
     float r2 = gather_radius * gather_radius;
-    float inv_area = 1.0f / (PI * r2);  // 1 / (pi * r^2)
-    float inv_N = 1.0f / (float)config.num_photons_total;
+
+    // Use tangential disk normalization (§6.3, §15.1.3):
+    //   box:         1 / (π r²)
+    //   Epanechnikov: 1 / ((π/2) r²)
+    float norm = config.use_kernel
+               ? epanechnikov_kernel_norm(r2)
+               : box_kernel_norm(r2);
+    float inv_area = 1.0f / fmaxf(norm, 1e-20f);
+    float inv_N    = 1.0f / (float)config.num_photons_total;
+    float tau      = effective_tau(config.surface_tau);
 
     ONB frame = ONB::from_normal(hit_normal);
 
-    grid.query(hit_pos, gather_radius, photons,
-        [&](uint32_t idx, float /*dist2*/) {
-            // Surface consistency filter
-            float3 photon_pos = make_f3(photons.pos_x[idx], photons.pos_y[idx], photons.pos_z[idx]);
-            float3 diff = photon_pos - hit_pos;
+    grid.query_tangential(hit_pos, hit_normal, gather_radius, tau, photons,
+        [&](uint32_t idx, float d_tan2) {
+            // Surface consistency filter (§6.4): conditions 3 & 4
+            // (conditions 1 & 2 already applied by query_tangential)
 
-            // Check: photon should be near the surface plane
-            float plane_dist = fabsf(dot(hit_normal, diff));
-            if (plane_dist > config.surface_tau) return;
-
-            // Check: photon must be on the same side of the surface as the
-            // query point — reject photons deposited on opposite faces (e.g.
-            // the back of a wall) to prevent irradiance leaking through walls.
-            // Guard: only apply if norm arrays are populated (old binary files may lack them).
+            // Condition 3: normal compatibility
             if (!photons.norm_x.empty()) {
-                float3 photon_n = make_f3(photons.norm_x[idx], photons.norm_y[idx], photons.norm_z[idx]);
-                if (dot(photon_n, hit_normal) <= 0.f) return;
+                float3 photon_n = make_f3(photons.norm_x[idx],
+                                          photons.norm_y[idx],
+                                          photons.norm_z[idx]);
+                if (dot(photon_n, hit_normal) <= 0.0f) return;
             }
 
-            // Check: photon incoming direction should point into the surface
-            float3 photon_wi = make_f3(photons.wi_x[idx], photons.wi_y[idx], photons.wi_z[idx]);
+            // Condition 4: direction consistency
+            float3 photon_wi = make_f3(photons.wi_x[idx],
+                                       photons.wi_y[idx],
+                                       photons.wi_z[idx]);
             if (dot(photon_wi, hit_normal) <= 0.f) return;
+
+            // Kernel weight (tangential distance based)
+            float w = config.use_kernel
+                    ? tangential_epanechnikov_kernel(d_tan2, r2)
+                    : tangential_box_kernel(d_tan2, r2);
+            if (w <= 0.f) return;
 
             // BSDF evaluation: f_s(x, wi, wo, lambda)
             float3 wi_local = frame.world_to_local(photon_wi);
-            Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
+            Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_local);
 
-            // Accumulate: Phi_i * f_s / (pi * r^2 * N)  — box kernel (weight = 1)
-            uint16_t bin = photons.lambda_bin[idx];
-            float photon_flux = photons.flux[idx] * inv_N;
-
-            // Add contribution only for the photon's wavelength bin
-            L_estimate.value[bin] += photon_flux * f.value[bin] * inv_area;
+            // Full spectral accumulation
+            Spectrum photon_flux = photons.get_flux(idx);
+            for (int b = 0; b < NUM_LAMBDA; ++b)
+                L_estimate.value[b] += w * photon_flux.value[b] * inv_N
+                                     * f.value[b] * inv_area;
         });
 
     return L_estimate;
@@ -143,7 +156,7 @@ inline PhotonGuidedSample sample_photon_guided(
 
             NeighborPhoton np;
             np.wi   = wi;
-            np.flux = photons.flux[idx];
+            np.flux = photons.total_flux(idx);
             neighbors.push_back(np);
             total_flux += np.flux;
         });
@@ -186,7 +199,7 @@ inline float photon_guided_pdf(
             float3 wi = make_f3(photons.wi_x[idx], photons.wi_y[idx], photons.wi_z[idx]);
             if (dot(wi, hit_normal) <= 0.f) return;
 
-            float f = photons.flux[idx];
+            float f = photons.total_flux(idx);
             total_flux += f;
 
             // Check if this photon's direction matches wi_world
@@ -198,28 +211,17 @@ inline float photon_guided_pdf(
     if (total_flux <= 0.f) return 0.f;
     return matching_flux / total_flux;
 }
-// ── SPPM photon gather ──────────────────────────────────────────────
+// ── SPPM photon gather (§6.3 tangential kernel) ─────────────────────
 //
 // Gathers photons within a per-pixel radius at a visible point and
 // returns the raw flux contribution (before progressive update).
 //
-// Unlike estimate_photon_density() which computes final radiance,
-// this returns:
-//   phi(λ) = Σ_j f_s(x, ω_o, ω_j, λ) · Φ_j(λ)
+// v2.1: Uses tangential distance on the query's tangent plane.
 //
-// along with the photon count M.  The caller applies the SPPM
-// progressive update using these values.
+// Returns:
+//   phi(λ) = Σ_j W(d_tan²) f_s(x, ω_o, ω_j, λ) · Φ_j(λ)
 //
-// @param hit_pos        Visible point position
-// @param hit_normal     Shading normal at visible point
-// @param wo_local       Outgoing direction in local frame
-// @param mat            Material at visible point
-// @param photons        Photon map (SoA)
-// @param grid           Hash grid for the photon map
-// @param gather_radius  Per-pixel gather radius (shrinks over iterations)
-// @param surface_tau    Plane-distance filter threshold
-// @param[out] M_out     Number of valid photons found
-// @return               Raw spectral flux contribution Φ_new
+// along with the photon count M.
 
 inline Spectrum sppm_gather(
     float3 hit_pos,
@@ -236,27 +238,21 @@ inline Spectrum sppm_gather(
     int M = 0;
 
     ONB frame = ONB::from_normal(hit_normal);
+    float r2  = gather_radius * gather_radius;
+    float tau = effective_tau(surface_tau);
 
-    grid.query(hit_pos, gather_radius, photons,
-        [&](uint32_t idx, float dist2) {
-            float3 photon_pos = make_f3(photons.pos_x[idx],
-                                        photons.pos_y[idx],
-                                        photons.pos_z[idx]);
-            float3 diff = photon_pos - hit_pos;
+    grid.query_tangential(hit_pos, hit_normal, gather_radius, tau, photons,
+        [&](uint32_t idx, float d_tan2) {
+            // Surface consistency filter: conditions 3 & 4
+            // (conditions 1 & 2 already applied by query_tangential)
 
-            // Surface consistency: plane distance
-            float plane_dist = fabsf(dot(hit_normal, diff));
-            if (plane_dist > surface_tau) return;
-
-            // Normal consistency: reject opposite-facing photons
             if (!photons.norm_x.empty()) {
                 float3 photon_n = make_f3(photons.norm_x[idx],
                                           photons.norm_y[idx],
                                           photons.norm_z[idx]);
-                if (dot(photon_n, hit_normal) <= 0.f) return;
+                if (dot(photon_n, hit_normal) <= 0.0f) return;
             }
 
-            // Direction consistency: photon must enter from above the surface
             float3 photon_wi = make_f3(photons.wi_x[idx],
                                        photons.wi_y[idx],
                                        photons.wi_z[idx]);
@@ -264,16 +260,16 @@ inline Spectrum sppm_gather(
 
             // BSDF evaluation
             float3 wi_local = frame.world_to_local(photon_wi);
-            Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
+            Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_local);
 
-            // Epanechnikov kernel: w = 1 - d²/r²
-            float r2 = gather_radius * gather_radius;
-            float w = 1.0f - dist2 / r2;
+            // Epanechnikov kernel on tangential distance
+            float w = tangential_epanechnikov_kernel(d_tan2, r2);
             if (w <= 0.f) return;
 
-            // Accumulate kernel-weighted flux: w · f_s · Φ per wavelength bin
-            uint16_t bin = photons.lambda_bin[idx];
-            phi.value[bin] += w * f.value[bin] * photons.flux[idx];
+            // Full spectral accumulation: w · f_s · Φ per wavelength bin
+            Spectrum photon_flux = photons.get_flux(idx);
+            for (int b = 0; b < NUM_LAMBDA; ++b)
+                phi.value[b] += w * f.value[b] * photon_flux.value[b];
 
             ++M;
         });

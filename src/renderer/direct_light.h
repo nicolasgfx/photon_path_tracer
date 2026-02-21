@@ -1,14 +1,19 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// direct_light.h – Next-event estimation (direct light sampling)
+// direct_light.h – Coverage-aware NEE (§7.2.1, v2.1)
 // ─────────────────────────────────────────────────────────────────────
-// Implements Section 7.2: always-on direct light sampling.
-// Samples a point on an emissive surface and computes the direct
-// illumination contribution with visibility testing.
+// Mixture sampling: p_select = (1-c) * p_power + c * p_area
+//   c = DEFAULT_NEE_COVERAGE_FRACTION (default 0.3)
+//   p_power = power-weighted alias table (existing)
+//   p_area  = area-weighted (uniform over emissive surface area)
+//
+// This prevents dark spots under large dim emitters (coverage problem)
+// while preserving low variance for small bright lights.
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
 #include "core/spectrum.h"
 #include "core/random.h"
+#include "core/config.h"
 #include "scene/scene.h"
 #include "bsdf/bsdf.h"
 
@@ -20,12 +25,16 @@ struct DirectLightSample {
     bool     visible;      // Shadow ray result
 };
 
-// ── Sample direct illumination at a surface point ───────────────────
+// ── Sample direct illumination (coverage-aware mixture, §7.2.1) ─────
+//
+// Mixture of power-weighted + area-weighted light sampling.
+// coverage_fraction: 0 = pure importance, 1 = pure area, 0.3 = default
 inline DirectLightSample sample_direct_light(
     float3 hit_pos,
     float3 hit_normal,
     const Scene& scene,
-    PCGRng& rng)
+    PCGRng& rng,
+    float coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION)
 {
     DirectLightSample result;
     result.Li      = Spectrum::zero();
@@ -33,15 +42,38 @@ inline DirectLightSample sample_direct_light(
 
     if (scene.emissive_tri_indices.empty()) return result;
 
-    // 1. Sample emissive triangle via alias table
-    float u1 = rng.next_float();
-    float u2 = rng.next_float();
-    int local_idx = scene.emissive_alias_table.sample(u1, u2);
+    const int num_emissive = (int)scene.emissive_tri_indices.size();
+
+    // ── Select emissive triangle via mixture ────────────────────────
+    float u_select = rng.next_float();
+    int local_idx;
+    float pdf_tri;
+
+    if (u_select > coverage_fraction) {
+        // Power-weighted branch (probability 1-c)
+        float u1 = rng.next_float();
+        float u2 = rng.next_float();
+        local_idx = scene.emissive_alias_table.sample(u1, u2);
+
+        // Mixture PDF: p = (1-c)*p_power + c*p_area
+        float p_power = scene.emissive_alias_table.pdf(local_idx);
+        float p_area_uniform = 1.0f / (float)num_emissive;
+        pdf_tri = (1.0f - coverage_fraction) * p_power
+                + coverage_fraction * p_area_uniform;
+    } else {
+        // Area-weighted branch (probability c): uniform over emissive items
+        local_idx = (int)(rng.next_float() * num_emissive);
+        if (local_idx >= num_emissive) local_idx = num_emissive - 1;
+
+        float p_power = scene.emissive_alias_table.pdf(local_idx);
+        float p_area_uniform = 1.0f / (float)num_emissive;
+        pdf_tri = (1.0f - coverage_fraction) * p_power
+                + coverage_fraction * p_area_uniform;
+    }
+
     uint32_t tri_idx = scene.emissive_tri_indices[local_idx];
     const Triangle& light_tri = scene.triangles[tri_idx];
     const Material& light_mat = scene.materials[light_tri.material_id];
-
-    float pdf_tri = scene.emissive_alias_table.pdf(local_idx);
 
     // 2. Sample point on the light triangle
     float3 bary = sample_triangle(rng.next_float(), rng.next_float());
@@ -92,12 +124,13 @@ inline DirectLightSample sample_direct_light(
     return result;
 }
 
-// ── PDF of direct light sampling for a given direction ──────────────
-// (needed for MIS with BSDF sampling)
+// ── PDF of direct light sampling for a given direction (§7.2.1) ─────
+// Uses coverage-aware mixture PDF: p = (1-c)*p_power + c*p_area
 inline float direct_light_pdf(
     float3 hit_pos,
     float3 wi,
-    const Scene& scene)
+    const Scene& scene,
+    float coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION)
 {
     // Trace ray in direction wi and check if it hits an emissive surface
     Ray ray;
@@ -120,16 +153,21 @@ inline float direct_light_pdf(
     float area = tri.area();
 
     // Find the local index in emissive_tri_indices
-    float pdf_tri = 0.f;
+    float p_power = 0.f;
     for (size_t i = 0; i < scene.emissive_tri_indices.size(); ++i) {
         if (scene.emissive_tri_indices[i] == hit.triangle_id) {
-            pdf_tri = scene.emissive_alias_table.pdf((int)i);
+            p_power = scene.emissive_alias_table.pdf((int)i);
             break;
         }
     }
 
+    // Coverage-aware mixture PDF (§7.2.1)
+    float p_area_uniform = 1.0f / (float)scene.emissive_tri_indices.size();
+    float pdf_tri_mix = (1.0f - coverage_fraction) * p_power
+                      +          coverage_fraction  * p_area_uniform;
+
     float pdf_pos = 1.0f / area;
     float dist2 = hit.t * hit.t;
 
-    return pdf_tri * pdf_pos * dist2 / cos_theta;
+    return pdf_tri_mix * pdf_pos * dist2 / cos_theta;
 }

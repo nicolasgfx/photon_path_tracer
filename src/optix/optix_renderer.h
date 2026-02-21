@@ -137,7 +137,8 @@ public:
                             const PhotonSoA& caustic_photons,
                             const HashGrid& caustic_grid,
                             float gather_radius,
-                            float caustic_radius);
+                            float caustic_radius,
+                            int num_photons_emitted = 0);
 
     /// Upload emitter data to device (for GPU photon tracing)
     void upload_emitter_data(const Scene& scene);
@@ -371,6 +372,7 @@ private:
     int  height_      = DEFAULT_IMAGE_HEIGHT;
     bool initialised_ = false;
     int  num_emissive_ = 0;
+    int  num_photons_emitted_ = 0;  // N_emitted for density normalisation
     bool runtime_volume_enabled_ = DEFAULT_VOLUME_ENABLED;  // toggled via V key
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
 };

@@ -16,8 +16,8 @@
 #include "scene/scene.h"
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
+#include "photon/kd_tree.h"
 #include "photon/density_estimator.h"
-#include "core/cell_bin_grid.h"
 #include "core/sppm.h"
 
 #include <vector>
@@ -26,10 +26,11 @@
 // ── Render configuration ────────────────────────────────────────────
 
 enum class RenderMode {
-    Full,                // Complete photon + path tracing
-    DirectOnly,          // Direct illumination only
-    IndirectOnly,        // Photon map indirect only
-    PhotonMap,           // Visualize photon density
+    Combined,            // Direct (NEE) + Indirect (photon map)  [default]
+    Full = Combined,     // Legacy alias for Combined
+    DirectOnly,          // NEE direct lighting only (no photon gather)
+    IndirectOnly,        // Photon map indirect only (no NEE)
+    PhotonMap,           // Visualize photon density (heatmap)
     Normals,             // Debug: surface normals
     MaterialID,          // Debug: material colors
     Depth                // Debug: depth buffer
@@ -45,12 +46,24 @@ struct RenderConfig {
 
     // Photon mapping
     int    num_photons       = DEFAULT_NUM_PHOTONS;
+    int    global_photon_budget  = DEFAULT_GLOBAL_PHOTON_BUDGET;   // §Q4
+    int    caustic_photon_budget = DEFAULT_CAUSTIC_PHOTON_BUDGET;  // §Q4
     float  gather_radius     = DEFAULT_GATHER_RADIUS;
     float  caustic_radius    = DEFAULT_CAUSTIC_RADIUS;
 
-    // MIS
+    // MIS (v2: disabled, kept for API compat)
     bool   use_mis           = DEFAULT_USE_MIS;
     bool   use_photon_guided = DEFAULT_USE_PHOTON_GUIDED;
+
+    // Camera specular chain (§E3)
+    int    max_specular_chain = DEFAULT_MAX_SPECULAR_CHAIN;
+
+    // KD-tree adaptive radius (k-NN, §C2)
+    int    knn_k              = DEFAULT_KNN_K;
+    bool   use_kdtree         = true;   // primary spatial index
+
+    // NEE coverage fraction (§7.2.1)
+    float  nee_coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION;
 
     // Participating medium (volumetric scattering)
     bool   volume_enabled     = DEFAULT_VOLUME_ENABLED;
@@ -76,7 +89,7 @@ struct RenderConfig {
     int   adaptive_radius        = 1;     ///< neighbourhood half-width (pixels)
 
     // Debug
-    RenderMode mode          = RenderMode::Full;
+    RenderMode mode          = RenderMode::Combined;
 };
 
 // ── Spectral framebuffer ────────────────────────────────────────────
@@ -122,7 +135,7 @@ struct FrameBuffer {
         lum_sum2[idx] += Y * Y;
     }
 
-    // Tonemap and convert to sRGB
+    // Tonemap and convert to sRGB (ACES Filmic, §Q8)
     void tonemap(float exposure = 1.0f) {
         for (int i = 0; i < width * height; ++i) {
             Spectrum avg = (sample_count[i] > 0.f)
@@ -132,8 +145,10 @@ struct FrameBuffer {
             // Apply exposure
             avg *= exposure;
 
-            // Spectrum → sRGB
-            float3 rgb = spectrum_to_srgb(avg);
+            // Spectrum → sRGB with ACES tone mapping
+            float3 rgb = USE_ACES_TONEMAPPING
+                ? spectrum_to_srgb_aces(avg)
+                : spectrum_to_srgb(avg);
 
             // Clamp
             rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
@@ -180,15 +195,17 @@ public:
     const HashGrid&  global_grid()     const { return global_grid_; }
     const HashGrid&  caustic_grid()    const { return caustic_grid_; }
 
-    // Result of a single traced camera path
+    // Result of a single camera ray (first-hit + specular chain)
     struct TraceResult {
         Spectrum combined;    ///< full radiance (NEE + photon + emission)
-        Spectrum nee_direct;  ///< direct-lighting-only component (all bounces,
-                              ///  throughput-weighted), used as low-variance
-                              ///  proxy for adaptive noise estimation
+        Spectrum nee_direct;  ///< direct-lighting-only component
     };
 
-    // Trace a single camera path and return spectral radiance
+    // v2: First-hit camera ray with specular chain (§E3).
+    // Follows specular bounces, then NEE + photon gather at first diffuse hit.
+    TraceResult render_pixel(Ray ray, PCGRng& rng);
+
+    // Legacy: multi-bounce trace_path (kept for backward compat, wraps render_pixel)
     TraceResult trace_path(Ray ray, PCGRng& rng);
 
 private:
@@ -209,8 +226,6 @@ private:
     PhotonSoA    caustic_photons_;
     HashGrid     global_grid_;
     HashGrid     caustic_grid_;
-
-    // Volume photons
-    PhotonSoA    volume_photons_;
-    CellBinGrid  volume_cell_grid_;
+    KDTree       global_kdtree_;     // v2: primary spatial index
+    KDTree       caustic_kdtree_;    // v2: caustic KD-tree
 };

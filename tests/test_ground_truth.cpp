@@ -33,6 +33,7 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/density_estimator.h"
+#include "photon/surface_filter.h"
 #include "photon/emitter.h"
 #include "bsdf/bsdf.h"
 
@@ -371,15 +372,9 @@ static Spectrum gather_with_local_bins(
 
     ONB frame = ONB::from_normal(normal);
 
-    ds.grid.query(pos, radius, ds.photons,
+    float tau = effective_tau(DEFAULT_SURFACE_TAU);
+    ds.grid.query_tangential(pos, normal, radius, tau, ds.photons,
         [&](uint32_t idx, float dist2) {
-            // Surface consistency
-            float3 pp = make_f3(ds.photons.pos_x[idx], ds.photons.pos_y[idx],
-                                ds.photons.pos_z[idx]);
-            float3 diff = pp - pos;
-            float plane_dist = fabsf(dot(normal, diff));
-            if (plane_dist > DEFAULT_SURFACE_TAU) return;
-
             // Normal visibility filter: reject photons from opposite faces
             // (mirrors density_estimator.h; guard for v1 files with empty norm arrays)
             if (!ds.photons.norm_x.empty()) {
@@ -395,6 +390,7 @@ static Spectrum gather_with_local_bins(
 
             // Density estimation uses box kernel (weight = 1) to match estimate_photon_density.
             // Bin population uses Epanechnikov for smoother guidance.
+            // dist2 is tangential distance from query_tangential callback
             float w_bin = 1.0f - dist2 / r2;  // Epanechnikov for bins
 
             // Density estimation

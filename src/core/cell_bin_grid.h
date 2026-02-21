@@ -184,7 +184,7 @@ struct CellBinGrid {
             float px = photons.pos_x[i];
             float py = photons.pos_y[i];
             float pz = photons.pos_z[i];
-            float flux = photons.flux[i];
+            float flux = photons.total_flux(i);
             float wi_x = photons.wi_x[i];
             float wi_y = photons.wi_y[i];
             float wi_z = photons.wi_z[i];
@@ -242,7 +242,7 @@ struct CellBinGrid {
             float px = photons.pos_x[i];
             float py = photons.pos_y[i];
             float pz = photons.pos_z[i];
-            float flux = photons.flux[i];
+            float flux = photons.total_flux(i);
             float wi_x = photons.wi_x[i];
             float wi_y = photons.wi_y[i];
             float wi_z = photons.wi_z[i];

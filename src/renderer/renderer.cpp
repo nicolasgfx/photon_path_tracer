@@ -1,15 +1,17 @@
 // ─────────────────────────────────────────────────────────────────────
-// renderer.cpp – Path tracing core and render pipeline
+// renderer.cpp – Photon-centric renderer (v2 Architecture)
+// ─────────────────────────────────────────────────────────────────────
+// Camera rays are first-hit probes with specular chain (§E3).
+// All indirect lighting comes from the photon map.
+// Direct lighting via NEE at the camera first-hit point.
 // ─────────────────────────────────────────────────────────────────────
 #include "renderer/renderer.h"
 #include "renderer/direct_light.h"
-#include "renderer/mis.h"
 #include "photon/emitter.h"
 #include "photon/density_estimator.h"
+#include "photon/surface_filter.h"
 #include "bsdf/bsdf.h"
 #include "core/random.h"
-#include "core/medium.h"
-#include "core/phase_function.h"
 
 #include <iostream>
 #include <chrono>
@@ -30,15 +32,9 @@ void Renderer::build_photon_maps() {
     emitter_cfg.max_bounces    = config_.max_bounces;
     emitter_cfg.rr_threshold   = config_.rr_threshold;
     emitter_cfg.min_bounces_rr = config_.min_bounces_rr;
-    emitter_cfg.volume_enabled = config_.volume_enabled;
-    emitter_cfg.volume_density = config_.volume_density;
-    emitter_cfg.volume_falloff = config_.volume_falloff;
-    emitter_cfg.volume_albedo  = config_.volume_albedo;
+    emitter_cfg.volume_enabled = false;  // §Q9: volume disabled in v2
 
-    volume_photons_ = PhotonSoA{};           // reset
-    PhotonSoA* vol_ptr = config_.volume_enabled ? &volume_photons_ : nullptr;
-
-    trace_photons(*scene_, emitter_cfg, global_photons_, caustic_photons_, vol_ptr);
+    trace_photons(*scene_, emitter_cfg, global_photons_, caustic_photons_, nullptr);
 
     auto t1 = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -47,169 +43,167 @@ void Renderer::build_photon_maps() {
               << ms << " ms\n";
     std::cout << "[Photon] Global map:  " << global_photons_.size() << " stored\n";
     std::cout << "[Photon] Caustic map: " << caustic_photons_.size() << " stored\n";
-    if (vol_ptr)
-        std::cout << "[Photon] Volume map:  " << volume_photons_.size() << " stored\n";
 
-    // Build hash grids
+    // Build spatial indices
     if (global_photons_.size() > 0) {
+        if (config_.use_kdtree) {
+            global_kdtree_.build(global_photons_);
+            std::cout << "[KDTree] Global KD-tree built ("
+                      << global_kdtree_.node_count() << " nodes)\n";
+        }
         global_grid_.build(global_photons_, config_.gather_radius);
         std::cout << "[Grid] Global hash grid built ("
                   << global_grid_.table_size << " buckets)\n";
     }
 
     if (caustic_photons_.size() > 0) {
+        if (config_.use_kdtree) {
+            caustic_kdtree_.build(caustic_photons_);
+            std::cout << "[KDTree] Caustic KD-tree built ("
+                      << caustic_kdtree_.node_count() << " nodes)\n";
+        }
         caustic_grid_.build(caustic_photons_, config_.caustic_radius);
         std::cout << "[Grid] Caustic hash grid built ("
                   << caustic_grid_.table_size << " buckets)\n";
     }
-
-    // Build volume photon cell-bin grid (stored in volume_photons_ member)
-    if (vol_ptr && volume_photons_.size() > 0) {
-        // Precompute bin indices for volume photons
-        PhotonBinDirs bin_dirs;
-        bin_dirs.init(PHOTON_BIN_COUNT);
-        volume_photons_.bin_idx.resize(volume_photons_.size());
-        for (size_t i = 0; i < volume_photons_.size(); ++i) {
-            float3 wi = make_f3(volume_photons_.wi_x[i],
-                                volume_photons_.wi_y[i],
-                                volume_photons_.wi_z[i]);
-            volume_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
-        }
-        volume_cell_grid_.build(volume_photons_, config_.gather_radius, PHOTON_BIN_COUNT);
-        std::cout << "[Grid] Volume cell-bin grid built ("
-                  << volume_cell_grid_.total_cells() << " cells)\n";
-    }
 }
 
-// ── Trace a single camera path ──────────────────────────────────────
+// ── KD-tree density estimate helper (§6.3 tangential kernel) ─────────
+//
+// Fixed-radius gather via KD-tree.  Uses tangential distance (v2.1).
 
-Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
-    Spectrum L_total = Spectrum::zero();      // Accumulated radiance
-    Spectrum L_nee   = Spectrum::zero();      // Direct-only component (proxy for noise)
-    Spectrum throughput = Spectrum::constant(1.0f);  // Path throughput
+static Spectrum estimate_density_kdtree(
+    float3 hit_pos, float3 hit_normal, float3 wo_local,
+    const Material& mat,
+    const PhotonSoA& photons, const KDTree& tree,
+    float gather_radius, int num_photons_total,
+    bool use_epanechnikov = false)
+{
+    Spectrum L = Spectrum::zero();
+    float r2       = gather_radius * gather_radius;
+    float norm     = use_epanechnikov
+                   ? epanechnikov_kernel_norm(r2)
+                   : box_kernel_norm(r2);
+    float inv_area = 1.0f / fmaxf(norm, 1e-20f);
+    float inv_N    = 1.0f / (float)num_photons_total;
+    float tau      = effective_tau(DEFAULT_SURFACE_TAU);
+    ONB frame = ONB::from_normal(hit_normal);
 
-    DensityEstimatorConfig de_config;
-    de_config.radius = config_.gather_radius;
-    de_config.caustic_radius = config_.caustic_radius;
-    de_config.num_photons_total = config_.num_photons;
-
-    for (int bounce = 0; bounce <= config_.max_bounces; ++bounce) {
-        HitRecord hit = scene_->intersect(ray);
-
-        // ── Participating medium: transmittance + single scattering ──
-        if (config_.volume_enabled && config_.volume_density > 0.f) {
-            float t_end = hit.hit ? hit.t
-                                 : config_.volume_max_t;
-            if (t_end > 0.f) {
-                // Build medium at midpoint height for falloff
-                float mid_y = ray.origin.y
-                    + ray.direction.y * (t_end * 0.5f);
-                HomogeneousMedium med = make_rayleigh_medium(
-                    config_.volume_density, config_.volume_albedo,
-                    config_.volume_falloff, mid_y);
-
-                // Single-scattering estimate (stratified along segment)
-                int N = config_.volume_samples;
-                float inv_N = 1.f / (float)N;
-                for (int vs = 0; vs < N; ++vs) {
-                    float u_t = (vs + rng.next_float()) * inv_N;
-                    float t_sample = u_t * t_end;
-                    float3 x = ray.origin + ray.direction * t_sample;
-
-                    // Transmittance from camera to sample point
-                    Spectrum T_cam = transmittance(med, t_sample);
-
-                    // NEE: sample a light from this medium point
-                    if (!scene_->emissive_tri_indices.empty()) {
-                        DirectLightSample dls = sample_direct_light(
-                            x, make_f3(0,1,0) /* dummy normal */, *scene_, rng);
-                        if (dls.visible && dls.pdf_light > 0.f) {
-                            // Phase function
-                            float cos_theta = dot(dls.wi,
-                                ray.direction * (-1.f));
-                            float phase = rayleigh_phase(cos_theta);
-
-                            // Transmittance from sample to light
-                            Spectrum T_light = transmittance(med,
-                                dls.distance);
-
-                            // Contribution
-                            for (int i = 0; i < NUM_LAMBDA; ++i) {
-                                float contrib = t_end * inv_N
-                                    * T_cam.value[i]
-                                    * med.sigma_s.value[i]
-                                    * phase
-                                    * T_light.value[i]
-                                    * dls.Li.value[i]
-                                    / fmaxf(dls.pdf_light, 1e-12f);
-                                L_total.value[i] += throughput.value[i]
-                                    * contrib;
-                            }
-                        }
-                    }
-
-                    // Volume photon grid gather (trilinear interpolation)
-                    if (volume_cell_grid_.total_cells() > 0) {
-                        auto tri = volume_cell_grid_.trilinear_cells(x);
-                        if (tri.count > 0) {
-                            float3 wo = ray.direction * (-1.f);
-                            float cell_vol = volume_cell_grid_.cell_size
-                                * volume_cell_grid_.cell_size
-                                * volume_cell_grid_.cell_size;
-                            // Each photon is scattered into a 3×3×3 = 27-cell
-                            // neighborhood during build(), so the effective
-                            // gather volume is 27× the single-cell volume.
-                            float gather_vol = 27.f * cell_vol;
-                            float inv_Nph = 1.0f / (float)config_.num_photons;
-                            for (int ci = 0; ci < tri.count; ++ci) {
-                                float cw = tri.weight[ci];
-                                const PhotonBin* vbins = &volume_cell_grid_.bins[
-                                    (size_t)tri.cell[ci] * PHOTON_BIN_COUNT];
-                                for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
-                                    if (vbins[k].count == 0) continue;
-                                    float cos_theta = dot(wo, make_f3(
-                                        vbins[k].dir_x, vbins[k].dir_y,
-                                        vbins[k].dir_z));
-                                    float phase = rayleigh_phase(cos_theta);
-                                    float bin_flux = vbins[k].flux;
-                                    float norm = bin_flux * phase * inv_Nph
-                                        * cw / fmaxf(gather_vol, 1e-20f);
-                                    for (int i = 0; i < NUM_LAMBDA; ++i) {
-                                        float contrib = t_end * inv_N
-                                            * T_cam.value[i]
-                                            * norm;
-                                        L_total.value[i] += throughput.value[i]
-                                            * contrib;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Apply transmittance to throughput for this segment
-                Spectrum T_seg = transmittance(med, t_end);
-                for (int i = 0; i < NUM_LAMBDA; ++i)
-                    throughput.value[i] *= T_seg.value[i];
+    tree.query_tangential(hit_pos, hit_normal, gather_radius, tau, photons,
+        [&](uint32_t idx, float d_tan2) {
+            // Surface consistency: conditions 3 & 4
+            if (!photons.norm_x.empty()) {
+                float3 pn = make_f3(photons.norm_x[idx],
+                                    photons.norm_y[idx],
+                                    photons.norm_z[idx]);
+                if (dot(pn, hit_normal) <= 0.0f) return;
             }
+
+            float3 wi = make_f3(photons.wi_x[idx],
+                                photons.wi_y[idx],
+                                photons.wi_z[idx]);
+            if (dot(wi, hit_normal) <= 0.f) return;
+
+            float w = use_epanechnikov
+                    ? tangential_epanechnikov_kernel(d_tan2, r2)
+                    : tangential_box_kernel(d_tan2, r2);
+            if (w <= 0.f) return;
+
+            float3 wi_loc = frame.world_to_local(wi);
+            Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_loc);
+
+            Spectrum photon_flux = photons.get_flux(idx);
+            for (int b = 0; b < NUM_LAMBDA; ++b)
+                L.value[b] += w * photon_flux.value[b] * inv_N
+                            * f.value[b] * inv_area;
+        });
+
+    return L;
+}
+
+// ── k-NN density estimate helper (§6.3 tangential kernel) ───────────
+//
+// Adaptive-radius gather: find the k nearest photons using tangential
+// distance, use distance to the k-th as the effective radius.
+
+static Spectrum estimate_density_knn(
+    float3 hit_pos, float3 hit_normal, float3 wo_local,
+    const Material& mat,
+    const PhotonSoA& photons, const KDTree& tree,
+    int k, int num_photons_total)
+{
+    std::vector<uint32_t> indices;
+    float max_dist2 = 0.f;
+    float tau = effective_tau(DEFAULT_SURFACE_TAU);
+    tree.knn_tangential(hit_pos, hit_normal, k, tau, photons,
+                        indices, max_dist2);
+
+    if (indices.empty()) return Spectrum::zero();
+
+    // Normalization uses the k-th tangential distance as effective radius
+    float inv_area = 1.0f / (PI * fmaxf(max_dist2, 1e-20f));
+    float inv_N    = 1.0f / (float)num_photons_total;
+    ONB frame = ONB::from_normal(hit_normal);
+
+    Spectrum L = Spectrum::zero();
+    for (uint32_t idx : indices) {
+        // Conditions 3 & 4 (already passed tangential + plane in knn)
+        if (!photons.norm_x.empty()) {
+            float3 pn = make_f3(photons.norm_x[idx],
+                                photons.norm_y[idx],
+                                photons.norm_z[idx]);
+            if (dot(pn, hit_normal) <= 0.0f) continue;
         }
 
+        float3 wi = make_f3(photons.wi_x[idx],
+                            photons.wi_y[idx],
+                            photons.wi_z[idx]);
+        if (dot(wi, hit_normal) <= 0.f) continue;
+
+        float3 wi_loc = frame.world_to_local(wi);
+        Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_loc);
+
+        Spectrum photon_flux = photons.get_flux(idx);
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            L.value[b] += photon_flux.value[b] * inv_N * f.value[b] * inv_area;
+    }
+    return L;
+}
+
+// ── First-hit + specular chain + NEE + photon gather (v2 §E3) ───────
+
+Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
+    Spectrum L_total    = Spectrum::zero();
+    Spectrum L_nee      = Spectrum::zero();
+    Spectrum throughput = Spectrum::constant(1.0f);
+
+    DensityEstimatorConfig de_config;
+    de_config.radius            = config_.gather_radius;
+    de_config.caustic_radius    = config_.caustic_radius;
+    de_config.num_photons_total = config_.num_photons;
+    de_config.use_kernel        = true; // Epanechnikov (§6.3)
+
+    const int max_spec = config_.max_specular_chain;
+
+    for (int bounce = 0; bounce <= max_spec; ++bounce) {
+        HitRecord hit = scene_->intersect(ray);
         if (!hit.hit) break;
 
-        // Get material, applying diffuse texture if present
+        // Apply diffuse texture
         Material mat = scene_->materials[hit.material_id];
-        if (mat.diffuse_tex >= 0 && mat.diffuse_tex < (int)scene_->textures.size()) {
+        if (mat.diffuse_tex >= 0 &&
+            mat.diffuse_tex < (int)scene_->textures.size()) {
             float3 rgb = scene_->textures[mat.diffuse_tex].sample(hit.uv);
             mat.Kd = rgb_to_spectrum_reflectance(rgb.x, rgb.y, rgb.z);
         }
 
-        // Handle emission (camera sees a light directly, or via specular bounce)
+        // Emission: only on first bounce (camera sees a light)
         if (mat.is_emissive() && bounce == 0) {
             L_total += throughput * mat.Le;
         }
 
-        // Handle debug render modes
-        if (config_.mode != RenderMode::Full) {
+        // Debug render modes (return immediately)
+        if (config_.mode != RenderMode::Combined) {
             switch (config_.mode) {
                 case RenderMode::Normals:
                     { auto s = render_normals(hit);     return TraceResult{s, s}; }
@@ -220,12 +214,11 @@ Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
                 case RenderMode::PhotonMap:
                     { auto s = render_photon_density(hit, ray.direction * (-1.f));
                       return TraceResult{s, s}; }
-                default:
-                    break;
+                default: break;
             }
         }
 
-        // For specular materials, just bounce (no direct light / photon map)
+        // ── Specular bounce: continue the chain ─────────────────────
         if (mat.is_specular()) {
             ONB frame = ONB::from_normal(hit.shading_normal);
             float3 wo_local = frame.world_to_local(ray.direction * (-1.f));
@@ -234,27 +227,22 @@ Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
             if (bs.pdf <= 0.f) break;
 
             float cos_theta = fabsf(bs.wi.z);
-
-            // Update throughput per wavelength
-            for (int i = 0; i < NUM_LAMBDA; ++i) {
+            for (int i = 0; i < NUM_LAMBDA; ++i)
                 throughput.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
-            }
 
-            // Set up next ray
             ray.origin    = hit.position + hit.shading_normal * EPSILON *
                             (bs.wi.z > 0.f ? 1.f : -1.f);
             ray.direction = frame.local_to_world(bs.wi);
-            continue;
+            continue;  // follow the specular chain
         }
 
-        // ── Diffuse hit: combine direct light + photon map + BSDF ──
-
+        // ── Diffuse hit: terminate chain, gather radiance ───────────
         ONB frame = ONB::from_normal(hit.shading_normal);
         float3 wo_local = frame.world_to_local(ray.direction * (-1.f));
         if (wo_local.z <= 0.f) break;
 
-        // ── 1. Direct light sampling (NEE) ──────────────────────────
-        if (config_.mode == RenderMode::Full ||
+        // 1. NEE: direct lighting
+        if (config_.mode == RenderMode::Combined ||
             config_.mode == RenderMode::DirectOnly) {
 
             DirectLightSample dls = sample_direct_light(
@@ -263,109 +251,64 @@ Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
             if (dls.visible && dls.pdf_light > 0.f) {
                 float3 wi_local = frame.world_to_local(dls.wi);
                 float cos_theta = fmaxf(0.f, wi_local.z);
-
                 if (cos_theta > 0.f) {
                     Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
-                    float pdf_bsdf = bsdf::pdf(mat, wo_local, wi_local);
-
-                    float pdf_photon = 0.f;
-                    if (config_.use_photon_guided && global_photons_.size() > 0) {
-                        pdf_photon = photon_guided_pdf(
-                            dls.wi, hit.position, hit.shading_normal,
-                            global_photons_, global_grid_, config_.gather_radius);
-                    }
-
-                    float w = config_.use_mis
-                        ? mis_weight_3(dls.pdf_light, pdf_bsdf, pdf_photon)
-                        : 1.0f;
-
-                    Spectrum contrib = dls.Li * f * (cos_theta * w / dls.pdf_light);
+                    Spectrum contrib = dls.Li * f * (cos_theta / dls.pdf_light);
                     L_total += throughput * contrib;
-                    L_nee   += throughput * contrib;  // NEE shadow-ray: low-variance proxy
+                    L_nee   += throughput * contrib;
                 }
             }
         }
 
-        // ── 2. BSDF sampling ────────────────────────────────────────
-        BSDFSample bs = bsdf::sample(mat, wo_local, rng);
-        if (bs.pdf > 0.f && !bs.is_specular) {
-            float3 wi_world = frame.local_to_world(bs.wi);
-            float cos_theta = fabsf(bs.wi.z);
-
-            // Check if this direction hits a light
-            Ray bsdf_ray;
-            bsdf_ray.origin    = hit.position + hit.shading_normal * EPSILON;
-            bsdf_ray.direction = wi_world;
-
-            HitRecord bsdf_hit = scene_->intersect(bsdf_ray);
-            if (bsdf_hit.hit) {
-                const Material& bsdf_mat = scene_->materials[bsdf_hit.material_id];
-                if (bsdf_mat.is_emissive()) {
-                    float pdf_light = direct_light_pdf(
-                        hit.position + hit.shading_normal * EPSILON,
-                        wi_world, *scene_);
-
-                    float pdf_photon = 0.f;
-                    if (config_.use_photon_guided && global_photons_.size() > 0) {
-                        pdf_photon = photon_guided_pdf(
-                            wi_world, hit.position, hit.shading_normal,
-                            global_photons_, global_grid_, config_.gather_radius);
-                    }
-
-                    float w = config_.use_mis
-                        ? mis_weight_3(bs.pdf, pdf_light, pdf_photon)
-                        : 1.0f;
-
-                    Spectrum contrib = bsdf_mat.Le * bs.f * (cos_theta * w / bs.pdf);
-                    L_total += throughput * contrib;
-                    L_nee   += throughput * contrib;  // BSDF-sampled emitter: also direct
-                }
-            }
-        }
-
-        // ── 3. Photon density estimate (indirect) ───────────────────
-        if ((config_.mode == RenderMode::Full ||
+        // 2. Photon gather: indirect lighting (global map)
+        if ((config_.mode == RenderMode::Combined ||
              config_.mode == RenderMode::IndirectOnly) &&
             global_photons_.size() > 0) {
 
-            Spectrum L_photon = estimate_photon_density(
-                hit.position, hit.shading_normal, wo_local, mat,
-                global_photons_, global_grid_, de_config, config_.gather_radius);
-
+            Spectrum L_photon;
+            if (config_.use_kdtree && !global_kdtree_.empty()) {
+                L_photon = estimate_density_kdtree(
+                    hit.position, hit.normal, wo_local, mat,
+                    global_photons_, global_kdtree_,
+                    config_.gather_radius, config_.num_photons,
+                    true /* Epanechnikov §6.3 */);
+            } else {
+                L_photon = estimate_photon_density(
+                    hit.position, hit.normal, wo_local, mat,
+                    global_photons_, global_grid_, de_config,
+                    config_.gather_radius);
+            }
             L_total += throughput * L_photon;
         }
 
-        // ── 4. Caustic map contribution ─────────────────────────────
+        // 3. Caustic map gather
         if (caustic_photons_.size() > 0) {
-            Spectrum L_caustic = estimate_photon_density(
-                hit.position, hit.shading_normal, wo_local, mat,
-                caustic_photons_, caustic_grid_, de_config, config_.caustic_radius);
-
+            Spectrum L_caustic;
+            if (config_.use_kdtree && !caustic_kdtree_.empty()) {
+                L_caustic = estimate_density_kdtree(
+                    hit.position, hit.normal, wo_local, mat,
+                    caustic_photons_, caustic_kdtree_,
+                    config_.caustic_radius, config_.num_photons,
+                    true /* Epanechnikov §6.3 */);
+            } else {
+                L_caustic = estimate_photon_density(
+                    hit.position, hit.normal, wo_local, mat,
+                    caustic_photons_, caustic_grid_, de_config,
+                    config_.caustic_radius);
+            }
             L_total += throughput * L_caustic;
         }
 
-        // ── Continue path (throughput update) ───────────────────────
-        if (bs.pdf <= 0.f) break;
-
-        float cos_theta = fabsf(bs.wi.z);
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            throughput.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
-        }
-
-        // Russian roulette
-        if (bounce >= config_.min_bounces_rr) {
-            float p_rr = fminf(config_.rr_threshold, throughput.max_component());
-            if (rng.next_float() >= p_rr) break;
-            throughput *= 1.0f / p_rr;
-        }
-
-        // Next ray
-        float3 wi_world = frame.local_to_world(bs.wi);
-        ray.origin    = hit.position + hit.shading_normal * EPSILON;
-        ray.direction = wi_world;
+        break;  // v2: stop at first diffuse hit (no BSDF continuation)
     }
 
     return TraceResult{L_total, L_nee};
+}
+
+// ── Legacy wrapper (backward compatibility) ─────────────────────────
+
+Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
+    return render_pixel(ray, rng);
 }
 
 // ── Debug render modes ──────────────────────────────────────────────
@@ -405,11 +348,12 @@ Spectrum Renderer::render_photon_density(const HitRecord& hit, float3 wo_world) 
     DensityEstimatorConfig de_config;
     de_config.radius = config_.gather_radius;
     de_config.num_photons_total = config_.num_photons;
+    de_config.use_kernel        = true; // Epanechnikov (§6.3)
 
     const Material& mat = scene_->materials[hit.material_id];
 
     return estimate_photon_density(
-        hit.position, hit.shading_normal, wo_local, mat,
+        hit.position, hit.normal, wo_local, mat,
         global_photons_, global_grid_, de_config, config_.gather_radius);
 }
 
@@ -581,7 +525,7 @@ void Renderer::render_sppm() {
                 Spectrum throughput = Spectrum::constant(1.f);
                 sp.valid = false;
 
-                for (int bounce = 0; bounce < config_.max_bounces; ++bounce) {
+                for (int bounce = 0; bounce <= config_.max_specular_chain; ++bounce) {
                     HitRecord hit = scene_->intersect(ray);
                     if (!hit.hit) break;
 
@@ -622,7 +566,7 @@ void Renderer::render_sppm() {
                     if (wo_local.z <= 0.f) break;
 
                     sp.position    = hit.position;
-                    sp.normal      = hit.shading_normal;
+                    sp.normal      = hit.normal;  // geometric normal for gather filtering
                     sp.wo_local    = wo_local;
                     sp.material_id = hit.material_id;
                     sp.uv          = hit.uv;
@@ -661,8 +605,12 @@ void Renderer::render_sppm() {
         caustic_photons_ = PhotonSoA{};
         trace_photons(*scene_, emitter_cfg, global_photons_, caustic_photons_, nullptr);
 
-        if (global_photons_.size() > 0)
+        if (global_photons_.size() > 0) {
+            if (config_.use_kdtree) {
+                global_kdtree_.build(global_photons_);
+            }
             global_grid_.build(global_photons_, config_.sppm_initial_radius);
+        }
 
         // ── 3 & 4. Gather pass + progressive update ─────────────────
         #pragma omp parallel for schedule(dynamic, 1)

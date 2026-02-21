@@ -296,9 +296,15 @@ void OptixRenderer::upload_photon_data(
     const PhotonSoA& /*caustic_photons*/,
     const HashGrid& /*caustic_grid*/,
     float gather_radius,
-    float /*caustic_radius*/)
+    float /*caustic_radius*/,
+    int num_photons_emitted)
 {
     if (global_photons.size() == 0) return;
+
+    // Record N_emitted; fall back to N_stored if caller passes 0
+    num_photons_emitted_ = (num_photons_emitted > 0)
+                               ? num_photons_emitted
+                               : (int)global_photons.size();
 
     d_photon_pos_x_.upload(global_photons.pos_x);
     d_photon_pos_y_.upload(global_photons.pos_y);
@@ -395,6 +401,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
 
     int num_photons = config.num_photons;
     int max_stored  = num_photons * DEFAULT_MAX_BOUNCES; // upper bound on stored photons
+    num_photons_emitted_ = num_photons;  // record N_emitted for density normalisation
 
     std::cout << "[OptiX] Tracing " << num_photons << " photons on GPU...\n";
 
@@ -693,6 +700,7 @@ static void fill_common_params(
     int num_emissive, float total_emissive_power,
     OptixTraversableHandle gas_handle,
     float gather_radius,
+    int   num_photons_emitted,
     const DeviceBuffer& nee_direct_buf,
     const DeviceBuffer& photon_indirect_buf,
     const DeviceBuffer& prof_total,
@@ -765,6 +773,7 @@ static void fill_common_params(
     p.num_textures  = num_textures;
 
     p.num_photons       = (int)(photon_flux.bytes / sizeof(float));
+    p.num_photons_emitted = num_photons_emitted;
     p.photon_pos_x      = const_cast<float*>(photon_pos_x.as<float>());
     p.photon_pos_y      = const_cast<float*>(photon_pos_y.as<float>());
     p.photon_pos_z      = const_cast<float*>(photon_pos_z.as<float>());
@@ -857,6 +866,7 @@ void OptixRenderer::render_debug_frame(
         num_emissive_, 0.f,
         gas_handle_,
         gather_radius_,
+        num_photons_emitted_,
         DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(),
@@ -921,6 +931,7 @@ void OptixRenderer::render_one_spp(
         num_emissive_, 0.f,
         gas_handle_,
         gather_radius_,
+        num_photons_emitted_,
         d_nee_direct_buffer_, d_photon_indirect_buffer_,
         d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
         d_prof_photon_gather_, d_prof_bsdf_,
@@ -962,6 +973,14 @@ void OptixRenderer::render_one_spp(
 // =====================================================================
 void OptixRenderer::build_cell_bin_grid()
 {
+    // Guideline v2.1 §G11: cell-bin grid is no longer used for rendering.
+    // The hash-grid gather with tangential-disk kernel replaces its
+    // functionality.  Skip the expensive build+upload to save time and
+    // GPU memory.  The infrastructure is retained so it can be re-enabled
+    // for debug/research if desired.
+    cell_grid_uploaded_ = false;
+    return;
+
     if (stored_photons_.size() == 0) {
         std::cout << "[CellGrid] No photons — skipping grid build.\n";
         cell_grid_uploaded_ = false;
@@ -1017,6 +1036,10 @@ void OptixRenderer::build_cell_bin_grid()
 // =====================================================================
 void OptixRenderer::build_volume_cell_bin_grid()
 {
+    // Guideline v2.1 §G11: volume cell-bin grid disabled (same rationale).
+    vol_cell_grid_uploaded_ = false;
+    return;
+
     if (volume_photons_.size() == 0) {
         std::cout << "[VolGrid] No volume photons — skipping grid build.\n";
         vol_cell_grid_uploaded_ = false;
@@ -1112,6 +1135,7 @@ void OptixRenderer::render_final(
             num_emissive_, 0.f,
             gas_handle_,
             gather_radius_,
+            num_photons_emitted_,
             d_nee_direct_buffer_, d_photon_indirect_buffer_,
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
@@ -1300,6 +1324,7 @@ void OptixRenderer::render_sppm(
                 num_emissive_, 0.f,
                 gas_handle_,
                 gather_radius_,
+                num_photons_emitted_,
                 d_nee_direct_buffer_, d_photon_indirect_buffer_,
                 d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
                 d_prof_photon_gather_, d_prof_bsdf_,
@@ -1381,6 +1406,7 @@ void OptixRenderer::render_sppm(
                 num_emissive_, 0.f,
                 gas_handle_,
                 gather_radius_,
+                num_photons_emitted_,
                 d_nee_direct_buffer_, d_photon_indirect_buffer_,
                 d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
                 d_prof_photon_gather_, d_prof_bsdf_,
