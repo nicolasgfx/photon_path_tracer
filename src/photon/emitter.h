@@ -62,12 +62,14 @@ inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
     // 3. Full spectral flux: compute flux for ALL wavelength bins.
     //    No wavelength sampling needed — each photon carries all bins.
 
-    // 4. Sample cosine-weighted direction (hemisphere above triangle)
-    float3 local_dir = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+    // 4. Sample cosine-weighted direction within emission cone
+    const float cone_half_rad = DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG * (PI / 180.0f);
+    const float cos_cone_max  = cosf(cone_half_rad);
+    float3 local_dir = sample_cosine_cone(rng.next_float(), rng.next_float(), cos_cone_max);
     ONB frame = ONB::from_normal(n);
     float3 world_dir = frame.local_to_world(local_dir);
     float cos_theta = local_dir.z;
-    float pdf_dir = cosine_hemisphere_pdf(cos_theta);
+    float pdf_dir = cosine_cone_pdf(cos_theta, cos_cone_max);
 
     // 5. Compute spectral photon flux for each wavelength bin:
     //    Phi(lambda) = Le(lambda) * cos_theta / (p_tri * p_pos * p_dir)

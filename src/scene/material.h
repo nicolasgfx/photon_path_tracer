@@ -7,11 +7,12 @@
 #include <string>
 
 enum class MaterialType : uint8_t {
-    Lambertian,     // Pure diffuse
-    Mirror,         // Perfect specular reflection
-    Glass,          // Specular transmission + reflection (dielectric)
-    GlossyMetal,    // Rough specular (Cook-Torrance)
-    Emissive        // Area light
+    Lambertian,         // Pure diffuse
+    Mirror,             // Perfect specular reflection
+    Glass,              // Specular transmission + reflection (dielectric)
+    GlossyMetal,        // Rough specular (Cook-Torrance, metallic Fresnel: F0 = Ks)
+    Emissive,           // Area light
+    GlossyDielectric    // Cook-Torrance + Lambertian (dielectric Fresnel: F0 from IOR)
 };
 
 struct Material {

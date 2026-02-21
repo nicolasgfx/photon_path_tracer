@@ -261,6 +261,94 @@ inline HD BSDFSample glossy_sample(const Spectrum& Kd, const Spectrum& Ks,
     return s;
 }
 
+// ── Cook-Torrance glossy dielectric ─────────────────────────────────
+// Uses IOR-based F0 for Fresnel (not Ks). Ks scales the specular lobe
+// colour/intensity. Diffuse is energy-conserving: weighted by (1 - Fr).
+
+inline HD BSDFSample glossy_dielectric_sample(const Spectrum& Kd, const Spectrum& Ks,
+                                               float roughness, float ior,
+                                               float3 wo, PCGRng& rng) {
+    BSDFSample s;
+    float alpha = fmaxf(roughness * roughness, 0.001f);
+
+    // Dielectric F0 from IOR
+    float f0t = (ior - 1.f) / (ior + 1.f);
+    float F0 = f0t * f0t;
+
+    // Sampling weights — scale specular by F0 so mostly-diffuse surfaces
+    // don't waste samples on the tiny specular peak
+    float spec_weight = Ks.max_component() * F0;
+    float diff_weight = Kd.max_component();
+    float total = spec_weight + diff_weight;
+    float p_spec = (total > 0.f) ? spec_weight / total : 0.5f;
+    p_spec = fmaxf(p_spec, 0.05f); // ensure highlights get some samples
+
+    if (rng.next_float() < p_spec) {
+        // Sample GGX specular
+        float u1 = rng.next_float();
+        float u2 = rng.next_float();
+        float3 h = ggx_sample_halfvector(wo, alpha, u1, u2);
+
+        s.wi = make_f3(2.f * dot(wo, h) * h.x - wo.x,
+                        2.f * dot(wo, h) * h.y - wo.y,
+                        2.f * dot(wo, h) * h.z - wo.z);
+
+        if (s.wi.z <= 0.f) {
+            s.pdf = 0.f;
+            s.f = Spectrum::zero();
+            s.is_specular = false;
+            return s;
+        }
+
+        float ndf = ggx_D(h, alpha);
+        float geo = ggx_G(wo, s.wi, alpha);
+        float VdotH = fabsf(dot(wo, h));
+
+        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float diff_pdf = cosine_hemisphere_pdf(s.wi.z);
+        s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
+
+        float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
+        float Fr = fresnel_schlick(VdotH, F0);
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            s.f.value[i] = Ks.value[i] * (ndf * geo * Fr) / denom
+                          + (1.f - Fr) * Kd.value[i] * INV_PI;
+        }
+    } else {
+        // Sample diffuse
+        float u1 = rng.next_float();
+        float u2 = rng.next_float();
+        s.wi = sample_cosine_hemisphere(u1, u2);
+
+        if (s.wi.z <= 0.f) {
+            s.pdf = 0.f;
+            s.f = Spectrum::zero();
+            s.is_specular = false;
+            return s;
+        }
+
+        float diff_pdf = cosine_hemisphere_pdf(s.wi.z);
+
+        float3 h = normalize(wo + s.wi);
+        float ndf = ggx_D(h, alpha);
+        float VdotH = fabsf(dot(wo, h));
+        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+
+        s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
+
+        float geo = ggx_G(wo, s.wi, alpha);
+        float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
+        float Fr = fresnel_schlick(VdotH, F0);
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            s.f.value[i] = Ks.value[i] * (ndf * geo * Fr) / denom
+                          + (1.f - Fr) * Kd.value[i] * INV_PI;
+        }
+    }
+
+    s.is_specular = false;
+    return s;
+}
+
 // ── Evaluate diffuse-only BSDF (for photon density estimation) ──────
 // Standard photon mapping practice: gather uses only the diffuse
 // component.  The peaked specular lobe creates unbounded variance in
@@ -297,6 +385,24 @@ inline HD Spectrum evaluate(const Material& mat, float3 wo, float3 wi) {
             for (int i = 0; i < NUM_LAMBDA; ++i) {
                 float Fr = fresnel_schlick(VdotH, mat.Ks.value[i]);
                 f.value[i] = (ndf * geo * Fr) / denom + mat.Kd.value[i] * INV_PI;
+            }
+            return f;
+        }
+
+        case MaterialType::GlossyDielectric: {
+            float alpha = fmaxf(mat.roughness * mat.roughness, 0.001f);
+            float3 h = normalize(wo + wi);
+            float ndf = ggx_D(h, alpha);
+            float geo = ggx_G(wo, wi, alpha);
+            float VdotH = fabsf(dot(wo, h));
+            float denom = 4.f * fabsf(wo.z) * fabsf(wi.z) + EPSILON;
+            float f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
+            float F0 = f0t * f0t;
+            float Fr = fresnel_schlick(VdotH, F0);
+            Spectrum f;
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                f.value[i] = mat.Ks.value[i] * (ndf * geo * Fr) / denom
+                           + (1.f - Fr) * mat.Kd.value[i] * INV_PI;
             }
             return f;
         }
@@ -340,6 +446,25 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
             return p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
         }
 
+        case MaterialType::GlossyDielectric: {
+            float alpha = fmaxf(mat.roughness * mat.roughness, 0.001f);
+            float f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
+            float F0 = f0t * f0t;
+            float spec_weight = mat.Ks.max_component() * F0;
+            float diff_weight = mat.Kd.max_component();
+            float total = spec_weight + diff_weight;
+            float p_spec = (total > 0.f) ? spec_weight / total : 0.5f;
+            p_spec = fmaxf(p_spec, 0.05f);
+
+            float diff_pdf = cosine_hemisphere_pdf(wi.z);
+            float3 h = normalize(wo + wi);
+            float ndf = ggx_D(h, alpha);
+            float VdotH = fabsf(dot(wo, h));
+            float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+
+            return p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
+        }
+
         case MaterialType::Mirror:
         case MaterialType::Glass:
             return 0.f; // Delta distribution
@@ -365,6 +490,9 @@ inline HD BSDFSample sample(const Material& mat, float3 wo, PCGRng& rng) {
 
         case MaterialType::GlossyMetal:
             return glossy_sample(mat.Kd, mat.Ks, mat.roughness, wo, rng);
+
+        case MaterialType::GlossyDielectric:
+            return glossy_dielectric_sample(mat.Kd, mat.Ks, mat.roughness, mat.ior, wo, rng);
 
         default:
             return lambertian_sample(mat.Kd, wo, rng);

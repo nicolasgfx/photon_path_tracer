@@ -354,6 +354,10 @@ static void render_help_overlay(int win_w, int win_h,
         snprintf(dof_buf, sizeof(dof_buf), ",/.  Focus dist: %.4f", camera.dof_focus_dist);
         draw_overlay_text(0, ly, dof_buf, 0.8f, 0.8f, 0.8f, 1.f);
         ly += line_h * 0.7f;
+        draw_overlay_text(0, ly, "F    Auto-focus (center)", 0.8f, 0.8f, 0.8f, 1.f);
+        ly += line_h * 0.7f;
+        draw_overlay_text(0, ly, "MMB  Auto-focus (cursor)", 0.8f, 0.8f, 0.8f, 1.f);
+        ly += line_h * 0.7f;
     }
 
     ly += line_h * 0.3f;
@@ -677,7 +681,7 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // DOF hotkeys – O toggle, [/] f-number, ,/. focus distance
+    // DOF hotkeys – O toggle, [/] f-number, ,/. focus distance, F auto-focus center
     if (g_active_camera) {
         constexpr float kFStopFactor = 1.2599f; // 2^(1/3): one-third stop per key press
         constexpr float kFocusStep   = 1.10f;   // 10% focus distance per key press
@@ -709,6 +713,21 @@ static void key_callback(GLFWwindow* window, int key,
             cam.dof_focus_dist = fminf(1000.0f, cam.dof_focus_dist * kFocusStep);
             printf("[DOF] Focus distance: %.4f\n", cam.dof_focus_dist);
             dof_changed = true;
+        } else if (key == GLFW_KEY_F && g_active_optix_renderer) {
+            // F -> auto-focus on screen center (cast a ray, set focus dist to hit)
+            float s = 0.5f;
+            float t = 0.5f;
+            float3 ray_dir = normalize(
+                cam.lower_left + cam.horizontal * s + cam.vertical * t
+                - cam.position);
+            HitRecord hit = g_active_optix_renderer->trace_single_ray(cam.position, ray_dir);
+            if (hit.hit && hit.t > 0.01f && hit.t < 1000.0f) {
+                cam.dof_focus_dist = hit.t;
+                printf("[DOF] Auto-focus (center): %.4f\n", cam.dof_focus_dist);
+                dof_changed = true;
+            } else {
+                printf("[DOF] Auto-focus: no hit\n");
+            }
         }
 
         if (dof_changed) {
@@ -743,6 +762,31 @@ static void mouse_button_callback(GLFWwindow* window, int button,
         g_app.mouse_captured = true;
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         g_app.first_mouse = true;
+    }
+
+    // Middle-click: auto-focus on the point under the cursor
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE && action == GLFW_PRESS
+        && !g_app.mouse_captured && g_active_camera && g_active_optix_renderer) {
+        double mx, my;
+        glfwGetCursorPos(window, &mx, &my);
+        int win_w, win_h;
+        glfwGetWindowSize(window, &win_w, &win_h);
+        float s = ((float)mx + 0.5f) / (float)win_w;
+        float t = 1.0f - (((float)my + 0.5f) / (float)win_h);
+        Camera& cam = *g_active_camera;
+        float3 ray_dir = normalize(
+            cam.lower_left + cam.horizontal * s + cam.vertical * t
+            - cam.position);
+        HitRecord hit = g_active_optix_renderer->trace_single_ray(cam.position, ray_dir);
+        if (hit.hit && hit.t > 0.01f && hit.t < 1000.0f) {
+            cam.dof_focus_dist = hit.t;
+            cam.update();
+            g_app.camera_moved  = true;
+            g_app.showing_final = false;
+            printf("[DOF] Auto-focus (cursor): %.4f\n", cam.dof_focus_dist);
+        } else {
+            printf("[DOF] Auto-focus: no hit\n");
+        }
     }
 }
 

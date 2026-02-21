@@ -61,3 +61,4 @@ tests/data/*.bin
 
 # Exclude scenes (keep only cornell_box and conference)
 scenes/
+tests/data/cornell_box.bin

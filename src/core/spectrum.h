@@ -159,36 +159,19 @@ inline HD float3 spectrum_to_srgb(const Spectrum& s) {
     );
 }
 
-// ── ACES Filmic Tone Mapping (§Q8) ─────────────────────────────────
-// Attempt to replace Reinhard with better highlight handling.
-// Narkowicz 2015 ACES fit.
-inline HD float aces_filmic(float x) {
-    float a = 2.51f;
-    float b = 0.03f;
-    float c = 2.43f;
-    float d = 0.59f;
-    float e = 0.14f;
-    return (x * (a * x + b)) / (x * (c * x + d) + e);
-}
-
-inline HD float3 aces_tonemap(float3 color) {
-    return make_f3(
-        aces_filmic(fmaxf(0.f, color.x)),
-        aces_filmic(fmaxf(0.f, color.y)),
-        aces_filmic(fmaxf(0.f, color.z))
-    );
-}
-
-// Spectrum → sRGB with ACES tone mapping
+// ACES Filmic tone mapping (Narkowicz 2015) + sRGB gamma
 inline HD float3 spectrum_to_srgb_aces(const Spectrum& s) {
     float3 xyz = spectrum_to_xyz(s);
     float3 lin = xyz_to_linear_srgb(xyz);
-    float3 mapped = aces_tonemap(lin);
-    return make_f3(
-        srgb_gamma(fmaxf(0.f, fminf(1.f, mapped.x))),
-        srgb_gamma(fmaxf(0.f, fminf(1.f, mapped.y))),
-        srgb_gamma(fmaxf(0.f, fminf(1.f, mapped.z)))
-    );
+    // ACES Filmic curve: maps [0,inf) -> [0,1)
+    auto aces = [](float x) -> float {
+        x = fmaxf(x, 0.f);
+        return (x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f);
+    };
+    float r = aces(lin.x);
+    float g = aces(lin.y);
+    float b = aces(lin.z);
+    return make_f3(srgb_gamma(r), srgb_gamma(g), srgb_gamma(b));
 }
 
 // ── RGB → Spectrum (Smits-style Gaussian basis) ────────────────────
@@ -216,24 +199,22 @@ inline HD Spectrum rgb_to_spectrum_reflectance(float r, float g, float b) {
 }
 
 // ── RGB → Spectrum (emission) ───────────────────────────────────────
-// For emitters: use the SAME white-normalised spectral shape as
-// reflectance, then scale by the apparent luminosity.  This keeps the
-// spectral profile smooth (no narrow peaks from raw Gaussians) while
-// preserving absolute intensity — values can exceed 1.0.
+// For emitters: same basis but NO white normalisation so that the
+// absolute intensity is preserved (values can exceed 1.0).
 inline Spectrum rgb_to_spectrum_emission(float r, float g, float b) {
-    // Apparent luminosity (Rec.709 luminance)
-    float Y = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-    if (Y <= 0.f) return Spectrum::zero();
+    Spectrum s = Spectrum::zero();
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        float lam = lambda_of_bin(i);
+        float dr = (lam - 630.f) / 28.f;
+        float dg = (lam - 532.f) / 28.f;
+        float db = (lam - 460.f) / 24.f;
+        float fr = expf(-0.5f * dr * dr);
+        float fg = expf(-0.5f * dg * dg);
+        float fb = expf(-0.5f * db * db);
 
-    // Use the normalised reflectance basis for shape …
-    Spectrum shape = rgb_to_spectrum_reflectance(
-        r / Y, g / Y, b / Y);      // chromaticity (sums to ~constant)
-
-    // … then scale by luminosity so brightness is correct.
-    for (int i = 0; i < NUM_LAMBDA; ++i)
-        shape.value[i] *= Y;
-
-    return shape;
+        s.value[i] = fmaxf(0.f, r * fr + g * fg + b * fb);
+    }
+    return s;
 }
 
 // ── Blackbody spectrum (Planck's law) ───────────────────────────────

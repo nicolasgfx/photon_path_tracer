@@ -62,6 +62,29 @@ inline HD float cosine_hemisphere_pdf(float cos_theta) {
     return fmaxf(0.f, cos_theta) * INV_PI;
 }
 
+// Cosine-weighted cone sampling: samples within a cone of half-angle
+// cos_theta_max = cos(half_angle).  Direction is cosine-distributed
+// within [cos_theta_max, 1].  When cos_theta_max == 0 this reduces
+// to the full hemisphere sampler above.
+inline HD float3 sample_cosine_cone(float u1, float u2, float cos_theta_max) {
+    // Map u1 into [cos_theta_max^2, 1] then take sqrt → cosine weighting
+    float cos2_max = cos_theta_max * cos_theta_max;
+    float cos2_theta = 1.0f - u1 * (1.0f - cos2_max);
+    float cos_theta  = sqrtf(fmaxf(0.f, cos2_theta));
+    float sin_theta  = sqrtf(fmaxf(0.f, 1.0f - cos2_theta));
+    float phi = TWO_PI * u2;
+    return make_f3(sin_theta * cosf(phi), sin_theta * sinf(phi), cos_theta);
+}
+
+// PDF for the cosine-weighted cone sampler.
+// The PDF over solid angle is:  cos(θ) / (π * (1 - cos²(θ_max)))
+// which integrates to 1 over the cone.
+inline HD float cosine_cone_pdf(float cos_theta, float cos_theta_max) {
+    if (cos_theta < cos_theta_max) return 0.f;
+    float denom = PI * (1.0f - cos_theta_max * cos_theta_max);
+    return (denom > 0.f) ? fmaxf(0.f, cos_theta) / denom : 0.f;
+}
+
 // Uniform hemisphere sampling
 inline HD float3 sample_uniform_hemisphere(float u1, float u2) {
     float z   = u1;

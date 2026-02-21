@@ -213,6 +213,20 @@ float3 sample_cosine_hemisphere_dev(PCGRng& rng) {
     return make_f3(r * cosf(phi), r * sinf(phi), sqrtf(fmaxf(0.f, 1.f - u1)));
 }
 
+// Cosine-weighted cone sampling (device version)
+// Samples within a cone of half-angle defined by cos_theta_max.
+__forceinline__ __device__
+float3 sample_cosine_cone_dev(PCGRng& rng, float cos_theta_max) {
+    float u1 = rng.next_float();
+    float u2 = rng.next_float();
+    float cos2_max = cos_theta_max * cos_theta_max;
+    float cos2_theta = 1.0f - u1 * (1.0f - cos2_max);
+    float cos_theta  = sqrtf(fmaxf(0.f, cos2_theta));
+    float sin_theta  = sqrtf(fmaxf(0.f, 1.0f - cos2_theta));
+    float phi = 2.0f * PI * u2;
+    return make_f3(sin_theta * cosf(phi), sin_theta * sinf(phi), cos_theta);
+}
+
 // == Device-side ONB ==================================================
 struct DevONB {
     float3 u, v, w;
@@ -271,19 +285,28 @@ float3 dev_spectrum_to_srgb(const Spectrum& s) {
     float scale = (Y_integral > 0.f) ? 1.0f / Y_integral : 0.f;
     X *= scale; Y *= scale; Z *= scale;
 
+    // Apply exposure
+    X *= DEFAULT_EXPOSURE; Y *= DEFAULT_EXPOSURE; Z *= DEFAULT_EXPOSURE;
+
     float r =  3.2406f*X - 1.5372f*Y - 0.4986f*Z;
     float g = -0.9689f*X + 1.8758f*Y + 0.0415f*Z;
     float b =  0.0557f*X - 0.2040f*Y + 1.0570f*Z;
 
-    // ACES filmic tone mapping (§14 guideline)
-    // Narkowicz 2015 fitted curve: maps [0,∞) → [0,1)
-    auto aces = [](float x) -> float {
-        x = fmaxf(x, 0.f);
-        return (x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f);
-    };
-    r = aces(r);
-    g = aces(g);
-    b = aces(b);
+    // Tone mapping (§14 guideline): ACES Filmic or clamp-only
+    if (USE_ACES_TONEMAPPING) {
+        // Narkowicz 2015 fitted ACES curve: maps [0,∞) → [0,1)
+        auto aces = [](float x) -> float {
+            x = fmaxf(x, 0.f);
+            return (x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f);
+        };
+        r = aces(r);
+        g = aces(g);
+        b = aces(b);
+    } else {
+        r = fmaxf(r, 0.f);
+        g = fmaxf(g, 0.f);
+        b = fmaxf(b, 0.f);
+    }
 
     auto gamma = [](float c) -> float {
         c = fmaxf(c, 0.f);
@@ -1104,53 +1127,117 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         }
     } else {
         // Real-time debug: fast single-sample, no shadow ray
-        Spectrum Kd = dev_get_Kd(cur_mat, cur_uv);
+        // Supports both diffuse and glossy materials with reflection bounces
 
-        if (params.num_emissive > 0) {
-            float xi = rng.next_float();
-            int local_idx = binary_search_cdf(
-                params.emissive_cdf, params.num_emissive, xi);
-            if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
-            uint32_t light_tri = params.emissive_tri_indices[local_idx];
+        // Helper lambda-like: approximate unshadowed direct lighting at a
+        // surface point using a single emissive sample and full BSDF eval.
+        // We do this inline for each bounce to keep the code self-contained.
+        Spectrum glossy_tp = Spectrum::constant(1.0f);
 
-            float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
-            float3 lv0 = params.vertices[light_tri * 3 + 0];
-            float3 lv1 = params.vertices[light_tri * 3 + 1];
-            float3 lv2 = params.vertices[light_tri * 3 + 2];
-            float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
+        for (int gb = 0; gb <= DEFAULT_MAX_GLOSSY_BOUNCES; ++gb) {
+            DevONB frame = DevONB::from_normal(cur_normal);
+            float3 wo_local = frame.world_to_local(normalize(-cur_dir));
+            if (wo_local.z <= 0.f) break;
 
-            float3 le1 = lv1 - lv0;
-            float3 le2 = lv2 - lv0;
-            float3 light_normal = normalize(cross(le1, le2));
-            float  light_area   = length(cross(le1, le2)) * 0.5f;
+            // ── Fast unshadowed direct lighting at this hit ──
+            if (params.num_emissive > 0) {
+                float xi = rng.next_float();
+                int local_idx = binary_search_cdf(
+                    params.emissive_cdf, params.num_emissive, xi);
+                if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+                uint32_t light_tri = params.emissive_tri_indices[local_idx];
 
-            float3 to_light = light_pos - cur_pos;
-            float dist2 = dot(to_light, to_light);
-            float dist  = sqrtf(dist2);
-            float3 wi   = to_light * (1.f / dist);
+                float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+                float3 lv0 = params.vertices[light_tri * 3 + 0];
+                float3 lv1 = params.vertices[light_tri * 3 + 1];
+                float3 lv2 = params.vertices[light_tri * 3 + 2];
+                float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
 
-            float cos_i = dot(wi, cur_normal);
-            float cos_o = -dot(wi, light_normal);
+                float3 le1 = lv1 - lv0;
+                float3 le2 = lv2 - lv0;
+                float3 light_normal = normalize(cross(le1, le2));
+                float  light_area   = length(cross(le1, le2)) * 0.5f;
 
-            if (cos_i > 0.f && cos_o > 0.f) {
-                float pdf_tri;
-                if (local_idx == 0)
-                    pdf_tri = params.emissive_cdf[0];
-                else
-                    pdf_tri = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+                float3 to_light = light_pos - cur_pos;
+                float dist2 = dot(to_light, to_light);
+                float dist  = sqrtf(dist2);
+                float3 wi   = to_light * (1.f / dist);
 
-                float pdf_area = 1.f / light_area;
-                float geom = cos_o / dist2;
-                float pdf_solid_angle = pdf_tri * pdf_area / geom;
+                float cos_i = dot(wi, cur_normal);
+                float cos_o = -dot(wi, light_normal);
 
-                uint32_t light_mat = params.material_ids[light_tri];
-                Spectrum Le = dev_get_Le(light_mat);
+                if (cos_i > 0.f && cos_o > 0.f) {
+                    float pdf_tri;
+                    if (local_idx == 0)
+                        pdf_tri = params.emissive_cdf[0];
+                    else
+                        pdf_tri = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
 
-                for (int i = 0; i < NUM_LAMBDA; ++i) {
-                    L.value[i] = Le.value[i] * Kd.value[i] * INV_PI
-                                 * cos_i / fmaxf(pdf_solid_angle, 1e-8f);
+                    float pdf_area = 1.f / light_area;
+                    float geom = cos_o / dist2;
+                    float pdf_solid_angle = pdf_tri * pdf_area / geom;
+
+                    uint32_t light_mat = params.material_ids[light_tri];
+                    Spectrum Le = dev_get_Le(light_mat);
+
+                    // Use full BSDF for glossy surfaces, Lambertian otherwise
+                    float3 wi_local = frame.world_to_local(wi);
+                    Spectrum bsdf_val = dev_bsdf_evaluate(cur_mat, wo_local, wi_local, cur_uv);
+
+                    for (int i = 0; i < NUM_LAMBDA; ++i) {
+                        L.value[i] += glossy_tp.value[i] * Le.value[i]
+                                     * bsdf_val.value[i]
+                                     * cos_i / fmaxf(pdf_solid_angle, 1e-8f);
+                    }
                 }
             }
+
+            // ── Glossy continuation: trace reflection bounce ──
+            if (!dev_is_glossy(cur_mat)) break;  // diffuse surfaces stop here
+
+            DevBSDFSample bs = dev_bsdf_sample(cur_mat, wo_local, cur_uv, rng);
+            if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
+
+            float cos_theta = bs.wi.z;
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                glossy_tp.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
+
+            float max_tp = glossy_tp.max_component();
+            if (max_tp < 0.01f) break;
+
+            float3 wi_world = frame.local_to_world(bs.wi);
+            cur_pos = cur_pos + cur_normal * OPTIX_SCENE_EPSILON;
+            TraceResult hit_g = trace_radiance(cur_pos, wi_world);
+            if (!hit_g.hit) break;
+
+            cur_mat = hit_g.material_id;
+            cur_dir = wi_world;
+
+            if (dev_is_emissive(cur_mat)) {
+                L += glossy_tp * dev_get_Le(cur_mat);
+                break;
+            }
+
+            // Follow specular chain if we hit a perfect mirror
+            if (dev_is_specular(cur_mat)) {
+                for (int s = 0; s < DEFAULT_MAX_SPECULAR_CHAIN; ++s) {
+                    float3 n = hit_g.shading_normal;
+                    cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
+                    cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
+                    hit_g = trace_radiance(cur_pos, cur_dir);
+                    if (!hit_g.hit) goto debug_done;
+                    cur_mat = hit_g.material_id;
+                    if (dev_is_emissive(cur_mat)) {
+                        L += glossy_tp * dev_get_Le(cur_mat);
+                        goto debug_done;
+                    }
+                    if (!dev_is_specular(cur_mat)) break;
+                }
+            }
+
+            cur_pos    = hit_g.position;
+            cur_normal = hit_g.shading_normal;
+            cur_uv     = hit_g.uv;
         }
     }
 
@@ -2059,24 +2146,35 @@ extern "C" __global__ void __raygen__photon_trace() {
         hero_bins[h] = companion;
     }
 
-    // 5. Sample cosine hemisphere direction
-    float3 local_dir = sample_cosine_hemisphere_dev(rng);
+    // 5. Sample cosine-weighted direction within emission cone
+    constexpr float cone_half_rad = DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG * (PI / 180.0f);
+    const float cos_cone_max = cosf(cone_half_rad);
+    float3 local_dir = sample_cosine_cone_dev(rng, cos_cone_max);
     DevONB frame = DevONB::from_normal(geo_n);
     float3 world_dir = frame.local_to_world(local_dir);
     float cos_theta = local_dir.z;
-    float pdf_dir = cos_theta * INV_PI;
+    float cone_denom = PI * (1.0f - cos_cone_max * cos_cone_max);
+    float pdf_dir = (cone_denom > 0.f) ? cos_theta / cone_denom : cos_theta * INV_PI;
 
     // 6. Compute initial flux per hero wavelength
     //    Each hero channel: flux_h = Le(λ_h) * cos / (pdf_tri * pdf_pos * pdf_dir * pdf_lambda_h)
     //    pdf_lambda_h for companion channels uses the same Le CDF probability
     //    as if that bin had been directly sampled: pdf_lambda_h = Le(λ_h) / Le_sum
+    //
+    //    PBRT v4 §14.3 hero-wavelength normalization: divide by
+    //    HERO_WAVELENGTHS because each physical photon contributes to
+    //    HERO_WAVELENGTHS spectral bins, but the density estimator
+    //    divides by N_emitted (the number of physical photons, not
+    //    the number of per-bin contributions).  Without this factor
+    //    the indirect component is HERO_WAVELENGTHS× too bright.
     float denom_common = pdf_tri * pdf_pos * pdf_dir;
+    float inv_hero = 1.0f / (float)HERO_WAVELENGTHS;
     for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
         int bin = hero_bins[h];
         float Le_h = Le.value[bin];
         float pdf_lambda_h = Le_h / Le_sum;
         hero_flux[h] = (denom_common * pdf_lambda_h > 0.f)
-                     ? (Le_h * cos_theta) / (denom_common * pdf_lambda_h)
+                     ? (Le_h * cos_theta) / (denom_common * pdf_lambda_h) * inv_hero
                      : 0.f;
     }
 

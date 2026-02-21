@@ -73,14 +73,6 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
     // never leaves us with a dangling pointer.
     int current_idx = -1;
 
-    // Track the first material index added by this MTL file so we can
-    // do a classification post-pass after all properties are parsed.
-    int first_mtl_idx = (int)scene.materials.size();
-
-    // Store raw illum values — classification depends on Ks which may
-    // appear after illum in the MTL file.
-    std::unordered_map<int, int> raw_illum;
-
     std::string line;
     while (std::getline(file, line)) {
         line = trim(line);
@@ -115,14 +107,12 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             scene.materials[current_idx].Ks = rgb_to_spectrum_reflectance(r, g, b);
         }
         else if (keyword == "Ke") {
-            // Emission — only treat as emissive when Ke is clearly
-            // intentional (max component > 1.5).  Many exporters write
-            // Ke 0 1 0 or Ke 1 1 1 as default / ambient-colour echo,
-            // which should NOT create a light source.
+            // Emission
             float r, g, b;
             ss >> r >> g >> b;
-            float ke_max = fmaxf(r, fmaxf(g, b));
-            if (ke_max > 1.5f) {
+            if (r > 0.f || g > 0.f || b > 0.f) {
+                // Convert RGB emission to spectral using emission basis
+                // (preserves absolute intensity, no white-normalisation)
                 scene.materials[current_idx].Le = rgb_to_spectrum_emission(r, g, b);
                 scene.materials[current_idx].type = MaterialType::Emissive;
             }
@@ -139,7 +129,30 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
         else if (keyword == "illum") {
             int illum;
             ss >> illum;
-            raw_illum[current_idx] = illum;
+            // Don't let illum override an already-set Emissive type
+            // (Ke line may have been parsed before illum)
+            if (scene.materials[current_idx].type == MaterialType::Emissive) continue;
+            switch (illum) {
+                case 0: case 1:
+                    scene.materials[current_idx].type = MaterialType::Lambertian;
+                    break;
+                case 2:
+                    // Diffuse + specular
+                    if (scene.materials[current_idx].Ks.max_component() > 0.01f)
+                        scene.materials[current_idx].type = MaterialType::GlossyMetal;
+                    break;
+                case 3:
+                    scene.materials[current_idx].type = MaterialType::Mirror;
+                    break;
+                case 4: case 6: case 7:
+                    scene.materials[current_idx].type = MaterialType::Glass;
+                    break;
+                case 5:
+                    scene.materials[current_idx].type = MaterialType::Mirror;
+                    break;
+                default:
+                    break;
+            }
         }
         else if (keyword == "map_Kd") {
             std::string tex_path;
@@ -180,59 +193,6 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
                     std::cerr << "[MTL] Failed to load texture: " << full_path << "\n";
                 }
             }
-        }
-    }
-
-    // ── Material type classification post-pass ──────────────────────
-    // Deferred so that Ks/Ke are available regardless of line ordering
-    // in the MTL file (illum often appears before Ks).
-    for (int mi = first_mtl_idx; mi < (int)scene.materials.size(); ++mi) {
-        Material& mat = scene.materials[mi];
-
-        // Ke already set the type to Emissive — don't override
-        if (mat.type == MaterialType::Emissive) continue;
-
-        int illum = 0;
-        auto it = raw_illum.find(mi);
-        if (it != raw_illum.end()) illum = it->second;
-
-        switch (illum) {
-            case 0: case 1:
-                mat.type = MaterialType::Lambertian;
-                break;
-            case 2:
-                // Diffuse + specular — now Ks is guaranteed to be loaded
-                if (mat.Ks.max_component() > 0.01f)
-                    mat.type = MaterialType::GlossyMetal;
-                else
-                    mat.type = MaterialType::Lambertian;
-                break;
-            case 3: case 5:
-                mat.type = MaterialType::Mirror;
-                break;
-            case 4: case 6: case 7:
-                mat.type = MaterialType::Glass;
-                break;
-            default:
-                break;
-        }
-    }
-
-    // Log classified materials for debugging
-    for (int mi = first_mtl_idx; mi < (int)scene.materials.size(); ++mi) {
-        const Material& mat = scene.materials[mi];
-        const char* type_str = "Lambertian";
-        switch (mat.type) {
-            case MaterialType::GlossyMetal: type_str = "GlossyMetal"; break;
-            case MaterialType::Mirror:      type_str = "Mirror";      break;
-            case MaterialType::Glass:       type_str = "Glass";       break;
-            case MaterialType::Emissive:    type_str = "Emissive";    break;
-            default: break;
-        }
-        if (mat.type != MaterialType::Lambertian) {
-            std::cout << "[MTL]   " << mat.name << " → " << type_str
-                      << " (Ks_max=" << mat.Ks.max_component()
-                      << ", roughness=" << mat.roughness << ")\n";
         }
     }
 
@@ -349,17 +309,9 @@ bool load_obj(const std::string& filepath, Scene& scene) {
                 tri.uv1 = get_uv(face_verts[i-1]);
                 tri.uv2 = get_uv(face_verts[i]);
 
-                // Normals: use provided or defer to smooth-normal post-pass.
-                // Detect flat per-face normals: when all 3 vertices of a
-                // face share the same vn index, the exporter assigned a
-                // flat face normal.  Defer those to the area-weighted
-                // smooth normal post-pass for Blender-style Shade Smooth.
+                // Normals: use provided or defer to smooth-normal post-pass
                 bool has_normals = (face_verts[0].vn >= 0);
-                bool is_flat_normal = has_normals &&
-                    (face_verts[0].vn == face_verts[i-1].vn) &&
-                    (face_verts[0].vn == face_verts[i].vn);
-
-                if (has_normals && !is_flat_normal) {
+                if (has_normals) {
                     tri.n0 = get_normal(face_verts[0]);
                     tri.n1 = get_normal(face_verts[i-1]);
                     tri.n2 = get_normal(face_verts[i]);
@@ -431,10 +383,9 @@ bool load_obj(const std::string& filepath, Scene& scene) {
               << scene.materials.size() << " materials\n";
 
     // ── Area-weighted smooth normals post-pass ───────────────────────
-    // For triangles that had no per-vertex normals in the OBJ file, or
-    // that had flat per-face normals (all 3 vertices sharing the same
-    // normal index), accumulate area-weighted geometric normals per
-    // vertex position and normalise, giving smooth shading across the mesh.
+    // For triangles that had no per-vertex normals in the OBJ file,
+    // accumulate area-weighted geometric normals per vertex position and
+    // normalise, giving smooth shading across the mesh.
     if (!smooth_tris.empty()) {
         std::vector<float3> accum(positions.size(), make_f3(0.f, 0.f, 0.f));
 
