@@ -1018,7 +1018,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         for (int i = 0; i < NUM_LAMBDA; ++i) throughput_s.value[i] *= Kd.value[i];
     }
 
-    // Diffuse hit: direct lighting via next-event estimation
+    // Diffuse/glossy hit: direct lighting via next-event estimation
     Spectrum L = Spectrum::zero();
 
     if (params.debug_shadow_rays) {
@@ -1035,6 +1035,72 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                     cur_pos, cur_normal, cur_normal, wo_local, cur_mat,
                     params.gather_radius, cur_uv);
             L += L_photon;
+        }
+
+        // Glossy BSDF continuation: trace reflections for glossy surfaces
+        if (dev_is_glossy(cur_mat)) {
+            Spectrum glossy_tp = Spectrum::constant(1.0f);
+            for (int gb = 0; gb < DEFAULT_MAX_GLOSSY_BOUNCES; ++gb) {
+                DevBSDFSample bs = dev_bsdf_sample(cur_mat, wo_local, cur_uv, rng);
+                if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
+
+                float cos_theta = bs.wi.z;
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    glossy_tp.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
+
+                float max_tp = glossy_tp.max_component();
+                if (max_tp < 0.01f) break;
+
+                float3 wi_world = frame.local_to_world(bs.wi);
+                cur_pos = cur_pos + cur_normal * OPTIX_SCENE_EPSILON;
+                TraceResult hit_g = trace_radiance(cur_pos, wi_world);
+                if (!hit_g.hit) break;
+
+                cur_mat = hit_g.material_id;
+                cur_dir = wi_world;
+
+                if (dev_is_emissive(cur_mat)) {
+                    L += glossy_tp * dev_get_Le(cur_mat);
+                    break;
+                }
+
+                // Follow specular chain if we hit mirror/glass
+                if (dev_is_specular(cur_mat)) {
+                    for (int s = 0; s < DEFAULT_MAX_SPECULAR_CHAIN; ++s) {
+                        float3 n = hit_g.shading_normal;
+                        cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
+                        cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
+                        hit_g = trace_radiance(cur_pos, cur_dir);
+                        if (!hit_g.hit) goto debug_done;
+                        cur_mat = hit_g.material_id;
+                        if (dev_is_emissive(cur_mat)) {
+                            L += glossy_tp * dev_get_Le(cur_mat);
+                            goto debug_done;
+                        }
+                        if (!dev_is_specular(cur_mat)) break;
+                    }
+                }
+
+                cur_pos    = hit_g.position;
+                cur_normal = hit_g.shading_normal;
+                cur_uv     = hit_g.uv;
+
+                frame = DevONB::from_normal(cur_normal);
+                wo_local = frame.world_to_local(normalize(-cur_dir));
+                if (wo_local.z <= 0.f) break;
+
+                NeeResult nee_g = dev_nee_direct(cur_pos, cur_normal, wo_local, cur_mat, rng, gb + 1, cur_uv);
+                L += glossy_tp * nee_g.L;
+
+                if (params.render_mode != RENDER_MODE_DIRECT_ONLY) {
+                    Spectrum L_ph = dev_estimate_photon_density(
+                        cur_pos, cur_normal, cur_normal, wo_local, cur_mat,
+                        params.gather_radius, cur_uv);
+                    L += glossy_tp * L_ph;
+                }
+
+                if (!dev_is_glossy(cur_mat)) break;
+            }
         }
     } else {
         // Real-time debug: fast single-sample, no shadow ray
@@ -1088,6 +1154,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         }
     }
 
+debug_done:
     return throughput_s * L;
 }
 
@@ -1405,14 +1472,16 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
 // Returns: combined, nee_direct, photon_indirect components separately
 //
 // =====================================================================
-// full_path_trace — v2 Architecture (first-hit + specular chain)
+// full_path_trace — v2 Architecture (first-hit + specular chain + glossy continuation)
 //
-// Camera rays are first-hit probes.  Specular surfaces are followed
-// through a chain of up to DEFAULT_MAX_SPECULAR_CHAIN bounces.
-// At the first diffuse hit:
+// Camera rays are first-hit probes.  Specular surfaces (mirror/glass)
+// are followed through a chain of up to DEFAULT_MAX_SPECULAR_CHAIN bounces.
+// At the first non-delta hit:
 //   1. NEE captures direct illumination
 //   2. Photon hash-grid gather captures indirect illumination
-//   3. Stop (no BSDF continuation — photon map has it all)
+//   3. If glossy: BSDF-sample a continuation ray and repeat (up to
+//      DEFAULT_MAX_GLOSSY_BOUNCES) — this produces scene reflections
+//   4. If diffuse: stop (photon map has the rest)
 // Volume integration is disabled in v2 (§Q9).
 // =====================================================================
 struct PathTraceResult {
@@ -1502,7 +1571,10 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             continue;
         }
 
-        // ── Diffuse hit: gather radiance, then stop ─────────────────
+        // ── Non-specular hit: NEE + photon gather ────────────────────
+        // For glossy materials, continue bouncing via BSDF sampling
+        // to capture scene reflections (polished tables, metals, etc.).
+        // Pure diffuse surfaces terminate after this gather.
         DevONB frame = DevONB::from_normal(hit.shading_normal);
         float3 wo_local = frame.world_to_local(direction * (-1.f));
         if (wo_local.z <= 0.f) break;
@@ -1533,9 +1605,146 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             result.photon_indirect  += photon_contrib;
         }
 
-        break;  // v2: stop at first diffuse hit
+        // ── Glossy BSDF continuation (§7.1.1) ──────────────────────
+        // If the surface is glossy, sample the BSDF to trace a
+        // reflection ray and continue gathering at subsequent hits.
+        // This is what produces visible scene reflections on glossy
+        // surfaces (not just specular highlights of light sources).
+        if (!dev_is_glossy(mat_id)) break;  // pure diffuse: stop
+
+        // BSDF continuation loop for glossy surfaces
+        for (int g_bounce = 0; g_bounce < DEFAULT_MAX_GLOSSY_BOUNCES; ++g_bounce) {
+            // Sample BSDF for the reflection direction
+            long long t_bsdf = clock64();
+            DevBSDFSample bs = dev_bsdf_sample(mat_id, wo_local, hit.uv, rng);
+            result.clk_bsdf += clock64() - t_bsdf;
+
+            if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
+
+            // Update throughput: f * cos_theta / pdf
+            float cos_theta = bs.wi.z;
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                throughput.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
+
+            // Russian roulette on throughput to avoid tracing negligible paths
+            float max_tp = throughput.max_component();
+            if (max_tp < 0.01f) break;
+            if (g_bounce >= 1) {
+                float survive = fminf(max_tp, 0.95f);
+                if (rng.next_float() > survive) break;
+                float inv_survive = 1.f / survive;
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    throughput.value[i] *= inv_survive;
+            }
+
+            // Transform sampled direction to world space and trace
+            float3 wi_world = frame.local_to_world(bs.wi);
+            origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
+
+            long long t_rt = clock64();
+            hit = trace_radiance(origin, wi_world);
+            result.clk_ray_trace += clock64() - t_rt;
+
+            if (!hit.hit) break;
+
+            mat_id = hit.material_id;
+            direction = wi_world;
+
+            // If we hit an emissive surface, add its contribution
+            if (dev_is_emissive(mat_id)) {
+                result.combined   += throughput * dev_get_Le(mat_id);
+                result.nee_direct += throughput * dev_get_Le(mat_id);
+                break;
+            }
+
+            // If we hit a specular surface, follow it through the
+            // remaining specular chain budget, then gather at diffuse
+            if (dev_is_specular(mat_id)) {
+                int spec_remain = max_spec - bounce;
+                for (int s = 0; s < spec_remain; ++s) {
+                    if (dev_is_glass(mat_id)) {
+                        float eta = dev_get_ior(mat_id);
+                        float3 n = hit.shading_normal;
+                        bool entering = dot(direction, n) < 0.f;
+                        float3 outward_n = entering ? n : n * (-1.f);
+                        float ni_nt = entering ? (1.f / eta) : eta;
+                        float cos_in = fabsf(dot(direction, outward_n));
+                        float sin2_t = ni_nt * ni_nt * (1.f - cos_in * cos_in);
+                        float fresnel = 1.f;
+                        if (sin2_t < 1.f) {
+                            float cos_t = sqrtf(1.f - sin2_t);
+                            float rs = (ni_nt * cos_in - cos_t) / (ni_nt * cos_in + cos_t);
+                            float rp = (cos_in - ni_nt * cos_t) / (cos_in + ni_nt * cos_t);
+                            fresnel = 0.5f * (rs * rs + rp * rp);
+                        }
+                        Spectrum Kd_g = dev_get_Kd(mat_id, hit.uv);
+                        for (int i = 0; i < NUM_LAMBDA; ++i)
+                            throughput.value[i] *= Kd_g.value[i];
+                        if (rng.next_float() < fresnel) {
+                            direction = direction - outward_n * (2.f * dot(direction, outward_n));
+                            origin = hit.position + outward_n * OPTIX_SCENE_EPSILON;
+                        } else {
+                            float3 refr = direction * ni_nt +
+                                outward_n * (ni_nt * cos_in - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
+                            direction = normalize(refr);
+                            origin = hit.position - outward_n * OPTIX_SCENE_EPSILON;
+                        }
+                    } else {
+                        float3 n = hit.shading_normal;
+                        direction = direction - n * (2.f * dot(direction, n));
+                        origin = hit.position + n * OPTIX_SCENE_EPSILON;
+                    }
+                    long long t_rt2 = clock64();
+                    hit = trace_radiance(origin, direction);
+                    result.clk_ray_trace += clock64() - t_rt2;
+                    if (!hit.hit) goto done;
+                    mat_id = hit.material_id;
+                    if (dev_is_emissive(mat_id)) {
+                        result.combined   += throughput * dev_get_Le(mat_id);
+                        result.nee_direct += throughput * dev_get_Le(mat_id);
+                        goto done;
+                    }
+                    if (!dev_is_specular(mat_id)) break;  // fell through to diffuse/glossy
+                }
+            }
+
+            // NEE + photon gather at this bounce's hit
+            frame = DevONB::from_normal(hit.shading_normal);
+            wo_local = frame.world_to_local(direction * (-1.f));
+            if (wo_local.z <= 0.f) break;
+
+            if (params.render_mode != RENDER_MODE_INDIRECT_ONLY) {
+                long long t_nee2 = clock64();
+                NeeResult nee = dev_nee_direct(
+                    hit.position, hit.shading_normal, wo_local,
+                    mat_id, rng, bounce + g_bounce + 1, hit.uv);
+                result.clk_nee += clock64() - t_nee2;
+
+                Spectrum nee_c = throughput * nee.L;
+                result.combined   += nee_c;
+                result.nee_direct += nee_c;
+            }
+
+            if (params.render_mode != RENDER_MODE_DIRECT_ONLY) {
+                long long t_pg2 = clock64();
+                Spectrum L_ph = dev_estimate_photon_density(
+                    hit.position, hit.shading_normal, hit.geo_normal,
+                    wo_local, mat_id, params.gather_radius, hit.uv);
+                result.clk_photon_gather += clock64() - t_pg2;
+
+                Spectrum ph_c = throughput * L_ph;
+                result.combined        += ph_c;
+                result.photon_indirect += ph_c;
+            }
+
+            // If the continuation hit is not glossy, stop
+            if (!dev_is_glossy(mat_id)) break;
+        }
+
+        break;  // exit outer specular-chain loop
     }
 
+done:
     return result;
 }
 

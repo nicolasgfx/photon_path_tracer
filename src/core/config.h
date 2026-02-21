@@ -157,10 +157,20 @@ constexpr float PLANE_TAU_EPSILON_FACTOR = 10.0f;
 
 // ── Camera specular chain limit (§E3, §7.1) ─────────────────────────
 // Camera ray follows specular (mirror/glass) bounces until hitting a
-// diffuse surface, then evaluates NEE + photon gather.  Only specular
-// bounces are allowed — no diffuse continuation.
+// non-delta surface, then evaluates NEE + photon gather.  Glossy
+// surfaces continue via BSDF sampling (see DEFAULT_MAX_GLOSSY_BOUNCES).
 //   Typical: 4–16  |  Default: 8
 constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 8;
+
+// ── Glossy BSDF continuation bounces (§7.1.1) ──────────────────────
+// After the specular chain lands on a glossy (non-delta) surface, the
+// path continues for up to this many additional BSDF-sampled bounces.
+// Each bounce does NEE + photon gather, then samples the Cook-Torrance
+// GGX lobe to trace a reflection ray.  This produces scene reflections
+// on glossy surfaces (e.g. polished tables, metallic objects).
+// Pure-diffuse surfaces still terminate immediately.
+//   0 = v2-classic (no glossy continuation)  |  Default: 3
+constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 3;
 
 // ── NEE shadow ray count (§7.2) ─────────────────────────────────────
 // Shadow rays cast to light sources at the camera first-hit.
