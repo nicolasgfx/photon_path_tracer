@@ -18,6 +18,7 @@
 #include "photon/hash_grid.h"
 #include "photon/density_estimator.h"
 #include "core/cell_bin_grid.h"
+#include "core/sppm.h"
 
 #include <vector>
 #include <string>
@@ -58,6 +59,13 @@ struct RenderConfig {
     float  volume_albedo      = DEFAULT_VOLUME_ALBEDO;
     int    volume_samples     = DEFAULT_VOLUME_SAMPLES;
     float  volume_max_t       = DEFAULT_VOLUME_MAX_T;
+
+    // SPPM (Stochastic Progressive Photon Mapping)
+    bool  sppm_enabled           = false;
+    int   sppm_iterations        = DEFAULT_SPPM_ITERATIONS;
+    float sppm_alpha             = DEFAULT_SPPM_ALPHA;
+    float sppm_initial_radius    = DEFAULT_SPPM_INITIAL_RADIUS;
+    float sppm_min_radius        = DEFAULT_SPPM_MIN_RADIUS;
 
     // Adaptive sampling
     bool  adaptive_sampling      = false;
@@ -152,6 +160,10 @@ public:
     // Pipeline stages
     void build_photon_maps();
     void render_frame();
+
+    /// SPPM rendering: iterative photon tracing + per-pixel progressive
+    /// radius shrinking.  Uses the existing photon maps and hash grids.
+    void render_sppm();
 
     // Access results
     FrameBuffer&       framebuffer()       { return fb_; }

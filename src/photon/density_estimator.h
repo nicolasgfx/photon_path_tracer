@@ -198,3 +198,86 @@ inline float photon_guided_pdf(
     if (total_flux <= 0.f) return 0.f;
     return matching_flux / total_flux;
 }
+// ── SPPM photon gather ──────────────────────────────────────────────
+//
+// Gathers photons within a per-pixel radius at a visible point and
+// returns the raw flux contribution (before progressive update).
+//
+// Unlike estimate_photon_density() which computes final radiance,
+// this returns:
+//   phi(λ) = Σ_j f_s(x, ω_o, ω_j, λ) · Φ_j(λ)
+//
+// along with the photon count M.  The caller applies the SPPM
+// progressive update using these values.
+//
+// @param hit_pos        Visible point position
+// @param hit_normal     Shading normal at visible point
+// @param wo_local       Outgoing direction in local frame
+// @param mat            Material at visible point
+// @param photons        Photon map (SoA)
+// @param grid           Hash grid for the photon map
+// @param gather_radius  Per-pixel gather radius (shrinks over iterations)
+// @param surface_tau    Plane-distance filter threshold
+// @param[out] M_out     Number of valid photons found
+// @return               Raw spectral flux contribution Φ_new
+
+inline Spectrum sppm_gather(
+    float3 hit_pos,
+    float3 hit_normal,
+    float3 wo_local,
+    const Material& mat,
+    const PhotonSoA& photons,
+    const HashGrid& grid,
+    float gather_radius,
+    float surface_tau,
+    int& M_out)
+{
+    Spectrum phi = Spectrum::zero();
+    int M = 0;
+
+    ONB frame = ONB::from_normal(hit_normal);
+
+    grid.query(hit_pos, gather_radius, photons,
+        [&](uint32_t idx, float dist2) {
+            float3 photon_pos = make_f3(photons.pos_x[idx],
+                                        photons.pos_y[idx],
+                                        photons.pos_z[idx]);
+            float3 diff = photon_pos - hit_pos;
+
+            // Surface consistency: plane distance
+            float plane_dist = fabsf(dot(hit_normal, diff));
+            if (plane_dist > surface_tau) return;
+
+            // Normal consistency: reject opposite-facing photons
+            if (!photons.norm_x.empty()) {
+                float3 photon_n = make_f3(photons.norm_x[idx],
+                                          photons.norm_y[idx],
+                                          photons.norm_z[idx]);
+                if (dot(photon_n, hit_normal) <= 0.f) return;
+            }
+
+            // Direction consistency: photon must enter from above the surface
+            float3 photon_wi = make_f3(photons.wi_x[idx],
+                                       photons.wi_y[idx],
+                                       photons.wi_z[idx]);
+            if (dot(photon_wi, hit_normal) <= 0.f) return;
+
+            // BSDF evaluation
+            float3 wi_local = frame.world_to_local(photon_wi);
+            Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
+
+            // Epanechnikov kernel: w = 1 - d²/r²
+            float r2 = gather_radius * gather_radius;
+            float w = 1.0f - dist2 / r2;
+            if (w <= 0.f) return;
+
+            // Accumulate kernel-weighted flux: w · f_s · Φ per wavelength bin
+            uint16_t bin = photons.lambda_bin[idx];
+            phi.value[bin] += w * f.value[bin] * photons.flux[idx];
+
+            ++M;
+        });
+
+    M_out = M;
+    return phi;
+}

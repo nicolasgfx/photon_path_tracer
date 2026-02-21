@@ -72,11 +72,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [testruns] Building ppt_tests (%BUILD_TYPE%)...
-cmake --build %BUILD_DIR% --target ppt_tests --config %BUILD_TYPE% >nul 2>&1
+echo [testruns] Building all targets (%BUILD_TYPE%)...
+cmake --build %BUILD_DIR% --config %BUILD_TYPE% >nul 2>&1
 if errorlevel 1 (
     echo [testruns] ERROR: Build failed!
-    cmake --build %BUILD_DIR% --target ppt_tests --config %BUILD_TYPE% 2>&1 | findstr /i "error"
+    cmake --build %BUILD_DIR% --config %BUILD_TYPE% 2>&1 | findstr /i "error"
     exit /b 1
 )
 echo [testruns] Build OK.

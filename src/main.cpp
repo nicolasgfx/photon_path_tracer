@@ -21,6 +21,9 @@
 //   --output FILE      Output file (default output/render.png)
 //   --mode MODE        Render mode: full|direct|indirect|photon|normals|
 //                                   material|depth
+//   --sppm             Enable SPPM rendering (R key triggers SPPM)
+//   --sppm-iterations N  SPPM iterations (default 64, implies --sppm)
+//   --sppm-radius R      SPPM initial radius (default 0.1, implies --sppm)
 // ---------------------------------------------------------------------
 
 #include "core/config.h"
@@ -426,6 +429,14 @@ static Options parse_args(int argc, char* argv[]) {
             else if (mode == "depth")    opt.config.mode = RenderMode::Depth;
         } else if (arg == "--save-test-data" && i + 1 < argc) {
             opt.save_test_data_file = argv[++i];
+        } else if (arg == "--sppm") {
+            opt.config.sppm_enabled = true;
+        } else if (arg == "--sppm-iterations" && i + 1 < argc) {
+            opt.config.sppm_iterations = std::stoi(argv[++i]);
+            opt.config.sppm_enabled = true;
+        } else if (arg == "--sppm-radius" && i + 1 < argc) {
+            opt.config.sppm_initial_radius = std::stof(argv[++i]);
+            opt.config.sppm_enabled = true;
         } else if (arg[0] != '-') {
             opt.scene_file = arg;
         }
@@ -687,6 +698,9 @@ static void run_interactive(
     std::cout << "  ESC = cancel render / release mouse / quit | Q = quit\n";
     std::cout << "  F1-F9 = debug toggles | TAB = cycle mode\n";
     std::cout << "  R = full path tracing render -> " << opt.output_file << "\n";
+    if (opt.config.sppm_enabled)
+        std::cout << "      (SPPM mode: " << opt.config.sppm_iterations << " iterations, r="
+                  << opt.config.sppm_initial_radius << ")\n";
     std::cout << "  H = toggle help overlay\n";
     std::cout << "  1-4 = switch scene (Cornell | Conference | Living | Sibenik)\n";
     std::cout << "  +/- = adjust light brightness (re-traces photons)\n";
@@ -933,19 +947,63 @@ static void run_interactive(
             g_app.showing_final = false;
         }
 
-        // Handle "R" key: start progressive final render
+        // Handle "R" key: start progressive final render (or SPPM)
         if (g_app.render_requested && !g_app.rendering) {
-            g_app.rendering = true;
-            g_app.showing_final = false;
-            g_app.render_spp_done  = 0;
-            g_app.render_spp_total = opt.config.samples_per_pixel;
-            g_app.render_start = std::chrono::high_resolution_clock::now();
-
             // Freeze camera for the render
             g_app.render_cam = camera;
             g_app.render_cam.width  = opt.config.image_width;
             g_app.render_cam.height = opt.config.image_height;
             g_app.render_cam.update();
+
+            // ── SPPM render path ────────────────────────────────────
+            if (opt.config.sppm_enabled) {
+                g_app.render_requested = false;
+                g_app.showing_final = true;
+
+                std::cout << "\n========================================\n";
+                std::cout << "  SPPM Render (R key)\n";
+                std::cout << "  Camera pos: (" << camera.position.x << ", "
+                          << camera.position.y << ", " << camera.position.z << ")\n";
+                std::cout << "  " << opt.config.image_width << "x"
+                          << opt.config.image_height << " @ "
+                          << opt.config.sppm_iterations << " SPPM iterations, "
+                          << opt.config.num_photons << " photons/iter\n";
+                std::cout << "  Initial radius: " << opt.config.sppm_initial_radius
+                          << "  alpha: " << opt.config.sppm_alpha << "\n";
+                std::cout << "========================================\n";
+
+                // Run blocking SPPM render
+                optix_renderer.render_sppm(
+                    g_app.render_cam, opt.config, scene);
+
+                // Download and save
+                FrameBuffer final_fb;
+                optix_renderer.download_framebuffer(final_fb);
+
+                auto now_tp = std::chrono::system_clock::now();
+                std::time_t now_t = std::chrono::system_clock::to_time_t(now_tp);
+                std::tm tm_buf;
+                localtime_s(&tm_buf, &now_t);
+                char ts[64];
+                std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+                std::string sppm_path = std::string("output/sppm_") + ts + ".png";
+
+                write_png(sppm_path, final_fb);
+
+                // Update display
+                display_fb = final_fb;
+
+                std::cout << "========================================\n";
+                std::cout << "  Saved: " << sppm_path << "\n";
+                std::cout << "========================================\n\n";
+
+            // ── Normal progressive render path ──────────────────────
+            } else {
+            g_app.rendering = true;
+            g_app.showing_final = false;
+            g_app.render_spp_done  = 0;
+            g_app.render_spp_total = opt.config.samples_per_pixel;
+            g_app.render_start = std::chrono::high_resolution_clock::now();
 
             optix_renderer.resize(opt.config.image_width, opt.config.image_height);
             optix_renderer.clear_buffers();  // ensure clean accumulation
@@ -983,6 +1041,7 @@ static void run_interactive(
             // automatically during the photon tracing phase.
 
             g_app.render_requested = false;
+            } // end else (normal progressive render)
         }
 
         // Progressive rendering: one spp per main-loop iteration
@@ -1036,11 +1095,24 @@ static void run_interactive(
                 // Print GPU kernel profiling summary
                 optix_renderer.print_kernel_profiling();
 
+                // Build timestamped prefix: output/render_YYYYMMDD_HHMMSS
+                auto now_tp = std::chrono::system_clock::now();
+                std::time_t now_t = std::chrono::system_clock::to_time_t(now_tp);
+                std::tm tm_buf;
+                localtime_s(&tm_buf, &now_t);
+                char ts[64];
+                std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+                std::string prefix = std::string("output/render_") + ts;
+
+                std::string final_path   = prefix + ".png";
+                std::string nee_path     = prefix + "_nee_direct.png";
+                std::string photon_path  = prefix + "_photon_indirect.png";
+
                 FrameBuffer final_fb;
                 optix_renderer.download_framebuffer(final_fb);
-                write_png(opt.output_file, final_fb);
+                write_png(final_path, final_fb);
 
-                // Write component PNGs (NEE direct, Photon indirect, Combined)
+                // Write component PNGs (NEE direct, Photon indirect)
                 {
                     std::vector<float> nee_spec, photon_spec, samp_counts;
                     optix_renderer.download_component_buffers(
@@ -1074,20 +1146,13 @@ static void run_interactive(
                         }
                     };
 
-                    FrameBuffer nee_fb, photon_fb, combined_fb;
+                    FrameBuffer nee_fb, photon_fb;
 
                     spectral_to_fb(nee_spec, nee_fb);
-                    write_png("output/out_nee_direct.png", nee_fb);
+                    write_png(nee_path, nee_fb);
 
                     spectral_to_fb(photon_spec, photon_fb);
-                    write_png("output/out_photon_indirect.png", photon_fb);
-
-                    // Combined = nee + photon (spectral sum, then convert)
-                    std::vector<float> combined_spec(nee_spec.size());
-                    for (size_t i = 0; i < nee_spec.size(); ++i)
-                        combined_spec[i] = nee_spec[i] + photon_spec[i];
-                    spectral_to_fb(combined_spec, combined_fb);
-                    write_png("output/out_combined.png", combined_fb);
+                    write_png(photon_path, photon_fb);
                 }
 
                 // Restore mouse capture state
@@ -1101,8 +1166,9 @@ static void run_interactive(
                 g_app.rendering = false;
                 g_app.showing_final = true;
                 std::cout << "========================================\n";
-                std::cout << "  Saved: " << opt.output_file << "\n";
-                std::cout << "  Components: out_nee_direct.png, out_photon_indirect.png, out_combined.png\n";
+                std::cout << "  Saved: " << final_path << "\n";
+                std::cout << "  NEE:   " << nee_path << "\n";
+                std::cout << "  Phot:  " << photon_path << "\n";
                 std::cout << "========================================\n\n";
                 }
             }

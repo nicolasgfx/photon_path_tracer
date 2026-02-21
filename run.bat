@@ -9,14 +9,13 @@ REM    run.bat --spp 64          Set samples for final render (R key)
 REM    run.bat test              Build & run unit tests
 REM    run.bat build             Build only (no run)
 REM    run.bat clean             Delete build directory
-REM    run.bat release           Build & render in Release mode
 REM
 REM -------------------------------------------------------------------
 
 setlocal enabledelayedexpansion
 
 set BUILD_DIR=build
-set BUILD_TYPE=Debug
+set BUILD_TYPE=Release
 set TARGET=photon_tracer
 set RUN_ARGS=
 
@@ -34,12 +33,6 @@ if "%1"=="build" (
     call build.bat
     if errorlevel 1 goto :error
     goto :done
-)
-
-if "%1"=="release" (
-    set BUILD_TYPE=Release
-    shift
-    goto :build_and_run
 )
 
 if "%1"=="clean" (

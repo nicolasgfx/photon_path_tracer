@@ -829,6 +829,119 @@ When `ADAPTIVE_NOISE_USE_DIRECT_ONLY == true`, `nee_direct` is passed as
 the proxy so `lum_sum`/`lum_sum2` track direct-only luminance, identical
 in spirit to the GPU path.
 
+### 6.10 SPPM (Stochastic Progressive Photon Mapping)
+
+An alternative rendering mode based on Hachisuka & Jensen (2009).
+Instead of guided-bounce path tracing with a fixed photon map, SPPM
+rebuilds the photon map every iteration and progressively shrinks a
+per-pixel gather radius to converge both bias and variance.
+
+#### 6.10.1 Algorithm
+
+Each SPPM iteration consists of three passes:
+
+1. **Camera pass** — trace eye paths through specular surfaces (glass
+   via Fresnel routing, mirrors via pure reflection) until the first
+   diffuse hit. Record the "visible point" (position, normal,
+   material, throughput). Evaluate next-event estimation (NEE) at the
+   visible point for the direct-lighting component $L_{\text{direct}}$.
+
+2. **Photon pass** — emit $N_p$ photons from lights, trace them
+   through the scene. Reuses the existing `trace_photons()` and
+   hash grid infrastructure.
+
+3. **Gather pass** — for each pixel with a valid visible point, query
+   the hash grid within the pixel's current radius $r_i$. Count $M_i$
+   photons and accumulate **Epanechnikov-kernel-weighted** BSDF flux:
+
+$$
+\Phi_{\text{new}} = \sum_{j=1}^{M_i} w_j \cdot f_s(x, \omega_o, \omega_j, \lambda) \cdot \Phi_j(\lambda)
+\quad\text{where}\quad w_j = 1 - \frac{d_j^2}{r_i^2}
+$$
+
+4. **Progressive update** — per pixel:
+
+$$
+N_{\text{new}} = N_i + \alpha \cdot M_i
+$$
+$$
+r_{\text{new}} = r_i \cdot \sqrt{\frac{N_{\text{new}}}{N_i + M_i}}
+$$
+$$
+\tau_{\text{new}} = (\tau_i + \Phi_{\text{new}}) \cdot \left(\frac{r_{\text{new}}}{r_i}\right)^2
+$$
+
+5. **Reconstruction** (after $k$ iterations):
+
+$$
+L(x, \omega_o, \lambda) = \frac{\tau(\lambda)}{(\pi / 2) \cdot r^2 \cdot k \cdot N_p}
+    + \frac{L_{\text{direct}}(\lambda)}{k}
+$$
+
+   The denominator uses $\pi r^2 / 2$ (effective Epanechnikov kernel
+   area) instead of a flat-kernel $\pi r^2$.
+
+The shrinkage parameter $\alpha \in (0,1)$ controls the rate of
+radius reduction. The classic value $\alpha = 2/3$ balances bias
+reduction with variance stability.
+
+#### 6.10.2 Configuration
+
+| `RenderConfig` Field | Default | Notes |
+|----------------------|---------|-------|
+| `sppm_enabled` | `false` | Enable SPPM mode |
+| `sppm_iterations` | 64 | Number of camera+photon+gather cycles |
+| `sppm_alpha` | $2/3$ | Shrinkage factor |
+| `sppm_initial_radius` | 0.1 | Starting gather radius |
+| `sppm_min_radius` | $10^{-5}$ | Floor clamp |
+
+#### 6.10.3 Implementation
+
+- **Core types** (`src/core/sppm.h`): `SPPMPixel`, `SPPMBuffer`,
+  `sppm_progressive_update()`, `sppm_reconstruct()`.
+- **CPU gather** (`src/photon/density_estimator.h`): `sppm_gather()`
+  — same surface/normal/direction filters as the standard estimator.
+- **CPU render loop** (`src/renderer/renderer.cpp`): `render_sppm()`.
+- **GPU camera pass** (`src/optix/optix_device.cu`):
+  `sppm_camera_pass()` — dispatched in `__raygen__render` when
+  `sppm_mode == 1`.
+- **GPU gather pass** (`src/optix/optix_device.cu`):
+  `sppm_gather_pass()` — dispatched when `sppm_mode == 2`. Includes
+  in-place progressive update and tonemap.
+- **GPU render loop** (`src/optix/optix_renderer.cpp`):
+  `OptixRenderer::render_sppm()` — allocates SoA visible-point
+  buffers, loops iterations, launches camera → photon → gather.
+
+Visible-point data uses SoA layout on the GPU (separate buffers for
+position x/y/z, normal x/y/z, wo x/y/z, material ID, UV, throughput,
+valid flag) to match the existing photon SoA convention.
+
+#### 6.10.4 Advantages over Fixed-Radius Gather
+
+- Converges to the correct result (consistent estimator).
+- Caustics sharpen progressively as the radius shrinks.
+- No per-pixel neighbour search expansion needed.
+
+#### 6.10.5 Hash Grid Sizing for SPPM
+
+In SPPM mode, `trace_photons()` receives a `grid_radius_override`
+equal to `sppm_initial_radius` (default 0.1). This sets the hash grid
+`cell_size = 2 × sppm_initial_radius = 0.2`, ensuring the 3×3×3 cell
+neighbourhood always covers the maximum per-pixel gather radius. As
+the per-pixel radii shrink over iterations, fewer cells are queried
+per pixel, keeping the gather efficient.
+
+The GPU gather pass uses `visited_keys[64]` (up from 27) for
+robustness when `cell_size` differs from the query radius.
+
+#### 6.10.6 CLI Flags
+
+| Flag             | Description                          |
+|------------------|--------------------------------------|
+| `--sppm`         | Enable SPPM (R key triggers SPPM)    |
+| `--sppm-iterations N` | Set iteration count (implies `--sppm`) |
+| `--sppm-radius R`     | Set initial radius (implies `--sppm`) |
+
 ---
 
 ## 7. Spectral Framework
@@ -951,6 +1064,8 @@ src/
     random.h                  PCG32 RNG (host + device)
     alias_table.h             Alias method for discrete sampling
     photon_bins.h             PhotonBin struct, PhotonBinDirs (Fibonacci sphere)
+    cell_bin_grid.h           Normal-gated 3D cell → directional bin scatter
+    sppm.h                    SPPM types, progressive update, reconstruction
     font_overlay.h            Watermark/overlay stamping for PNG output
   bsdf/
     bsdf.h                    BSDF evaluation, sampling, PDF
@@ -977,7 +1092,7 @@ src/
   debug/
     debug.h                   Debug key bindings, DebugState
 tests/
-  test_main.cpp               163 unit tests (GoogleTest)
+  test_main.cpp               274 unit tests (GoogleTest)
 ```
 
 ---

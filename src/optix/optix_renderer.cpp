@@ -377,7 +377,8 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
 //   3. Build hash grid on CPU
 //   4. Upload photons + grid back to device
 // =====================================================================
-void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config) {
+void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config,
+                                  float grid_radius_override) {
     if (num_emissive_ <= 0) {
         std::cout << "[OptiX] Skipping photon trace (no emissive triangles)\n";
         return;
@@ -386,7 +387,11 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     auto t_phase_start = std::chrono::high_resolution_clock::now();
     auto t_lap = t_phase_start;
 
-    gather_radius_ = config.gather_radius;   // keep member in sync with config
+    // Use override radius for the hash grid if provided (SPPM mode).
+    // The member gather_radius_ drives both grid build AND fill_common_params.
+    gather_radius_ = (grid_radius_override > 0.f)
+                         ? grid_radius_override
+                         : config.gather_radius;
 
     int num_photons = config.num_photons;
     int max_stored  = num_photons * DEFAULT_MAX_BOUNCES; // upper bound on stored photons
@@ -548,7 +553,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     }
 
     // Build hash grid on CPU
-    stored_grid_.build(stored_photons_, config.gather_radius);
+    stored_grid_.build(stored_photons_, gather_radius_);
 
     std::cout << "[OptiX] Hash grid built: " << stored_grid_.sorted_indices.size()
               << " entries, " << stored_grid_.table_size << " buckets\n";
@@ -1225,6 +1230,220 @@ void OptixRenderer::render_final(
     std::cout << "\n[Render] Done in " << std::fixed
               << std::setprecision(1) << total_s << "s"
               << "  (~" << (int)mrays << " Mray-bounces/s)\n";
+}
+
+// =====================================================================
+// render_sppm() -- SPPM iterative rendering
+//   For each iteration k:
+//     1. Camera pass   → store visible points per pixel
+//     2. Photon pass   → trace new photons, rebuild hash grid
+//     3. Gather pass   → query hash grid per pixel, progressive update
+// =====================================================================
+void OptixRenderer::render_sppm(
+    const Camera& camera, const RenderConfig& config, const Scene& scene)
+{
+    resize(config.image_width, config.image_height);
+
+    const int K    = config.sppm_iterations;
+    const int N_p  = config.num_photons;
+    const size_t pixels = (size_t)width_ * height_;
+
+    std::cout << "[SPPM] Starting: " << width_ << "x" << height_
+              << " @ " << K << " iterations, " << N_p << " photons/iter\n";
+
+    // ── Allocate SPPM per-pixel buffers ──────────────────────────────
+    d_sppm_vp_pos_x_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_pos_y_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_pos_z_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_norm_x_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_norm_y_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_norm_z_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_wo_x_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_wo_y_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_wo_z_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_mat_id_.alloc_zero(pixels * sizeof(uint32_t));
+    d_sppm_vp_uv_u_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_uv_v_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_throughput_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
+    d_sppm_vp_valid_.alloc_zero(pixels * sizeof(uint8_t));
+    d_sppm_N_.alloc_zero(pixels * sizeof(float));
+    d_sppm_tau_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
+    d_sppm_L_direct_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
+
+    // Initialise per-pixel radius to sppm_initial_radius
+    {
+        std::vector<float> init_radius(pixels, config.sppm_initial_radius);
+        d_sppm_radius_.upload(init_radius);
+    }
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    for (int k = 0; k < K; ++k) {
+        // ── 1. Camera pass ──────────────────────────────────────────
+        {
+            LaunchParams lp = {};
+            fill_common_params(lp,
+                d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+                width_, height_, camera,
+                d_vertices_, d_normals_, d_texcoords_,
+                d_material_ids_,
+                d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+                d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+                (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
+                d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+                d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+                d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
+                d_photon_lambda_, d_photon_flux_,
+                d_photon_bin_idx_,
+                d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
+                d_emissive_indices_, d_emissive_cdf_,
+                num_emissive_, 0.f,
+                gas_handle_,
+                gather_radius_,
+                d_nee_direct_buffer_, d_photon_indirect_buffer_,
+                d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
+                d_prof_photon_gather_, d_prof_bsdf_,
+                d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
+                false, 0.f, 0.f, 0.f, 0, 0.f,  // volume disabled for SPPM
+                d_vol_cell_bin_grid_, vol_cell_bin_grid_, false);
+
+            lp.sppm_mode            = 1;  // camera pass
+            lp.sppm_iteration       = k;
+            lp.sppm_photons_per_iter = N_p;
+            lp.sppm_alpha           = config.sppm_alpha;
+            lp.sppm_min_radius      = config.sppm_min_radius;
+            lp.max_bounces          = config.max_bounces;
+            lp.nee_light_samples    = DEFAULT_NEE_LIGHT_SAMPLES;
+            lp.nee_deep_samples     = DEFAULT_NEE_DEEP_SAMPLES;
+            lp.is_final_render      = 1;
+            lp.samples_per_pixel    = 1;
+            lp.frame_number         = k;
+
+            // SPPM visible-point buffers
+            lp.sppm_vp_pos_x     = d_sppm_vp_pos_x_.as<float>();
+            lp.sppm_vp_pos_y     = d_sppm_vp_pos_y_.as<float>();
+            lp.sppm_vp_pos_z     = d_sppm_vp_pos_z_.as<float>();
+            lp.sppm_vp_norm_x    = d_sppm_vp_norm_x_.as<float>();
+            lp.sppm_vp_norm_y    = d_sppm_vp_norm_y_.as<float>();
+            lp.sppm_vp_norm_z    = d_sppm_vp_norm_z_.as<float>();
+            lp.sppm_vp_wo_x      = d_sppm_vp_wo_x_.as<float>();
+            lp.sppm_vp_wo_y      = d_sppm_vp_wo_y_.as<float>();
+            lp.sppm_vp_wo_z      = d_sppm_vp_wo_z_.as<float>();
+            lp.sppm_vp_mat_id    = d_sppm_vp_mat_id_.as<uint32_t>();
+            lp.sppm_vp_uv_u      = d_sppm_vp_uv_u_.as<float>();
+            lp.sppm_vp_uv_v      = d_sppm_vp_uv_v_.as<float>();
+            lp.sppm_vp_throughput = d_sppm_vp_throughput_.as<float>();
+            lp.sppm_vp_valid      = d_sppm_vp_valid_.as<uint8_t>();
+            lp.sppm_radius        = d_sppm_radius_.as<float>();
+            lp.sppm_N             = d_sppm_N_.as<float>();
+            lp.sppm_tau           = d_sppm_tau_.as<float>();
+            lp.sppm_L_direct      = d_sppm_L_direct_.as<float>();
+
+            d_launch_params_.alloc(sizeof(LaunchParams));
+            CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                                   sizeof(LaunchParams), cudaMemcpyHostToDevice));
+            last_launch_params_host_ = lp;
+
+            OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
+                reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+                sizeof(LaunchParams), &sbt_,
+                width_, height_, 1));
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        // ── 2. Photon pass (reuse existing infrastructure) ──────────
+        // Override hash grid cell size for SPPM: cells must be >= 2 × max
+        // per-pixel radius so the 3×3×3 neighbour query always covers the
+        // full gather disc.  On iteration 0 the max radius is the initial
+        // SPPM radius; on subsequent iterations it can only shrink.
+        float max_radius = (k == 0) ? config.sppm_initial_radius
+                                    : config.sppm_initial_radius; // radii only shrink
+        trace_photons(scene, config, /*grid_radius_override=*/ max_radius);
+
+        // ── 3. Gather pass ──────────────────────────────────────────
+        {
+            LaunchParams lp = {};
+            fill_common_params(lp,
+                d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+                width_, height_, camera,
+                d_vertices_, d_normals_, d_texcoords_,
+                d_material_ids_,
+                d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+                d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+                (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
+                d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+                d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+                d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
+                d_photon_lambda_, d_photon_flux_,
+                d_photon_bin_idx_,
+                d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
+                d_emissive_indices_, d_emissive_cdf_,
+                num_emissive_, 0.f,
+                gas_handle_,
+                gather_radius_,
+                d_nee_direct_buffer_, d_photon_indirect_buffer_,
+                d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
+                d_prof_photon_gather_, d_prof_bsdf_,
+                d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
+                false, 0.f, 0.f, 0.f, 0, 0.f,
+                d_vol_cell_bin_grid_, vol_cell_bin_grid_, false);
+
+            lp.sppm_mode            = 2;  // gather pass
+            lp.sppm_iteration       = k;
+            lp.sppm_photons_per_iter = N_p;
+            lp.sppm_alpha           = config.sppm_alpha;
+            lp.sppm_min_radius      = config.sppm_min_radius;
+            lp.is_final_render      = 1;
+            lp.samples_per_pixel    = 1;
+
+            lp.sppm_vp_pos_x     = d_sppm_vp_pos_x_.as<float>();
+            lp.sppm_vp_pos_y     = d_sppm_vp_pos_y_.as<float>();
+            lp.sppm_vp_pos_z     = d_sppm_vp_pos_z_.as<float>();
+            lp.sppm_vp_norm_x    = d_sppm_vp_norm_x_.as<float>();
+            lp.sppm_vp_norm_y    = d_sppm_vp_norm_y_.as<float>();
+            lp.sppm_vp_norm_z    = d_sppm_vp_norm_z_.as<float>();
+            lp.sppm_vp_wo_x      = d_sppm_vp_wo_x_.as<float>();
+            lp.sppm_vp_wo_y      = d_sppm_vp_wo_y_.as<float>();
+            lp.sppm_vp_wo_z      = d_sppm_vp_wo_z_.as<float>();
+            lp.sppm_vp_mat_id    = d_sppm_vp_mat_id_.as<uint32_t>();
+            lp.sppm_vp_uv_u      = d_sppm_vp_uv_u_.as<float>();
+            lp.sppm_vp_uv_v      = d_sppm_vp_uv_v_.as<float>();
+            lp.sppm_vp_throughput = d_sppm_vp_throughput_.as<float>();
+            lp.sppm_vp_valid      = d_sppm_vp_valid_.as<uint8_t>();
+            lp.sppm_radius        = d_sppm_radius_.as<float>();
+            lp.sppm_N             = d_sppm_N_.as<float>();
+            lp.sppm_tau           = d_sppm_tau_.as<float>();
+            lp.sppm_L_direct      = d_sppm_L_direct_.as<float>();
+
+            d_launch_params_.alloc(sizeof(LaunchParams));
+            CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                                   sizeof(LaunchParams), cudaMemcpyHostToDevice));
+            last_launch_params_host_ = lp;
+
+            OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
+                reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+                sizeof(LaunchParams), &sbt_,
+                width_, height_, 1));
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        // ── Progress ────────────────────────────────────────────────
+        {
+            auto t_now = std::chrono::high_resolution_clock::now();
+            double elapsed = std::chrono::duration<double>(t_now - t_start).count();
+            float pct = 100.f * (k + 1) / K;
+            double eta = (k + 1 < K)
+                ? elapsed * (K - k - 1) / (k + 1) : 0.0;
+            std::printf("\r[SPPM] %3d%%  iter %d/%d  %.1fs  ETA %.1fs   ",
+                        (int)pct, k + 1, K, elapsed, eta);
+            std::fflush(stdout);
+        }
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_s = std::chrono::duration<double>(t_end - t_start).count();
+    std::printf("\n[SPPM] Done in %.1f s  (%d iterations, %d photons/iter)\n",
+                total_s, K, N_p);
 }
 
 // =====================================================================

@@ -144,7 +144,11 @@ public:
 
     /// Trace photons entirely on the GPU. Downloads results, builds
     /// the hash grid on CPU, uploads the grid + photon data back.
-    void trace_photons(const Scene& scene, const RenderConfig& config);
+    /// @param grid_radius_override  If > 0, use this radius instead of
+    ///     config.gather_radius for the hash grid build and GPU cell size.
+    ///     Used by SPPM to size cells for the SPPM initial radius.
+    void trace_photons(const Scene& scene, const RenderConfig& config,
+                       float grid_radius_override = 0.f);
 
     // -- Rendering ----------------------------------------------------
 
@@ -156,6 +160,11 @@ public:
 
     /// Launch the full final render (multi-spp, blocking)
     void render_final(const Camera& camera, const RenderConfig& config);
+
+    /// Launch the SPPM render (iterative photon mapping, blocking).
+    /// Each iteration: camera pass → photon trace → gather → update.
+    void render_sppm(const Camera& camera, const RenderConfig& config,
+                     const Scene& scene);
 
     /// Launch a single sample of full path tracing (progressive)
     void render_one_spp(const Camera& camera, int frame_number,
@@ -344,6 +353,19 @@ private:
     PhotonSoA volume_photons_;
     CellBinGrid vol_cell_bin_grid_;
     bool vol_cell_grid_uploaded_ = false;
+
+    // SPPM per-pixel buffers (GPU side)
+    DeviceBuffer d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_;
+    DeviceBuffer d_sppm_vp_norm_x_, d_sppm_vp_norm_y_, d_sppm_vp_norm_z_;
+    DeviceBuffer d_sppm_vp_wo_x_,   d_sppm_vp_wo_y_,   d_sppm_vp_wo_z_;
+    DeviceBuffer d_sppm_vp_mat_id_;
+    DeviceBuffer d_sppm_vp_uv_u_, d_sppm_vp_uv_v_;
+    DeviceBuffer d_sppm_vp_throughput_;   // float [W*H*NUM_LAMBDA]
+    DeviceBuffer d_sppm_vp_valid_;        // uint8_t [W*H]
+    DeviceBuffer d_sppm_radius_;          // float [W*H]
+    DeviceBuffer d_sppm_N_;               // float [W*H]
+    DeviceBuffer d_sppm_tau_;             // float [W*H*NUM_LAMBDA]
+    DeviceBuffer d_sppm_L_direct_;        // float [W*H*NUM_LAMBDA]
 
     int  width_       = DEFAULT_IMAGE_WIDTH;
     int  height_      = DEFAULT_IMAGE_HEIGHT;

@@ -16,6 +16,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <iomanip>
 
 // ── Build photon maps ───────────────────────────────────────────────
 
@@ -532,6 +533,190 @@ void Renderer::render_frame() {
     std::cout << "\r[Render] 100%  (" << sec << " s, "
               << config_.samples_per_pixel << " spp"
               << (adaptive ? ", adaptive" : "") << ")\n";
+
+    fb_.tonemap(1.0f);
+}
+// =====================================================================
+//  SPPM render (CPU path)
+// =====================================================================
+// Full SPPM loop:
+//   for each iteration k:
+//     1. Camera pass  → find visible points (first diffuse hit)
+//     2. Photon pass  → retrace photons, rebuild hash grid
+//     3. Gather pass  → query photons per pixel, accumulate flux
+//     4. Progressive update → shrink radius, adjust counts
+//   Final: reconstruct L = tau / (pi * r^2 * k * N_p) + L_direct/k
+// =====================================================================
+
+void Renderer::render_sppm() {
+    if (!scene_) return;
+
+    const int width  = config_.image_width;
+    const int height = config_.image_height;
+    const int K      = config_.sppm_iterations;
+    const int N_p    = config_.num_photons;
+    const float alpha      = config_.sppm_alpha;
+    const float min_radius = config_.sppm_min_radius;
+
+    fb_.resize(width, height);
+
+    // Initialise per-pixel SPPM state
+    SPPMBuffer sppm;
+    sppm.resize(width, height, config_.sppm_initial_radius);
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    for (int k = 0; k < K; ++k) {
+        // ── 1. Camera pass: find visible points ─────────────────────
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                SPPMPixel& sp = sppm.at(x, y);
+
+                PCGRng rng = PCGRng::seed(
+                    (uint64_t)(y * width + x) * 1000 + k,
+                    (uint64_t)(y * width + x) + 1);
+
+                Ray ray = camera_.generate_ray(x, y, rng);
+                Spectrum throughput = Spectrum::constant(1.f);
+                sp.valid = false;
+
+                for (int bounce = 0; bounce < config_.max_bounces; ++bounce) {
+                    HitRecord hit = scene_->intersect(ray);
+                    if (!hit.hit) break;
+
+                    Material mat = scene_->materials[hit.material_id];
+
+                    // Texture lookup
+                    if (mat.diffuse_tex >= 0 &&
+                        mat.diffuse_tex < (int)scene_->textures.size()) {
+                        float3 rgb = scene_->textures[mat.diffuse_tex].sample(hit.uv);
+                        mat.Kd = rgb_to_spectrum_reflectance(rgb.x, rgb.y, rgb.z);
+                    }
+
+                    // Emission (camera sees light directly or via specular)
+                    if (mat.is_emissive() && bounce == 0) {
+                        sp.L_direct += throughput * mat.Le;
+                    }
+
+                    // Specular: bounce and continue
+                    if (mat.is_specular()) {
+                        ONB frame = ONB::from_normal(hit.shading_normal);
+                        float3 wo_local = frame.world_to_local(ray.direction * (-1.f));
+                        BSDFSample bs = bsdf::sample(mat, wo_local, rng);
+                        if (bs.pdf <= 0.f) break;
+
+                        float cos_theta = fabsf(bs.wi.z);
+                        for (int i = 0; i < NUM_LAMBDA; ++i)
+                            throughput.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
+
+                        ray.origin    = hit.position + hit.shading_normal * EPSILON *
+                                        (bs.wi.z > 0.f ? 1.f : -1.f);
+                        ray.direction = frame.local_to_world(bs.wi);
+                        continue;
+                    }
+
+                    // ── First diffuse hit: store visible point ──────
+                    ONB frame = ONB::from_normal(hit.shading_normal);
+                    float3 wo_local = frame.world_to_local(ray.direction * (-1.f));
+                    if (wo_local.z <= 0.f) break;
+
+                    sp.position    = hit.position;
+                    sp.normal      = hit.shading_normal;
+                    sp.wo_local    = wo_local;
+                    sp.material_id = hit.material_id;
+                    sp.uv          = hit.uv;
+                    sp.throughput  = throughput;
+                    sp.valid       = true;
+
+                    // NEE at visible point (direct lighting)
+                    DirectLightSample dls = sample_direct_light(
+                        hit.position, hit.shading_normal, *scene_, rng);
+
+                    if (dls.visible && dls.pdf_light > 0.f) {
+                        float3 wi_local = frame.world_to_local(dls.wi);
+                        float cos_theta = fmaxf(0.f, wi_local.z);
+                        if (cos_theta > 0.f) {
+                            Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
+                            Spectrum contrib = dls.Li * f *
+                                               (cos_theta / dls.pdf_light);
+                            sp.L_direct += throughput * contrib;
+                        }
+                    }
+
+                    break;  // stop at first diffuse hit
+                }
+            }
+        }
+
+        // ── 2. Photon pass: retrace photons and rebuild hash grid ───
+        EmitterConfig emitter_cfg;
+        emitter_cfg.num_photons    = N_p;
+        emitter_cfg.max_bounces    = config_.max_bounces;
+        emitter_cfg.rr_threshold   = config_.rr_threshold;
+        emitter_cfg.min_bounces_rr = config_.min_bounces_rr;
+        emitter_cfg.volume_enabled = false;
+
+        global_photons_ = PhotonSoA{};
+        caustic_photons_ = PhotonSoA{};
+        trace_photons(*scene_, emitter_cfg, global_photons_, caustic_photons_, nullptr);
+
+        if (global_photons_.size() > 0)
+            global_grid_.build(global_photons_, config_.sppm_initial_radius);
+
+        // ── 3 & 4. Gather pass + progressive update ─────────────────
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                SPPMPixel& sp = sppm.at(x, y);
+                if (!sp.valid) continue;
+
+                Material mat = scene_->materials[sp.material_id];
+                if (mat.diffuse_tex >= 0 &&
+                    mat.diffuse_tex < (int)scene_->textures.size()) {
+                    float3 rgb = scene_->textures[mat.diffuse_tex].sample(sp.uv);
+                    mat.Kd = rgb_to_spectrum_reflectance(rgb.x, rgb.y, rgb.z);
+                }
+
+                int M = 0;
+                Spectrum phi = sppm_gather(
+                    sp.position, sp.normal, sp.wo_local, mat,
+                    global_photons_, global_grid_,
+                    sp.radius, DEFAULT_SURFACE_TAU, M);
+
+                // Bake camera throughput into the flux contribution
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    phi.value[i] *= sp.throughput.value[i];
+
+                sppm_progressive_update(sp, phi, M, alpha, min_radius);
+            }
+        }
+
+        // Progress
+        float pct = 100.f * (k + 1) / K;
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double elapsed = std::chrono::duration<double>(t_now - t_start).count();
+        std::cout << "\r[SPPM] " << (int)pct << "%  iteration "
+                  << (k + 1) << "/" << K
+                  << "  " << std::fixed << std::setprecision(1)
+                  << elapsed << "s" << std::flush;
+    }
+
+    // ── 5. Reconstruction: L = tau / (pi * r^2 * k * N_p) + L_direct/k ──
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const SPPMPixel& sp = sppm.at(x, y);
+            Spectrum L = sppm_reconstruct(sp, K, N_p);
+            // Store as a single-sample entry for the framebuffer
+            fb_.pixels[y * width + x] = L;
+            fb_.sample_count[y * width + x] = 1.f;
+        }
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_s = std::chrono::duration<double>(t_end - t_start).count();
+    std::cout << "\n[SPPM] Done in " << total_s << " s"
+              << "  (" << K << " iterations, " << N_p << " photons/iter)\n";
 
     fb_.tonemap(1.0f);
 }

@@ -59,6 +59,7 @@
 #include "photon/emitter.h"
 #include "core/photon_bins.h"
 #include "core/cell_bin_grid.h"
+#include "core/sppm.h"
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -4247,6 +4248,824 @@ TEST(CornellBox, NormalVisibilityEliminatesLeakage) {
 
     EXPECT_GT(L_correct_side.sum(), 0.f)
         << "Correct side should receive irradiance from photons";
+}
+
+// =====================================================================
+//  SECTION - CellBinGrid: normal-gated scatter correctness
+// =====================================================================
+// A physically-correct (but slow) CPU reference implementation that
+// gathers photons per-cell by iterating ALL photons and checking
+// distance + normal compatibility — the "ground truth" against which
+// our two-pass approximation is validated.
+
+namespace {
+
+// ── Reference (brute-force, correct) cell-bin builder ───────────────
+// For each cell, iterate ALL photons.  A photon contributes to a cell
+// if:
+//   (a) It is within the 3×3×3 neighbourhood of that cell, AND
+//   (b) Its surface normal is compatible with the cell's dominant
+//       surface normal (dot > 0).
+//
+// The dominant normal is computed identically: flux-weighted average
+// of photons in the cell's OWN voxel only, then normalised.
+//
+// This is O(cells × photons) — correct but far too slow for production.
+struct ReferenceCellBinGrid {
+    std::vector<PhotonBin>  bins;
+    std::vector<float3>     cell_normals;
+    float cell_size;
+    float min_x, min_y, min_z;
+    int   dim_x, dim_y, dim_z;
+    int   bin_count;
+
+    void build(const PhotonSoA& photons, float gather_radius, int num_bins) {
+        bin_count = num_bins;
+        cell_size = gather_radius * 2.0f;
+
+        // Use a temporary CellBinGrid just to get identical AABB / dims
+        CellBinGrid tmp;
+        tmp.cell_size = cell_size;
+        tmp.bin_count = num_bins;
+        tmp.compute_grid_geometry(photons);
+        min_x = tmp.min_x; min_y = tmp.min_y; min_z = tmp.min_z;
+        dim_x = tmp.dim_x; dim_y = tmp.dim_y; dim_z = tmp.dim_z;
+
+        const size_t total = (size_t)dim_x * dim_y * dim_z;
+        const size_t N = photons.size();
+
+        // ── Pass 1: compute dominant normals (native cell only) ─────
+        cell_normals.resize(total);
+        for (size_t c = 0; c < total; ++c)
+            cell_normals[c] = make_f3(0.f, 0.f, 0.f);
+
+        for (size_t i = 0; i < N; ++i) {
+            int cx = (int)std::floor((photons.pos_x[i] - min_x) / cell_size);
+            int cy = (int)std::floor((photons.pos_y[i] - min_y) / cell_size);
+            int cz = (int)std::floor((photons.pos_z[i] - min_z) / cell_size);
+            cx = (std::max)(0, (std::min)(cx, dim_x - 1));
+            cy = (std::max)(0, (std::min)(cy, dim_y - 1));
+            cz = (std::max)(0, (std::min)(cz, dim_z - 1));
+            int flat = cx + cy * dim_x + cz * dim_x * dim_y;
+            float flux = photons.flux[i];
+            cell_normals[flat].x += photons.norm_x[i] * flux;
+            cell_normals[flat].y += photons.norm_y[i] * flux;
+            cell_normals[flat].z += photons.norm_z[i] * flux;
+        }
+        for (size_t c = 0; c < total; ++c) {
+            float len = length(cell_normals[c]);
+            if (len > 1e-8f) cell_normals[c] = cell_normals[c] / len;
+        }
+
+        // ── Pass 2: brute-force accumulation ────────────────────────
+        bins.resize(total * bin_count);
+        std::memset(bins.data(), 0, bins.size() * sizeof(PhotonBin));
+
+        for (size_t c = 0; c < total; ++c) {
+            int cz_cell = (int)(c / ((size_t)dim_x * dim_y));
+            int cy_cell = (int)((c % ((size_t)dim_x * dim_y)) / dim_x);
+            int cx_cell = (int)(c % dim_x);
+
+            for (size_t i = 0; i < N; ++i) {
+                int px_cell = (int)std::floor((photons.pos_x[i] - min_x) / cell_size);
+                int py_cell = (int)std::floor((photons.pos_y[i] - min_y) / cell_size);
+                int pz_cell = (int)std::floor((photons.pos_z[i] - min_z) / cell_size);
+                px_cell = (std::max)(0, (std::min)(px_cell, dim_x - 1));
+                py_cell = (std::max)(0, (std::min)(py_cell, dim_y - 1));
+                pz_cell = (std::max)(0, (std::min)(pz_cell, dim_z - 1));
+
+                // Check: photon must be in the 3×3×3 neighbourhood
+                if (std::abs(px_cell - cx_cell) > 1) continue;
+                if (std::abs(py_cell - cy_cell) > 1) continue;
+                if (std::abs(pz_cell - cz_cell) > 1) continue;
+
+                bool is_native = (px_cell == cx_cell && py_cell == cy_cell && pz_cell == cz_cell);
+
+                // For non-native cells, apply normal gate
+                if (!is_native) {
+                    float3 cdn = cell_normals[c];
+                    float d = photons.norm_x[i] * cdn.x +
+                              photons.norm_y[i] * cdn.y +
+                              photons.norm_z[i] * cdn.z;
+                    if (d <= 0.f) continue;
+                }
+
+                int k = (int)photons.bin_idx[i];
+                if (k >= bin_count) k = 0;
+
+                PhotonBin& b = bins[c * bin_count + k];
+                float flux = photons.flux[i];
+                b.flux   += flux;
+                b.dir_x  += photons.wi_x[i] * flux;
+                b.dir_y  += photons.wi_y[i] * flux;
+                b.dir_z  += photons.wi_z[i] * flux;
+                b.avg_nx += photons.norm_x[i] * flux;
+                b.avg_ny += photons.norm_y[i] * flux;
+                b.avg_nz += photons.norm_z[i] * flux;
+                b.weight += 1.0f;
+                b.count  += 1;
+            }
+        }
+
+        // ── Normalize (same logic as CellBinGrid) ───────────────────
+        PhotonBinDirs fib;
+        fib.init(bin_count);
+        for (size_t c = 0; c < total; ++c) {
+            for (int k = 0; k < bin_count; ++k) {
+                PhotonBin& b = bins[c * bin_count + k];
+                if (b.count > 0) {
+                    float len = std::sqrt(b.dir_x*b.dir_x + b.dir_y*b.dir_y + b.dir_z*b.dir_z);
+                    if (len > 1e-8f) { b.dir_x /= len; b.dir_y /= len; b.dir_z /= len; }
+                    else { b.dir_x = fib.dirs[k].x; b.dir_y = fib.dirs[k].y; b.dir_z = fib.dirs[k].z; }
+
+                    float nlen = std::sqrt(b.avg_nx*b.avg_nx + b.avg_ny*b.avg_ny + b.avg_nz*b.avg_nz);
+                    if (nlen > 1e-8f) { b.avg_nx /= nlen; b.avg_ny /= nlen; b.avg_nz /= nlen; }
+                }
+            }
+        }
+    }
+};
+
+// Helper: create photons on a planar surface patch
+void add_planar_photons(PhotonSoA& photons, float3 center, float3 normal,
+                        float3 wi_dir, int count, float spread,
+                        uint16_t lambda_bin, float flux_each,
+                        PhotonBinDirs& bin_dirs) {
+    // Build a tangent frame for the surface
+    float3 tangent, bitangent;
+    if (std::fabs(normal.x) < 0.9f) tangent = normalize(cross(make_f3(1,0,0), normal));
+    else                              tangent = normalize(cross(make_f3(0,1,0), normal));
+    bitangent = cross(normal, tangent);
+
+    PCGRng rng = PCGRng::seed(12345, 67890);
+    for (int i = 0; i < count; ++i) {
+        float u = (rng.next_float() - 0.5f) * spread;
+        float v = (rng.next_float() - 0.5f) * spread;
+        Photon p;
+        p.position    = center + tangent * u + bitangent * v;
+        p.wi          = wi_dir;
+        p.geom_normal = normal;
+        p.lambda_bin  = lambda_bin;
+        p.flux        = flux_each;
+        photons.push_back(p);
+    }
+    // Precompute bin_idx for newly added photons
+    size_t start = photons.bin_idx.size();
+    photons.bin_idx.resize(photons.size());
+    for (size_t i = start; i < photons.size(); ++i) {
+        float3 wi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
+        photons.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+    }
+}
+
+} // anonymous namespace
+
+// ── Test 1: Reference matches approximation on a single planar surface
+// On a single flat surface (floor only), the normal gate never rejects
+// anything → both implementations must produce bit-identical results.
+TEST(CellBinGrid, NormalGate_SinglePlaneSameAsReference) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    // Floor photons at y=0, normal=(0,1,0), light from above
+    float3 floor_n  = make_f3(0, 1, 0);
+    float3 floor_wi = normalize(make_f3(0.2f, 1.0f, 0.1f)); // mostly from above
+    add_planar_photons(photons, make_f3(0, 0, 0), floor_n, floor_wi,
+                       200, 0.3f, 0, 1.0f, bin_dirs);
+
+    float radius = 0.05f;
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    ReferenceCellBinGrid ref;
+    ref.build(photons, radius, PHOTON_BIN_COUNT);
+
+    // Both grids must have identical geometry
+    ASSERT_EQ(grid.dim_x, ref.dim_x);
+    ASSERT_EQ(grid.dim_y, ref.dim_y);
+    ASSERT_EQ(grid.dim_z, ref.dim_z);
+    ASSERT_EQ(grid.bins.size(), ref.bins.size());
+
+    // Compare all bins (pre-normalisation values: flux, count)
+    int mismatches = 0;
+    for (size_t c = 0; c < (size_t)grid.total_cells(); ++c) {
+        for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
+            const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
+            const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
+            if (a.count != b.count) ++mismatches;
+            if (std::fabs(a.flux - b.flux) > 1e-4f) ++mismatches;
+        }
+    }
+    EXPECT_EQ(mismatches, 0)
+        << "Single plane: all bins should be identical between "
+           "reference and two-pass implementation";
+}
+
+// ── Test 2: Wall-floor corner: cross-surface contamination is blocked
+// Two perpendicular surfaces meet at a corner.  Without the normal
+// gate, wall photons would leak into floor cells and vice versa.
+TEST(CellBinGrid, NormalGate_WallFloorNoContamination) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    // Floor photons (y=0 plane, normal up)
+    float3 floor_n  = make_f3(0, 1, 0);
+    float3 floor_wi = normalize(make_f3(0.1f, 1.0f, 0.0f));
+    add_planar_photons(photons, make_f3(0, 0, 0), floor_n, floor_wi,
+                       100, 0.08f, 0, 1.0f, bin_dirs);
+
+    // Wall photons (x=0.05 plane, normal = +x) — close enough to share cells
+    float3 wall_n  = make_f3(1, 0, 0);
+    float3 wall_wi = normalize(make_f3(1.0f, 0.1f, 0.0f));
+    add_planar_photons(photons, make_f3(0.05f, 0.05f, 0), wall_n, wall_wi,
+                       100, 0.08f, 0, 1.0f, bin_dirs);
+
+    float radius = 0.05f;  // cell_size = 0.1 — surfaces share adjacent cells
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    // Identify a "pure floor" cell (contains only floor photons natively)
+    // The floor center is at (0, 0, 0), wall center at (0.05, 0.05, 0).
+    // A cell around (-0.04, 0, 0) should be floor-only.
+    int floor_cell = grid.cell_index(-0.04f, 0.f, 0.f);
+
+    // The dominant normal of that cell should be close to (0,1,0)
+    float3 cdn = grid.cell_dominant_normal[floor_cell];
+    EXPECT_GT(dot(cdn, floor_n), 0.9f)
+        << "Floor cell dominant normal should face up";
+
+    // Count total photons seen by bins in this cell
+    int total_count = 0;
+    float total_flux = 0.f;
+    for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
+        const PhotonBin& b = grid.bins[(size_t)floor_cell * PHOTON_BIN_COUNT + k];
+        total_count += b.count;
+        total_flux  += b.flux;
+    }
+
+    // For the reference, wall photons should NOT have contributed
+    ReferenceCellBinGrid ref;
+    ref.build(photons, radius, PHOTON_BIN_COUNT);
+
+    int ref_count = 0;
+    float ref_flux = 0.f;
+    for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
+        const PhotonBin& b = ref.bins[(size_t)floor_cell * PHOTON_BIN_COUNT + k];
+        ref_count += b.count;
+        ref_flux  += b.flux;
+    }
+
+    // Our grid and reference should agree
+    EXPECT_EQ(total_count, ref_count)
+        << "Floor cell photon count must match reference";
+    EXPECT_NEAR(total_flux, ref_flux, 1e-4f)
+        << "Floor cell flux must match reference";
+
+    // Check every bin in every cell matches
+    int mismatches = 0;
+    for (size_t c = 0; c < (size_t)grid.total_cells(); ++c) {
+        for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
+            const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
+            const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
+            if (a.count != b.count) ++mismatches;
+            if (std::fabs(a.flux - b.flux) > 1e-4f) ++mismatches;
+        }
+    }
+    EXPECT_EQ(mismatches, 0)
+        << "All cells must match reference in wall-floor corner scenario";
+}
+
+// ── Test 3: Opposite-facing back-to-back walls
+// Two walls at x≈0, one facing +x and one facing −x (thin wall).
+// Ensures photons from one side never leak to the other.
+TEST(CellBinGrid, NormalGate_BackToBackWalls) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    // Wall A: faces +x
+    float3 nA  = make_f3(1, 0, 0);
+    float3 wiA = normalize(make_f3(1.0f, 0.3f, 0.0f));
+    add_planar_photons(photons, make_f3(0.001f, 0, 0), nA, wiA,
+                       80, 0.15f, 0, 2.0f, bin_dirs);
+
+    // Wall B: faces −x (opposite side)
+    float3 nB  = make_f3(-1, 0, 0);
+    float3 wiB = normalize(make_f3(-1.0f, 0.2f, 0.1f));
+    add_planar_photons(photons, make_f3(-0.001f, 0, 0), nB, wiB,
+                       80, 0.15f, 0, 3.0f, bin_dirs);
+
+    float radius = 0.05f;
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    ReferenceCellBinGrid ref;
+    ref.build(photons, radius, PHOTON_BIN_COUNT);
+
+    ASSERT_EQ(grid.bins.size(), ref.bins.size());
+
+    int mismatches = 0;
+    for (size_t c = 0; c < (size_t)grid.total_cells(); ++c) {
+        for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
+            const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
+            const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
+            if (a.count != b.count) ++mismatches;
+            if (std::fabs(a.flux - b.flux) > 1e-4f) ++mismatches;
+        }
+    }
+    EXPECT_EQ(mismatches, 0)
+        << "Back-to-back walls: all bins must match reference";
+}
+
+// ── Test 4: Normals and directions are preserved after accumulation
+// Verifies that after the two-pass build, the normalised avg_n and dir
+// fields in bins still point in physically reasonable directions.
+TEST(CellBinGrid, NormalGate_NormalsAndDirectionsPreserved) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    float3 floor_n  = make_f3(0, 1, 0);
+    float3 floor_wi = normalize(make_f3(0.0f, 1.0f, 0.0f)); // straight down
+    add_planar_photons(photons, make_f3(0, 0, 0), floor_n, floor_wi,
+                       300, 0.2f, 0, 1.0f, bin_dirs);
+
+    float radius = 0.05f;
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    // Find the bin that contains the floor_wi direction
+    int wi_bin = bin_dirs.find_nearest(floor_wi);
+
+    // Check a cell near the center of the photon distribution
+    int center_cell = grid.cell_index(0.f, 0.f, 0.f);
+    const PhotonBin& b = grid.bins[(size_t)center_cell * PHOTON_BIN_COUNT + wi_bin];
+
+    EXPECT_GT(b.count, 0) << "Centre cell wi-bin should have photons";
+
+    // The normalised direction should closely match floor_wi
+    float3 bin_dir = make_f3(b.dir_x, b.dir_y, b.dir_z);
+    EXPECT_GT(dot(bin_dir, floor_wi), 0.99f)
+        << "Bin direction should closely match photon incoming direction";
+
+    // The normalised avg normal should closely match floor_n
+    float3 bin_n = make_f3(b.avg_nx, b.avg_ny, b.avg_nz);
+    EXPECT_GT(dot(bin_n, floor_n), 0.99f)
+        << "Bin average normal should closely match surface normal";
+}
+
+// ── Test 5: Dominant normal of empty-neighbour cells stays zero
+// An empty cell has dominant normal (0,0,0) → length ≈ 0, which means
+// no photon passes the dot > 0 gate.  Photons that try to scatter into
+// that cell should be blocked.
+TEST(CellBinGrid, NormalGate_EmptyCellBlocksScatter) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    // Place photons in a tight cluster so most neighbouring cells are empty
+    float3 n  = make_f3(0, 0, 1);
+    float3 wi = make_f3(0, 0, 1);
+    add_planar_photons(photons, make_f3(0, 0, 0), n, wi,
+                       10, 0.001f, 0, 1.0f, bin_dirs);
+
+    float radius = 0.05f;
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    // The native cell of the photons
+    int native = grid.cell_index(0.f, 0.f, 0.f);
+
+    // A cell far away should be completely empty
+    int far_cell = grid.cell_index(0.5f, 0.5f, 0.5f);
+    if (far_cell != native) {
+        int count = 0;
+        for (int k = 0; k < PHOTON_BIN_COUNT; ++k)
+            count += grid.bins[(size_t)far_cell * PHOTON_BIN_COUNT + k].count;
+        EXPECT_EQ(count, 0)
+            << "Far cell should have no photons";
+    }
+}
+
+// ── Test 6: Three mutually-perpendicular surfaces (floor, wall-X, wall-Z)
+// Full 3-surface corner. Each surface's cells should contain only
+// compatible photons.
+TEST(CellBinGrid, NormalGate_ThreeSurfaceCorner) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    float3 floor_n  = make_f3(0, 1, 0);
+    float3 wallX_n  = make_f3(1, 0, 0);
+    float3 wallZ_n  = make_f3(0, 0, 1);
+
+    add_planar_photons(photons, make_f3(0.0f, 0.0f, 0.0f), floor_n,
+                       normalize(make_f3(0.1f, 1.0f, 0.0f)), 80, 0.06f,
+                       0, 1.0f, bin_dirs);
+    add_planar_photons(photons, make_f3(0.05f, 0.05f, 0.0f), wallX_n,
+                       normalize(make_f3(1.0f, 0.1f, 0.0f)), 80, 0.06f,
+                       1, 2.0f, bin_dirs);
+    add_planar_photons(photons, make_f3(0.0f, 0.05f, 0.05f), wallZ_n,
+                       normalize(make_f3(0.0f, 0.1f, 1.0f)), 80, 0.06f,
+                       2, 3.0f, bin_dirs);
+
+    float radius = 0.05f;
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    ReferenceCellBinGrid ref;
+    ref.build(photons, radius, PHOTON_BIN_COUNT);
+
+    ASSERT_EQ(grid.bins.size(), ref.bins.size());
+
+    // Compare every cell/bin — allow zero tolerance on counts, small on flux
+    int count_mismatch = 0;
+    int flux_mismatch  = 0;
+    for (size_t c = 0; c < (size_t)grid.total_cells(); ++c) {
+        for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
+            const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
+            const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
+            if (a.count != b.count) ++count_mismatch;
+            if (std::fabs(a.flux - b.flux) > 1e-4f) ++flux_mismatch;
+        }
+    }
+    EXPECT_EQ(count_mismatch, 0);
+    EXPECT_EQ(flux_mismatch, 0);
+}
+
+// ── Test 7: Cell dominant normals are correctly computed
+TEST(CellBinGrid, NormalGate_DominantNormalCorrectness) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    // Floor photons only
+    float3 floor_n  = make_f3(0, 1, 0);
+    float3 floor_wi = make_f3(0, 1, 0);
+    add_planar_photons(photons, make_f3(0, 0, 0), floor_n, floor_wi,
+                       50, 0.05f, 0, 1.0f, bin_dirs);
+
+    float radius = 0.05f;
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    // The cell containing (0,0,0) should have dominant normal ≈ (0,1,0)
+    int cell = grid.cell_index(0.f, 0.f, 0.f);
+    float3 cdn = grid.cell_dominant_normal[cell];
+    EXPECT_GT(dot(cdn, floor_n), 0.99f)
+        << "Dominant normal should match floor normal";
+
+    // An empty cell's dominant normal should be zero-length
+    int far_cell = grid.cell_index(0.5f, 0.5f, 0.5f);
+    if (far_cell != cell) {
+        float len = length(grid.cell_dominant_normal[far_cell]);
+        EXPECT_LT(len, 1e-6f)
+            << "Empty cell dominant normal should be near-zero";
+    }
+}
+
+// ── Test 8: Flux conservation on single surface
+// When many photons share the same normal in a cluster, the 3×3×3
+// scatter should propagate all of them to compatible neighbours.
+// The native cell always gets the photon.  Neighbour cells only get it
+// if their dominant normal (from pass 1) is compatible (dot > 0).
+// For a single-surface cluster every occupied neighbour has the same
+// normal, so the gate always passes.
+TEST(CellBinGrid, NormalGate_FluxConservation_SingleSurface) {
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(PHOTON_BIN_COUNT);
+    PhotonSoA photons;
+
+    // Place many photons in a tight cluster so that all 27 neighbours
+    // actually contain native photons (all with the same normal).
+    float3 normal = make_f3(0.f, 1.f, 0.f);
+    float3 wi_dir = normalize(make_f3(0.f, 1.f, 0.f));
+    float flux_each = 2.0f;
+    int count = 500;
+    float radius = 0.05f;  // cell_size = 0.1
+    // Spread the photons across ~3 cells in each dimension
+    add_planar_photons(photons, make_f3(0.f, 0.f, 0.f), normal, wi_dir,
+                       count, 0.25f, 0, flux_each, bin_dirs);
+
+    CellBinGrid grid;
+    grid.build(photons, radius, PHOTON_BIN_COUNT);
+
+    // Sum flux in every cell for every bin
+    float total_flux = 0.f;
+    for (size_t c = 0; c < (size_t)grid.total_cells(); ++c)
+        for (int k = 0; k < PHOTON_BIN_COUNT; ++k)
+            total_flux += grid.bins[c * PHOTON_BIN_COUNT + k].flux;
+
+    // Each photon scatters into its native cell + up to 26 neighbours.
+    // With a large spread, most photons' neighbours are also occupied
+    // and share the same normal → gate passes.
+    // Total flux should be > N * flux (from native cells alone) and
+    // strictly less than N * flux * 27 (boundary photons may have
+    // fewer than 26 valid neighbours).
+    float native_total = (float)count * flux_each;  // minimum: native only
+    EXPECT_GE(total_flux, native_total - 1e-3f)
+        << "Total flux must be at least the native-cell-only sum";
+    EXPECT_GT(total_flux, native_total * 2.f)
+        << "3×3×3 scatter should significantly amplify total flux "
+           "(photons in interior cells contribute to 27 cells each)";
+
+    // Verify against reference
+    ReferenceCellBinGrid ref;
+    ref.build(photons, radius, PHOTON_BIN_COUNT);
+
+    float ref_total = 0.f;
+    for (size_t c = 0; c < (size_t)ref.dim_x * ref.dim_y * ref.dim_z; ++c)
+        for (int k = 0; k < PHOTON_BIN_COUNT; ++k)
+            ref_total += ref.bins[c * PHOTON_BIN_COUNT + k].flux;
+
+    EXPECT_NEAR(total_flux, ref_total, 1e-2f)
+        << "Total flux should match reference implementation";
+}
+
+// =====================================================================
+//  SECTION – SPPM Progressive Photon Mapping (sppm.h)
+// =====================================================================
+
+// ── SPPMPixel initialization ────────────────────────────────────────
+
+TEST(SPPM, PixelInit) {
+    SPPMPixel p;
+    p.init(0.25f);
+
+    EXPECT_FLOAT_EQ(p.radius, 0.25f);
+    EXPECT_FLOAT_EQ(p.N, 0.f);
+    EXPECT_FALSE(p.valid);
+    EXPECT_EQ(p.M_count, 0);
+
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        EXPECT_FLOAT_EQ(p.tau.value[i], 0.f);
+        EXPECT_FLOAT_EQ(p.throughput.value[i], 0.f);
+        EXPECT_FLOAT_EQ(p.L_direct.value[i], 0.f);
+    }
+}
+
+// ── Progressive update: no photons → no change ─────────────────────
+
+TEST(SPPM, UpdateZeroPhotons) {
+    SPPMPixel p;
+    p.init(0.5f);
+    p.N = 10.f;  // some prior accumulated photons
+
+    Spectrum phi = Spectrum::constant(1.0f);
+    sppm_progressive_update(p, phi, 0);  // M = 0
+
+    // Nothing should change
+    EXPECT_FLOAT_EQ(p.radius, 0.5f);
+    EXPECT_FLOAT_EQ(p.N, 10.f);
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        EXPECT_FLOAT_EQ(p.tau.value[i], 0.f);
+}
+
+// ── Progressive update: radius shrinks monotonically ────────────────
+
+TEST(SPPM, RadiusShrinks) {
+    SPPMPixel p;
+    p.init(1.0f);
+
+    Spectrum phi = Spectrum::constant(1.0f);
+    float prev_radius = p.radius;
+
+    for (int iter = 0; iter < 20; ++iter) {
+        sppm_progressive_update(p, phi, 10);  // 10 photons per iter
+        EXPECT_LT(p.radius, prev_radius)
+            << "Radius must shrink each iteration (iter=" << iter << ")";
+        prev_radius = p.radius;
+    }
+}
+
+// ── Progressive update: N accumulates correctly with alpha ──────────
+
+TEST(SPPM, NAccumulation) {
+    SPPMPixel p;
+    p.init(1.0f);
+
+    float alpha = 0.7f;
+
+    // Iteration 1: N = 0 + alpha * M = 0.7 * 5 = 3.5
+    sppm_progressive_update(p, Spectrum::constant(1.0f), 5, alpha);
+    EXPECT_NEAR(p.N, alpha * 5.f, 1e-5f);
+
+    // Iteration 2: N = 3.5 + 0.7 * 8 = 3.5 + 5.6 = 9.1
+    sppm_progressive_update(p, Spectrum::constant(1.0f), 8, alpha);
+    EXPECT_NEAR(p.N, 3.5f + alpha * 8.f, 1e-4f);
+}
+
+// ── Progressive update: radius formula verification ─────────────────
+
+TEST(SPPM, RadiusFormula) {
+    SPPMPixel p;
+    float r0 = 0.5f;
+    p.init(r0);
+    float alpha = DEFAULT_SPPM_ALPHA;
+    int M = 12;
+
+    sppm_progressive_update(p, Spectrum::constant(1.0f), M, alpha);
+
+    // Expected: N_new = 0 + alpha * M = alpha * M
+    // ratio = N_new / (0 + M) = alpha
+    // r_new = r0 * sqrt(alpha)
+    float expected_r = r0 * sqrtf(alpha);
+    EXPECT_NEAR(p.radius, expected_r, 1e-5f);
+}
+
+// ── Progressive update: flux scales with area ratio ─────────────────
+
+TEST(SPPM, FluxAreaRatio) {
+    SPPMPixel p;
+    float r0 = 1.0f;
+    p.init(r0);
+    float alpha = DEFAULT_SPPM_ALPHA;
+
+    Spectrum phi;
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        phi.value[i] = (float)(i + 1);  // distinct values
+
+    sppm_progressive_update(p, phi, 10, alpha);
+
+    // area_ratio = (r_new/r_old)^2 = ratio = alpha * 10 / (0 + 10) = alpha
+    // tau = (0 + phi) * area_ratio = phi * alpha
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        float expected = phi.value[i] * alpha;
+        EXPECT_NEAR(p.tau.value[i], expected, 1e-4f)
+            << "tau[" << i << "] should be phi * alpha on first iteration";
+    }
+}
+
+// ── Progressive update: minimum radius clamp ────────────────────────
+
+TEST(SPPM, MinRadiusClamp) {
+    SPPMPixel p;
+    float min_r = 0.01f;
+    p.init(min_r * 0.5f);  // start below minimum
+    p.N = 1000.f;          // many prior photons to force small ratio
+
+    Spectrum phi = Spectrum::constant(0.001f);
+    sppm_progressive_update(p, phi, 1000, 0.1f, min_r);
+
+    EXPECT_GE(p.radius, min_r)
+        << "Radius should be clamped at min_radius";
+}
+
+// ── Reconstruction: invalid pixel returns zero ──────────────────────
+
+TEST(SPPM, ReconstructInvalidPixel) {
+    SPPMPixel p;
+    p.init(0.5f);
+    p.valid = false;
+
+    Spectrum L = sppm_reconstruct(p, 10, 1000);
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        EXPECT_FLOAT_EQ(L.value[i], 0.f);
+}
+
+// ── Reconstruction: zero iterations returns zero ────────────────────
+
+TEST(SPPM, ReconstructZeroIterations) {
+    SPPMPixel p;
+    p.init(0.5f);
+    p.valid = true;
+    p.tau = Spectrum::constant(100.f);
+
+    Spectrum L = sppm_reconstruct(p, 0, 1000);
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        EXPECT_FLOAT_EQ(L.value[i], 0.f);
+}
+
+// ── Reconstruction: formula verification ────────────────────────────
+
+TEST(SPPM, ReconstructFormula) {
+    SPPMPixel p;
+    float r = 0.1f;
+    p.init(r);
+    p.valid = true;
+
+    // Set known tau and L_direct
+    float tau_val = 100.f;
+    float direct_val = 50.f;
+    p.tau = Spectrum::constant(tau_val);
+    p.L_direct = Spectrum::constant(direct_val);
+
+    int k = 10;      // iterations
+    int N_p = 5000;   // photons per iteration
+
+    Spectrum L = sppm_reconstruct(p, k, N_p);
+
+    // Expected: L_indirect = tau / (0.5 * pi * r^2 * k * N_p)  [Epanechnikov]
+    //           L_direct_avg = L_direct / k
+    float denom = 0.5f * PI * r * r * (float)k * (float)N_p;
+    float expected_indirect = tau_val / denom;
+    float expected_direct   = direct_val / (float)k;
+    float expected_total    = expected_indirect + expected_direct;
+
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        EXPECT_NEAR(L.value[i], expected_total, expected_total * 1e-4f)
+            << "Reconstruction formula incorrect at bin " << i;
+    }
+}
+
+// ── SPPMBuffer initialization ───────────────────────────────────────
+
+TEST(SPPM, BufferResize) {
+    SPPMBuffer buf;
+    buf.resize(32, 16, 0.3f);
+
+    EXPECT_EQ(buf.width, 32);
+    EXPECT_EQ(buf.height, 16);
+    EXPECT_EQ((int)buf.pixels.size(), 32 * 16);
+
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            const auto& p = buf.at(x, y);
+            EXPECT_FLOAT_EQ(p.radius, 0.3f);
+            EXPECT_FLOAT_EQ(p.N, 0.f);
+            EXPECT_FALSE(p.valid);
+        }
+    }
+}
+
+// ── Multi-iteration convergence: radius decreases, N increases ──────
+
+TEST(SPPM, MultiIterationConvergence) {
+    SPPMPixel p;
+    p.init(0.5f);
+
+    float alpha = DEFAULT_SPPM_ALPHA;
+    Spectrum phi = Spectrum::constant(2.0f);
+
+    float prev_r = p.radius;
+    float prev_N = p.N;
+
+    for (int iter = 0; iter < 100; ++iter) {
+        sppm_progressive_update(p, phi, 5, alpha);
+
+        EXPECT_LE(p.radius, prev_r) << "radius must not increase";
+        EXPECT_GE(p.N, prev_N) << "N must not decrease";
+
+        prev_r = p.radius;
+        prev_N = p.N;
+    }
+
+    // After many iterations, radius should be significantly smaller
+    EXPECT_LT(p.radius, 0.5f * 0.5f)
+        << "After 100 iterations, radius should be < 50% of initial";
+    EXPECT_GT(p.N, 0.f)
+        << "N should have accumulated";
+}
+
+// ── sppm_gather: verify photon counting and flux accumulation ───────
+
+TEST(SPPM, GatherBasic) {
+    // Create a simple photon set and test sppm_gather
+    PhotonSoA photons;
+    const int N = 5;
+    photons.resize(N);
+
+    // Place all photons at origin, facing +Y surface
+    for (int i = 0; i < N; ++i) {
+        photons.pos_x[i] = 0.01f * (float)i;
+        photons.pos_y[i] = 0.f;
+        photons.pos_z[i] = 0.f;
+        photons.wi_x[i] = 0.f;
+        photons.wi_y[i] = 1.f;   // coming from below
+        photons.wi_z[i] = 0.f;
+        photons.norm_x[i] = 0.f;
+        photons.norm_y[i] = 1.f;
+        photons.norm_z[i] = 0.f;
+        photons.flux[i] = 10.f;
+        photons.lambda_bin[i] = 0;
+    }
+
+    // Build hash grid
+    HashGrid grid;
+    grid.build(photons, 0.5f);
+
+    // Create a simple diffuse material
+    Material mat;
+    mat.type = MaterialType::Lambertian;
+    mat.Kd   = Spectrum::constant(0.8f);
+
+    // Setup hit point: at origin, normal +Y, looking down from above
+    float3 hit_pos = make_f3(0, 0, 0);
+    float3 hit_normal = make_f3(0, 1, 0);
+    float3 hit_wo = make_f3(0, 0, 1);  // outgoing direction in local frame
+
+    int M_out = 0;
+    Spectrum phi = sppm_gather(
+        hit_pos, hit_normal, hit_wo,
+        mat,
+        photons, grid, 0.5f,
+        DEFAULT_SURFACE_TAU,
+        M_out);
+
+    EXPECT_GT(M_out, 0) << "Should find at least some photons";
+    EXPECT_GT(phi.value[0], 0.f) << "Flux in bin 0 should be positive";
 }
 
 // =====================================================================

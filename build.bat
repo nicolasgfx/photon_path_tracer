@@ -4,26 +4,21 @@ REM  build.bat -- Build the Spectral Photon + Path Tracer
 REM -------------------------------------------------------------------
 REM
 REM  Usage:
-REM    build.bat                 Build in Debug mode
-REM    build.bat release         Build in Release mode
-REM    build.bat test            Build unit tests (Debug)
+REM    build.bat                 Build in Release mode (incremental)
+REM    build.bat rebuild         Clean rebuild (use after changing config.h)
 REM
 REM -------------------------------------------------------------------
 
 setlocal enabledelayedexpansion
 
 set BUILD_DIR=build
-set BUILD_TYPE=Debug
+set BUILD_TYPE=Release
 set CMAKE_OPTS=
-set BUILD_TARGET=
+set BUILD_TARGET=--target photon_tracer
+set CLEAN_FIRST=
 
-if /i "%1"=="release" (
-    set BUILD_TYPE=Release
-)
-
-if /i "%1"=="test" (
-    set CMAKE_OPTS=-DPPT_BUILD_TESTS=ON
-    set BUILD_TARGET=--target ppt_tests
+if /i "%1"=="rebuild" (
+    set CLEAN_FIRST=--clean-first
 )
 
 REM -- Configure --
@@ -33,7 +28,7 @@ if errorlevel 1 goto :error
 
 REM -- Build --
 echo [build.bat] Building (%BUILD_TYPE%)...
-cmake --build %BUILD_DIR% %BUILD_TARGET% --config %BUILD_TYPE%
+cmake --build %BUILD_DIR% %BUILD_TARGET% %CLEAN_FIRST% --config %BUILD_TYPE%
 if errorlevel 1 goto :error
 
 echo [build.bat] Build successful.

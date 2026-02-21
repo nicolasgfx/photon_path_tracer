@@ -141,6 +141,21 @@ bool dev_is_specular(uint32_t mat_id) {
     return t == DEV_MIRROR || t == DEV_GLASS;
 }
 
+__forceinline__ __device__
+bool dev_is_glass(uint32_t mat_id) {
+    return params.mat_type[mat_id] == DEV_GLASS;
+}
+
+__forceinline__ __device__
+bool dev_is_mirror(uint32_t mat_id) {
+    return params.mat_type[mat_id] == DEV_MIRROR;
+}
+
+__forceinline__ __device__
+float dev_get_ior(uint32_t mat_id) {
+    return params.ior[mat_id];
+}
+
 // Sample the flat texture atlas at the given UV for material mat_id.
 // Returns linear RGB (0-1).  Falls back to (0,0,0) when no texture.
 __forceinline__ __device__
@@ -1726,6 +1741,12 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
     return result;
 }
 
+// ── Forward declarations for SPPM device functions ──────────────────
+static __forceinline__ __device__ void sppm_camera_pass(
+    int px, int py, int pixel_idx,
+    float3 origin, float3 direction, PCGRng& rng);
+static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixel_idx);
+
 // =====================================================================
 // __raygen__render
 // =====================================================================
@@ -1734,6 +1755,51 @@ extern "C" __global__ void __raygen__render() {
     int px = idx.x;
     int py = idx.y;
     int pixel_idx = py * params.width + px;
+
+    // ── SPPM mode dispatch ──────────────────────────────────────────
+    if (params.sppm_mode == 1) {
+        // SPPM camera pass: trace to first diffuse hit, store visible point
+        PCGRng rng = PCGRng::seed(
+            (uint64_t)pixel_idx * 1000
+                + (uint64_t)params.sppm_iteration * 100000,
+            (uint64_t)pixel_idx + 1);
+
+        float jx = rng.next_float();
+        float jy = rng.next_float();
+        float u = ((float)px + jx) / (float)params.width;
+        float v = ((float)py + jy) / (float)params.height;
+        float3 focus_target = params.cam_lower_left
+                              + params.cam_horizontal * u
+                              + params.cam_vertical * v;
+        float3 origin    = params.cam_pos;
+        float3 direction = normalize(focus_target - params.cam_pos);
+
+        if (params.cam_lens_radius > 0.f) {
+            float lu1 = rng.next_float();
+            float lu2 = rng.next_float();
+            float a = 2.f * lu1 - 1.f, b = 2.f * lu2 - 1.f;
+            float dr, dphi;
+            if (a == 0.f && b == 0.f) { dr = 0.f; dphi = 0.f; }
+            else if (a * a > b * b)   { dr = a; dphi = (PI / 4.f) * (b / a); }
+            else                      { dr = b; dphi = (PI / 2.f) - (PI / 4.f) * (a / b); }
+            float3 lens_offset = (params.cam_u * dr * cosf(dphi) + params.cam_v * dr * sinf(dphi))
+                                 * params.cam_lens_radius;
+            origin    = params.cam_pos + lens_offset;
+            direction = normalize(focus_target - origin);
+        }
+
+        // Reset valid flag before camera pass
+        params.sppm_vp_valid[pixel_idx] = 0;
+
+        sppm_camera_pass(px, py, pixel_idx, origin, direction, rng);
+        return;
+    }
+
+    if (params.sppm_mode == 2) {
+        // SPPM gather pass: density estimation + progressive update
+        sppm_gather_pass(px, py, pixel_idx);
+        return;
+    }
 
     // ── Adaptive sampling: skip inactive pixels ──────────────────────
     // active_mask is nullptr when adaptive sampling is disabled.
@@ -2105,6 +2171,318 @@ extern "C" __global__ void __raygen__photon_trace() {
             flux /= p_rr;
         }
     }
+}
+
+// =====================================================================
+// SPPM camera pass – traces eye paths to first diffuse hit and stores
+// the visible-point data per pixel.  Also evaluates NEE at the visible
+// point for the direct-lighting component.
+// =====================================================================
+static __forceinline__ __device__ void sppm_camera_pass(
+    int px, int py, int pixel_idx,
+    float3 origin, float3 direction, PCGRng& rng)
+{
+    Spectrum throughput = Spectrum::constant(1.0f);
+    Spectrum L_direct   = Spectrum::zero();
+
+    for (int bounce = 0; bounce <= params.max_bounces; ++bounce) {
+        TraceResult hit = trace_radiance(origin, direction);
+        if (!hit.hit) break;
+
+        uint32_t mat_id = hit.material_id;
+
+        // Emission seen directly or via specular chain
+        if (dev_is_emissive(mat_id) && bounce == 0) {
+            Spectrum Le = dev_get_Le(mat_id);
+            L_direct += throughput * Le;
+        }
+
+        // Glass (Fresnel dielectric): bounce through via Fresnel routing
+        if (dev_is_glass(mat_id)) {
+            float eta = dev_get_ior(mat_id);
+            float3 n = hit.shading_normal;
+            bool entering = dot(direction, n) < 0.f;
+            float3 outward_normal = entering ? n : n * (-1.f);
+            float ni_over_nt = entering ? (1.f / eta) : eta;
+
+            float cos_i = fabsf(dot(direction, outward_normal));
+            float sin2_t = ni_over_nt * ni_over_nt * (1.f - cos_i * cos_i);
+            float fresnel = 1.f;
+            if (sin2_t < 1.f) {
+                float cos_t = sqrtf(1.f - sin2_t);
+                float rs = (ni_over_nt * cos_i - cos_t) / (ni_over_nt * cos_i + cos_t);
+                float rp = (cos_i - ni_over_nt * cos_t) / (cos_i + ni_over_nt * cos_t);
+                fresnel = 0.5f * (rs * rs + rp * rp);
+            }
+
+            if (rng.next_float() < fresnel) {
+                direction = direction - outward_normal * (2.f * dot(direction, outward_normal));
+                origin = hit.position + outward_normal * OPTIX_SCENE_EPSILON;
+            } else {
+                float3 refracted = direction * ni_over_nt +
+                    outward_normal * (ni_over_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
+                direction = normalize(refracted);
+                origin = hit.position - outward_normal * OPTIX_SCENE_EPSILON;
+            }
+            continue;
+        }
+
+        // Mirror: pure reflection
+        if (dev_is_mirror(mat_id)) {
+            float3 n = hit.shading_normal;
+            direction = direction - n * (2.f * dot(direction, n));
+            origin = hit.position + n * OPTIX_SCENE_EPSILON;
+            continue;
+        }
+
+        // ── Diffuse hit: store visible point ────────────────────
+        DevONB frame = DevONB::from_normal(hit.shading_normal);
+        float3 wo_local = frame.world_to_local(direction * (-1.f));
+        if (wo_local.z <= 0.f) break;
+
+        // Store visible-point data
+        params.sppm_vp_pos_x[pixel_idx]  = hit.position.x;
+        params.sppm_vp_pos_y[pixel_idx]  = hit.position.y;
+        params.sppm_vp_pos_z[pixel_idx]  = hit.position.z;
+        params.sppm_vp_norm_x[pixel_idx] = hit.shading_normal.x;
+        params.sppm_vp_norm_y[pixel_idx] = hit.shading_normal.y;
+        params.sppm_vp_norm_z[pixel_idx] = hit.shading_normal.z;
+        params.sppm_vp_wo_x[pixel_idx]   = wo_local.x;
+        params.sppm_vp_wo_y[pixel_idx]   = wo_local.y;
+        params.sppm_vp_wo_z[pixel_idx]   = wo_local.z;
+        params.sppm_vp_mat_id[pixel_idx] = mat_id;
+        params.sppm_vp_uv_u[pixel_idx]   = hit.uv.x;
+        params.sppm_vp_uv_v[pixel_idx]   = hit.uv.y;
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            params.sppm_vp_throughput[pixel_idx * NUM_LAMBDA + i] = throughput.value[i];
+        params.sppm_vp_valid[pixel_idx] = 1;
+
+        // ── NEE at visible point ────────────────────────────────
+        // Simple NEE: one shadow ray to a light
+        int n_nee = (bounce == 0) ? params.nee_light_samples : params.nee_deep_samples;
+        for (int ns = 0; ns < n_nee; ++ns) {
+            float xi = rng.next_float();
+            int emissive_idx = binary_search_cdf(
+                params.emissive_cdf, params.num_emissive, xi);
+            if (emissive_idx >= params.num_emissive)
+                emissive_idx = params.num_emissive - 1;
+
+            uint32_t tri_id = params.emissive_tri_indices[emissive_idx];
+            float u1 = rng.next_float();
+            float u2 = rng.next_float();
+            float su = sqrtf(u1);
+            float bary_a = 1.f - su;
+            float bary_b = u2 * su;
+            float bary_c = 1.f - bary_a - bary_b;
+
+            float3 lv0 = params.vertices[tri_id * 3 + 0];
+            float3 lv1 = params.vertices[tri_id * 3 + 1];
+            float3 lv2 = params.vertices[tri_id * 3 + 2];
+            float3 light_pos = lv0 * bary_a + lv1 * bary_b + lv2 * bary_c;
+            float3 light_normal = normalize(cross(lv1 - lv0, lv2 - lv0));
+
+            float3 to_light = light_pos - hit.position;
+            float dist2 = dot(to_light, to_light);
+            float dist = sqrtf(dist2);
+            float3 wi = to_light * (1.f / dist);
+
+            float cos_recv = dot(wi, hit.shading_normal);
+            if (cos_recv <= 0.f) continue;
+
+            float cos_emit = -dot(wi, light_normal);
+            if (cos_emit <= 0.f) continue;
+
+            // Shadow test
+            if (!trace_shadow(hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON,
+                              wi, dist - 2.f * OPTIX_SCENE_EPSILON))
+                continue;
+
+            // Triangle area
+            float3 e1 = lv1 - lv0, e2 = lv2 - lv0;
+            float area = 0.5f * length(cross(e1, e2));
+            if (area <= 0.f) continue;
+
+            float pdf_light = dist2 / (cos_emit * area * params.num_emissive);
+            if (pdf_light <= 0.f) continue;
+
+            Spectrum Le = dev_get_Le(params.material_ids[tri_id]);
+            float3 wi_local = frame.world_to_local(wi);
+            Spectrum f_bsdf = dev_bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
+
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                float contrib = throughput.value[i] * Le.value[i] *
+                                f_bsdf.value[i] * cos_recv /
+                                (pdf_light * (float)n_nee);
+                L_direct.value[i] += contrib;
+            }
+        }
+
+        break;  // stop at first diffuse hit
+    }
+
+    // Accumulate direct lighting into persistent buffer
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        params.sppm_L_direct[pixel_idx * NUM_LAMBDA + i] += L_direct.value[i];
+}
+
+// =====================================================================
+// SPPM gather pass – for each pixel with a valid visible point, query
+// the hash grid within the pixel's current radius, accumulate BSDF-
+// weighted flux, and perform the progressive radius/flux update.
+// =====================================================================
+static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixel_idx) {
+    if (params.sppm_vp_valid[pixel_idx] == 0) return;
+
+    // Read visible-point data
+    float3 pos     = make_f3(params.sppm_vp_pos_x[pixel_idx],
+                             params.sppm_vp_pos_y[pixel_idx],
+                             params.sppm_vp_pos_z[pixel_idx]);
+    float3 normal  = make_f3(params.sppm_vp_norm_x[pixel_idx],
+                             params.sppm_vp_norm_y[pixel_idx],
+                             params.sppm_vp_norm_z[pixel_idx]);
+    float3 wo_local = make_f3(params.sppm_vp_wo_x[pixel_idx],
+                              params.sppm_vp_wo_y[pixel_idx],
+                              params.sppm_vp_wo_z[pixel_idx]);
+    uint32_t mat_id = params.sppm_vp_mat_id[pixel_idx];
+    float2 uv       = make_f2(params.sppm_vp_uv_u[pixel_idx],
+                               params.sppm_vp_uv_v[pixel_idx]);
+
+    float radius = params.sppm_radius[pixel_idx];
+    float r2     = radius * radius;
+
+    // Build ONB for BSDF evaluation
+    DevONB frame = DevONB::from_normal(normal);
+
+    // Read camera throughput
+    Spectrum tp;
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        tp.value[i] = params.sppm_vp_throughput[pixel_idx * NUM_LAMBDA + i];
+
+    // Hash grid query — gather photons within radius
+    Spectrum phi = Spectrum::zero();
+    int M = 0;
+
+    float cell_size = params.grid_cell_size;
+    int cx0 = (int)floorf((pos.x - radius) / cell_size);
+    int cy0 = (int)floorf((pos.y - radius) / cell_size);
+    int cz0 = (int)floorf((pos.z - radius) / cell_size);
+    int cx1 = (int)floorf((pos.x + radius) / cell_size);
+    int cy1 = (int)floorf((pos.y + radius) / cell_size);
+    int cz1 = (int)floorf((pos.z + radius) / cell_size);
+
+    uint32_t visited_keys[64];
+    int num_visited = 0;
+
+    for (int iz = cz0; iz <= cz1; ++iz)
+    for (int iy = cy0; iy <= cy1; ++iy)
+    for (int ix = cx0; ix <= cx1; ++ix) {
+        uint32_t key = dev_hash_cell(ix, iy, iz, params.grid_table_size);
+
+        bool already = false;
+        for (int v = 0; v < num_visited; ++v)
+            if (visited_keys[v] == key) { already = true; break; }
+        if (already) continue;
+        if (num_visited >= 64) break;  // safety: prevent buffer overflow
+        visited_keys[num_visited++] = key;
+
+        uint32_t start = params.grid_cell_start[key];
+        uint32_t end   = params.grid_cell_end[key];
+        if (start == 0xFFFFFFFF) continue;
+
+        for (uint32_t j = start; j < end; ++j) {
+            uint32_t idx = params.grid_sorted_indices[j];
+            float3 pp = make_f3(params.photon_pos_x[idx],
+                                params.photon_pos_y[idx],
+                                params.photon_pos_z[idx]);
+            float3 diff = pos - pp;
+            float d2 = dot(diff, diff);
+            if (d2 > r2) continue;
+
+            // Surface consistency
+            float plane_dist = fabsf(dot(diff, normal));
+            if (plane_dist > DEFAULT_SURFACE_TAU) continue;
+
+            // Normal consistency
+            float3 photon_n = make_f3(params.photon_norm_x[idx],
+                                      params.photon_norm_y[idx],
+                                      params.photon_norm_z[idx]);
+            if (dot(photon_n, normal) <= 0.f) continue;
+
+            // Direction consistency
+            float3 wi_world = make_f3(params.photon_wi_x[idx],
+                                      params.photon_wi_y[idx],
+                                      params.photon_wi_z[idx]);
+            if (dot(wi_world, normal) <= 0.f) continue;
+
+            // BSDF evaluation
+            float3 wi_local = frame.world_to_local(wi_world);
+            Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
+
+            // Epanechnikov kernel: w = 1 - d²/r² (smooth falloff)
+            float w = 1.0f - d2 / r2;
+
+            // Accumulate: w · f_s · Φ per wavelength bin
+            uint16_t bin = params.photon_lambda[idx];
+            phi.value[bin] += w * f.value[bin] * params.photon_flux[idx];
+            ++M;
+        }
+    }
+
+    // Apply camera throughput
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        phi.value[i] *= tp.value[i];
+
+    // ── Progressive update ──────────────────────────────────────
+    if (M > 0) {
+        float N_old = params.sppm_N[pixel_idx];
+        float N_new = N_old + params.sppm_alpha * (float)M;
+        float ratio = N_new / (N_old + (float)M);
+        float r_old = radius;
+        float r_new = r_old * sqrtf(ratio);
+        if (r_new < params.sppm_min_radius) r_new = params.sppm_min_radius;
+
+        float area_ratio = (r_new * r_new) / (r_old * r_old);
+
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            params.sppm_tau[pixel_idx * NUM_LAMBDA + i] =
+                (params.sppm_tau[pixel_idx * NUM_LAMBDA + i] + phi.value[i]) * area_ratio;
+        }
+
+        params.sppm_N[pixel_idx]      = N_new;
+        params.sppm_radius[pixel_idx] = r_new;
+    }
+
+    // ── Reconstruct and tonemap ─────────────────────────────────
+    // L_indirect = tau / (A_kernel * k * N_p)
+    // With Epanechnikov kernel, A_kernel = pi*r^2/2  (not pi*r^2)
+    float r_final = params.sppm_radius[pixel_idx];
+    float denom = 0.5f * PI * r_final * r_final
+                  * (float)(params.sppm_iteration + 1)
+                  * (float)params.sppm_photons_per_iter;
+    float inv_denom = (denom > 0.f) ? (1.f / denom) : 0.f;
+    float inv_k = 1.f / (float)(params.sppm_iteration + 1);
+
+    Spectrum L;
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        float tau_val = params.sppm_tau[pixel_idx * NUM_LAMBDA + i];
+        float direct  = params.sppm_L_direct[pixel_idx * NUM_LAMBDA + i];
+        L.value[i] = tau_val * inv_denom + direct * inv_k;
+    }
+
+    // Write to spectrum buffer for tonemap
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        params.spectrum_buffer[pixel_idx * NUM_LAMBDA + i] = L.value[i];
+    params.sample_counts[pixel_idx] = 1.f;
+
+    // Tonemap to sRGB
+    float3 rgb = dev_spectrum_to_srgb(L);
+    rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
+    rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
+    rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
+    params.srgb_buffer[pixel_idx * 4 + 0] = (uint8_t)(rgb.x * 255.f);
+    params.srgb_buffer[pixel_idx * 4 + 1] = (uint8_t)(rgb.y * 255.f);
+    params.srgb_buffer[pixel_idx * 4 + 2] = (uint8_t)(rgb.z * 255.f);
+    params.srgb_buffer[pixel_idx * 4 + 3] = 255;
 }
 
 // =====================================================================

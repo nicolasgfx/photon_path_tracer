@@ -34,7 +34,7 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 768;
 //   - Preview:  1–4 spp
 //   - Default:  16 spp (good balance)
 //   - Final:    64–256 spp depending on noise tolerance
-constexpr int   DEFAULT_SPP            = 32;  // samples per pixel
+constexpr int   DEFAULT_SPP            = 64;  // samples per pixel
 constexpr int   DEFAULT_MAX_BOUNCES    = 4;    // path depth
 constexpr int   DEFAULT_MIN_BOUNCES_RR = 3;    // start Russian roulette after this
 constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
@@ -44,8 +44,8 @@ constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;
 //   - Preview:  50k–200k photons, radius 0.07–0.12
 //   - Default:  500k photons,     radius 0.05
 //   - Final:    1M–5M photons,    radius 0.02–0.05
-constexpr int   DEFAULT_NUM_PHOTONS    = 5000000;
-constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;
+constexpr int   DEFAULT_NUM_PHOTONS    = 1000000;
+constexpr float DEFAULT_GATHER_RADIUS  = 0.05; // 0.05f;
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.02f;
 
 // Photon emission distribution tweak (variance reduction):
@@ -95,7 +95,7 @@ constexpr bool  ADAPTIVE_NOISE_USE_DIRECT_ONLY = false;
 // Probability of sampling a guided direction vs cosine hemisphere.
 // Used in OptiX device path tracer to steer diffuse bounces toward
 // high-flux directions while keeping a cosine fallback for robustness.
-constexpr float DEFAULT_GUIDED_BSDF_MIX = 0.50f; // default 0.8
+constexpr float DEFAULT_GUIDED_BSDF_MIX = 0.80f; // default 0.8
 
 // ── Participating medium (volumetric scattering / crepuscular rays) ──
 // Physically-based Rayleigh scattering in air (σ_s ∝ 1/λ⁴).

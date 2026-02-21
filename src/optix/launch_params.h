@@ -198,6 +198,39 @@ struct LaunchParams {
     int        vol_cell_grid_dim_y;
     int        vol_cell_grid_dim_z;
 
+    // ── SPPM (Stochastic Progressive Photon Mapping) ────────────────
+    // Per-pixel visible-point buffers (written by camera pass, read by
+    // gather kernel).  All buffers are [width * height].
+    int    sppm_mode;                ///< 0 = off, 1 = camera pass, 2 = gather pass
+    int    sppm_iteration;           ///< current iteration index k
+    int    sppm_photons_per_iter;    ///< N_p photons emitted this iteration
+    float  sppm_alpha;               ///< radius shrinkage factor α
+    float  sppm_min_radius;          ///< floor for radius shrinkage
+
+    // Visible-point storage (written by SPPM camera pass)
+    float*    sppm_vp_pos_x;         ///< [W*H] hit position x
+    float*    sppm_vp_pos_y;         ///< [W*H] hit position y
+    float*    sppm_vp_pos_z;         ///< [W*H] hit position z
+    float*    sppm_vp_norm_x;        ///< [W*H] shading normal x
+    float*    sppm_vp_norm_y;        ///< [W*H] shading normal y
+    float*    sppm_vp_norm_z;        ///< [W*H] shading normal z
+    float*    sppm_vp_wo_x;          ///< [W*H] outgoing direction (local) x
+    float*    sppm_vp_wo_y;          ///< [W*H] outgoing direction (local) y
+    float*    sppm_vp_wo_z;          ///< [W*H] outgoing direction (local) z
+    uint32_t* sppm_vp_mat_id;        ///< [W*H] material index
+    float*    sppm_vp_uv_u;          ///< [W*H] texture coord u
+    float*    sppm_vp_uv_v;          ///< [W*H] texture coord v
+    float*    sppm_vp_throughput;     ///< [W*H*NUM_LAMBDA] camera-path throughput
+    uint8_t*  sppm_vp_valid;         ///< [W*H] 1 = valid visible point
+
+    // Progressive per-pixel state (persists across iterations)
+    float*    sppm_radius;           ///< [W*H] current gather radius r_i
+    float*    sppm_N;                ///< [W*H] accumulated photon count N_i
+    float*    sppm_tau;              ///< [W*H*NUM_LAMBDA] accumulated flux τ_i
+
+    // Direct lighting accumulator (summed over iterations)
+    float*    sppm_L_direct;         ///< [W*H*NUM_LAMBDA] summed NEE radiance
+
 #ifdef PPT_USE_OPTIX
     OptixTraversableHandle traversable;
 #endif
