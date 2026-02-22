@@ -113,6 +113,7 @@ bool save_photon_cache(const std::string& path,
     ok = ok && write_vec(f, photons.flux);
     ok = ok && write_vec(f, photons.num_hero);
     ok = ok && write_vec(f, photons.bin_idx);
+    ok = ok && write_vec(f, photons.source_emissive_idx);
 
     // Write hash grid arrays
     ok = ok && write_vec(f, grid.sorted_indices);
@@ -177,6 +178,7 @@ bool load_photon_cache(const std::string& path,
     ok = ok && read_vec(f, photons.flux,          N * (size_t)HERO_WAVELENGTHS);
     ok = ok && read_vec(f, photons.num_hero,      N);
     ok = ok && read_vec(f, photons.bin_idx,       N);
+    ok = ok && read_vec(f, photons.source_emissive_idx, N);
     ok = ok && read_vec(f, grid.sorted_indices,   N);
     ok = ok && read_vec(f, grid.cell_start,       TS);
     ok = ok && read_vec(f, grid.cell_end,         TS);

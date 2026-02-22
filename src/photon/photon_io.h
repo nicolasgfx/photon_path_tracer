@@ -35,7 +35,7 @@ static_assert(sizeof(PhotonCacheHeader) == 64,
               "PhotonCacheHeader must be exactly 64 bytes");
 
 constexpr uint32_t PHOTON_CACHE_MAGIC   = 0x50484F54u; // "PHOT"
-constexpr uint32_t PHOTON_CACHE_VERSION = 1u;
+constexpr uint32_t PHOTON_CACHE_VERSION = 2u;  // v2: added source_emissive_idx
 
 // ── API ───────────────────────────────────────────────────────────────
 

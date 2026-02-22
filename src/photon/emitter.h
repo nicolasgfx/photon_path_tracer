@@ -36,6 +36,7 @@ struct EmitterConfig {
 struct EmittedPhoton {
     Ray      ray;              // Origin + direction of emitted photon
     Spectrum spectral_flux;    // Full spectral flux [W/nm] per wavelength bin
+    uint16_t source_emissive_idx = 0xFFFFu;  // local index into emissive_tri_indices
 };
 
 // Sample an emitted photon given the scene's emissive distribution
@@ -85,6 +86,7 @@ inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
 
     ep.ray.origin    = pos + n * EPSILON; // Offset to avoid self-intersection
     ep.ray.direction = world_dir;
+    ep.source_emissive_idx = (uint16_t)local_idx;
 
     return ep;
 }
@@ -184,6 +186,7 @@ inline void trace_photons(const Scene& scene,
         EmittedPhoton ep = sample_emitted_photon(scene, rng);
         Spectrum spectral_flux = ep.spectral_flux;  // Full spectral throughput
         Ray ray = ep.ray;
+        uint16_t source_emissive = ep.source_emissive_idx;
 
         bool on_caustic_path = false; // Set true on first specular bounce, false after diffuse
 
@@ -236,6 +239,7 @@ inline void trace_photons(const Scene& scene,
                 p.wi            = ray.direction * (-1.f); // Flip: stored as incoming
                 p.geom_normal   = hit.normal;             // Geometric normal at hit
                 p.spectral_flux = spectral_flux;
+                p.source_emissive_idx = source_emissive;
 
                 if (on_caustic_path && bounce > 0) {
                     caustic_map.push_back(p);

@@ -240,6 +240,10 @@ public:
     const CellBinGrid& vol_cell_bin_grid_for_test() const { return vol_cell_bin_grid_; }
     const PhotonSoA& volume_photons() const { return volume_photons_; }
 
+    /// Test hooks for light importance cache.
+    const LightCache& light_cache_for_test() const { return light_cache_; }
+    bool is_light_cache_uploaded() const { return light_cache_uploaded_; }
+
     void cleanup();
 
 private:
@@ -340,6 +344,7 @@ private:
     DeviceBuffer d_out_photon_norm_x_, d_out_photon_norm_y_, d_out_photon_norm_z_;  // surface normals
     DeviceBuffer d_out_photon_lambda_, d_out_photon_flux_;
     DeviceBuffer d_out_photon_num_hero_;  // uint8_t [max_stored] hero count per photon
+    DeviceBuffer d_out_photon_source_emissive_;  // uint16_t [max_stored] source emissive idx
     DeviceBuffer d_out_photon_count_;
 
     // Volume photon output buffers (device -- written by __raygen__photon_trace)
@@ -367,6 +372,13 @@ private:
     // Host-side cell-bin grid (kept after build for save/test access)
     CellBinGrid cell_bin_grid_;
     bool cell_grid_uploaded_ = false;
+
+    // Light importance cache (per-cell top-K lights for NEE)
+    LightCache light_cache_;
+    bool light_cache_uploaded_ = false;
+    DeviceBuffer d_light_cache_entries_;          // CellLightEntry [TABLE_SIZE * TOP_K]
+    DeviceBuffer d_light_cache_count_;            // int [TABLE_SIZE]
+    DeviceBuffer d_light_cache_total_importance_; // float [TABLE_SIZE]
 
     // Volume photon storage and cell-bin grid
     PhotonSoA volume_photons_;

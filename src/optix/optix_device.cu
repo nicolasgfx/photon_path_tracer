@@ -1174,6 +1174,12 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
                          uint32_t mat_id, PCGRng& rng, int bounce = 0,
                          float2 uv = make_float2(0.f, 0.f));
 
+// Forward declaration – dispatches to cached or direct NEE
+__forceinline__ __device__
+NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
+                           uint32_t mat_id, PCGRng& rng, int bounce = 0,
+                           float2 uv = make_float2(0.f, 0.f));
+
 // =====================================================================
 // DEBUG FIRST-HIT RENDERING
 // Simple direct-lighting: one ray, one shadow test, one frame
@@ -1230,7 +1236,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         float3 wo_local = make_float3(0.f, 0.f, 1.f); // approximate wo in local frame
         DevONB frame = DevONB::from_normal(cur_normal);
         wo_local = frame.world_to_local(normalize(-cur_dir));
-        NeeResult nee = dev_nee_direct(cur_pos, cur_normal, wo_local, cur_mat, rng, 0, cur_uv);
+        NeeResult nee = dev_nee_dispatch(cur_pos, cur_normal, wo_local, cur_mat, rng, 0, cur_uv);
         L = nee.L;
 
         // v2: also gather photon density for indirect lighting
@@ -1293,7 +1299,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                 wo_local = frame.world_to_local(normalize(-cur_dir));
                 if (wo_local.z <= 0.f) break;
 
-                NeeResult nee_g = dev_nee_direct(cur_pos, cur_normal, wo_local, cur_mat, rng, gb + 1, cur_uv);
+                NeeResult nee_g = dev_nee_dispatch(cur_pos, cur_normal, wo_local, cur_mat, rng, gb + 1, cur_uv);
                 L += glossy_tp * nee_g.L;
 
                 if (params.render_mode != RENDER_MODE_DIRECT_ONLY) {
@@ -1767,6 +1773,191 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
 	}
 
 // =====================================================================
+// NEE WITH LIGHT IMPORTANCE CACHE (§7.2.2)
+//
+// Instead of sampling ALL emissive triangles via the power-weighted CDF,
+// we use the precomputed per-cell light importance cache to steer shadow
+// rays toward lights that actually contribute at this location.
+//
+// Strategy:
+//   With probability (1 - epsilon): sample from cell cache (top-K lights)
+//   With probability epsilon:       sample from global power CDF (fallback)
+//
+// The mixture PDF is computed exactly for correct MIS weighting:
+//   p_mix(i) = (1-eps) × p_cache(i) + eps × p_global(i)
+//
+// Falls back to dev_nee_direct when the cache is empty for a cell.
+// =====================================================================
+
+__forceinline__ __device__
+NeeResult dev_nee_cached(float3 pos, float3 normal, float3 wo_local,
+                         uint32_t mat_id, PCGRng& rng, int bounce,
+                         float2 uv = make_float2(0.f, 0.f))
+{
+    // ── Look up light cache for this cell ────────────────────────────
+    int cx = (int)floorf(pos.x / params.light_cache_cell_size);
+    int cy = (int)floorf(pos.y / params.light_cache_cell_size);
+    int cz = (int)floorf(pos.z / params.light_cache_cell_size);
+    uint32_t cache_key = dev_hash_cell(cx, cy, cz, LIGHT_CACHE_TABLE_SIZE);
+
+    int cache_count = params.light_cache_count[cache_key];
+
+    // Fall back to standard NEE if cache is empty for this cell
+    if (cache_count <= 0) {
+        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+    }
+
+    float cache_total = params.light_cache_total_importance[cache_key];
+    if (cache_total <= 0.f) {
+        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+    }
+
+    const CellLightEntry* cache_entries =
+        &params.light_cache_entries[cache_key * NEE_CELL_TOP_K];
+
+    // ── Shadow ray sampling loop ─────────────────────────────────────
+    NeeResult result;
+    result.L = Spectrum::zero();
+    result.visibility = 0.f;
+    if (params.num_emissive <= 0) return result;
+
+    const int M = nee_shadow_sample_count(
+        bounce, params.nee_light_samples, params.nee_deep_samples);
+    int visible_count = 0;
+
+    DevONB frame = DevONB::from_normal(normal);
+    const float eps = NEE_CACHE_FALLBACK_PROB;
+    const float c   = DEFAULT_NEE_COVERAGE_FRACTION;
+
+    for (int s = 0; s < M; ++s) {
+        // Strategy selection: cache vs global fallback
+        bool use_cache = (rng.next_float() >= eps);
+        int local_idx;
+
+        if (use_cache) {
+            // Sample from per-cell cache: importance-weighted
+            float xi = rng.next_float() * cache_total;
+            float cum = 0.f;
+            int chosen = cache_count - 1;
+            for (int j = 0; j < cache_count; ++j) {
+                cum += cache_entries[j].importance;
+                if (xi <= cum) { chosen = j; break; }
+            }
+            local_idx = (int)cache_entries[chosen].emissive_idx;
+        } else {
+            // Global fallback: coverage-aware mixture (same as dev_nee_direct)
+            float xi = rng.next_float();
+            if (c > 0.f && rng.next_float() < c) {
+                local_idx = (int)(rng.next_float() * (float)params.num_emissive);
+                if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+            } else {
+                local_idx = binary_search_cdf(
+                    params.emissive_cdf, params.num_emissive, xi);
+                if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+            }
+        }
+
+        uint32_t light_tri = params.emissive_tri_indices[local_idx];
+
+        // Sample point on triangle
+        float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+        float3 lv0 = params.vertices[light_tri * 3 + 0];
+        float3 lv1 = params.vertices[light_tri * 3 + 1];
+        float3 lv2 = params.vertices[light_tri * 3 + 2];
+        float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
+
+        float3 le1 = lv1 - lv0;
+        float3 le2 = lv2 - lv0;
+        float3 light_normal = normalize(cross(le1, le2));
+        float  light_area   = length(cross(le1, le2)) * 0.5f;
+
+        // Direction, distance, cosines
+        float3 to_light = light_pos - pos;
+        float dist2 = dot(to_light, to_light);
+        float dist  = sqrtf(dist2);
+        float3 wi   = to_light * (1.f / dist);
+
+        float cos_x = dot(wi, normal);
+        float cos_y = -dot(wi, light_normal);
+        if (cos_x <= 0.f || cos_y <= 0.f) continue;
+
+        // Shadow ray
+        if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
+            continue;
+        visible_count++;
+
+        // ── Compute mixture PDF ──────────────────────────────────────
+        // p_cache: probability of selecting this light from the cache
+        float p_cache = 0.f;
+        for (int j = 0; j < cache_count; ++j) {
+            if (cache_entries[j].emissive_idx == (uint16_t)local_idx) {
+                p_cache = cache_entries[j].importance / cache_total;
+                break;
+            }
+        }
+
+        // p_global: coverage-aware mixture (power + uniform)
+        float p_power;
+        if (local_idx == 0) p_power = params.emissive_cdf[0];
+        else p_power = params.emissive_cdf[local_idx]
+                     - params.emissive_cdf[local_idx - 1];
+        float p_uniform = 1.f / (float)params.num_emissive;
+        float p_global = (1.f - c) * p_power + c * p_uniform;
+
+        // Combined mixture: (1-eps)*cache + eps*global
+        float p_tri = (1.f - eps) * p_cache + eps * p_global;
+        if (p_tri <= 0.f) continue;  // shouldn't happen, but guard
+
+        // Emission and BSDF
+        uint32_t light_mat = params.material_ids[light_tri];
+        Spectrum Le = dev_get_Le(light_mat);
+
+        float3 wi_local = frame.world_to_local(wi);
+        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
+
+        // PDF conversion: area → solid angle
+        float p_y_area = p_tri / light_area;
+        float p_wi     = p_y_area * dist2 / cos_y;
+
+        // MIS vs BSDF sampling
+        float w_mis = 1.0f;
+        if (DEFAULT_USE_MIS) {
+            float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
+            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
+        }
+
+        // Accumulate MIS-weighted: f * Le * cos_x / p_wi
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
+                          * cos_x / fmaxf(p_wi, 1e-8f);
+        }
+    }
+
+    // Average over M samples
+    if (M > 1) {
+        float inv_M = 1.f / (float)M;
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            result.L.value[i] *= inv_M;
+    }
+
+    result.visibility = (float)visible_count / (float)M;
+    return result;
+}
+
+// =====================================================================
+// dev_nee_dispatch -- route to cached or direct NEE
+// =====================================================================
+__forceinline__ __device__
+NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
+                           uint32_t mat_id, PCGRng& rng, int bounce,
+                           float2 uv)
+{
+    if (params.use_light_cache && params.light_cache_valid)
+        return dev_nee_cached(pos, normal, wo_local, mat_id, rng, bounce, uv);
+    return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+}
+
+// =====================================================================
 // FULL PATH TRACING (final render only)
 // Hybrid: NEE (direct) + Photon density estimation (indirect)
 // Returns: combined, nee_direct, photon_indirect components separately
@@ -1882,7 +2073,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         // 1. NEE: direct lighting via shadow ray
         if (params.render_mode != RENDER_MODE_INDIRECT_ONLY) {
             long long t_nee = clock64();
-            NeeResult nee = dev_nee_direct(
+            NeeResult nee = dev_nee_dispatch(
                 hit.position, hit.shading_normal, wo_local,
                 mat_id, rng, bounce, hit.uv);
             result.clk_nee += clock64() - t_nee;
@@ -2034,7 +2225,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
 
             if (params.render_mode != RENDER_MODE_INDIRECT_ONLY) {
                 long long t_nee2 = clock64();
-                NeeResult nee = dev_nee_direct(
+                NeeResult nee = dev_nee_dispatch(
                     hit.position, hit.shading_normal, wo_local,
                     mat_id, rng, bounce + g_bounce + 1, hit.uv);
                 result.clk_nee += clock64() - t_nee2;
@@ -2492,6 +2683,7 @@ extern "C" __global__ void __raygen__photon_trace() {
                     params.out_photon_flux[slot * HERO_WAVELENGTHS + h]   = hero_flux[h];
                 }
                 params.out_photon_num_hero[slot] = (uint8_t)num_hero;
+                params.out_photon_source_emissive[slot] = (uint16_t)local_idx;
             }
         }
 

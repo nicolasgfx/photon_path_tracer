@@ -133,7 +133,9 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.05f;   // caustic map — 5% of scene
 // (hero-wavelength flux summed to scalar; BSDF provides surface colour).
 // Toggle at runtime with G key.
 //   true = dense grid (default)  |  false = per-photon hash-grid walk
-constexpr bool DEFAULT_USE_DENSE_GRID = true;
+// NOTE: Disabled by default since v2.2 — dense grid has 87% energy deficit
+//       due to Fibonacci bin discretisation.  Hash grid is exact.
+constexpr bool DEFAULT_USE_DENSE_GRID = false;
 
 // ── k-NN adaptive radius (§C2, §6.5) ────────────────────────────────
 // In k-NN gather mode, the radius adapts to local photon density:
@@ -377,37 +379,10 @@ enum class SceneLightMode {
     FromMTL,            // Emissive surfaces defined in .mtl file
     DirectionalToFloor, // Directional light aimed at center floor (e.g. Sibenik)
     HemisphereEnv,      // Upper hemisphere sky dome (e.g. Sponza open atrium)
-    SphericalEnv,       // Full sphere environment light (e.g. Hairball)
+    SphericalEnv,       // Full sphere environment light (e.g. Mori Knob)
 };
 
-// ── Scene complexity level ──────────────────────────────────────────
-// Used to auto-select photon budget, gather radius, spp, etc.
-enum class SceneComplexity {
-    Low,     // e.g. Cornell Box — fast to render
-    Medium,  // e.g. Conference, Living Room — moderate cost
-    High,    // e.g. Sibenik, Sponza, Hairball — expensive
-};
 
-// ── Complexity-based rendering presets ──────────────────────────────
-struct ComplexityPreset {
-    int   global_photon_budget;
-    int   caustic_photon_budget;
-    float gather_radius;
-    float caustic_radius;
-    int   spp;
-    int   photon_max_bounces;
-    int   nee_light_samples;
-};
-
-// Indexed by SceneComplexity enum value
-constexpr ComplexityPreset COMPLEXITY_PRESETS[3] = {
-    // Low:    small scenes, fast convergence
-    { 500000,  100000, 0.10f, 0.05f, 64, 4, 64 },
-    // Medium: moderate geometry, balanced quality
-    { 1000000, 250000, 0.10f, 0.05f, 64, 4, 64 },
-    // High:   complex geometry, high photon budget for coverage
-    { 2000000, 500000, 0.10f, 0.05f, 64, 6, 64 },
-};
 
 // ── Runtime scene profile (for hotkey scene switching) ──────────────
 struct SceneProfile {
@@ -419,12 +394,6 @@ struct SceneProfile {
     float           cam_fov;
     float           cam_speed;
     SceneLightMode  light_mode;     // how light enters the scene
-    SceneComplexity complexity;     // auto-selects render presets
-
-    // Convenience: get the complexity-based preset
-    constexpr const ComplexityPreset& preset() const {
-        return COMPLEXITY_PRESETS[static_cast<int>(complexity)];
-    }
 };
 
 constexpr int NUM_SCENE_PROFILES = 8;
@@ -434,41 +403,41 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     // 1: Cornell Box — low complexity, emitters in MTL
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 40.0f, 0.5f,
-      SceneLightMode::FromMTL, SceneComplexity::Low },
+      SceneLightMode::FromMTL },
 
     // 2: Conference Room — medium complexity, emitters in MTL
     { "conference/conference.obj",               "Conference Room",   false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::FromMTL, SceneComplexity::Medium },
+      SceneLightMode::FromMTL },
 
     // 3: Living Room — medium complexity, emitters in MTL
     { "living_room/living_room.obj",             "Living Room",       false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::FromMTL, SceneComplexity::Medium },
+      SceneLightMode::FromMTL },
 
-    // 4: Fireplace Room — medium complexity, emitters in MTL
-    { "fireplace_room/fireplace_room.obj",       "Fireplace Room",    false,
+    // 4: Interior — medium complexity, emitters in MTL
+    { "Interior/interior.obj",                   "Interior",          false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::FromMTL, SceneComplexity::Medium },
+      SceneLightMode::FromMTL },
 
     // 5: Salle de Bain — medium complexity, emitters in MTL
     { "salle_de_bain/salle_de_bain.obj",         "Salle de Bain",     false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::FromMTL, SceneComplexity::Medium },
+      SceneLightMode::FromMTL },
 
     // 6: Sibenik Cathedral — high complexity, directional light to floor
     { "sibenik/sibnek.obj",                      "Sibenik Cathedral",  false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::DirectionalToFloor, SceneComplexity::High },
+      SceneLightMode::DirectionalToFloor },
 
     // 7: Sponza — high complexity, hemisphere sky dome from above
     { "sponza/sponza.obj",                       "Sponza",            false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 60.0f, 0.5f,
-      SceneLightMode::HemisphereEnv, SceneComplexity::High },
+      SceneLightMode::HemisphereEnv },
 
-    // 8: Hairball — high complexity, spherical environment light
-    { "hairball/hairball.obj",                   "Hairball",           false,
+    // 8: Mori Knob — high complexity, spherical environment light
+    { "mori_knob/testObj.obj",                   "Mori Knob",          false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::SphericalEnv, SceneComplexity::High },
+      SceneLightMode::FromMTL },
 };
 

@@ -5156,7 +5156,42 @@ TEST(SPPM, GatherBasic) {
 //  Main
 // =====================================================================
 
+#include "report_listener.h"
+
+// Parse --report-dir=<path> from argv, or fall back to PPT_REPORT_DIR
+// environment variable.  Returns empty string if neither is set.
+static std::string get_report_dir(int argc, char** argv) {
+    const char* prefix = "--report-dir=";
+    size_t prefix_len = strlen(prefix);
+    for (int i = 1; i < argc; ++i) {
+        if (strncmp(argv[i], prefix, prefix_len) == 0)
+            return std::string(argv[i] + prefix_len);
+    }
+#ifdef _MSC_VER
+    char* env = nullptr;
+    size_t env_len = 0;
+    _dupenv_s(&env, &env_len, "PPT_REPORT_DIR");
+    std::string result;
+    if (env && env[0]) { result = env; free(env); return result; }
+    free(env);
+#else
+    const char* env = std::getenv("PPT_REPORT_DIR");
+    if (env && env[0]) return std::string(env);
+#endif
+    return {};
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
+
+    // If a report directory is specified, register the detailed
+    // report listener that writes report.txt, report.json, summary.txt
+    std::string report_dir = get_report_dir(argc, argv);
+    if (!report_dir.empty()) {
+        auto& listeners = ::testing::UnitTest::GetInstance()->listeners();
+        listeners.Append(new ReportListener(report_dir));
+        std::cout << "[ppt_tests] Report output: " << report_dir << "\n";
+    }
+
     return RUN_ALL_TESTS();
 }

@@ -6,6 +6,7 @@
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "core/photon_bins.h"
+#include "core/light_cache.h"
 
 #ifdef PPT_USE_OPTIX
 #include <optix.h>
@@ -135,6 +136,7 @@ struct LaunchParams {
     uint16_t* out_photon_lambda;   // [max_stored * HERO_WAVELENGTHS]
     float*    out_photon_flux;     // [max_stored * HERO_WAVELENGTHS]
     uint8_t*  out_photon_num_hero; // [max_stored] valid hero count per photon
+    uint16_t* out_photon_source_emissive; // [max_stored] source emissive local index
     unsigned int* out_photon_count;  // atomic counter (device)
     int       max_stored_photons;
 
@@ -209,6 +211,18 @@ struct LaunchParams {
     int        vol_cell_grid_dim_x;
     int        vol_cell_grid_dim_y;
     int        vol_cell_grid_dim_z;
+
+    // ── Light importance cache (per-cell top-K lights for NEE) ────────
+    // Built from photon deposition statistics.  Each hash cell stores
+    // the top NEE_CELL_TOP_K most important light sources ranked by
+    // accumulated photon flux.  NEE samples from this cache instead
+    // of the global power CDF, reducing shadow-ray variance.
+    CellLightEntry* light_cache_entries;         // [LIGHT_CACHE_TABLE_SIZE * NEE_CELL_TOP_K]
+    int*            light_cache_count;            // [LIGHT_CACHE_TABLE_SIZE]
+    float*          light_cache_total_importance; // [LIGHT_CACHE_TABLE_SIZE]
+    float           light_cache_cell_size;        // cell size (same as hash grid)
+    int             light_cache_valid;            // 1 = cache uploaded, 0 = not available
+    int             use_light_cache;              // 1 = use cached NEE, 0 = standard NEE
 
     // ── SPPM (Stochastic Progressive Photon Mapping) ────────────────
     // Per-pixel visible-point buffers (written by camera pass, read by

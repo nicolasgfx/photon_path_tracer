@@ -194,7 +194,7 @@ static void add_scene_lights(Scene& scene, SceneLightMode mode) {
         return;
     }
 
-    // ── SphericalEnv (Hairball): full sphere surrounding the scene ──
+    // ── SphericalEnv (Mori Knob): full sphere surrounding the scene ──
     if (mode == SceneLightMode::SphericalEnv) {
         Material env_mat;
         env_mat.name = "__env_sphere__";
@@ -258,25 +258,7 @@ static void add_scene_lights(Scene& scene, SceneLightMode mode) {
               << scene.num_emissive() << " emissive triangles)\n";
 }
 
-// Apply complexity preset from a scene profile to a RenderConfig
-static void apply_complexity_preset(RenderConfig& cfg, const SceneProfile& prof) {
-    const ComplexityPreset& preset = prof.preset();
-    cfg.global_photon_budget  = preset.global_photon_budget;
-    cfg.caustic_photon_budget = preset.caustic_photon_budget;
-    cfg.num_photons           = preset.global_photon_budget;
-    cfg.gather_radius         = preset.gather_radius;
-    cfg.caustic_radius        = preset.caustic_radius;
-    cfg.samples_per_pixel     = preset.spp;
-    cfg.max_bounces           = preset.photon_max_bounces;
-    std::cout << "[Preset] " << prof.display_name << " ("
-              << (prof.complexity == SceneComplexity::Low  ? "low" :
-                  prof.complexity == SceneComplexity::Medium ? "medium" : "high")
-              << "): " << preset.global_photon_budget << " global, "
-              << preset.caustic_photon_budget << " caustic photons, "
-              << "r=" << preset.gather_radius << ", "
-              << preset.spp << " spp, "
-              << preset.photon_max_bounces << " bounces\n";
-}
+
 
 // -- Debug overlay (stb_easy_font) ------------------------------------
 
@@ -1013,9 +995,6 @@ static void run_interactive(
             std::cout << "\n========================================\n";
             std::cout << "  Loading scene: " << prof.display_name << "\n";
             std::cout << "========================================\n";
-
-            // Apply complexity preset for new scene
-            apply_complexity_preset(opt.config, prof);
 
             // Load new scene
             Scene new_scene;

@@ -448,6 +448,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_out_photon_lambda_.alloc(max_stored * HERO_WAVELENGTHS * sizeof(uint16_t));
     d_out_photon_flux_.alloc(max_stored * HERO_WAVELENGTHS * sizeof(float));
     d_out_photon_num_hero_.alloc(max_stored * sizeof(uint8_t));
+    d_out_photon_source_emissive_.alloc(max_stored * sizeof(uint16_t));
     d_out_photon_count_.alloc_zero(sizeof(unsigned int)); // zero the counter
 
     // Allocate volume photon output buffers
@@ -505,6 +506,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.out_photon_lambda  = d_out_photon_lambda_.as<uint16_t>();
     lp.out_photon_flux    = d_out_photon_flux_.as<float>();
     lp.out_photon_num_hero = d_out_photon_num_hero_.as<uint8_t>();
+    lp.out_photon_source_emissive = d_out_photon_source_emissive_.as<uint16_t>();
     lp.out_photon_count   = d_out_photon_count_.as<unsigned int>();
     lp.max_stored_photons = max_stored;
 
@@ -592,6 +594,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     CUDA_CHECK(cudaMemcpy(stored_photons_.lambda_bin.data(), d_out_photon_lambda_.d_ptr, stored_count*HERO_WAVELENGTHS*sizeof(uint16_t), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.flux.data(),   d_out_photon_flux_.d_ptr,   stored_count*HERO_WAVELENGTHS*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.num_hero.data(), d_out_photon_num_hero_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(stored_photons_.source_emissive_idx.data(), d_out_photon_source_emissive_.d_ptr, stored_count*sizeof(uint16_t), cudaMemcpyDeviceToHost));
 
     {
         auto t_now = std::chrono::high_resolution_clock::now();
@@ -683,6 +686,27 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
         std::printf("[Timing] Cell grid build:   %8.1f ms\n", ms);
+        t_lap = t_now;
+    }
+
+    // Build light importance cache from photon deposition statistics
+    if (DEFAULT_USE_LIGHT_CACHE) {
+        light_cache_.build(stored_photons_, stored_grid_.cell_size);
+        if (light_cache_.valid()) {
+            // Upload to device
+            d_light_cache_entries_.upload(light_cache_.entries);
+            d_light_cache_count_.upload(light_cache_.count);
+            d_light_cache_total_importance_.upload(light_cache_.total_importance);
+            light_cache_uploaded_ = true;
+        } else {
+            light_cache_uploaded_ = false;
+        }
+    }
+
+    {
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] Light cache build: %8.1f ms\n", ms);
         t_lap = t_now;
     }
 
@@ -826,7 +850,14 @@ static void fill_common_params(
     const DeviceBuffer& vol_cell_bin_grid_buf,
     const CellBinGrid&  vol_cell_grid,
     bool                vol_cell_grid_uploaded,
-    bool                use_dense_grid)
+    bool                use_dense_grid,
+    // ── Light cache for NEE ──
+    const DeviceBuffer& light_cache_entries_buf,
+    const DeviceBuffer& light_cache_count_buf,
+    const DeviceBuffer& light_cache_total_buf,
+    float               light_cache_cell_size,
+    bool                light_cache_valid,
+    bool                use_light_cache)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -953,6 +984,17 @@ static void fill_common_params(
     p.vol_cell_grid_dim_x     = vol_cell_grid.dim_x;
     p.vol_cell_grid_dim_y     = vol_cell_grid.dim_y;
     p.vol_cell_grid_dim_z     = vol_cell_grid.dim_z;
+
+    // ── Light cache for NEE ──────────────────────────────────────────
+    p.light_cache_entries = light_cache_entries_buf.d_ptr
+        ? reinterpret_cast<CellLightEntry*>(light_cache_entries_buf.d_ptr) : nullptr;
+    p.light_cache_count = light_cache_count_buf.d_ptr
+        ? const_cast<int*>(light_cache_count_buf.as<int>()) : nullptr;
+    p.light_cache_total_importance = light_cache_total_buf.d_ptr
+        ? const_cast<float*>(light_cache_total_buf.as<float>()) : nullptr;
+    p.light_cache_cell_size = light_cache_cell_size;
+    p.light_cache_valid     = light_cache_valid ? 1 : 0;
+    p.use_light_cache       = use_light_cache ? 1 : 0;
 }
 
 // =====================================================================
@@ -989,7 +1031,9 @@ void OptixRenderer::render_debug_frame(
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
         d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_,
-        use_dense_grid_);
+        use_dense_grid_,
+        d_light_cache_entries_, d_light_cache_count_, d_light_cache_total_importance_,
+        light_cache_.cell_size, light_cache_uploaded_, DEFAULT_USE_LIGHT_CACHE);
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -1056,7 +1100,9 @@ void OptixRenderer::render_one_spp(
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
         d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_,
-        use_dense_grid_);
+        use_dense_grid_,
+        d_light_cache_entries_, d_light_cache_count_, d_light_cache_total_importance_,
+        light_cache_.cell_size, light_cache_uploaded_, DEFAULT_USE_LIGHT_CACHE);
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -1254,7 +1300,9 @@ void OptixRenderer::render_final(
             config.volume_enabled, config.volume_density, config.volume_falloff,
             config.volume_albedo, config.volume_samples, config.volume_max_t,
             d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_,
-            use_dense_grid_);
+            use_dense_grid_,
+            d_light_cache_entries_, d_light_cache_count_, d_light_cache_total_importance_,
+            light_cache_.cell_size, light_cache_uploaded_, DEFAULT_USE_LIGHT_CACHE);
 
         // Runtime toggle (V key) overrides the RenderConfig value
         lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -1469,7 +1517,9 @@ void OptixRenderer::render_sppm(
                 d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
                 false, 0.f, 0.f, 0.f, 0, 0.f,  // volume disabled for SPPM
                 d_vol_cell_bin_grid_, vol_cell_bin_grid_, false,
-                use_dense_grid_);
+                use_dense_grid_,
+                d_light_cache_entries_, d_light_cache_count_, d_light_cache_total_importance_,
+                light_cache_.cell_size, light_cache_uploaded_, DEFAULT_USE_LIGHT_CACHE);
 
             lp.sppm_mode            = 1;  // camera pass
             lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
@@ -1553,7 +1603,9 @@ void OptixRenderer::render_sppm(
                 d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
                 false, 0.f, 0.f, 0.f, 0, 0.f,
                 d_vol_cell_bin_grid_, vol_cell_bin_grid_, false,
-                use_dense_grid_);
+                use_dense_grid_,
+                d_light_cache_entries_, d_light_cache_count_, d_light_cache_total_importance_,
+                light_cache_.cell_size, light_cache_uploaded_, DEFAULT_USE_LIGHT_CACHE);
 
             lp.sppm_mode            = 2;  // gather pass
             lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;

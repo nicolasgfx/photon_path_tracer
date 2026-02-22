@@ -25,6 +25,11 @@ struct Photon {
     uint16_t lambda_bin[HERO_WAVELENGTHS] = {};  // Wavelength bin indices (GPU path)
     float    flux[HERO_WAVELENGTHS]       = {};  // Scalar flux per hero bin (GPU path)
     int      num_hero = 1;                       // number of valid hero channels (1..HERO_WAVELENGTHS)
+
+    // ── Light source tracking (for NEE light importance cache) ───────
+    // Local index into emissive_tri_indices[] identifying which light
+    // emitted/caused this photon.  0xFFFF = unknown/unset.
+    uint16_t source_emissive_idx = 0xFFFFu;
 };
 
 // ── SoA layout for GPU storage ──────────────────────────────────────
@@ -63,6 +68,10 @@ struct PhotonSoA {
     // Computed on CPU after photon trace, used on device for O(1) bin lookup.
     std::vector<uint8_t> bin_idx;
 
+    // Source emissive triangle index (for NEE light importance cache)
+    // 0xFFFF = unknown/unset.
+    std::vector<uint16_t> source_emissive_idx;
+
     size_t size() const { return pos_x.size(); }
 
     // ── Spectral flux accessors ─────────────────────────────────────
@@ -94,6 +103,7 @@ struct PhotonSoA {
         flux.reserve(n * HERO_WAVELENGTHS);
         num_hero.reserve(n);
         bin_idx.reserve(n);
+        source_emissive_idx.reserve(n);
     }
 
     void resize(size_t n) {
@@ -105,6 +115,7 @@ struct PhotonSoA {
         flux.resize(n * HERO_WAVELENGTHS);
         num_hero.resize(n, 1);
         bin_idx.resize(n);
+        source_emissive_idx.resize(n, 0xFFFFu);
     }
 
     void push_back(const Photon& p) {
@@ -124,6 +135,7 @@ struct PhotonSoA {
             flux.push_back(p.flux[h]);
         }
         num_hero.push_back((uint8_t)p.num_hero);
+        source_emissive_idx.push_back(p.source_emissive_idx);
     }
 
     Photon get(size_t i) const {
@@ -138,6 +150,8 @@ struct PhotonSoA {
             p.lambda_bin[h] = (lambda_bin.size() > idx) ? lambda_bin[idx] : 0;
             p.flux[h]       = (flux.size() > idx) ? flux[idx] : 0.f;
         }
+        p.source_emissive_idx = (source_emissive_idx.size() > i)
+                              ? source_emissive_idx[i] : (uint16_t)0xFFFFu;
         return p;
     }
 
@@ -150,6 +164,7 @@ struct PhotonSoA {
         flux.clear();
         num_hero.clear();
         bin_idx.clear();
+        source_emissive_idx.clear();
     }
 };
 
