@@ -88,10 +88,10 @@ inline DirectLightSample sample_direct_light(
     float  dist     = sqrtf(dist2);
     float3 wi       = to_light / dist;
 
-    // Geometry checks
-    float cos_theta_receiver = dot(wi, hit_normal);
     float cos_theta_emitter  = dot(wi * (-1.f), light_normal);
 
+    // Geometry checks
+    float cos_theta_receiver = dot(wi, hit_normal);
     if (cos_theta_receiver <= 0.f || cos_theta_emitter <= 0.f) {
         return result;
     }

@@ -11,6 +11,12 @@
 #include <vector>
 #include <cstdint>
 
+// ── Photon path flag bits ────────────────────────────────────────────
+constexpr uint8_t PHOTON_FLAG_TRAVERSED_GLASS = 0x01;  // bit 0: passed through ≥1 glass interface
+constexpr uint8_t PHOTON_FLAG_CAUSTIC_GLASS   = 0x02;  // bit 1: caustic path starts with glass
+constexpr uint8_t PHOTON_FLAG_VOLUME_SEGMENT  = 0x04;  // bit 2: had a volume interaction
+constexpr uint8_t PHOTON_FLAG_DISPERSION      = 0x08;  // bit 3: dispersion was active
+
 // ── Single photon (AoS, for host-side convenience) ──────────────────
 struct Photon {
     float3   position;
@@ -30,6 +36,10 @@ struct Photon {
     // Local index into emissive_tri_indices[] identifying which light
     // emitted/caused this photon.  0xFFFF = unknown/unset.
     uint16_t source_emissive_idx = 0xFFFFu;
+
+    // ── Path metadata ────────────────────────────────────────────────────
+    uint8_t  path_flags   = 0;     // PHOTON_FLAG_* bit field
+    uint8_t  bounce_count = 0;     // total bounces at deposit
 };
 
 // ── SoA layout for GPU storage ──────────────────────────────────────
@@ -72,6 +82,10 @@ struct PhotonSoA {
     // 0xFFFF = unknown/unset.
     std::vector<uint16_t> source_emissive_idx;
 
+    // Path metadata
+    std::vector<uint8_t>  path_flags;      // PHOTON_FLAG_* bit field
+    std::vector<uint8_t>  bounce_count;     // total bounces at deposit
+
     size_t size() const { return pos_x.size(); }
 
     // ── Spectral flux accessors ─────────────────────────────────────
@@ -104,6 +118,8 @@ struct PhotonSoA {
         num_hero.reserve(n);
         bin_idx.reserve(n);
         source_emissive_idx.reserve(n);
+        path_flags.reserve(n);
+        bounce_count.reserve(n);
     }
 
     void resize(size_t n) {
@@ -116,6 +132,8 @@ struct PhotonSoA {
         num_hero.resize(n, 1);
         bin_idx.resize(n);
         source_emissive_idx.resize(n, 0xFFFFu);
+        path_flags.resize(n, 0);
+        bounce_count.resize(n, 0);
     }
 
     void push_back(const Photon& p) {
@@ -136,6 +154,8 @@ struct PhotonSoA {
         }
         num_hero.push_back((uint8_t)p.num_hero);
         source_emissive_idx.push_back(p.source_emissive_idx);
+        path_flags.push_back(p.path_flags);
+        bounce_count.push_back(p.bounce_count);
     }
 
     Photon get(size_t i) const {
@@ -152,6 +172,8 @@ struct PhotonSoA {
         }
         p.source_emissive_idx = (source_emissive_idx.size() > i)
                               ? source_emissive_idx[i] : (uint16_t)0xFFFFu;
+        p.path_flags   = (path_flags.size() > i)   ? path_flags[i]   : (uint8_t)0;
+        p.bounce_count = (bounce_count.size() > i) ? bounce_count[i] : (uint8_t)0;
         return p;
     }
 
@@ -165,6 +187,8 @@ struct PhotonSoA {
         num_hero.clear();
         bin_idx.clear();
         source_emissive_idx.clear();
+        path_flags.clear();
+        bounce_count.clear();
     }
 };
 

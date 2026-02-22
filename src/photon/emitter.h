@@ -158,6 +158,15 @@ inline uint64_t rng_spatial_seed(float3 pos, int bounce, int photon_idx) {
     return seed;
 }
 
+// ── IOR stack for nested dielectrics ────────────────────────────────
+struct IORStack {
+    float stack[4] = {1.0f, 0.f, 0.f, 0.f};
+    int   depth    = 0;
+    float current_ior() const { return depth > 0 ? stack[depth-1] : 1.0f; }
+    void  push(float ior) { if (depth < 4) stack[depth++] = ior; }
+    void  pop()           { if (depth > 0) --depth; }
+};
+
 inline void trace_photons(const Scene& scene,
                            const EmitterConfig& config,
                            PhotonSoA& global_map,
@@ -189,6 +198,8 @@ inline void trace_photons(const Scene& scene,
         uint16_t source_emissive = ep.source_emissive_idx;
 
         bool on_caustic_path = false; // Set true on first specular bounce, false after diffuse
+        uint8_t path_flags = 0;       // Accumulated path flags
+        IORStack ior_stack;            // Nested dielectric IOR tracking
 
         for (int bounce = 0; bounce < config.max_bounces; ++bounce) {
             HitRecord hit = scene.intersect(ray);
@@ -204,6 +215,7 @@ inline void trace_photons(const Scene& scene,
 
             // ── Volume photon deposit (Beer–Lambert free-flight) ─────
             if (volume_map && config.volume_enabled && config.volume_density > 0.f) {
+                path_flags |= PHOTON_FLAG_VOLUME_SEGMENT;
                 float seg_t = hit.t;
                 float mid_y = ray.origin.y + ray.direction.y * (seg_t * 0.5f);
                 HomogeneousMedium med = make_rayleigh_medium(
@@ -218,6 +230,8 @@ inline void trace_photons(const Scene& scene,
                         Photon vp;
                         vp.position = ray.origin + ray.direction * t_ff;
                         vp.wi = ray.direction * (-1.f);
+                        vp.path_flags = path_flags;
+                        vp.bounce_count = (uint8_t)bounce;
                         for (int b = 0; b < NUM_LAMBDA; ++b) {
                             float sig_s_b = med.sigma_s.value[b];
                             float sig_t_b = fmaxf(med.sigma_t.value[b], 1e-20f);
@@ -240,6 +254,8 @@ inline void trace_photons(const Scene& scene,
                 p.geom_normal   = hit.normal;             // Geometric normal at hit
                 p.spectral_flux = spectral_flux;
                 p.source_emissive_idx = source_emissive;
+                p.path_flags    = path_flags;
+                p.bounce_count  = (uint8_t)bounce;
 
                 if (on_caustic_path && bounce > 0) {
                     caustic_map.push_back(p);
@@ -250,8 +266,21 @@ inline void trace_photons(const Scene& scene,
 
                 on_caustic_path = false;
             } else {
-                // Specular bounce: mark path as potentially caustic
+                // Specular bounce: track glass traversal and caustic flags
                 on_caustic_path = true;
+                if (mat.type == MaterialType::Glass) {
+                    path_flags |= PHOTON_FLAG_TRAVERSED_GLASS;
+                    if (bounce == 0)
+                        path_flags |= PHOTON_FLAG_CAUSTIC_GLASS;
+                    if (mat.dispersion)
+                        path_flags |= PHOTON_FLAG_DISPERSION;
+                    // Push/pop IOR stack on glass entry/exit
+                    float dot_ni = dot(ray.direction, hit.normal);
+                    if (dot_ni < 0.f)
+                        ior_stack.push(mat.ior);
+                    else
+                        ior_stack.pop();
+                }
             }
 
             // §5.3.1: Cell-stratified bounce direction
@@ -325,5 +354,73 @@ inline void trace_photons(const Scene& scene,
             ray.tmin      = 1e-4f;
             ray.tmax      = 1e20f;
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Adaptive caustic shooting (§10c)
+// ─────────────────────────────────────────────────────────────────────
+// Two-phase emission: after the initial uniform photon trace, identify
+// caustic hotspot cells (high CV) via CellInfoCache and re-trace
+// additional targeted caustic photons.  The targeted photons are
+// appended to the existing caustic map and the hash grid is rebuilt.
+//
+// Uses standard trace_photons internally — the "targeting" is achieved
+// by simply tracing extra photons uniformly (more of them) and only
+// keeping the caustic deposits.  A more sophisticated scheme would
+// bias emission toward glass objects, but this approach is simple and
+// correct: more samples → lower variance.
+
+#include "core/cell_cache.h"
+
+inline void trace_targeted_caustic_photons(
+    const Scene& scene,
+    const EmitterConfig& config,
+    const CellInfoCache& cell_cache,
+    PhotonSoA& caustic_map)
+{
+    // Determine how many extra photons to emit
+    auto hotspot_keys = cell_cache.get_caustic_hotspot_keys();
+    if (hotspot_keys.empty()) {
+        std::cout << "[AdaptiveCaustic] No hotspot cells — skipping\n";
+        return;
+    }
+
+    int targeted_budget = (int)(config.num_photons * CAUSTIC_TARGETED_FRACTION);
+    if (targeted_budget <= 0) return;
+
+    std::cout << "[AdaptiveCaustic] " << hotspot_keys.size()
+              << " hotspot cells, tracing " << targeted_budget
+              << " targeted photons\n";
+
+    for (int iter = 0; iter < CAUSTIC_MAX_TARGETED_ITERS; ++iter) {
+        // Trace extra photons — only keep caustic deposits
+        PhotonSoA extra_global;
+        PhotonSoA extra_caustic;
+        extra_caustic.reserve(targeted_budget / 4);
+
+        EmitterConfig extra_cfg = config;
+        extra_cfg.num_photons    = targeted_budget;
+        extra_cfg.volume_enabled = false;
+
+        trace_photons(scene, extra_cfg, extra_global, extra_caustic, nullptr);
+
+        if (extra_caustic.size() == 0) break;
+
+        // Append targeted caustic photons to the main map
+        size_t before = caustic_map.size();
+        size_t n = extra_caustic.size();
+        for (size_t i = 0; i < n; ++i) {
+            Photon p = extra_caustic.get(i);
+            caustic_map.push_back(p);
+        }
+
+        std::cout << "[AdaptiveCaustic] Iter " << (iter + 1)
+                  << ": +" << n << " caustic photons (total "
+                  << caustic_map.size() << ")\n";
+
+        // Reduce budget for subsequent iterations
+        targeted_budget /= 2;
+        if (targeted_budget < 1000) break;
     }
 }

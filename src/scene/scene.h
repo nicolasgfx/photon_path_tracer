@@ -277,7 +277,7 @@ inline HitRecord Scene::intersect(const Ray& ray) const {
                         result.material_id = triangles[i].material_id;
                         float alpha = 1.f - u - v;
                         result.position = triangles[i].interpolate_position(alpha, u, v);
-                        result.normal   = triangles[i].geometric_normal();
+                        result.normal = triangles[i].geometric_normal();
                         result.shading_normal = triangles[i].interpolate_normal(alpha, u, v);
                         result.uv = triangles[i].interpolate_uv(alpha, u, v);
                     }

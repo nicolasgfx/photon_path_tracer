@@ -126,7 +126,7 @@ set_target_properties(photon_tracer PROPERTIES
 if(MSVC)
     # For C/C++ source files
     set_source_files_properties(${CORE_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "/wd4505")
+        COMPILE_OPTIONS "/wd4505;/FS")
 endif()
 
 # OptiX is always enabled
@@ -181,7 +181,7 @@ target_compile_definitions(photon_tracer PRIVATE
 # -- Compiler flags ----------------------------------------------------
 if(MSVC)
     target_compile_options(photon_tracer PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>
+        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast /FS>
         $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -Xcompiler=/W4>
     )
 else()
@@ -220,6 +220,7 @@ if(PPT_BUILD_TESTS)
         tests/test_pixel_comparison.cpp
         tests/test_dense_grid_diagnostics.cpp
         tests/test_light_cache.cpp
+        tests/test_speed_tweaks.cpp
         src/scene/obj_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp

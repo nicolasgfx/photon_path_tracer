@@ -23,9 +23,17 @@ struct Material {
     Spectrum      Kd           = Spectrum::constant(0.5f);
     Spectrum      Ks           = Spectrum::zero();       // Specular reflectance
     Spectrum      Le           = Spectrum::zero();       // Emission (spectral radiance)
+    Spectrum      Tf           = Spectrum::constant(1.0f);  // Transmittance filter (glass colour)
 
     float         roughness    = 1.0f;   // 0 = mirror, 1 = diffuse
     float         ior          = 1.5f;   // Index of refraction (glass)
+
+    // ── Chromatic dispersion (Cauchy equation) ──────────────────────
+    // n(λ) = cauchy_A + cauchy_B / λ²   (λ in nm)
+    // When dispersion == false, the constant `ior` is used.
+    float         cauchy_A     = 1.5046f;  // base refractive index (crown glass)
+    float         cauchy_B     = 4200.0f;  // dispersion coefficient (nm²)
+    bool          dispersion   = false;    // enable wavelength-dependent IOR
 
     // Texture IDs (−1 = none)
     int           diffuse_tex  = -1;
@@ -38,4 +46,10 @@ struct Material {
 
     // Mean emission (average over wavelengths) for weighting
     float mean_emission() const { return Le.sum() / NUM_LAMBDA; }
+
+    // Per-wavelength IOR via Cauchy equation
+    HD float ior_at_lambda(float lambda_nm) const {
+        if (!dispersion) return ior;
+        return cauchy_A + cauchy_B / (lambda_nm * lambda_nm);
+    }
 };

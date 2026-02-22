@@ -12,6 +12,7 @@
 #include "core/types.h"
 #include "core/spectrum.h"
 #include "core/config.h"
+#include "core/cell_cache.h"
 #include "renderer/camera.h"
 #include "scene/scene.h"
 #include "photon/photon.h"
@@ -196,6 +197,7 @@ public:
     const PhotonSoA& caustic_photons() const { return caustic_photons_; }
     const HashGrid&  global_grid()     const { return global_grid_; }
     const HashGrid&  caustic_grid()    const { return caustic_grid_; }
+    const CellInfoCache& cell_cache()  const { return cell_cache_; }
 
     // Result of a single camera ray (first-hit + specular chain)
     struct TraceResult {
@@ -230,4 +232,5 @@ private:
     HashGrid     caustic_grid_;
     KDTree       global_kdtree_;     // v2: primary spatial index
     KDTree       caustic_kdtree_;    // v2: caustic KD-tree
+    CellInfoCache cell_cache_;       // Precomputed per-cell statistics (§10c)
 };

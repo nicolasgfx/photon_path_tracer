@@ -122,15 +122,22 @@ with $N \to \infty$ (consistency).
    c. Trace each photon through scene with full bounce logic:
       - Bounce 0: guided hemisphere/sphere coverage
       - Bounce 1+: BSDF importance sampling + Russian roulette
+      - Glass: wavelength-dependent IOR (Cauchy dispersion), Tf filter,
+        IOR stack for nested dielectrics, path flag tagging
       - Deposit at each qualifying diffuse hit (lightPathDepth ≥ 2)
    d. Build spatial index (KD-tree on CPU, hash grid on GPU)
-   e. Save photon map + spatial index to binary file (optional)
+   e. Build CellInfoCache (per-cell photon statistics, §5.5)
+   f. Adaptive caustic shooting: re-emit photons toward high-CV
+      caustic hotspot cells (§5.6), rebuild grids + cache if augmented
+   g. Save photon map + spatial index to binary file (optional)
 4. ═══ CAMERA PASS ═══  (first-hit only, independent of photon pass)
    a. For each pixel: trace ONE camera ray → find first hit
    b. Follow specular bounces (mirrors, glass) up to N=8
    c. At first diffuse hit:
       - NEE: shadow rays to light sample points
       - Photon gather: query KD-tree / hash grid within adaptive radius
+        (radius from CellInfoCache, §5.5)
+      - Caustic gather: skip if CellInfoCache reports zero caustics
       - Combine: L = L_direct(NEE) + L_indirect(photon density)
    d. Multiply by specular chain throughput
 5. Spectral → RGB conversion (CIE XYZ), ACES filmic tone mapping, output
@@ -152,13 +159,14 @@ to fit inside the Cornell Box reference frame $([-0.5, 0.5]^3)$.
 
 Supported material types:
 
-| Type        | MTL Cue                | Internal Enum      |
-|-------------|------------------------|--------------------|
-| Lambertian  | default                | `Lambertian`       |
-| Mirror      | `illum 3`, Ks > 0.99   | `Mirror`           |
-| Glass       | `illum 4`, Ni > 1      | `Glass`            |
-| Glossy      | `illum 2`, Ns > 0      | `Glossy`           |
-| Emissive    | `Ke` present           | `Emissive`         |
+| Type        | MTL Cue                | Internal Enum       |
+|-------------|------------------------|---------------------|
+| Lambertian  | default                | `Lambertian`        |
+| Mirror      | `illum 3`, Ks > 0.99   | `Mirror`            |
+| Glass       | `illum 4`, Ni > 1      | `Glass`             |
+| GlossyMetal | `illum 2`, Ns > 0      | `GlossyMetal`       |
+| GlossyDiel. | `illum 7`              | `GlossyDielectric`  |
+| Emissive    | `Ke` present           | `Emissive`          |
 
 ### 4.2 Acceleration Structure
 
@@ -234,7 +242,7 @@ Full coverage of the hemisphere (diffuse/glossy) or full sphere
 (glass/translucent). Strategy: cosine-weighted hemisphere sampling with
 optional guided importance sampling. For glass/translucent surfaces:
 Fresnel-weighted reflection/refraction with full spherical coverage.
-Wavelength-dependent IOR for dispersion.
+Wavelength-dependent IOR for dispersion (Cauchy equation, §10.1).
 
 #### 5.2.2 Bounce 1+ (Deeper Bounces)
 
@@ -264,6 +272,40 @@ Terminating at delta surfaces prevents caustic formation.
 
 `hasSpecularChain == true` means at least one delta BSDF interaction
 occurred along the photon's path from the light source.
+
+### 5.2.5 Photon Path Flags
+
+Each photon carries a `path_flags` bitmask and `bounce_count`, set during
+tracing and stored in the photon SoA. These flags enable downstream
+optimisations (CellInfoCache, adaptive caustic shooting).
+
+| Flag | Bit | Meaning |
+|------|-----|---------|
+| `PHOTON_FLAG_TRAVERSED_GLASS` | 0x01 | Path passed through at least one glass surface |
+| `PHOTON_FLAG_CAUSTIC_GLASS` | 0x02 | Path is a glass caustic (specular chain → diffuse) |
+| `PHOTON_FLAG_VOLUME_SEGMENT` | 0x04 | Deposited inside a participating medium |
+| `PHOTON_FLAG_DISPERSION` | 0x08 | Path went through a dispersive glass material |
+
+Flags are accumulated along the path: glass detection sets `TRAVERSED_GLASS`;
+if the photon later deposits on a diffuse surface, `CAUSTIC_GLASS` is set.
+Materials with `dispersion == true` trigger `DISPERSION`.
+
+### 5.2.6 IOR Stack (Nested Dielectrics)
+
+An `IORStack` (4 deep) tracks the current refractive index during photon
+tracing. When entering glass, the material's IOR is pushed; when exiting,
+it is popped. The stack returns `current_ior()` for Fresnel and Snell
+calculations, handling nested glass objects correctly.
+
+```cpp
+struct IORStack {
+    float stack[4] = {1.0f, 0, 0, 0};
+    int   depth    = 1;
+    void  push(float n);
+    void  pop();
+    float current_ior() const { return stack[depth - 1]; }
+};
+```
 
 ### 5.3 Photon Path Decorrelation
 
@@ -309,6 +351,90 @@ $$
 $$
 
 For Lambertian with cosine sampling: factor = albedo $\rho$.
+
+### 5.5 CellInfoCache (Precomputed Per-Cell Statistics)
+
+After the initial photon pass and spatial index build, a **CellInfoCache**
+is constructed. It divides the scene into a hashed 3D grid
+(`CELL_CACHE_TABLE_SIZE` = 65 536 cells) and precomputes per-cell
+statistics using a single pass over all photons with Welford's online
+algorithm.
+
+#### 5.5.1 CellInfo Fields
+
+| Field | Description |
+|-------|-------------|
+| `irradiance` | Sum of photon flux in cell |
+| `flux_variance` | Welford variance of flux values |
+| `photon_count` | Number of photons in cell |
+| `density` | Photons per unit volume |
+| `avg_wi` | Average incoming direction |
+| `directional_spread` | `1 - |avg_wi|` (0 = collimated, 1 = isotropic) |
+| `caustic_count` | Photons with `PHOTON_FLAG_CAUSTIC_GLASS` |
+| `caustic_flux` | Total caustic photon flux |
+| `is_caustic_hotspot` | True if caustic CV exceeds threshold |
+| `glass_fraction` | Fraction of photons with `TRAVERSED_GLASS` flag |
+| `avg_normal` | Average surface normal |
+| `normal_variance` | Variance of normals (non-planarity) |
+| `adaptive_radius` | Precomputed per-cell gather radius |
+| `caustic_cv` | Coefficient of variation of caustic flux |
+
+#### 5.5.2 Adaptive Radius
+
+The CellInfoCache provides a **per-cell adaptive gather radius** that
+scales inversely with local photon density:
+
+$$
+r_{\text{adaptive}} = r_{\text{base}} \cdot \sqrt{\frac{k_{\text{target}}}{\max(n, 1)}}
+$$
+
+Clamped to $[r_{\text{base}} \times 0.25,\; r_{\text{base}} \times 2.0]$.
+
+#### 5.5.3 Caustic Hotspot Detection
+
+Cells with `caustic_count ≥ 4` AND `caustic_cv > CAUSTIC_CV_THRESHOLD`
+(default 0.50) are flagged as caustic hotspots. These cells are targeted
+by the adaptive caustic shooting pass (§5.6).
+
+#### 5.5.4 Usage in Camera Pass
+
+- **Adaptive gather radius**: `get_adaptive_radius(pos)` replaces the
+  fixed `config.gather_radius`.
+- **Caustic skip**: If `query(pos).caustic_count == 0`, skip the caustic
+  photon gather entirely (avoids wasted hash grid queries in empty regions).
+
+Implementation: `src/core/cell_cache.h`.
+
+### 5.6 Adaptive Caustic Shooting
+
+After the initial photon pass and CellInfoCache build, the renderer can
+optionally trace **additional targeted caustic photons** toward regions
+with high caustic variance (CV). This two-phase approach concentrates
+photon budget where it matters most — sharp caustic edges.
+
+#### 5.6.1 Algorithm
+
+```
+1. Identify caustic hotspot cells from CellInfoCache
+   (caustic_cv > CAUSTIC_CV_THRESHOLD)
+2. For up to MAX_CAUSTIC_ITERATIONS:
+   a. Emit CAUSTIC_TARGETED_FRACTION × N_caustic additional photons
+   b. Append to existing caustic photon SoA
+   c. Rebuild caustic hash grid and CellInfoCache
+   d. If no hotspots remain (all CV < CAUSTIC_CV_TARGET), stop
+```
+
+#### 5.6.2 Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CAUSTIC_TARGETED_FRACTION` | 0.30 | Extra photons per iteration (fraction of caustic budget) |
+| `CAUSTIC_CV_THRESHOLD` | 0.50 | Minimum CV to qualify as hotspot |
+| `CAUSTIC_CV_TARGET` | 0.20 | Target CV for convergence |
+| `MAX_CAUSTIC_ITERATIONS` | 3 | Maximum refinement iterations |
+
+Implementation: `trace_targeted_caustic_photons()` in `src/photon/emitter.h`,
+integrated in `Renderer::build_photon_maps()` in `src/renderer/renderer.cpp`.
 
 ---
 
@@ -649,6 +775,55 @@ ACES pipeline for fair PSNR comparison.
 All BSDF evaluations are spectral: albedo $K_d(\lambda)$ or $K_s(\lambda)$
 is evaluated per-bin. For glass with wavelength-dependent IOR, Fresnel
 reflectance and refraction angle vary per bin (spectral dispersion).
+
+### 10.1 Chromatic Dispersion (Cauchy Equation)
+
+Glass materials optionally support wavelength-dependent index of refraction
+via the **Cauchy dispersion model**:
+
+$$
+n(\lambda) = A + \frac{B}{\lambda^2}
+$$
+
+where $\lambda$ is in nanometers. Default constants (crown glass):
+$A = 1.5046$, $B = 4200\,\text{nm}^2$.
+
+#### Material Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Tf` | `Spectrum` | 1.0 (all bins) | Spectral transmittance filter (glass colour) |
+| `cauchy_A` | `float` | 1.5046 | Cauchy A coefficient |
+| `cauchy_B` | `float` | 4200.0 | Cauchy B coefficient (nm²) |
+| `dispersion` | `bool` | false | Enable wavelength-dependent IOR |
+
+#### `ior_at_lambda(float lambda_nm)`
+
+Returns `cauchy_A + cauchy_B / (lambda_nm * lambda_nm)` when `dispersion`
+is true; otherwise returns the constant `ior` field.
+
+#### Per-Wavelength Fresnel in Glass BSDF
+
+When `mat.dispersion` is true, `glass_sample()` evaluates Fresnel
+reflectance **per wavelength bin** using `mat.ior_at_lambda(lambda_of_bin(b))`.
+This produces wavelength-dependent reflection/refraction splitting — the
+physical basis of prismatic rainbows and chromatic caustics.
+
+The glass BSDF also applies the material's **transmittance filter** `Tf` to
+both reflected and refracted flux, enabling coloured glass (e.g., stained
+glass windows).
+
+```cpp
+// Per-bin Fresnel when dispersion is enabled:
+for (int b = 0; b < NUM_LAMBDA; ++b) {
+    float n_b = mat.ior_at_lambda(lambda_of_bin(b));
+    float F_b = fresnel_schlick(cos_theta, n_b);
+    sample.weight.value[b] *= mat.Tf.value[b] * (reflect ? F_b : (1 - F_b));
+}
+```
+
+The legacy `glass_sample(float3 wo, float ior, PCGRng& rng)` overload is
+preserved for backward compatibility.
 
 ---
 
@@ -1037,6 +1212,26 @@ All tunable constants in `src/core/config.h`:
 | `sppm_alpha` | 2/3 | Shrinkage factor |
 | `sppm_initial_radius` | 0.1 | Starting gather radius |
 
+### Chromatic Dispersion
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DEFAULT_CAUCHY_A` | 1.5046 | Cauchy A (crown glass) |
+| `DEFAULT_CAUCHY_B` | 4200.0 | Cauchy B (nm²) |
+
+### CellInfoCache & Adaptive Caustics
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CELL_CACHE_TABLE_SIZE` | 65 536 | Hash table size for cell cache |
+| `CAUSTIC_TARGETED_FRACTION` | 0.30 | Extra caustic photons per iteration |
+| `CAUSTIC_CV_THRESHOLD` | 0.50 | Min CV to flag as hotspot |
+| `CAUSTIC_CV_TARGET` | 0.20 | Target CV for convergence |
+| `MAX_CAUSTIC_ITERATIONS` | 3 | Max adaptive shooting rounds |
+| `ADAPTIVE_RADIUS_MIN_FACTOR` | 0.25 | Min adaptive radius scale |
+| `ADAPTIVE_RADIUS_MAX_FACTOR` | 2.0 | Max adaptive radius scale |
+| `ADAPTIVE_RADIUS_TARGET_K` | 100 | Target photon count per cell |
+
 ### Image & Window
 
 | Parameter | Default | Description |
@@ -1072,6 +1267,8 @@ struct PhotonSoA {
     vector<float> norm_x, norm_y, norm_z;  // geometric surface normal at deposit
     vector<uint16_t> lambda_bin;
     vector<float> flux;
+    vector<uint8_t> path_flags;            // PHOTON_FLAG_* bitmask (§5.2.5)
+    vector<uint8_t> bounce_count;          // number of bounces before deposit
 };
 ```
 
@@ -1144,6 +1341,7 @@ src/
     sppm.h                      SPPM types, progressive update, reconstruction
     photon_bins.h               PhotonBin struct, Fibonacci sphere (Phase 7)
     photon_density_cache.h      Per-pixel cached spectral density
+    cell_cache.h                CellInfoCache — per-cell precomputed statistics (§5.5)
     guided_nee.h                Bin-flux-weighted NEE CDF
     nee_sampling.h              NEE sampling helpers
     medium.h                    Participating medium (temporarily disabled)
@@ -1188,6 +1386,7 @@ tests/
   test_per_ray_validation.cpp   Individual ray correctness checks
   test_pixel_comparison.cpp     Per-pixel render validation
   test_medium.cpp               Participating medium tests
+  test_speed_tweaks.cpp         Dispersion, CellInfoCache, caustic tracing, IOR stack (29 tests)
   feature_speed_test.cpp        Performance benchmarks
 ```
 
@@ -1227,6 +1426,17 @@ tests/
 
 11. **Comprehensive test suite.** Unit tests, integration tests (CPU↔GPU),
     ground-truth comparisons, and per-ray validation.
+
+12. **Chromatic dispersion.** Cauchy-equation wavelength-dependent IOR with
+    per-bin Fresnel produces physically correct spectral splitting
+    (prismatic rainbows, chromatic caustics).
+
+13. **CellInfoCache precomputation.** Per-cell photon statistics (density,
+    variance, caustic count, directional spread) enable adaptive gather
+    radius and empty-region skip without per-query overhead.
+
+14. **Adaptive caustic shooting.** Two-phase photon emission concentrates
+    budget on high-variance caustic cells, reducing caustic noise.
 
 ---
 

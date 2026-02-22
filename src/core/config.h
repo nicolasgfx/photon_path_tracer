@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 // ─────────────────────────────────────────────────────────────────────
 // config.h – Central configuration for the photon-centric renderer v2.1
 // ─────────────────────────────────────────────────────────────────────
@@ -35,7 +36,7 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 1080;
 
 // Samples per pixel (anti-aliasing + noise averaging).
 //   Preview: 1–4  |  Default: 16–64  |  Final: 64–256
-constexpr int DEFAULT_SPP = 64;
+constexpr int DEFAULT_SPP = 32;
 
 // Stratified sub-pixel jitter grid (§7.1).
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP (one sample per stratum).
@@ -59,8 +60,8 @@ constexpr int HERO_WAVELENGTHS = 4;
 // longer precomputation.  The photon map carries ALL multi-bounce
 // indirect transport in v2.
 //   Preview: 50k–200k  |  Default: 500k–1M  |  Final: 1M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 10000000;  // diffuse indirect photons
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 5000000;   // specular→diffuse caustic photons
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;  // diffuse indirect photons
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 500000;   // specular→diffuse caustic photons
 
 // ── Photon path depth (§5.2) ────────────────────────────────────────
 // Maximum bounce depth for photon rays (the real path tracers in v2).
@@ -300,6 +301,37 @@ constexpr float DEFAULT_VOLUME_FALLOFF  = 0.0f;    // height falloff (0 = homoge
 constexpr float DEFAULT_VOLUME_ALBEDO   = 0.95f;   // single-scattering albedo σ_s/σ_t. Range: [0, 1]
 constexpr int   DEFAULT_VOLUME_SAMPLES  = 2;       // medium samples per ray segment. Range: 1–8
 constexpr float DEFAULT_VOLUME_MAX_T    = 2.0f;    // max march distance for miss rays (scene units)
+
+// =====================================================================
+// §10b  CHROMATIC DISPERSION (Cauchy equation)
+// =====================================================================
+// Per-wavelength IOR: n(λ) = cauchy_A + cauchy_B / λ²
+// Enables spectral caustics and rainbow effects through glass.
+
+constexpr float DEFAULT_CAUCHY_A = 1.5046f;          // crown glass base IOR
+constexpr float DEFAULT_CAUCHY_B = 4200.0f;          // dispersion coefficient (nm²)
+constexpr bool  DEFAULT_DISPERSION_ENABLED = false;   // off by default (backward compat)
+
+// =====================================================================
+// §10c  CELL INFO CACHE (precomputed cell statistics)
+// =====================================================================
+// Hash-grid precomputed per-cell photon statistics for adaptive
+// gather radius, empty-region skip, and caustic hotspot detection.
+
+constexpr uint32_t CELL_CACHE_TABLE_SIZE = 65536u;     // 64K cells (same as LightCache)
+
+// Adaptive gather radius parameters
+constexpr float ADAPTIVE_RADIUS_MIN_FACTOR = 0.25f;   // never shrink below 25% of base
+constexpr float ADAPTIVE_RADIUS_MAX_FACTOR = 2.0f;    // never grow above 200% of base
+constexpr float ADAPTIVE_RADIUS_TARGET_K   = 100.f;   // desired photons in gather disk
+
+// Adaptive caustic emission parameters
+constexpr float CAUSTIC_TARGETED_FRACTION  = 0.30f;   // 30% of caustic budget is targeted
+constexpr int   CAUSTIC_MIN_FOR_ANALYSIS   = 10;      // min photons per cell for CV analysis
+constexpr float CAUSTIC_CV_THRESHOLD       = 0.50f;   // CV threshold to classify as "hot"
+constexpr float CAUSTIC_CV_TARGET          = 0.20f;   // target CV after adaptive shooting
+constexpr float CAUSTIC_CONE_HALF_ANGLE    = 15.0f;   // degrees, targeting cone half-angle
+constexpr int   CAUSTIC_MAX_TARGETED_ITERS = 3;       // max adaptive refinement passes
 
 // =====================================================================
 // §11  BACKWARD COMPATIBILITY (v1 → v2 migration aliases)

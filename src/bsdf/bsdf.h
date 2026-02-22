@@ -144,22 +144,27 @@ inline HD BSDFSample mirror_sample(const Spectrum& Ks, float3 wo) {
     return s;
 }
 
-// ── Dielectric glass ────────────────────────────────────────────────
+// ── Dielectric glass (with spectral Tf and chromatic dispersion) ────
 
-inline HD BSDFSample glass_sample(float3 wo, float ior, PCGRng& rng) {
+inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng) {
     BSDFSample s;
 
     bool entering = wo.z > 0.f;
-    float eta = entering ? (1.f / ior) : ior;
+    float base_ior = mat.ior;
+    float eta = entering ? (1.f / base_ior) : base_ior;
     float cos_i = fabsf(wo.z);
 
     float F = fresnel_dielectric(cos_i, eta);
 
-    if (rng.next_float() < F) {
+    bool do_reflect = (rng.next_float() < F);
+
+    if (do_reflect) {
         // Reflect
         s.wi = reflect_local(wo);
         s.pdf = F;
-        s.f = Spectrum::constant(F / (fabsf(s.wi.z) + EPSILON));
+        // Apply Tf to reflection (light passes through glass surface)
+        float base_factor = F / (fabsf(s.wi.z) + EPSILON);
+        s.f = mat.Tf * base_factor;
         s.is_specular = true;
     } else {
         // Refract
@@ -167,18 +172,42 @@ inline HD BSDFSample glass_sample(float3 wo, float ior, PCGRng& rng) {
         if (refract_local(wo, eta, wt)) {
             s.wi = wt;
             s.pdf = 1.f - F;
-            float factor = (1.f - F) / (fabsf(s.wi.z) + EPSILON);
-            s.f = Spectrum::constant(factor);
+            float base_factor = (1.f - F) / (fabsf(s.wi.z) + EPSILON);
+
+            if (mat.dispersion) {
+                // Per-wavelength Fresnel for chromatic dispersion
+                for (int b = 0; b < NUM_LAMBDA; ++b) {
+                    float lam = lambda_of_bin(b);
+                    float n_b = mat.ior_at_lambda(lam);
+                    float eta_b = entering ? (1.f / n_b) : n_b;
+                    float F_b = fresnel_dielectric(cos_i, eta_b);
+                    float factor_b = (1.f - F_b) / (fabsf(s.wi.z) + EPSILON);
+                    s.f.value[b] = mat.Tf.value[b] * factor_b;
+                }
+            } else {
+                s.f = mat.Tf * base_factor;
+            }
             s.is_specular = true;
         } else {
             // Total internal reflection fallback
             s.wi = reflect_local(wo);
             s.pdf = 1.f;
-            s.f = Spectrum::constant(1.f / (fabsf(s.wi.z) + EPSILON));
+            float factor = 1.f / (fabsf(s.wi.z) + EPSILON);
+            s.f = mat.Tf * factor;
             s.is_specular = true;
         }
     }
     return s;
+}
+
+// Legacy overload for backward compatibility (no material reference)
+inline HD BSDFSample glass_sample(float3 wo, float ior, PCGRng& rng) {
+    Material m;
+    m.ior = ior;
+    m.type = MaterialType::Glass;
+    m.Tf = Spectrum::constant(1.0f);
+    m.dispersion = false;
+    return glass_sample(wo, m, rng);
 }
 
 // ── Cook-Torrance glossy metal ──────────────────────────────────────
@@ -486,7 +515,7 @@ inline HD BSDFSample sample(const Material& mat, float3 wo, PCGRng& rng) {
             return mirror_sample(mat.Ks, wo);
 
         case MaterialType::Glass:
-            return glass_sample(wo, mat.ior, rng);
+            return glass_sample(wo, mat, rng);
 
         case MaterialType::GlossyMetal:
             return glossy_sample(mat.Kd, mat.Ks, mat.roughness, wo, rng);

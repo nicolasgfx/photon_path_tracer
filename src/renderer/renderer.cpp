@@ -66,6 +66,41 @@ void Renderer::build_photon_maps() {
         std::cout << "[Grid] Caustic hash grid built ("
                   << caustic_grid_.table_size << " buckets)\n";
     }
+
+    // Build CellInfoCache (§10c) — precomputed per-cell statistics
+    float cache_cell_size = config_.gather_radius * 2.0f;
+    cell_cache_.build(global_photons_, caustic_photons_,
+                      cache_cell_size, config_.gather_radius);
+
+    // §10c: Adaptive caustic shooting — trace extra photons toward
+    // caustic hotspot cells with high flux variance
+    if (caustic_photons_.size() > 0) {
+        EmitterConfig caustic_cfg;
+        caustic_cfg.num_photons    = config_.num_photons;
+        caustic_cfg.max_bounces    = config_.max_bounces;
+        caustic_cfg.rr_threshold   = config_.rr_threshold;
+        caustic_cfg.min_bounces_rr = config_.min_bounces_rr;
+        caustic_cfg.volume_enabled = false;
+
+        size_t before = caustic_photons_.size();
+        trace_targeted_caustic_photons(*scene_, caustic_cfg,
+                                       cell_cache_, caustic_photons_);
+
+        // Rebuild caustic grid if new photons were added
+        if (caustic_photons_.size() > before) {
+            if (config_.use_kdtree) {
+                caustic_kdtree_.build(caustic_photons_);
+            }
+            caustic_grid_.build(caustic_photons_, config_.caustic_radius);
+            std::cout << "[Grid] Caustic hash grid rebuilt ("
+                      << caustic_grid_.table_size << " buckets, "
+                      << caustic_photons_.size() << " photons)\n";
+
+            // Rebuild cell cache with the augmented maps
+            cell_cache_.build(global_photons_, caustic_photons_,
+                              cache_cell_size, config_.gather_radius);
+        }
+    }
 }
 
 // ── KD-tree density estimate helper (§6.3 tangential kernel) ─────────
@@ -265,38 +300,54 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
              config_.mode == RenderMode::IndirectOnly) &&
             global_photons_.size() > 0) {
 
+            // §10c: Adaptive gather radius from CellInfoCache
+            float eff_radius = config_.gather_radius;
+            if (!cell_cache_.cells.empty()) {
+                eff_radius = cell_cache_.get_adaptive_radius(hit.position);
+            }
+
             Spectrum L_photon;
             if (config_.use_kdtree && !global_kdtree_.empty()) {
                 L_photon = estimate_density_kdtree(
                     hit.position, hit.normal, wo_local, mat,
                     global_photons_, global_kdtree_,
-                    config_.gather_radius, config_.num_photons,
+                    eff_radius, config_.num_photons,
                     true /* Epanechnikov §6.3 */);
             } else {
+                de_config.radius = eff_radius;
                 L_photon = estimate_photon_density(
                     hit.position, hit.normal, wo_local, mat,
                     global_photons_, global_grid_, de_config,
-                    config_.gather_radius);
+                    eff_radius);
             }
             L_total += throughput * L_photon;
         }
 
         // 3. Caustic map gather
         if (caustic_photons_.size() > 0) {
-            Spectrum L_caustic;
-            if (config_.use_kdtree && !caustic_kdtree_.empty()) {
-                L_caustic = estimate_density_kdtree(
-                    hit.position, hit.normal, wo_local, mat,
-                    caustic_photons_, caustic_kdtree_,
-                    config_.caustic_radius, config_.num_photons,
-                    true /* Epanechnikov §6.3 */);
-            } else {
-                L_caustic = estimate_photon_density(
-                    hit.position, hit.normal, wo_local, mat,
-                    caustic_photons_, caustic_grid_, de_config,
-                    config_.caustic_radius);
+            // §10c: Skip caustic gather if cell has no caustic photons
+            bool skip_caustic = false;
+            if (!cell_cache_.cells.empty()) {
+                const CellCacheInfo& ci = cell_cache_.query(hit.position);
+                skip_caustic = (ci.caustic_count == 0);
             }
-            L_total += throughput * L_caustic;
+
+            if (!skip_caustic) {
+                Spectrum L_caustic;
+                if (config_.use_kdtree && !caustic_kdtree_.empty()) {
+                    L_caustic = estimate_density_kdtree(
+                        hit.position, hit.normal, wo_local, mat,
+                        caustic_photons_, caustic_kdtree_,
+                        config_.caustic_radius, config_.num_photons,
+                        true /* Epanechnikov §6.3 */);
+                } else {
+                    L_caustic = estimate_photon_density(
+                        hit.position, hit.normal, wo_local, mat,
+                        caustic_photons_, caustic_grid_, de_config,
+                        config_.caustic_radius);
+                }
+                L_total += throughput * L_caustic;
+            }
         }
 
         // ── Glossy continuation: specular reflection for glossy surfaces ──

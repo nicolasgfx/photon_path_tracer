@@ -19,9 +19,11 @@ inverts that relationship.
 | **Light transport carrier** | Photon rays carry all indirect GI | Camera ray bounces carry GI |
 | **Camera ray role** | Probe to first diffuse surface only | Full recursive path |
 | **Spectral representation** | 32 bins, 380–780 nm throughout | sRGB or hero wavelength |
+| **Chromatic dispersion** | Cauchy-equation per-bin IOR + Fresnel | Rarely modelled |
 | **Gather kernel** | Tangential disk (2D surface distance) | N/A |
 | **Indirect lighting** | Decoupled from camera, precomputable | Recomputed every frame |
-| **Caustics** | Separate caustic photon map | Expensive or approximated |
+| **Caustics** | Separate caustic photon map + adaptive shooting | Expensive or approximated |
+| **Cell cache** | Precomputed per-cell statistics, adaptive radius | N/A |
 | **CPU reference** | Full dual implementation, PSNR-tested | Rarely present |
 
 **The photon pass is the path tracer.** Photon rays start from lights and
@@ -50,13 +52,19 @@ and reloaded instantly for interactive camera exploration of the same scene.
 | Indirect lighting | Photon density estimation, tangential disk kernel |
 | Spatial index (CPU) | KD-tree, arbitrary radius, k-NN adaptive |
 | Spatial index (GPU) | Hash grid, shell-expansion k-NN |
+| Chromatic dispersion | Cauchy equation: $n(\lambda) = A + B/\lambda^2$, per-bin Fresnel |
+| Glass colour | Spectral transmittance filter (Tf) per material |
+| Photon path flags | Per-photon glass/caustic/dispersion/volume tags |
+| Cell cache | CellInfoCache — 65K-cell precomputed density, variance, caustic stats |
+| Adaptive gather radius | Per-cell radius from CellInfoCache photon density |
+| Adaptive caustic shooting | Multi-iteration targeted emission for high-CV cells |
 | Gather kernel | Tangential disk — 2D surface distance, not 3D Euclidean |
 | Global illumination mode | SPPM progressive (Hachisuka & Jensen 2009) |
 | Tone mapping | ACES Filmic |
 | Sub-pixel sampling | Stratified jittered (16 SPP default) |
 | Viewer | Interactive GLFW window, 7 render modes |
 | CPU reference | Physically identical to GPU path, used for PSNR validation |
-| Tests | ~270 unit + integration tests (GoogleTest) |
+| Tests | ~500 unit + integration tests (GoogleTest) |
 
 ---
 
@@ -75,10 +83,13 @@ PHOTON PASS  ── run once, reuse across camera views ──
   Per photon:
     Bounce 0: cosine-weighted hemisphere coverage from emitter
     Bounce 1+: BSDF importance sampling + Russian roulette
+    Glass: Cauchy dispersion (per-λ IOR), Tf filter, IOR stack, path flags
     Deposit flux packet at each diffuse hit where lightPathDepth ≥ 2
     (first-bounce deposits skipped — would double-count with NEE)
     Separate global map (diffuse paths) vs caustic map (specular chain)
   Build spatial index: KD-tree (CPU) or hash grid (GPU)
+  Build CellInfoCache: per-cell density, variance, caustic stats
+  Adaptive caustic shooting: re-emit toward high-CV hotspot cells
 
 CAMERA PASS  ── executed per frame ──
   For each pixel (stratified jittered sub-pixel samples):
@@ -87,6 +98,8 @@ CAMERA PASS  ── executed per frame ──
     At first diffuse hit:
       NEE: shadow rays to sampled emitter points
       Gather: query photon map with tangential disk kernel
+        (adaptive gather radius from CellInfoCache)
+        (caustic gather skipped if cell has zero caustics)
       L = L_emission + L_direct(NEE) + L_indirect(photon density)
     Spectral → CIE XYZ → linear sRGB → ACES → gamma → PNG
 ```
@@ -332,6 +345,11 @@ build\Debug\ppt_tests.exe --gtest_filter="KDTree*"
 | Surface filter | Cross-wall photons rejected; same-surface photons accepted |
 | Hash grid | Build, query, Epanechnikov kernel, surface consistency |
 | Density estimator | Tangential disk kernel correctness |
+| Photon flags | Path flag tagging, glass/caustic/dispersion classification |
+| CellInfoCache | Build, query, adaptive radius, caustic hotspot detection |
+| Dispersion | Cauchy IOR, per-bin Fresnel, spectral splitting |
+| Adaptive caustics | Targeted emission convergence, photon budget distribution |
+| IOR stack | Push/pop/overflow, nested dielectric tracking |
 | Photon map | Deposition rules (lightPathDepth ≥ 2), global/caustic separation |
 | SPPM | Progressive convergence, radius shrinkage |
 | CPU↔GPU integration | Direct lighting PSNR > 40 dB; indirect PSNR > 30 dB; energy conservation within 5% |
@@ -353,6 +371,7 @@ photon_path_tracer/
 │   │   ├── sppm.h                   SPPM types, progressive radius update, reconstruction
 │   │   ├── cdf.h / alias_table.h    CDF build and O(1) alias sampling
 │   │   ├── nee_sampling.h           Coverage-aware NEE helpers
+│   │   ├── cell_cache.h             CellInfoCache — precomputed per-cell statistics
 │   │   └── font_overlay.h           Debug text rendering (stb_easy_font)
 │   ├── bsdf/
 │   │   └── bsdf.h                   Lambertian, mirror, glass, GGX VNDF
@@ -387,6 +406,7 @@ photon_path_tracer/
 │   ├── test_ground_truth.cpp        Reference image comparisons
 │   ├── test_medium.cpp              Participating medium tests
 │   └── feature_speed_test.cpp       Performance benchmarks
+│   └── test_speed_tweaks.cpp     Dispersion, CellInfoCache, adaptive caustics, IOR stack
 ├── scenes/                          OBJ scene files
 ├── doc/architecture/                Architecture documentation
 ├── CREDITS.md                       Third-party scene attributions

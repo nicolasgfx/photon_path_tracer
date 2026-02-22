@@ -88,15 +88,78 @@ bit 3: dispersion_active     — different hero wavelengths took different paths
 bits 4-7: reserved
 ```
 
-### 1.3  Dispersion Path (Future)
+### 1.3  Chromatic Dispersion
 
-When wavelength-dependent IOR is enabled:
-- Hero wavelengths may split at a glass interface (different refraction angles).
-- The per-hero `lambda_bin` + `flux` arrays already support per-wavelength flux.
-- A "dispersion" flag (`path_flags` bit 3) would indicate that the photon's `wi`
-  direction is approximate — the true direction varies per wavelength.
-- For caustic map accuracy, each hero wavelength should be deposited separately
-  when dispersion is significant (`|Δθ| > threshold`).
+#### 1.3.1  Physics
+
+Real glass has wavelength-dependent refractive index. The **Cauchy equation**
+is the standard approximation:
+
+$$n(\lambda) = A + \frac{B}{\lambda^2}$$
+
+Typical crown glass: A ≈ 1.5046, B ≈ 4200 nm² (Abbe number V_d ≈ 60, low
+dispersion). Flint glass: A ≈ 1.62, B ≈ 10500 nm² (V_d ≈ 36, high dispersion).
+
+At each glass interface the refraction angle depends on wavelength:
+sin(θ_t(λ)) = n₁(λ) / n₂(λ) × sin(θ_i). Blue light (λ ≈ 460 nm) refracts
+more than red (λ ≈ 630 nm), producing prism-style rainbow separation.
+
+#### 1.3.2  Material Model
+
+Add Cauchy coefficients to `Material`:
+
+```cpp
+float cauchy_A    = 1.5f;    // base refractive index
+float cauchy_B    = 0.0f;    // dispersion coefficient (nm²)
+bool  dispersion  = false;   // master switch
+```
+
+Per-wavelength IOR: `n(λ) = cauchy_A + cauchy_B / (λ_nm²)`.
+When `dispersion == false`, the constant `mat.ior` is used (backward compat).
+
+#### 1.3.3  Per-Wavelength Glass BSDF
+
+The current `glass_sample` computes a single Fresnel term and a single
+refraction direction. With dispersion, refraction angle varies per bin.
+
+**Strategy: Per-bin Fresnel + dominant-λ direction**
+
+In the photon emitter (`trace_photons`), at a dispersive glass interface:
+1. Compute per-bin IOR via Cauchy: `n_b = cauchy_ior(A, B, lambda_of_bin(b))`
+2. Compute per-bin Fresnel reflectance: `F_b = fresnel_dielectric(cos_i, 1/n_b)`
+3. Decide reflect vs refract using Fresnel at the dominant bin
+4. Apply per-bin Fresnel weights to `spectral_flux`: each bin's flux is
+   modulated by its own `F_b` or `(1 - F_b)`
+5. Refract using the dominant bin's IOR for the geometric direction
+6. Set `path_flags` bit 3 (dispersion_active)
+
+This gives **spectrally correct flux attenuation** (per-bin Fresnel) with a
+**single geometric direction** (no photon splitting). The spectral caustic
+pattern emerges naturally because photon flux is redistributed across bins
+at each interface — blue bins lose more energy to reflection than red bins.
+
+For higher-quality spectral caustics (true rainbow separation), an optional
+**hero-wavelength split** can be added later:
+- Split into HERO_WAVELENGTHS (4) child photons at large dispersion angle
+- Each child carries a spectral subset and follows its own refraction angle
+- Bounded cost: at most 4× per glass surface
+
+#### 1.3.4  Camera Pass Dispersion
+
+The specular chain in `render_pixel` already carries per-bin throughput.
+At a dispersive glass surface:
+- Apply per-bin Fresnel to throughput (each bin gets its own F_b)
+- Use dominant-bin IOR for the geometric refraction direction
+- The spectral splitting naturally occurs in the throughput — different
+  bins get different Fresnel weights
+
+#### 1.3.5  Constants
+
+```cpp
+constexpr float DEFAULT_CAUCHY_A = 1.5046f;    // crown glass
+constexpr float DEFAULT_CAUCHY_B = 4200.0f;    // nm² — moderate dispersion
+constexpr bool  DEFAULT_DISPERSION_ENABLED = false;  // off by default
+```
 
 ### 1.4  IOR Stack Tracking (Photon Emitter)
 
