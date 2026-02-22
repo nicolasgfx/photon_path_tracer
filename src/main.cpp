@@ -35,7 +35,6 @@
 #include "debug/debug.h"
 #include "optix/optix_renderer.h"
 #include "core/test_data_io.h"
-#include "photon/photon_io.h"
 
 #include <GLFW/glfw3.h>
 
@@ -582,11 +581,6 @@ struct Options {
     std::string output_file = "output/render.png";
     std::string save_test_data_file;   // if non-empty, dump photons to this binary file
 
-    // Photon cache I/O (§20)
-    std::string photon_file;           // path for photon cache (empty = auto)
-    bool        force_recompute = false;  // ignore existing cache
-    bool        save_photons    = true;   // save photon cache after trace
-
     RenderConfig config;
 };
 
@@ -644,13 +638,7 @@ static Options parse_args(int argc, char* argv[]) {
             opt.config.knn_k = std::stoi(argv[++i]);
         } else if (arg == "--max-specular-chain" && i + 1 < argc) {
             opt.config.max_specular_chain = std::stoi(argv[++i]);
-        // ── photon cache flags (§20) ─────────────────────────────────────
-        } else if (arg == "--photon-file" && i + 1 < argc) {
-            opt.photon_file = argv[++i];
-        } else if (arg == "--force-recompute") {
-            opt.force_recompute = true;
-        } else if (arg == "--no-save-photons") {
-            opt.save_photons = false;
+        // photon cache flags removed -- photon map is re-traced every MULTI_MAP_SPP_GROUP iters
         } else if (arg == "--adaptive-radius") {
             opt.config.use_knn_adaptive = true;
         } else if (arg[0] != '-') {
@@ -1504,28 +1492,40 @@ int main(int argc, char* argv[]) {
 
     // -- Load scene ---------------------------------------------------
     Scene scene;
-    auto t0 = std::chrono::high_resolution_clock::now();
+    {
+        auto t_load0 = std::chrono::high_resolution_clock::now();
 
-    if (!load_obj(opt.scene_file, scene)) {
-        std::cerr << "[Error] Failed to load scene: " << opt.scene_file << "\n";
-        return 1;
+        if (!load_obj(opt.scene_file, scene)) {
+            std::cerr << "[Error] Failed to load scene: " << opt.scene_file << "\n";
+            return 1;
+        }
+
+        // Normalise non-reference scenes to Cornell-Box coordinate frame
+        if (!SCENE_IS_REFERENCE) {
+            scene.normalize_to_reference();
+        }
+
+        auto t_load1 = std::chrono::high_resolution_clock::now();
+        double load_ms = std::chrono::duration<double, std::milli>(t_load1 - t_load0).count();
+        std::printf("[Timing] OBJ load:          %8.1f ms  (%zu tris, %zu mats, %zu textures)\n",
+                    load_ms, scene.triangles.size(), scene.materials.size(), scene.textures.size());
+
+        scene.build_bvh();
+        auto t_bvh = std::chrono::high_resolution_clock::now();
+        double bvh_ms = std::chrono::duration<double, std::milli>(t_bvh - t_load1).count();
+        std::printf("[Timing] BVH build:         %8.1f ms  (%zu nodes)\n",
+                    bvh_ms, scene.bvh_nodes.size());
+
+        scene.build_emissive_distribution();
+        std::printf("[Scene]  Emissive tris: %d   total power = %.4f   total area = %.4f\n",
+                    (int)scene.num_emissive(),
+                    scene.total_emissive_power,
+                    scene.total_emissive_area);
+        std::printf("[Scene]  Render config: %dx%d  spp=%d  photons=%d  radius=%.5f  bounces=%d\n",
+                    opt.config.image_width, opt.config.image_height,
+                    opt.config.samples_per_pixel, opt.config.num_photons,
+                    opt.config.gather_radius, opt.config.max_bounces);
     }
-
-    // Normalise non-reference scenes to Cornell-Box coordinate frame
-    if (!SCENE_IS_REFERENCE) {
-        scene.normalize_to_reference();
-    }
-
-    scene.build_bvh();
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    std::cout << "[Scene] BVH built (" << scene.bvh_nodes.size()
-              << " nodes) in " << load_ms << " ms\n";
-
-    scene.build_emissive_distribution();
-    std::cout << "[Scene] " << scene.num_emissive()
-              << " emissive triangles, total power = "
-              << scene.total_emissive_power << "\n\n";
 
     // -- Add light source if none exists ------------------------------
     // Determine initial scene lighting mode from compile-time scene define
@@ -1563,67 +1563,41 @@ int main(int argc, char* argv[]) {
 
     try {
         std::cout << "-- OptiX Initialization --\n";
-        optix_renderer.init();
-        optix_renderer.build_accel(scene);
-        optix_renderer.upload_scene_data(scene);
-        optix_renderer.upload_emitter_data(scene);
+        {
+            auto t_init0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.init();
+            auto t_init1 = std::chrono::high_resolution_clock::now();
+            std::printf("[Timing] OptiX init:        %8.1f ms\n",
+                std::chrono::duration<double, std::milli>(t_init1 - t_init0).count());
+
+            auto t_accel0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.build_accel(scene);
+            auto t_accel1 = std::chrono::high_resolution_clock::now();
+            std::printf("[Timing] build_accel:       %8.1f ms\n",
+                std::chrono::duration<double, std::milli>(t_accel1 - t_accel0).count());
+
+            auto t_scene0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.upload_scene_data(scene);
+            auto t_scene1 = std::chrono::high_resolution_clock::now();
+            std::printf("[Timing] upload_scene_data: %8.1f ms\n",
+                std::chrono::duration<double, std::milli>(t_scene1 - t_scene0).count());
+
+            auto t_emit0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.upload_emitter_data(scene);
+            auto t_emit1 = std::chrono::high_resolution_clock::now();
+            std::printf("[Timing] upload_emitter:    %8.1f ms\n",
+                std::chrono::duration<double, std::milli>(t_emit1 - t_emit0).count());
+        }
         std::cout << "\n";
 
-        // -- GPU photon trace (with optional cache) ---------------------
+        // -- GPU photon trace ------------------------------------------
         std::cout << "-- GPU Photon Trace --\n";
         {
-            // Derive default cache path from scene file if not specified
-            std::string cache_path = opt.photon_file;
-            if (cache_path.empty()) {
-                // e.g. "scenes/cornell_box/cornell_box.obj" -> "scenes/cornell_box/cornell_box.photons"
-                std::string base = opt.scene_file;
-                size_t dot = base.rfind('.');
-                if (dot != std::string::npos) base = base.substr(0, dot);
-                cache_path = base + ".photons";
-            }
-
-            uint64_t shash = compute_scene_hash(
-                opt.scene_file, (int)scene.num_triangles(),
-                opt.config.num_photons, opt.config.gather_radius);
-
-            bool loaded_from_cache = false;
-            if (!opt.force_recompute && photon_cache_valid(cache_path, shash)) {
-                std::cout << "[Photon] Loading from cache: " << cache_path << "\n";
-                PhotonSoA cached_photons;
-                HashGrid  cached_grid;
-                float     cached_radius = opt.config.gather_radius;
-                if (load_photon_cache(cache_path, cached_photons, cached_grid, cached_radius)) {
-                    opt.config.gather_radius = cached_radius;
-                    PhotonSoA empty_caustic;
-                    HashGrid  empty_cgrid;
-                    optix_renderer.upload_photon_data(
-                        cached_photons, cached_grid,
-                        empty_caustic,  empty_cgrid,
-                        cached_radius, opt.config.caustic_radius,
-                        opt.config.num_photons);
-                    loaded_from_cache = true;
-                    std::cout << "[Photon] Cache loaded (" << cached_photons.size() << " photons)\n\n";
-                } else {
-                    std::cout << "[Photon] Cache load failed, re-tracing...\n";
-                }
-            }
-
-            if (!loaded_from_cache) {
-                auto tp0 = std::chrono::high_resolution_clock::now();
-                optix_renderer.trace_photons(scene, opt.config);
-                auto tp1 = std::chrono::high_resolution_clock::now();
-                double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
-                std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n\n";
-
-                // Save to cache
-                if (opt.save_photons && optix_renderer.photons().size() > 0) {
-                    save_photon_cache(cache_path,
-                                      optix_renderer.photons(),
-                                      optix_renderer.grid(),
-                                      shash,
-                                      opt.config.gather_radius);
-                }
-            }
+            auto tp0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.trace_photons(scene, opt.config);
+            auto tp1 = std::chrono::high_resolution_clock::now();
+            double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+            std::printf("[Photon] Initial trace completed in %.1f ms\n\n", photon_ms);
         }
 
         // -- Save test data (if requested) ----------------------------

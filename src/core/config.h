@@ -20,8 +20,8 @@
 // Runtime switching via keys 1–9 uses SCENE_PROFILES[] below.
 
 //#define SCENE_CORNELL_BOX
-#define SCENE_CONFERENCE
-//#define SCENE_LIVING_ROOM
+//#define SCENE_CONFERENCE
+#define SCENE_LIVING_ROOM
 //#define SCENE_BREAKFAST_ROOM
 //#define SCENE_SIBENIK
 
@@ -40,8 +40,8 @@ constexpr int DEFAULT_SPP = 32;
 
 // Stratified sub-pixel jitter grid (§7.1).
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP (one sample per stratum).
-//   8×8 = 64 matches DEFAULT_SPP = 64.
-constexpr int STRATA_X = 8;
+//   4×8 = 32 matches DEFAULT_SPP = 32.
+constexpr int STRATA_X = 4;
 constexpr int STRATA_Y = 8;
 
 // =====================================================================
@@ -61,7 +61,7 @@ constexpr int HERO_WAVELENGTHS = 4;
 // indirect transport in v2.
 //   Preview: 50k–200k  |  Default: 500k–1M  |  Final: 1M–5M
 constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;  // diffuse indirect photons
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // specular→diffuse caustic photons
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 250000;   // specular→diffuse caustic photons
 
 // ── Photon path depth (§5.2) ────────────────────────────────────────
 // Maximum bounce depth for photon rays (the real path tracers in v2).
@@ -73,9 +73,9 @@ constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 4;
 // After MIN_BOUNCES_RR bounces, each photon terminates with probability
 // (1 − min(max_spectrum(throughput), RR_THRESHOLD)).  Throughput is
 // divided by the survival probability to keep the estimator unbiased.
-//   min_bounces: 2–3  |  threshold: 0.90–0.95
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 3;
-constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.95f;
+//   min_bounces: 2–3  |  threshold: 0.80–0.90
+constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 2;
+constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.85f;
 
 // ── Photon emission mixture (§5.1, variance reduction) ──────────────
 // Fraction of photons emitted with area-uniform (rather than power-
@@ -108,9 +108,10 @@ constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
 // Radius of the tangential disk kernel (§6.3) for photon density
 // estimation.  Smaller = sharper but noisier; larger = smoother but
 // more bias.  Both maps use the tangential (surface) distance metric.
-//   Preview: 0.07–0.12  |  Default: 0.05  |  Final: 0.02–0.05
-constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;   // global (diffuse) map
-constexpr float DEFAULT_CAUSTIC_RADIUS = 0.02f;   // caustic map (tighter for sharp features)
+// Scene is normalised to [-0.5, 0.5]³ (SCENE_REF_EXTENT = 1.0):
+//   10% of scene = 0.10  |  5% = 0.05  |  Final quality: 0.02–0.05
+constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;   // global (diffuse) map — 10% of scene extent
+constexpr float DEFAULT_CAUSTIC_RADIUS = 0.05f;   // caustic map — 5% of scene extent
 
 // ── k-NN adaptive radius (§C2, §6.5) ────────────────────────────────
 // In k-NN gather mode, the radius adapts to local photon density:
@@ -156,7 +157,7 @@ constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 8;
 // additional BSDF-sampled reflection bounces to capture scene
 // reflections (not just specular highlights of light sources).
 //   0 = no glossy continuation  |  2–3 = recommended  |  5+ = expensive
-constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 3;
+constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 2;
 
 // ── NEE shadow ray count (§7.2) ─────────────────────────────────────
 // Shadow rays cast to light sources at the camera first-hit.
@@ -177,6 +178,22 @@ constexpr float DEFAULT_NEE_COVERAGE_FRACTION = 0.3f;
 // full combined path radiance (legacy behavior).
 constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false;
 
+// ── MIS: NEE vs BSDF continuation (§7.3 — 2-way power heuristic) ───
+// Applies balance between NEE shadow rays and stochastic BSDF-sampled
+// rays that coincidentally hit a light (glossy continuation bounces).
+// Without MIS, both paths add their full contribution → firefly spikes
+// on metallic/glossy surfaces.  With MIS, the power heuristic weights
+// each estimator by its squared PDF, removing double counting.
+//
+// GPU: applied in dev_nee_direct() and dev_guided_nee() for every
+//      glossy BSDF continuation bounce (DEFAULT_MAX_GLOSSY_BOUNCES > 0).
+// CPU: pure mirror reflection has delta-BSDF → MIS weight = 1.0 always,
+//      so this flag has no numerical effect on the CPU path currently.
+//      It will matter when stochastic BSDF sampling is added to CPU.
+//   false = no MIS (double-counts emitters on glossy surfaces)
+//   true  = power heuristic MIS (eliminates glossy fireflies)
+constexpr bool DEFAULT_USE_MIS = true;
+
 // =====================================================================
 // §5  TONE MAPPING (§Q8)
 // =====================================================================
@@ -194,8 +211,9 @@ constexpr float DEFAULT_EXPOSURE = 1.0f;
 // ── Multi-map photon re-tracing (§1.2) ────────────────────────────
 // Re-trace the photon map with a new RNG seed every N samples to
 // decorrelate photon noise from camera noise.  0 = single map.
-//   0 = disabled  |  8–16 = recommended for quality renders
-constexpr int MULTI_MAP_SPP_GROUP = 8;
+// With DEFAULT_SPP=32: group=4 → 8 unique maps; group=8 → 4 maps.
+//   0 = disabled  |  4 = recommended for 32 spp  |  8 = quality renders
+constexpr int MULTI_MAP_SPP_GROUP = 4;
 
 // =====================================================================
 // §6  DEPTH OF FIELD (thin-lens camera)
@@ -271,7 +289,7 @@ constexpr float DEFAULT_VOLUME_MAX_T    = 2.0f;    // max march distance for mis
 // These constants are unused by the rendering pipeline.  They remain
 // only to avoid breaking external callers that reference them.
 // TODO: Remove when all references have been cleaned from tests.
-constexpr bool  DEFAULT_USE_MIS           = false;   // v1 3-way MIS (removed)
+// DEFAULT_USE_MIS is now defined in §4 (CAMERA PASS) — not a dead flag.
 constexpr bool  DEFAULT_USE_PHOTON_GUIDED = false;   // v1 guided camera bounce (removed)
 constexpr float DEFAULT_GUIDED_BSDF_MIX   = 0.80f;  // v1 guided BSDF mix       (removed)
 constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 4;       // v1 deep NEE samples       (removed)
@@ -371,11 +389,11 @@ struct ComplexityPreset {
 // Indexed by SceneComplexity enum value
 constexpr ComplexityPreset COMPLEXITY_PRESETS[3] = {
     // Low:    small scenes, fast convergence
-    { 500000,  100000, 0.05f, 0.02f, 64, 4, 64 },
+    { 500000,  100000, 0.10f, 0.05f, 64, 4, 64 },
     // Medium: moderate geometry, balanced quality
-    { 1000000, 250000, 0.05f, 0.02f, 64, 4, 64 },
+    { 1000000, 250000, 0.10f, 0.05f, 64, 4, 64 },
     // High:   complex geometry, high photon budget for coverage
-    { 2000000, 500000, 0.03f, 0.015f, 32, 6, 32 },
+    { 2000000, 500000, 0.10f, 0.05f, 32, 6, 32 },
 };
 
 // ── Runtime scene profile (for hotkey scene switching) ──────────────

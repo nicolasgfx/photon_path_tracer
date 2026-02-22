@@ -160,6 +160,7 @@ void OptixRenderer::build_accel(const Scene& scene) {
     emit_desc.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
     emit_desc.result = reinterpret_cast<CUdeviceptr>(compacted_size_buf.d_ptr);
 
+    auto t_gas0 = std::chrono::high_resolution_clock::now();
     OPTIX_CHECK(optixAccelBuild(
         context_, nullptr,
         &accel_options,
@@ -170,6 +171,7 @@ void OptixRenderer::build_accel(const Scene& scene) {
         &emit_desc, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+    auto t_gas1 = std::chrono::high_resolution_clock::now();
 
     size_t compacted_size;
     CUDA_CHECK(cudaMemcpy(&compacted_size, compacted_size_buf.d_ptr,
@@ -183,9 +185,16 @@ void OptixRenderer::build_accel(const Scene& scene) {
         &gas_handle_));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+    auto t_gas2 = std::chrono::high_resolution_clock::now();
 
-    std::cout << "[OptiX] GAS built: " << num_tris << " triangles, "
-              << (compacted_size / 1024) << " KB\n";
+    double ms_build   = std::chrono::duration<double, std::milli>(t_gas1 - t_gas0).count();
+    double ms_compact = std::chrono::duration<double, std::milli>(t_gas2 - t_gas1).count();
+    std::printf("[OptiX] GAS built: %zu tris  uncompressed=%.1f KB  compacted=%.1f KB  "
+                "build=%.1f ms  compact=%.1f ms\n",
+                num_tris,
+                (double)output_buffer.bytes / 1024.0,
+                (double)compacted_size / 1024.0,
+                ms_build, ms_compact);
 
     // Now create module, programs, pipeline, SBT
     // Module/programs/pipeline are shader-dependent, not scene-dependent.
@@ -284,8 +293,15 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
         d_tex_descs_.free();
     }
 
-    std::cout << "[OptiX] Uploaded " << num_mats << " materials, "
-              << num_tris << " triangles to device\n";
+    // Compute total GPU scene data size
+    size_t scene_bytes =
+        d_normals_.bytes + d_texcoords_.bytes + d_material_ids_.bytes +
+        d_Kd_.bytes + d_Ks_.bytes + d_Le_.bytes +
+        d_roughness_.bytes + d_ior_.bytes + d_mat_type_.bytes +
+        d_diffuse_tex_.bytes + d_tex_atlas_.bytes + d_tex_descs_.bytes;
+    std::printf("[OptiX] Scene data: %zu mats  %zu tris  %zu textures  total=%.2f MB\n",
+                num_mats, num_tris, num_textures,
+                (double)scene_bytes / (1024.0 * 1024.0));
 }
 
 // =====================================================================
@@ -377,8 +393,10 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
 
     d_emissive_cdf_.upload(cdf);
 
-    std::cout << "[OptiX] Uploaded " << n << " emissive triangles, "
-              << "total power = " << total << "\n";
+    std::printf("[OptiX] Emitter data: %zu tris  total_power=%.4f  max_w=%.4f  min_w=%.4f\n",
+                n, total,
+                *std::max_element(weights.begin(), weights.end()),
+                *std::min_element(weights.begin(), weights.end()));
 }
 
 // =====================================================================
@@ -408,7 +426,13 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     int max_stored  = num_photons * DEFAULT_MAX_BOUNCES; // upper bound on stored photons
     num_photons_emitted_ = num_photons;  // record N_emitted for density normalisation
 
-    std::cout << "[OptiX] Tracing " << num_photons << " photons on GPU...\n";
+    // Estimate GPU buffer footprint (bytes per photon: 9 float pos/wi/norm + Hero*(uint16+float) + 1 uint8)
+    size_t bytes_per_photon = 9 * sizeof(float)
+                             + HERO_WAVELENGTHS * (sizeof(uint16_t) + sizeof(float))
+                             + sizeof(uint8_t);
+    double buf_mb = (double)(max_stored * bytes_per_photon) / (1024.0 * 1024.0);
+    std::printf("[OptiX] Tracing %d photons  max_stored=%d  buf=%.1f MB  radius=%.5f  bounces=%d\n",
+                num_photons, max_stored, buf_mb, gather_radius_, config.max_bounces);
 
     // Allocate output buffers
     d_out_photon_pos_x_.alloc(max_stored * sizeof(float));
@@ -544,7 +568,12 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     if ((int)stored_count > max_stored)
         stored_count = (unsigned int)max_stored;
 
-    std::cout << "[OptiX] GPU photon trace stored " << stored_count << " photons\n";
+    {
+        float stored_pct = 100.f * (float)stored_count / (float)(std::max)(1, num_photons);
+        float photons_per_emitted = (float)stored_count / (float)(std::max)(1, num_photons);
+        std::printf("[OptiX] Stored %u photons  (%.1f%% of %d emitted = %.2f stored/ray)\n",
+                    stored_count, stored_pct, num_photons, photons_per_emitted);
+    }
 
     if (stored_count == 0) return;
 
@@ -573,13 +602,30 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     // Build hash grid on CPU
     stored_grid_.build(stored_photons_, gather_radius_);
 
-    std::cout << "[OptiX] Hash grid built: " << stored_grid_.sorted_indices.size()
-              << " entries, " << stored_grid_.table_size << " buckets\n";
-
     {
+        // Compute hash grid quality metrics
+        int occupied_cells = 0;
+        uint32_t chain_max = 0;
+        uint64_t chain_sum = 0;
+        for (uint32_t ci = 0; ci < stored_grid_.table_size; ++ci) {
+            uint32_t len = stored_grid_.cell_end[ci] - stored_grid_.cell_start[ci];
+            if (len > 0) {
+                ++occupied_cells;
+                chain_sum += len;
+                if (len > chain_max) chain_max = len;
+            }
+        }
+        float load_factor  = (float)occupied_cells / (float)stored_grid_.table_size;
+        float mean_chain   = occupied_cells > 0 ? (float)chain_sum / (float)occupied_cells : 0.f;
+        size_t grid_mem_kb = (stored_grid_.sorted_indices.size() * sizeof(uint32_t)
+                             + stored_grid_.cell_start.size()    * sizeof(uint32_t)
+                             + stored_grid_.cell_end.size()      * sizeof(uint32_t)) / 1024;
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
-        std::printf("[Timing] Hash grid build:   %8.1f ms\n", ms);
+        std::printf("[Timing] Hash grid build:   %8.1f ms  "
+                    "buckets=%u  occupied=%d  load=%.2f  mean_chain=%.1f  max_chain=%u  mem=%zu KB\n",
+                    ms, stored_grid_.table_size, occupied_cells, load_factor,
+                    mean_chain, chain_max, grid_mem_kb);
         t_lap = t_now;
     }
 
@@ -588,7 +634,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         PhotonBinDirs bin_dirs;
         bin_dirs.init(PHOTON_BIN_COUNT);
         stored_photons_.bin_idx.resize(stored_count);
-        for (size_t i = 0; i < stored_count; ++i) {
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < (int)stored_count; ++i) {
             float3 wi = make_f3(stored_photons_.wi_x[i],
                                 stored_photons_.wi_y[i],
                                 stored_photons_.wi_z[i]);
@@ -663,7 +710,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
             PhotonBinDirs bin_dirs;
             bin_dirs.init(PHOTON_BIN_COUNT);
             volume_photons_.bin_idx.resize(vol_count);
-            for (size_t i = 0; i < vol_count; ++i) {
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)vol_count; ++i) {
                 float3 wi = make_f3(volume_photons_.wi_x[i],
                                     volume_photons_.wi_y[i],
                                     volume_photons_.wi_z[i]);

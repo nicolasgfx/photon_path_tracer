@@ -19,6 +19,10 @@
 #include <numeric>
 #include <cstdint>
 #include <functional>
+#include <execution>   // std::execution::par_unseq (MSVC PPL, C++17)
+#ifdef _OPENMP
+#  include <omp.h>
+#endif
 
 struct HashGrid {
     float    cell_size;
@@ -57,26 +61,38 @@ struct HashGrid {
         cell_size  = radius * 2.0f;  // Cell size = photon gather diameter
         table_size = (uint32_t)std::max(n, (size_t)1024);
 
-        // 1. Compute keys for each photon
+        // 1. Compute keys for each photon  (OMP parallel: embarrassingly independent)
         std::vector<uint32_t> keys(n);
-        for (size_t i = 0; i < n; ++i) {
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < (int)n; ++i) {
             float3 pos = make_f3(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
             keys[i] = cell_key(pos);
         }
 
-        // 2. Create index array and sort by key
+        // 2. Create index array and sort by key.
+        // std::execution::par_unseq uses the MSVC PPL thread pool — typically
+        // 2-4x faster than std::sort for N > 500k.
         sorted_indices.resize(n);
         std::iota(sorted_indices.begin(), sorted_indices.end(), 0u);
-        std::sort(sorted_indices.begin(), sorted_indices.end(),
+        std::sort(std::execution::par_unseq,
+                  sorted_indices.begin(), sorted_indices.end(),
                   [&keys](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
 
         // 3. Build cell_start and cell_end arrays
-        cell_start.assign(table_size, 0xFFFFFFFFu); // sentinel: no photons
-        cell_end.assign(table_size, 0);
+        // Init is trivially parallel; the scan over sorted keys is sequential
+        // (each element writes to cell_start[k] which can alias neighbors).
+        cell_start.resize(table_size);
+        cell_end.resize(table_size);
+        #pragma omp parallel for schedule(static)
+        for (int ci = 0; ci < (int)table_size; ++ci) {
+            cell_start[ci] = 0xFFFFFFFFu;
+            cell_end[ci]   = 0;
+        }
 
         // Reorder keys by sorted order
         std::vector<uint32_t> sorted_keys(n);
-        for (size_t i = 0; i < n; ++i) {
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < (int)n; ++i) {
             sorted_keys[i] = keys[sorted_indices[i]];
         }
 

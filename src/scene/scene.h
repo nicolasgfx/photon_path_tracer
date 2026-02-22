@@ -9,6 +9,7 @@
 #include "core/alias_table.h"
 #include <vector>
 #include <string>
+#include <algorithm>
 #include <iostream>
 
 // ── BVH Node ────────────────────────────────────────────────────────
@@ -147,6 +148,13 @@ inline void Scene::build_emissive_distribution() {
         total_emissive_power      = emissive_alias_table.total_weight;
         emissive_area_alias_table = AliasTable::build(area_weights);
         total_emissive_area       = emissive_area_alias_table.total_weight;
+
+        const int   num_lights     = (int)emissive_tri_indices.size();
+        const int   nee_samples    = DEFAULT_NEE_LIGHT_SAMPLES;
+        const float coverage_pct   = std::min(1.0f, (float)nee_samples / (float)num_lights) * 100.0f;
+        std::printf("[Scene] Emissive alias table: %d light triangles  "
+                    "(NEE samples=%d  =>  %.1f%% coverage per shading point)\n",
+                    num_lights, nee_samples, coverage_pct);
     }
 }
 

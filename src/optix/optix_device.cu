@@ -1832,10 +1832,29 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             mat_id = hit.material_id;
             direction = wi_world;
 
-            // If we hit an emissive surface, add its contribution
+            // If we hit an emissive surface, add its contribution.
+            // This stochastic BSDF sample competes with the NEE shadow rays
+            // fired at the previous diffuse/glossy hit.  Apply 2-way power-
+            // heuristic MIS so both estimators contribute without double
+            // counting.  NEE's matching weight is applied in dev_nee_direct().
+            //
+            // Note: throughput already contains (f * cosθ / pdf_bsdf) from
+            // the BSDF sample above, so the raw contribution is
+            //   throughput * Le  =  (f cosθ / pdf_bsdf) * Le.
+            // The MIS weight scales this down when NEE would have had high
+            // probability to reach this same emitter (p_nee >> pdf_bsdf).
             if (dev_is_emissive(mat_id)) {
-                result.combined   += throughput * dev_get_Le(mat_id);
-                result.nee_direct += throughput * dev_get_Le(mat_id);
+                Spectrum Le = dev_get_Le(mat_id);
+                float w_bsdf = 1.0f;
+                if (DEFAULT_USE_MIS) {
+                    // p_nee: solid-angle PDF that the NEE strategy would assign
+                    // to this direction (power-weighted CDF × area → solid-angle).
+                    float p_nee = dev_light_pdf(
+                        hit.triangle_id, hit.geo_normal, direction, hit.t);
+                    w_bsdf = mis_weight_2_dev(bs.pdf, p_nee);
+                }
+                result.combined   += throughput * Le * w_bsdf;
+                result.nee_direct += throughput * Le * w_bsdf;
                 break;
             }
 

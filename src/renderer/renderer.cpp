@@ -353,6 +353,15 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
 
                 const auto& rmat = scene_->materials[refl_hit.material_id];
                 if (rmat.is_emissive()) {
+                    // CPU glossy continuation uses a deterministic mirror
+                    // direction (delta-function BSDF), so pdf_bsdf → ∞
+                    // and the 2-way power-heuristic MIS weight collapses to
+                    // w_bsdf = 1.0.  NEE at the primary hit uses the *diffuse*
+                    // BSDF lobe, which is a different component — not competing
+                    // with this specular estimator — so no double counting exists
+                    // here.  (DEFAULT_USE_MIS has no numerical effect for the
+                    // CPU mirror path; it will matter when stochastic BSDF
+                    // sampling replaces the mirror continuation.)
                     L_total += glossy_tp * rmat.Le;
                     break;
                 }

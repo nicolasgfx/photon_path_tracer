@@ -66,7 +66,6 @@ set(CORE_SOURCES
     src/scene/obj_loader.cpp
     src/renderer/renderer.cpp
     src/optix/optix_renderer.cpp
-    src/photon/photon_io.cpp
 )
 
 set(CUDA_SOURCES
@@ -222,7 +221,6 @@ if(PPT_BUILD_TESTS)
         src/scene/obj_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp
-        src/photon/photon_io.cpp
     )
 
     add_executable(ppt_tests
