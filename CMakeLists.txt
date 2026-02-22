@@ -166,6 +166,8 @@ add_custom_command(
         --std=c++17
         -arch=compute_75
         --use_fast_math
+        -O3
+        -DNDEBUG
         -DPPT_USE_OPTIX=1
         "-I${CMAKE_CURRENT_SOURCE_DIR}/src"
         "-I${OptiX_INCLUDE_DIR}"
@@ -275,9 +277,7 @@ if(PPT_BUILD_TESTS)
     add_dependencies(ppt_tests optix_ptx)
 
     if(MSVC)
-        target_compile_options(ppt_tests PRIVATE /MP)
-    endif()
-        target_compile_options(ppt_tests PRIVATE /W4 /fp:fast)
+        target_compile_options(ppt_tests PRIVATE /MP /W4 /fp:fast)
     else()
         target_compile_options(ppt_tests PRIVATE -Wall -Wextra -O2)
     endif()

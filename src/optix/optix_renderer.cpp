@@ -280,6 +280,12 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
         emission_tex[m] = scene.materials[m].emission_tex;
     d_emission_tex_.upload(emission_tex);
 
+    // Per-material opacity (from MTL 'd' keyword, default 1.0)
+    std::vector<float> opacity(num_mats);
+    for (size_t m = 0; m < num_mats; ++m)
+        opacity[m] = scene.materials[m].opacity;
+    d_opacity_.upload(opacity);
+
     // Texture atlas: concatenate all textures into one flat RGBA float buffer
     size_t num_textures = scene.textures.size();
     if (num_textures > 0) {
@@ -462,7 +468,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_out_photon_flux_.alloc(max_stored * HERO_WAVELENGTHS * sizeof(float));
     d_out_photon_num_hero_.alloc(max_stored * sizeof(uint8_t));
     d_out_photon_source_emissive_.alloc(max_stored * sizeof(uint16_t));
-    d_out_photon_is_caustic_.alloc(max_stored * sizeof(uint8_t));
+    if (DEBUG_CAUSTIC_PNG)
+        d_out_photon_is_caustic_.alloc(max_stored * sizeof(uint8_t));
     d_out_photon_count_.alloc_zero(sizeof(unsigned int)); // zero the counter
 
     // Allocate volume photon output buffers
@@ -494,6 +501,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.mat_type          = d_mat_type_.as<uint8_t>();
     lp.diffuse_tex       = d_diffuse_tex_.d_ptr ? d_diffuse_tex_.as<int>() : nullptr;
     lp.emission_tex      = d_emission_tex_.d_ptr ? d_emission_tex_.as<int>() : nullptr;
+    lp.opacity           = d_opacity_.d_ptr ? d_opacity_.as<float>() : nullptr;
     lp.tex_atlas         = d_tex_atlas_.d_ptr   ? d_tex_atlas_.as<float>() : nullptr;
     lp.tex_descs         = d_tex_descs_.d_ptr   ? d_tex_descs_.as<GpuTexDesc>() : nullptr;
     lp.num_textures      = (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc));
@@ -522,7 +530,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.out_photon_flux    = d_out_photon_flux_.as<float>();
     lp.out_photon_num_hero = d_out_photon_num_hero_.as<uint8_t>();
     lp.out_photon_source_emissive = d_out_photon_source_emissive_.as<uint16_t>();
-    lp.out_photon_is_caustic  = d_out_photon_is_caustic_.as<uint8_t>();
+    lp.out_photon_is_caustic  = (DEBUG_CAUSTIC_PNG && d_out_photon_is_caustic_.d_ptr)
+                                   ? d_out_photon_is_caustic_.as<uint8_t>() : nullptr;
     lp.out_photon_count   = d_out_photon_count_.as<unsigned int>();
     lp.max_stored_photons = max_stored;
 
@@ -612,16 +621,20 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     CUDA_CHECK(cudaMemcpy(stored_photons_.num_hero.data(), d_out_photon_num_hero_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.source_emissive_idx.data(), d_out_photon_source_emissive_.d_ptr, stored_count*sizeof(uint16_t), cudaMemcpyDeviceToHost));
 
-    // Download per-photon caustic flags
-    caustic_flags_.resize(stored_count);
-    CUDA_CHECK(cudaMemcpy(caustic_flags_.data(), d_out_photon_is_caustic_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToHost));
-    {
-        size_t n_caustic = 0;
-        for (size_t i = 0; i < stored_count; ++i)
-            if (caustic_flags_[i]) ++n_caustic;
-        std::printf("[OptiX] Caustic photons: %zu / %u (%.1f%%)\n",
-                    n_caustic, stored_count,
-                    100.f * (float)n_caustic / (float)(std::max)(1u, stored_count));
+    // Download per-photon caustic flags (only when caustic debug is enabled)
+    if constexpr (DEBUG_CAUSTIC_PNG) {
+        if (d_out_photon_is_caustic_.d_ptr) {
+            caustic_flags_.resize(stored_count);
+            CUDA_CHECK(cudaMemcpy(caustic_flags_.data(), d_out_photon_is_caustic_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToHost));
+            size_t n_caustic = 0;
+            for (size_t i = 0; i < stored_count; ++i)
+                if (caustic_flags_[i]) ++n_caustic;
+            std::printf("[OptiX] Caustic photons: %zu / %u (%.1f%%)\n",
+                        n_caustic, stored_count,
+                        100.f * (float)n_caustic / (float)(std::max)(1u, stored_count));
+        }
+    } else {
+        caustic_flags_.clear();
     }
 
     {
@@ -1258,6 +1271,24 @@ void OptixRenderer::render_caustic_debug_pass(
     }
     std::printf("[CausticDebug] Filtered %zu caustic photons from %zu total\n",
                 n_caustic, stored_photons_.size());
+
+    // Diagnostic: flux statistics of caustic photons
+    {
+        float min_flux = 1e30f, max_flux = 0.f, sum_flux = 0.f;
+        for (size_t i = 0; i < n_caustic; ++i) {
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                float f = caustic_soa.flux[i * HERO_WAVELENGTHS + h];
+                if (f > 0.f) {
+                    min_flux = (std::min)(min_flux, f);
+                    max_flux = (std::max)(max_flux, f);
+                    sum_flux += f;
+                }
+            }
+        }
+        float avg_flux = sum_flux / (std::max)((float)(n_caustic * HERO_WAVELENGTHS), 1.f);
+        std::printf("[CausticDebug] Flux stats: min=%.4e  max=%.4e  avg=%.4e  total=%.4e\n",
+                    (double)min_flux, (double)max_flux, (double)avg_flux, (double)sum_flux);
+    }
 
     // 2. Build hash grid from caustic photons
     HashGrid caustic_grid;
@@ -2268,6 +2299,8 @@ void OptixRenderer::create_programs() {
         desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
         desc.hitgroup.moduleCH = module_;
         desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance";
+        desc.hitgroup.moduleAH = module_;
+        desc.hitgroup.entryFunctionNameAH = "__anyhit__radiance";
         log_size = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(
             context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_pg_));
@@ -2279,6 +2312,8 @@ void OptixRenderer::create_programs() {
         desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
         desc.hitgroup.moduleCH = module_;
         desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
+        desc.hitgroup.moduleAH = module_;
+        desc.hitgroup.entryFunctionNameAH = "__anyhit__shadow";
         log_size = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(
             context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_shadow_pg_));

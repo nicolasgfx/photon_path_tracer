@@ -1,0 +1,63 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build (Release)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build.bat",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$msCompile"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Build (Debug)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--config",
+                "Debug",
+                "-j",
+                "${env:NUMBER_OF_PROCESSORS}"
+            ],
+            "group": "build",
+            "problemMatcher": [
+                "$msCompile"
+            ]
+        },
+        {
+            "label": "Run Photon Tracer",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/Release/photon_tracer.exe",
+            "dependsOn": "Build (Release)",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Run Tests",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/Release/ppt_tests.exe",
+            "dependsOn": "Build (Release)",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        }
+    ]
+}

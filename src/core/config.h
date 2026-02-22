@@ -21,8 +21,8 @@
 // Runtime switching via keys 1–9 uses SCENE_PROFILES[] below.
 
 //#define SCENE_CORNELL_BOX
-#define SCENE_CONFERENCE
-//#define SCENE_LIVING_ROOM
+//#define SCENE_CONFERENCE
+#define SCENE_LIVING_ROOM
 //#define SCENE_SIBENIK
 
 // =====================================================================
@@ -67,14 +67,14 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 750000;   // specular→diffuse ca
 // Maximum bounce depth for photon rays (the real path tracers in v2).
 // Camera rays do NOT use this — see DEFAULT_MAX_SPECULAR_CHAIN.
 //   Preview: 3–4  |  Default: 6  |  High-quality: 8–10
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 6;
+constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 10;
 
 // ── Russian roulette (§5.2.2) ───────────────────────────────────────
 // After MIN_BOUNCES_RR bounces, each photon terminates with probability
 // (1 − min(max_spectrum(throughput), RR_THRESHOLD)).  Throughput is
 // divided by the survival probability to keep the estimator unbiased.
 //   min_bounces: 2–3  |  threshold: 0.80–0.90
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 2;
+constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 8;
 constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.90f;
 
 // ── Photon emission mixture (§5.1, variance reduction) ──────────────
@@ -102,6 +102,18 @@ constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
 // Debug: stop photon after first intersection (validate emission only).
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
+
+// Debug: emit photon-indirect preview PNGs before the progressive render
+// starts (adds ~8 spp render + caustic pass overhead at render launch).
+constexpr bool DEBUG_PHOTON_INDIRECT_PNG = false;
+
+// Debug: emit caustic-only photon map debug PNGs (slow: rebuilds grid
+// + re-renders).  Disable to skip caustic flag tracking & debug pass.
+// Only active when DEBUG_PHOTON_INDIRECT_PNG is also true.
+constexpr bool DEBUG_CAUSTIC_PNG = false;
+
+// Debug: emit a per-cell shadow-ray-coverage heat-map PNG after render.
+constexpr bool DEBUG_COVERAGE_PNG = false;
 
 // =====================================================================
 // §3  SPATIAL INDEX & GATHER KERNEL (§6)

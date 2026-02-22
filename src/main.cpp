@@ -1354,23 +1354,35 @@ static void run_interactive(
                 std::printf("[Timing] NEE debug PNG:     %8.1f ms\n", ms);
                 std::cout << "[Debug NEE] Saved: output/out_debug_nee.png\n";
                 // Clear buffers so the progressive render starts clean
+                std::cout << "[Init] Clearing buffers before photon debug pass...\n";
+                std::cout.flush();
                 optix_renderer.clear_buffers();
+                std::cout << "[Init] Buffers cleared.\n";
+                std::cout.flush();
             }
 
             // ── Photon-indirect + caustic debug PNGs (early output) ──
-            // Render a quick low-spp pass to visualise the photon maps
-            // immediately, before the full progressive render begins.
-            {
+            // Gated by DEBUG_PHOTON_INDIRECT_PNG in config.h.
+            if constexpr (DEBUG_PHOTON_INDIRECT_PNG) {
                 auto t_pi_start = std::chrono::high_resolution_clock::now();
                 constexpr int EARLY_DEBUG_SPP = 8;
 
                 // Quick pass for photon indirect
-                for (int s = 0; s < EARLY_DEBUG_SPP; ++s)
+                std::printf("[Debug] Starting photon-indirect debug pass (%d spp)...\n", EARLY_DEBUG_SPP);
+                std::cout.flush();
+                for (int s = 0; s < EARLY_DEBUG_SPP; ++s) {
+                    std::printf("[Debug] Photon-indirect spp %d/%d\n", s + 1, EARLY_DEBUG_SPP);
+                    std::cout.flush();
                     optix_renderer.render_one_spp(
                         g_app.render_cam, s, opt.config.max_bounces);
+                }
+                std::cout << "[Debug] Photon-indirect render done, downloading buffers...\n";
+                std::cout.flush();
 
                 std::vector<float> pi_spec, pi_samp, dummy;
                 optix_renderer.download_component_buffers(dummy, pi_spec, pi_samp);
+                std::cout << "[Debug] Buffers downloaded, converting to PNG...\n";
+                std::cout.flush();
 
                 int cw = opt.config.image_width;
                 int ch = opt.config.image_height;
@@ -1403,19 +1415,36 @@ static void run_interactive(
                 FrameBuffer pi_fb;
                 spectral_to_fb(pi_spec, pi_samp, pi_fb);
                 write_png("output/out_debug_photon_indirect.png", pi_fb);
+                std::cout << "[Debug] Wrote output/out_debug_photon_indirect.png\n";
+                std::cout.flush();
 
                 // Clear buffers before caustic pass
+                std::cout << "[Init] Clearing buffers before caustic pass...\n";
+                std::cout.flush();
                 optix_renderer.clear_buffers();
+                std::cout << "[Init] Buffers cleared.\n";
+                std::cout.flush();
 
-                // Caustic-only pass
-                std::vector<float> caustic_spec, caustic_samp;
-                optix_renderer.render_caustic_debug_pass(
-                    g_app.render_cam, opt.config, caustic_spec, caustic_samp);
+                // Caustic-only pass (gated by DEBUG_CAUSTIC_PNG)
+                if constexpr (DEBUG_CAUSTIC_PNG) {
+                    std::cout << "[Debug] Starting caustic debug pass...\n";
+                    std::cout.flush();
+                    std::vector<float> caustic_spec, caustic_samp;
+                    optix_renderer.render_caustic_debug_pass(
+                        g_app.render_cam, opt.config, caustic_spec, caustic_samp);
+                    std::cout << "[Debug] Caustic pass done.\n";
+                    std::cout.flush();
 
-                if (!caustic_spec.empty()) {
-                    FrameBuffer caustic_fb;
-                    spectral_to_fb(caustic_spec, caustic_samp, caustic_fb);
-                    write_png("output/out_debug_caustic_indirect.png", caustic_fb);
+                    if (!caustic_spec.empty()) {
+                        FrameBuffer caustic_fb;
+                        spectral_to_fb(caustic_spec, caustic_samp, caustic_fb);
+                        write_png("output/out_debug_caustic_indirect.png", caustic_fb);
+                        std::cout << "[Debug] Wrote output/out_debug_caustic_indirect.png\n";
+                        std::cout.flush();
+                    } else {
+                        std::cout << "[Debug] Caustic buffer empty, skipping PNG write.\n";
+                        std::cout.flush();
+                    }
                 }
 
                 auto t_pi_end = std::chrono::high_resolution_clock::now();
@@ -1426,7 +1455,11 @@ static void run_interactive(
                 std::cout << "[Debug] Saved: output/out_debug_caustic_indirect.png\n";
 
                 // Clear buffers so the progressive render starts clean
+                std::cout << "[Init] Final buffer clear before progressive render...\n";
+                std::cout.flush();
                 optix_renderer.clear_buffers();
+                std::cout << "[Init] Ready. Starting progressive render.\n";
+                std::cout.flush();
             }
 
             g_app.render_requested = false;
@@ -1545,8 +1578,8 @@ static void run_interactive(
                     write_png(photon_path, photon_fb);
                 }
 
-                // Render caustic-only debug pass
-                {
+                // Render caustic-only debug pass (gated by DEBUG_CAUSTIC_PNG)
+                if constexpr (DEBUG_CAUSTIC_PNG) {
                     std::vector<float> caustic_spec, caustic_samp;
                     optix_renderer.render_caustic_debug_pass(
                         camera, opt.config, caustic_spec, caustic_samp);
@@ -1580,8 +1613,9 @@ static void run_interactive(
                 }
 
                 // Render shadow-ray coverage debug PNG
-                std::string coverage_path = prefix + "_coverage.png";
-                {
+                std::string coverage_path;
+                if constexpr (DEBUG_COVERAGE_PNG) {
+                    coverage_path = prefix + "_coverage.png";
                     FrameBuffer coverage_fb;
                     optix_renderer.render_coverage_debug_png(camera, coverage_fb);
                     if (coverage_fb.width > 0)
@@ -1603,7 +1637,8 @@ static void run_interactive(
                 std::cout << "  NEE:   " << nee_path << "\n";
                 std::cout << "  Phot:  " << photon_path << "\n";
                 std::cout << "  Caus:  " << caustic_path << "\n";
-                std::cout << "  Cov:   " << coverage_path << "\n";
+                if constexpr (DEBUG_COVERAGE_PNG)
+                    std::cout << "  Cov:   " << coverage_path << "\n";
                 std::cout << "========================================\n\n";
                 }
             }
@@ -1691,6 +1726,10 @@ int main(int argc, char* argv[]) {
         }
     }
 #endif
+
+    // Flush stdout immediately so progress messages appear even when piped
+    // through a bat file (Windows buffers stdout by default in that case).
+    setvbuf(stdout, nullptr, _IONBF, 0);
 
     std::cout << "== Spectral Photon + Path Tracing Renderer (OptiX) ==\n";
     std::cout << "   Scene: " << SCENE_DISPLAY_NAME << "\n\n";

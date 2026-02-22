@@ -3072,8 +3072,9 @@ extern "C" __global__ void __raygen__photon_trace() {
             on_caustic_path = false;
         }
 
-        // Russian roulette
-        if (bounce >= DEFAULT_MIN_BOUNCES_RR) {
+        // Russian roulette — skip for specular (glass/mirror) bounces so
+        // that caustic photons survive the full glass path unattenuated.
+        if (bounce >= DEFAULT_MIN_BOUNCES_RR && !dev_is_specular(hit_mat)) {
             float p_rr = fminf(DEFAULT_RR_THRESHOLD, rr_albedo);
             if (rng.next_float() >= p_rr) break;
             for (int h = 0; h < HERO_WAVELENGTHS; ++h)
@@ -3414,6 +3415,63 @@ static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixe
     params.srgb_buffer[pixel_idx * 4 + 1] = (uint8_t)(rgb.y * 255.f);
     params.srgb_buffer[pixel_idx * 4 + 2] = (uint8_t)(rgb.z * 255.f);
     params.srgb_buffer[pixel_idx * 4 + 3] = 255;
+}
+
+// =====================================================================
+// Stochastic opacity helpers (TEA hash for cheap per-intersection RNG)
+// =====================================================================
+__forceinline__ __device__
+uint32_t tea4(uint32_t v0, uint32_t v1) {
+    uint32_t s0 = 0;
+    for (int n = 0; n < 4; ++n) {
+        s0 += 0x9e3779b9u;
+        v0 += ((v1 << 4) + 0xa341316cu) ^ (v1 + s0) ^ ((v1 >> 5) + 0xc8013ea4u);
+        v1 += ((v0 << 4) + 0xad90777du) ^ (v0 + s0) ^ ((v0 >> 5) + 0x7e95761eu);
+    }
+    return v0;
+}
+
+// =====================================================================
+// __anyhit__radiance  –  stochastic alpha test for translucent surfaces
+// =====================================================================
+extern "C" __global__ void __anyhit__radiance() {
+    if (!params.opacity) return;   // no opacity data uploaded
+
+    const int      prim_idx = optixGetPrimitiveIndex();
+    const uint32_t mat_id   = params.material_ids[prim_idx];
+    const float    opac     = params.opacity[mat_id];
+
+    if (opac >= 1.f) return;       // fully opaque — accept hit
+    if (opac <= 0.f) { optixIgnoreIntersection(); return; } // fully transparent
+
+    // Cheap per-intersection random number via TEA hash
+    const uint3  idx  = optixGetLaunchIndex();
+    const uint32_t pixel_seed = idx.x + idx.y * 65537u;
+    const uint32_t h   = tea4(pixel_seed, prim_idx ^ __float_as_uint(optixGetRayTmax()));
+    const float    xi  = (float)(h & 0x00FFFFFFu) / (float)0x01000000u;  // [0,1)
+
+    if (xi >= opac) optixIgnoreIntersection();  // stochastic transparency
+}
+
+// =====================================================================
+// __anyhit__shadow  –  stochastic alpha test for shadow rays
+// =====================================================================
+extern "C" __global__ void __anyhit__shadow() {
+    if (!params.opacity) return;
+
+    const int      prim_idx = optixGetPrimitiveIndex();
+    const uint32_t mat_id   = params.material_ids[prim_idx];
+    const float    opac     = params.opacity[mat_id];
+
+    if (opac >= 1.f) return;
+    if (opac <= 0.f) { optixIgnoreIntersection(); return; }
+
+    const uint3  idx  = optixGetLaunchIndex();
+    const uint32_t pixel_seed = idx.x + idx.y * 65537u;
+    const uint32_t h   = tea4(pixel_seed, prim_idx ^ __float_as_uint(optixGetRayTmax()));
+    const float    xi  = (float)(h & 0x00FFFFFFu) / (float)0x01000000u;
+
+    if (xi >= opac) optixIgnoreIntersection();
 }
 
 // =====================================================================

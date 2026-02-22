@@ -26,7 +26,7 @@ if /I "%1"=="rebuild" (
 
 REM -- Lock Check --
 if exist "%BUILD_DIR%\build.lock" (
-    echo [build.bat] ERROR: A build is already in progress (lock file exists).
+    echo [build.bat] ERROR: A build is already in progress ^(lock file exists^).
     echo             If you are sure no other build is running, delete "%BUILD_DIR%\build.lock"
     exit /b 1
 )
@@ -37,7 +37,7 @@ echo locked > "%BUILD_DIR%\build.lock"
 REM -- Configure --
 REM Only configure if CMakeCache doesn't exist or if we want to ensure fresh config options
 if not exist "%BUILD_DIR%\CMakeCache.txt" (
-    echo [build.bat] Configuring (%BUILD_TYPE%)...
+    echo [build.bat] Configuring ^(%BUILD_TYPE%^)...
     cmake -B %BUILD_DIR% %CMAKE_OPTS%
     if errorlevel 1 goto :error
 )
