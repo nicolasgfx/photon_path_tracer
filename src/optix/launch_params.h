@@ -21,6 +21,7 @@ constexpr int RENDER_MODE_PHOTON_MAP    = 3;
 constexpr int RENDER_MODE_NORMALS       = 4;
 constexpr int RENDER_MODE_MATERIAL_ID   = 5;
 constexpr int RENDER_MODE_DEPTH         = 6;
+constexpr int RENDER_MODE_COVERAGE      = 7;  // shadow-ray coverage per cell
 
 // ── GPU texture descriptor (for flat atlas lookup) ──────────────────
 struct GpuTexDesc {
@@ -67,6 +68,7 @@ struct LaunchParams {
     int    debug_shadow_rays;    // 1 = debug_first_hit casts shadow rays (NEE PNG)
     int    nee_light_samples;    // M: shadow-ray samples at bounce 0
     int    nee_deep_samples;     // shadow-ray samples at bounce >= 1
+    float  exposure;             // linear exposure multiplier (applied before tone mapping)
 
     // Scene geometry (device pointers)
     float3*   vertices;          // [num_tris * 3]
@@ -138,6 +140,7 @@ struct LaunchParams {
     float*    out_photon_flux;     // [max_stored * HERO_WAVELENGTHS]
     uint8_t*  out_photon_num_hero; // [max_stored] valid hero count per photon
     uint16_t* out_photon_source_emissive; // [max_stored] source emissive local index
+    uint8_t*  out_photon_is_caustic;     // [max_stored] 1 = caustic path, 0 = global
     unsigned int* out_photon_count;  // atomic counter (device)
     int       max_stored_photons;
 
@@ -224,6 +227,16 @@ struct LaunchParams {
     float           light_cache_cell_size;        // cell size (same as hash grid)
     int             light_cache_valid;            // 1 = cache uploaded, 0 = not available
     int             use_light_cache;              // 1 = use cached NEE, 0 = standard NEE
+
+    // ── Coverage-based shadow ray targets (per-cell, variable-length) ─
+    // Built from EmitterPointSet using hemisphere directional coverage.
+    // Each cell stores a variable number of precomputed shadow ray
+    // targets, accessed via offset + count.
+    ShadowRayTarget* shadow_ray_targets;         // flattened array of all targets
+    int*             shadow_ray_cell_offset;     // [LIGHT_CACHE_TABLE_SIZE] start into targets
+    int*             shadow_ray_cell_count;      // [LIGHT_CACHE_TABLE_SIZE] num targets per cell
+    int              shadow_ray_cache_valid;      // 1 = coverage data uploaded
+    float            coverage_max_value;           // max cell count (for normalised viz)
 
     // ── SPPM (Stochastic Progressive Photon Mapping) ────────────────
     // Per-pixel visible-point buffers (written by camera pass, read by

@@ -26,11 +26,15 @@ Ks 0.0000 0.0000 0.0000
 Ke 18.4 15.6 8
 illum 1
 
+# Glass block: refractive dielectric, IOR 1.5, fully transparent
 newmtl ShortBox
-Kd 0.73 0.73 0.73
-Ka 0.0000 0.0000 0.0000
-Ks 0.0000 0.0000 0.0000
-illum 1
+Kd 0.0 0.0 0.0
+Ka 0.0 0.0 0.0
+Ks 1.0 1.0 1.0
+Ns 10000
+Ni 1.5
+d 0.05
+illum 4
 
 newmtl TallBox
 Kd 0.73 0.73 0.73

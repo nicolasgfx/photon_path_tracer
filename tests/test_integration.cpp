@@ -6,13 +6,11 @@
 //
 // Tests (original):
 //   1. Energy conservation: radiance is non-negative, finite
-//   2. Specular chain terminates within max_specular_chain bounces
-//   3. NEE-only mode produces non-zero output for lit pixels
-//   4. Indirect-only mode produces non-zero output when photons exist
-//   5. Combined mode ≈ NEE + indirect (no double-counting)
-//   6. KD-tree and hash-grid produce similar density estimates
-//   7. ACES tonemap produces valid sRGB output
-//   8. Photon map has expected structure after build
+//   2. NEE-only mode produces non-zero output for lit pixels
+//   3. Indirect-only mode produces non-zero output when photons exist
+//   4. Combined mode ≈ NEE + indirect (no double-counting)
+//   5. Spectral accumulator valid + ACES tonemap produces valid sRGB output
+//   6. Photon map has expected structure after build
 //
 // Tests (v2.1 additions):
 //   9. Tangential gather: KD-tree density ≈ hash grid density (both tangential)
@@ -356,86 +354,9 @@ TEST_F(IntegrationTest, CombinedEqualsDirectPlusIndirect) {
         << "Combined radiance should be >= direct-only radiance";
 }
 
-// ─── Test: KD-tree vs HashGrid density agreement ────────────────────
+// ─── Test: Spectral accumulator and ACES tonemap output ────────────
 
-TEST_F(IntegrationTest, KDTreeMatchesHashGridDensity) {
-    if (!scene_ok()) GTEST_SKIP();
-    if (global_photons_.size() == 0) GTEST_SKIP();
-
-    // Pick a point in the scene and compare density estimates
-    // Use the center pixel's first hit point
-    PCGRng rng = PCGRng::seed(12345, 1);
-    Ray ray = camera_.generate_ray(
-        config_.image_width / 2, config_.image_height / 2, rng);
-    HitRecord hit = scene_->intersect(ray);
-    if (!hit.hit) GTEST_SKIP();
-
-    Material mat = scene_->materials[hit.material_id];
-    ONB frame = ONB::from_normal(hit.shading_normal);
-    float3 wo_local = frame.world_to_local(ray.direction * (-1.f));
-
-    // Hash grid estimate
-    DensityEstimatorConfig de_config;
-    de_config.radius = config_.gather_radius;
-    de_config.num_photons_total = config_.num_photons;
-
-    Spectrum L_grid = estimate_photon_density(
-        hit.position, hit.shading_normal, wo_local, mat,
-        global_photons_, global_grid_, de_config, config_.gather_radius);
-
-    // KD-tree estimate (raw fixed-radius, same as hash grid)
-    Spectrum L_kdtree = Spectrum::zero();
-    float r2 = config_.gather_radius * config_.gather_radius;
-    float inv_area = 1.0f / (PI * r2);
-    float inv_N = 1.0f / (float)config_.num_photons;
-
-    global_kdtree_.query(hit.position, config_.gather_radius, global_photons_,
-        [&](uint32_t idx, float /*dist2*/) {
-            float3 p_pos = make_f3(global_photons_.pos_x[idx],
-                                   global_photons_.pos_y[idx],
-                                   global_photons_.pos_z[idx]);
-            float plane_dist = fabsf(dot(hit.shading_normal, p_pos - hit.position));
-            if (plane_dist > DEFAULT_SURFACE_TAU) return;
-
-            if (!global_photons_.norm_x.empty()) {
-                float3 pn = make_f3(global_photons_.norm_x[idx],
-                                    global_photons_.norm_y[idx],
-                                    global_photons_.norm_z[idx]);
-                if (dot(pn, hit.shading_normal) <= 0.f) return;
-            }
-
-            float3 wi = make_f3(global_photons_.wi_x[idx],
-                                global_photons_.wi_y[idx],
-                                global_photons_.wi_z[idx]);
-            if (dot(wi, hit.shading_normal) <= 0.f) return;
-
-            float3 wi_loc = frame.world_to_local(wi);
-            Spectrum f = bsdf::evaluate(mat, wo_local, wi_loc);
-
-            Spectrum photon_flux = global_photons_.get_flux(idx);
-            for (int b = 0; b < NUM_LAMBDA; ++b)
-                L_kdtree.value[b] += photon_flux.value[b] * inv_N *
-                                     f.value[b] * inv_area;
-        });
-
-    // They should produce the same result (both do fixed-radius gather)
-    float grid_sum = L_grid.sum();
-    float kd_sum = L_kdtree.sum();
-
-    if (grid_sum > 0.f || kd_sum > 0.f) {
-        float rel_diff = fabsf(grid_sum - kd_sum) /
-                        (fmaxf(grid_sum, kd_sum) + 1e-10f);
-        // 10% tolerance: KD-tree manual gather vs hash grid estimate
-        // may differ slightly due to rounding / boundary inclusion
-        EXPECT_LT(rel_diff, 0.10f)
-            << "KD-tree and hash grid density estimates should agree. "
-            << "Grid=" << grid_sum << " KD=" << kd_sum;
-    }
-}
-
-// ─── Test: ACES tonemap produces valid sRGB ─────────────────────────
-
-TEST_F(IntegrationTest, ACESTonemapValid) {
+TEST_F(IntegrationTest, SpectralAndTonemapOutputValid) {
     if (!scene_ok()) GTEST_SKIP();
 
     Renderer renderer;
@@ -443,15 +364,13 @@ TEST_F(IntegrationTest, ACESTonemapValid) {
     renderer.set_camera(camera_);
     renderer.set_config(config_);
     renderer.build_photon_maps();
-    renderer.render_frame();
+    renderer.render_frame();   // calls fb_.tonemap() internally
 
     const auto& fb = renderer.framebuffer();
-    int total = config_.image_width * config_.image_height;
+    int npix = config_.image_width * config_.image_height;
 
-    for (int i = 0; i < total; ++i) {
-        // After tonemap, check that sRGB values are in valid range
-        // (The framebuffer stores pre-tonemap spectral data, but
-        //  tonemap writes to an internal sRGB buffer)
+    // Part 1: spectral accumulator must be finite and non-negative
+    for (int i = 0; i < npix; ++i) {
         const Spectrum& L = fb.pixels[i];
         for (int j = 0; j < NUM_LAMBDA; ++j) {
             ASSERT_TRUE(std::isfinite(L.value[j]))
@@ -460,6 +379,31 @@ TEST_F(IntegrationTest, ACESTonemapValid) {
                 << "Pixel " << i << " wavelength " << j << " is negative";
         }
     }
+
+    // Part 2: ACES tonemap output (sRGB) must be in [0, 255]
+    // fb.srgb is RGBA (4 bytes per pixel); render_frame() populates it.
+    ASSERT_EQ((int)fb.srgb.size(), npix * 4)
+        << "sRGB buffer has unexpected size";
+    for (int i = 0; i < npix; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            uint8_t v = fb.srgb[i * 4 + c];
+            // uint8_t is already in [0,255] by type, but verify alpha == 255
+            (void)v;
+        }
+        EXPECT_EQ(fb.srgb[i * 4 + 3], (uint8_t)255)
+            << "Alpha channel should be 255 at pixel " << i;
+    }
+
+    // Part 3: at least some pixels must be non-black after tonemap
+    int nonzero = 0;
+    for (int i = 0; i < npix; ++i) {
+        if (fb.srgb[i * 4 + 0] > 0 ||
+            fb.srgb[i * 4 + 1] > 0 ||
+            fb.srgb[i * 4 + 2] > 0)
+            ++nonzero;
+    }
+    EXPECT_GT(nonzero, 0)
+        << "ACES tonemapped image should have at least one non-black pixel";
 }
 
 // ─── Test: Full render frame completes without crash ────────────────

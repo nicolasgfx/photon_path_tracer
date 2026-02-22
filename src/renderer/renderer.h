@@ -34,7 +34,8 @@ enum class RenderMode {
     PhotonMap,           // Visualize photon density (heatmap)
     Normals,             // Debug: surface normals
     MaterialID,          // Debug: material colors
-    Depth                // Debug: depth buffer
+    Depth,               // Debug: depth buffer
+    Coverage             // Debug: shadow-ray coverage per cell
 };
 
 struct RenderConfig {
@@ -90,6 +91,9 @@ struct RenderConfig {
     int   adaptive_update_interval = 1;   ///< recompute mask every N passes
     float adaptive_threshold     = 0.02f; ///< relative-noise threshold to keep sampling
     int   adaptive_radius        = 1;     ///< neighbourhood half-width (pixels)
+
+    // Tone mapping
+    float exposure           = DEFAULT_EXPOSURE;  ///< linear multiplier before tone mapping (§Q8)
 
     // Debug
     RenderMode mode          = RenderMode::Combined;

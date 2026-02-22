@@ -73,17 +73,30 @@ echo [overnight] Started at %DATE% %TIME% > "%RUN_DIR%\timing.txt"
 REM -- Configure & build (unless --no-build) --------------------------
 if %DO_BUILD% EQU 0 goto :skip_build
 
+echo [overnight] Waiting for build lock...
+:wait_lock
+if exist "%BUILD_DIR%\build.lock" (
+    timeout /t 5 >nul
+    goto :wait_lock
+)
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+echo locked > "%BUILD_DIR%\build.lock"
+
 echo [overnight] Configuring CMake...
 cmake -B %BUILD_DIR% -DPPT_BUILD_TESTS=ON > "%RUN_DIR%\build_log.txt" 2>&1
 if errorlevel 1 (
     echo [overnight] ERROR: CMake configure failed!
     echo See %RUN_DIR%\build_log.txt for details.
+    if exist "%BUILD_DIR%\build.lock" del "%BUILD_DIR%\build.lock"
     exit /b 1
 )
 
 echo [overnight] Building all targets (%BUILD_TYPE%)...
-cmake --build %BUILD_DIR% --config %BUILD_TYPE% >> "%RUN_DIR%\build_log.txt" 2>&1
-if errorlevel 1 (
+cmake --build %BUILD_DIR% --config %BUILD_TYPE% -j %NUMBER_OF_PROCESSORS% >> "%RUN_DIR%\build_log.txt" 2>&1
+set BUILD_RES=%ERRORLEVEL%
+if exist "%BUILD_DIR%\build.lock" del "%BUILD_DIR%\build.lock"
+
+if %BUILD_RES% NEQ 0 (
     echo [overnight] ERROR: Build failed!
     echo.
     echo Build errors:

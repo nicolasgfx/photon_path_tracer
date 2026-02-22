@@ -1,0 +1,212 @@
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-3875587-key6327a48f2bc79c57fd2c614e942b467b-sm_89-rtc1-drv591.74
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     6
+	trace call(s)                        :    44
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  2878
+	instruction(s) in entry functions    : 135172
+	non-entry function(s)                :     1
+	basic block(s) in non-entry functions:     1
+	instruction(s) in non-entry functions:  1061
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"
+[OptiX][4][KNOBS] All knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\Nico\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "575.7 MiB"

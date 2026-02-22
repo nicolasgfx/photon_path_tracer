@@ -16,6 +16,7 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "core/cell_bin_grid.h"
+#include "core/emitter_points.h"
 #include "optix/launch_params.h"
 
 #include <cuda_runtime.h>
@@ -179,6 +180,19 @@ public:
     void render_one_spp(const Camera& camera, int frame_number,
                         int max_bounces = DEFAULT_MAX_BOUNCES);
 
+    /// Render a caustic-only debug pass using only caustic-flagged photons.
+    /// Call after render_final() completes.  Outputs caustic-only photon
+    /// indirect into the provided spectral / sample-count buffers.
+    void render_caustic_debug_pass(const Camera& camera,
+                                   const RenderConfig& config,
+                                   std::vector<float>& caustic_spec,
+                                   std::vector<float>& samp_counts);
+
+    /// Render a coverage debug PNG: each pixel shows the normalised
+    /// shadow-ray coverage count of the light-cache cell it falls in.
+    /// Bright = many targets, dark = few.  Writes directly to a FrameBuffer.
+    void render_coverage_debug_png(const Camera& camera, FrameBuffer& out_fb);
+
     /// Build the dense 3D cell-bin grid from stored photons and upload
     /// it to the device.  Called once after trace_photons().
     void build_cell_bin_grid();
@@ -216,6 +230,10 @@ public:
     /// hash-grid gather (exact, O(k)).  Mirrors the G key in main.cpp.
     void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
     bool is_use_dense_grid()  const { return use_dense_grid_; }
+
+    /// Runtime exposure multiplier (render_config.json §5, applied before tone mapping).
+    void set_exposure(float e)   { exposure_ = e; }
+    float get_exposure()   const { return exposure_; }
 
     /// Download GPU kernel profiling data and print a summary.
     /// Call after the final render completes.
@@ -346,6 +364,7 @@ private:
     DeviceBuffer d_out_photon_lambda_, d_out_photon_flux_;
     DeviceBuffer d_out_photon_num_hero_;  // uint8_t [max_stored] hero count per photon
     DeviceBuffer d_out_photon_source_emissive_;  // uint16_t [max_stored] source emissive idx
+    DeviceBuffer d_out_photon_is_caustic_;       // uint8_t  [max_stored] caustic flag
     DeviceBuffer d_out_photon_count_;
 
     // Volume photon output buffers (device -- written by __raygen__photon_trace)
@@ -366,6 +385,7 @@ private:
     // Stored photon data & hash grid (CPU side, after trace_photons())
     PhotonSoA stored_photons_;
     HashGrid  stored_grid_;
+    std::vector<uint8_t> caustic_flags_;  // per-photon caustic flag (downloaded from GPU)
 
     // Host-side scene triangles for debug ray picking/hover inspection.
     std::vector<Triangle> host_triangles_;
@@ -380,6 +400,13 @@ private:
     DeviceBuffer d_light_cache_entries_;          // CellLightEntry [TABLE_SIZE * TOP_K]
     DeviceBuffer d_light_cache_count_;            // int [TABLE_SIZE]
     DeviceBuffer d_light_cache_total_importance_; // float [TABLE_SIZE]
+
+    // Coverage-based shadow ray targets (variable-length per cell)
+    EmitterPointSet emitter_points_;
+    DeviceBuffer d_shadow_ray_targets_;           // ShadowRayTarget [total_targets]
+    DeviceBuffer d_shadow_ray_cell_offset_;       // int [TABLE_SIZE]
+    DeviceBuffer d_shadow_ray_cell_count_;        // int [TABLE_SIZE]
+    bool shadow_ray_cache_uploaded_ = false;
 
     // Volume photon storage and cell-bin grid
     PhotonSoA volume_photons_;
@@ -407,6 +434,7 @@ private:
     bool runtime_volume_enabled_ = DEFAULT_VOLUME_ENABLED;  // toggled via V key
     bool use_dense_grid_         = DEFAULT_USE_DENSE_GRID;  // toggled via G key
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
+    float exposure_      = DEFAULT_EXPOSURE;          // runtime exposure (set_exposure / R key)
 };
 
 // ---------------------------------------------------------------------

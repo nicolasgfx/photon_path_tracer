@@ -35,6 +35,7 @@
 #include "debug/debug.h"
 #include "optix/optix_renderer.h"
 #include "core/test_data_io.h"
+#include "core/runtime_config.h"
 
 #include <GLFW/glfw3.h>
 
@@ -348,7 +349,7 @@ static void render_help_overlay(int win_w, int win_h,
     ly += line_h * 0.7f;
     draw_overlay_text(0, ly, "M      Toggle mouse capture", 0.8f, 0.8f, 0.8f, 1.f);
     ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "R      Full path trace render", 0.8f, 0.8f, 0.8f, 1.f);
+    draw_overlay_text(0, ly, "R      Load render_config.json + render", 0.8f, 0.8f, 0.8f, 1.f);
     ly += line_h * 0.7f;
     draw_overlay_text(0, ly, "ESC    Cancel render / release mouse / quit", 0.8f, 0.8f, 0.8f, 1.f);
     ly += line_h;
@@ -690,6 +691,7 @@ struct AppState {
 static AppState        g_app;
 static Camera*         g_active_camera          = nullptr;  // set by run_interactive for key_callback DOF editing
 static OptixRenderer*  g_active_optix_renderer  = nullptr;  // set by run_interactive for key_callback volume toggle
+static Options*        g_active_options         = nullptr;  // set by run_interactive for key_callback JSON reload (R key)
 
 static void key_callback(GLFWwindow* window, int key,
                           int /*scancode*/, int action, int /*mods*/) {
@@ -723,8 +725,41 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // "R" -> start final render
+    // "R" -> load render_config.json then start final render
     if (key == GLFW_KEY_R) {
+        // ── Reload render_config.json ────────────────────────────────
+        if (g_active_options && g_active_camera && g_active_optix_renderer) {
+            RuntimeConfigFlags flags;
+            bool loaded = load_runtime_config(
+                "render_config.json",
+                g_active_options->config,
+                *g_active_camera,
+                flags);
+            if (loaded) {
+                std::printf("[Config] render_config.json loaded.\n");
+                if (flags.photon_params_changed || flags.gather_radius_changed) {
+                    std::printf("[Config]   Photon/gather params changed — will retrace photons.\n");
+                    g_app.photon_retrace_requested = true;
+                }
+                if (flags.exposure_changed) {
+                    g_active_optix_renderer->set_exposure(flags.exposure);
+                    std::printf("[Config]   Exposure: %.3f\n", flags.exposure);
+                }
+                if (flags.dof_changed) {
+                    g_active_camera->update();
+                    g_app.camera_moved = true;  // reset accumulation
+                    std::printf("[Config]   DOF params changed.\n");
+                }
+                if (flags.resolution_changed) {
+                    std::printf("[Config]   Resolution/SPP: %dx%d @ %d spp\n",
+                        g_active_options->config.image_width,
+                        g_active_options->config.image_height,
+                        g_active_options->config.samples_per_pixel);
+                }
+            } else {
+                std::printf("[Config] render_config.json not found — using current settings.\n");
+            }
+        }
         g_app.showing_final = false;
         g_app.render_requested = true;
         // Release mouse cursor during render so the camera stays frozen
@@ -959,6 +994,7 @@ static void run_interactive(
     // Expose camera and renderer to key_callback for runtime editing
     g_active_camera         = &camera;
     g_active_optix_renderer = &optix_renderer;
+    g_active_options        = &opt;
 
     // Sync initial volume state from AppState into the renderer
     optix_renderer.set_volume_enabled(g_app.volume_enabled);
@@ -984,7 +1020,7 @@ static void run_interactive(
     std::cout << "  WASD = move | Mouse = look | M = release/capture mouse\n";
     std::cout << "  ESC = cancel render / release mouse / quit | Q = quit\n";
     std::cout << "  F1-F9 = debug toggles | TAB = cycle mode\n";
-    std::cout << "  R = full path tracing render -> " << opt.output_file << "\n";
+    std::cout << "  R = load render_config.json + full path tracing render -> " << opt.output_file << "\n";
     if (opt.config.sppm_enabled)
         std::cout << "      (SPPM mode: " << opt.config.sppm_iterations << " iterations, r="
                   << opt.config.sppm_initial_radius << ")\n";
@@ -1321,9 +1357,77 @@ static void run_interactive(
                 optix_renderer.clear_buffers();
             }
 
-            // ── Cell-bin grid is already built by trace_photons() ──
-            // Nothing to do here — the grid is precomputed and uploaded
-            // automatically during the photon tracing phase.
+            // ── Photon-indirect + caustic debug PNGs (early output) ──
+            // Render a quick low-spp pass to visualise the photon maps
+            // immediately, before the full progressive render begins.
+            {
+                auto t_pi_start = std::chrono::high_resolution_clock::now();
+                constexpr int EARLY_DEBUG_SPP = 8;
+
+                // Quick pass for photon indirect
+                for (int s = 0; s < EARLY_DEBUG_SPP; ++s)
+                    optix_renderer.render_one_spp(
+                        g_app.render_cam, s, opt.config.max_bounces);
+
+                std::vector<float> pi_spec, pi_samp, dummy;
+                optix_renderer.download_component_buffers(dummy, pi_spec, pi_samp);
+
+                int cw = opt.config.image_width;
+                int ch = opt.config.image_height;
+
+                // Helper: spectral buffer → sRGB FrameBuffer
+                auto spectral_to_fb = [&](const std::vector<float>& spec_buf,
+                                          const std::vector<float>& sc,
+                                          FrameBuffer& fb) {
+                    fb.resize(cw, ch);
+                    for (int y = 0; y < ch; ++y) {
+                        for (int x = 0; x < cw; ++x) {
+                            int px = y * cw + x;
+                            float n = sc[px];
+                            Spectrum avg = Spectrum::zero();
+                            if (n > 0.f)
+                                for (int k = 0; k < NUM_LAMBDA; ++k)
+                                    avg.value[k] = spec_buf[px * NUM_LAMBDA + k] / n;
+                            float3 rgb = spectrum_to_srgb(avg);
+                            rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
+                            rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
+                            rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
+                            fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
+                            fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
+                            fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
+                            fb.srgb[px * 4 + 3] = 255;
+                        }
+                    }
+                };
+
+                FrameBuffer pi_fb;
+                spectral_to_fb(pi_spec, pi_samp, pi_fb);
+                write_png("output/out_debug_photon_indirect.png", pi_fb);
+
+                // Clear buffers before caustic pass
+                optix_renderer.clear_buffers();
+
+                // Caustic-only pass
+                std::vector<float> caustic_spec, caustic_samp;
+                optix_renderer.render_caustic_debug_pass(
+                    g_app.render_cam, opt.config, caustic_spec, caustic_samp);
+
+                if (!caustic_spec.empty()) {
+                    FrameBuffer caustic_fb;
+                    spectral_to_fb(caustic_spec, caustic_samp, caustic_fb);
+                    write_png("output/out_debug_caustic_indirect.png", caustic_fb);
+                }
+
+                auto t_pi_end = std::chrono::high_resolution_clock::now();
+                double ms = std::chrono::duration<double, std::milli>(
+                    t_pi_end - t_pi_start).count();
+                std::printf("[Timing] Photon debug PNGs: %8.1f ms\n", ms);
+                std::cout << "[Debug] Saved: output/out_debug_photon_indirect.png\n";
+                std::cout << "[Debug] Saved: output/out_debug_caustic_indirect.png\n";
+
+                // Clear buffers so the progressive render starts clean
+                optix_renderer.clear_buffers();
+            }
 
             g_app.render_requested = false;
             } // end else (normal progressive render)
@@ -1392,6 +1496,7 @@ static void run_interactive(
                 std::string final_path   = prefix + ".png";
                 std::string nee_path     = prefix + "_nee_direct.png";
                 std::string photon_path  = prefix + "_photon_indirect.png";
+                std::string caustic_path = prefix + "_caustic_indirect.png";
 
                 FrameBuffer final_fb;
                 optix_renderer.download_framebuffer(final_fb);
@@ -1440,6 +1545,49 @@ static void run_interactive(
                     write_png(photon_path, photon_fb);
                 }
 
+                // Render caustic-only debug pass
+                {
+                    std::vector<float> caustic_spec, caustic_samp;
+                    optix_renderer.render_caustic_debug_pass(
+                        camera, opt.config, caustic_spec, caustic_samp);
+
+                    if (!caustic_spec.empty()) {
+                        int cw = final_fb.width;
+                        int ch = final_fb.height;
+                        FrameBuffer caustic_fb;
+                        caustic_fb.resize(cw, ch);
+                        for (int y = 0; y < ch; ++y) {
+                            for (int x = 0; x < cw; ++x) {
+                                int px = y * cw + x;
+                                float n = caustic_samp[px];
+                                Spectrum avg = Spectrum::zero();
+                                if (n > 0.f) {
+                                    for (int k = 0; k < NUM_LAMBDA; ++k)
+                                        avg.value[k] = caustic_spec[px * NUM_LAMBDA + k] / n;
+                                }
+                                float3 rgb = spectrum_to_srgb(avg);
+                                rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
+                                rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
+                                rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
+                                caustic_fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
+                                caustic_fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
+                                caustic_fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
+                                caustic_fb.srgb[px * 4 + 3] = 255;
+                            }
+                        }
+                        write_png(caustic_path, caustic_fb);
+                    }
+                }
+
+                // Render shadow-ray coverage debug PNG
+                std::string coverage_path = prefix + "_coverage.png";
+                {
+                    FrameBuffer coverage_fb;
+                    optix_renderer.render_coverage_debug_png(camera, coverage_fb);
+                    if (coverage_fb.width > 0)
+                        write_png(coverage_path, coverage_fb);
+                }
+
                 // Restore mouse capture state
                 if (g_app.mouse_was_captured) {
                     g_app.mouse_captured = true;
@@ -1454,6 +1602,8 @@ static void run_interactive(
                 std::cout << "  Saved: " << final_path << "\n";
                 std::cout << "  NEE:   " << nee_path << "\n";
                 std::cout << "  Phot:  " << photon_path << "\n";
+                std::cout << "  Caus:  " << caustic_path << "\n";
+                std::cout << "  Cov:   " << coverage_path << "\n";
                 std::cout << "========================================\n\n";
                 }
             }

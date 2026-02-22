@@ -336,8 +336,8 @@ float3 dev_spectrum_to_srgb(const Spectrum& s) {
     float scale = (Y_integral > 0.f) ? 1.0f / Y_integral : 0.f;
     X *= scale; Y *= scale; Z *= scale;
 
-    // Apply exposure
-    X *= DEFAULT_EXPOSURE; Y *= DEFAULT_EXPOSURE; Z *= DEFAULT_EXPOSURE;
+    // Apply exposure (runtime — set via render_config.json and R key)
+    X *= params.exposure; Y *= params.exposure; Z *= params.exposure;
 
     float r =  3.2406f*X - 1.5372f*Y - 0.4986f*Z;
     float g = -0.9689f*X + 1.8758f*Y + 0.0415f*Z;
@@ -1248,6 +1248,19 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         return render_material_id_dev(mat_id);
     if (params.render_mode == RENDER_MODE_DEPTH)
         return render_depth_dev(hit.t, 5.0f);
+    if (params.render_mode == RENDER_MODE_COVERAGE) {
+        if (params.shadow_ray_cache_valid && params.shadow_ray_cell_count
+            && params.light_cache_cell_size > 0.f && params.coverage_max_value > 0.f) {
+            int cx = (int)floorf(hit.position.x / params.light_cache_cell_size);
+            int cy = (int)floorf(hit.position.y / params.light_cache_cell_size);
+            int cz = (int)floorf(hit.position.z / params.light_cache_cell_size);
+            uint32_t key = dev_hash_cell(cx, cy, cz, LIGHT_CACHE_TABLE_SIZE);
+            float v = (float)params.shadow_ray_cell_count[key] / params.coverage_max_value;
+            v = fminf(v, 1.f);
+            return Spectrum::constant(v);
+        }
+        return Spectrum::zero();
+    }
 
     // Emission
     if (dev_is_emissive(mat_id))
@@ -2108,13 +2121,132 @@ NeeResult dev_nee_cached(float3 pos, float3 normal, float3 wo_local,
 }
 
 // =====================================================================
-// dev_nee_dispatch -- route to cached or direct NEE
+// dev_nee_coverage -- Coverage-based NEE using precomputed shadow ray
+// targets.  For each cell, a variable number of shadow ray targets
+// provide optimal angular coverage of the hemisphere.
+// Each target is a fixed precomputed point on an emitter surface.
+// All targets are tested (no random selection), giving deterministic
+// and complete coverage.
+//
+// Falls back to dev_nee_cached when coverage data is unavailable.
+// =====================================================================
+__forceinline__ __device__
+NeeResult dev_nee_coverage(float3 pos, float3 normal, float3 wo_local,
+                           uint32_t mat_id, PCGRng& rng, int bounce,
+                           float2 uv = make_float2(0.f, 0.f))
+{
+    // ── Look up coverage targets for this cell ───────────────────────
+    int cx = (int)floorf(pos.x / params.light_cache_cell_size);
+    int cy = (int)floorf(pos.y / params.light_cache_cell_size);
+    int cz = (int)floorf(pos.z / params.light_cache_cell_size);
+    uint32_t cache_key = dev_hash_cell(cx, cy, cz, LIGHT_CACHE_TABLE_SIZE);
+
+    int n_targets = params.shadow_ray_cell_count[cache_key];
+    if (n_targets <= 0) {
+        // No coverage data for this cell — fall back to legacy cached NEE
+        return dev_nee_cached(pos, normal, wo_local, mat_id, rng, bounce, uv);
+    }
+
+    int offset = params.shadow_ray_cell_offset[cache_key];
+
+    NeeResult result;
+    result.L = Spectrum::zero();
+    result.visibility = 0.f;
+    if (params.num_emissive <= 0) return result;
+
+    int visible_count = 0;
+    DevONB frame = DevONB::from_normal(normal);
+    const float inv_N = 1.f / (float)n_targets;
+
+    for (int s = 0; s < n_targets; ++s) {
+        const ShadowRayTarget& target = params.shadow_ray_targets[offset + s];
+
+        float3 light_pos = target.position;
+        float3 light_normal = target.normal;
+        uint32_t light_tri = target.global_tri_idx;
+
+        // Direction, distance, cosines
+        float3 to_light = light_pos - pos;
+        float dist2 = dot(to_light, to_light);
+        float dist  = sqrtf(dist2);
+        float3 wi   = to_light * (1.f / dist);
+
+        float cos_x = dot(wi, normal);
+        float cos_y = -dot(wi, light_normal);
+        if (cos_x <= 0.f || cos_y <= 0.f) continue;
+
+        // Shadow ray via OptiX BVH
+        if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
+            continue;
+        visible_count++;
+
+        // Compute light triangle area
+        float3 lv0 = params.vertices[light_tri * 3 + 0];
+        float3 lv1 = params.vertices[light_tri * 3 + 1];
+        float3 lv2 = params.vertices[light_tri * 3 + 2];
+        float3 le1 = lv1 - lv0;
+        float3 le2 = lv2 - lv0;
+        float  light_area = length(cross(le1, le2)) * 0.5f;
+
+        // Emission — use triangle centroid UV for the fixed target point
+        // (the exact UV at the precomputed point is not stored, but for
+        // typical uniform-emission lights this is fine)
+        uint32_t light_mat = params.material_ids[light_tri];
+        // Approximate UV: compute barycentric coords of target on triangle
+        // For efficiency, use centroid UV (most emissive textures are uniform)
+        float2 luv0 = params.texcoords[light_tri * 3 + 0];
+        float2 luv1 = params.texcoords[light_tri * 3 + 1];
+        float2 luv2 = params.texcoords[light_tri * 3 + 2];
+        float2 light_uv = make_float2(
+            (luv0.x + luv1.x + luv2.x) / 3.0f,
+            (luv0.y + luv1.y + luv2.y) / 3.0f);
+        Spectrum Le = dev_get_Le(light_mat, light_uv);
+
+        float3 wi_local = frame.world_to_local(wi);
+        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
+
+        // PDF for uniform coverage sampling:
+        // Each of N targets is selected with probability 1/N.
+        // Area-to-solid-angle Jacobian: p_y_area = (1/N) / light_area
+        // p_wi = p_y_area * dist² / cos_y
+        float p_y_area = inv_N / fmaxf(light_area, 1e-8f);
+        float p_wi     = p_y_area * dist2 / fmaxf(cos_y, 1e-8f);
+
+        // MIS vs BSDF sampling
+        float w_mis = 1.0f;
+        if (DEFAULT_USE_MIS) {
+            float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
+            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
+        }
+
+        // Accumulate: f * Le * cos_x / p_wi
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
+                          * cos_x / fmaxf(p_wi, 1e-8f);
+        }
+    }
+
+    // Average over N targets (each had equal selection probability)
+    if (n_targets > 1) {
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            result.L.value[i] *= inv_N;
+    }
+
+    result.visibility = (float)visible_count / (float)n_targets;
+    return result;
+}
+
+// =====================================================================
+// dev_nee_dispatch -- route to coverage, cached, or direct NEE
 // =====================================================================
 __forceinline__ __device__
 NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
                            uint32_t mat_id, PCGRng& rng, int bounce,
                            float2 uv)
 {
+    // Prefer coverage-based NEE when available
+    if (params.use_light_cache && params.shadow_ray_cache_valid)
+        return dev_nee_coverage(pos, normal, wo_local, mat_id, rng, bounce, uv);
     if (params.use_light_cache && params.light_cache_valid)
         return dev_nee_cached(pos, normal, wo_local, mat_id, rng, bounce, uv);
     return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
@@ -2774,6 +2906,7 @@ extern "C" __global__ void __raygen__photon_trace() {
     // 7. Trace through scene
     float3 origin    = pos + geo_n * OPTIX_SCENE_EPSILON;
     float3 direction = world_dir;
+    bool on_caustic_path = true;  // stays true through specular bounces only
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
@@ -2854,6 +2987,8 @@ extern "C" __global__ void __raygen__photon_trace() {
                 }
                 params.out_photon_num_hero[slot] = (uint8_t)num_hero;
                 params.out_photon_source_emissive[slot] = (uint16_t)local_idx;
+                if (params.out_photon_is_caustic)
+                    params.out_photon_is_caustic[slot] = on_caustic_path ? (uint8_t)1 : (uint8_t)0;
             }
         }
 
@@ -2918,6 +3053,7 @@ extern "C" __global__ void __raygen__photon_trace() {
 
             direction = bounce_frame.local_to_world(bs.wi);
             origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
+            on_caustic_path = false;
         } else {
             // Diffuse: cosine hemisphere sampling, per-hero throughput
             DevONB bounce_frame = DevONB::from_normal(hit.shading_normal);
@@ -2933,6 +3069,7 @@ extern "C" __global__ void __raygen__photon_trace() {
 
             direction = bounce_frame.local_to_world(wi_local);
             origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
+            on_caustic_path = false;
         }
 
         // Russian roulette

@@ -36,13 +36,13 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 768;
 
 // Samples per pixel (anti-aliasing + noise averaging).
 //   Preview: 1–4  |  Default: 16–64  |  Final: 64–256
-constexpr int DEFAULT_SPP = 64;
+constexpr int DEFAULT_SPP = 32;
 
 // Stratified sub-pixel jitter grid (§7.1).
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP (one sample per stratum).
 //   4×8 = 32 matches DEFAULT_SPP = 32.
 constexpr int STRATA_X = 4;
-constexpr int STRATA_Y = 8;
+constexpr int STRATA_Y = 4;
 
 // =====================================================================
 // §2  PHOTON PASS — BUDGETS & TRANSPORT (§5)

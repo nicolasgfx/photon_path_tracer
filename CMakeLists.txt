@@ -82,6 +82,7 @@ set_target_properties(ppt_cuda_objects PROPERTIES
     CUDA_ARCHITECTURES "75;86;89"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
 )
 target_include_directories(ppt_cuda_objects PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -89,14 +90,21 @@ target_include_directories(ppt_cuda_objects PRIVATE
 )
 target_compile_definitions(ppt_cuda_objects PRIVATE PPT_USE_OPTIX=1)
 if(MSVC)
-    set_source_files_properties(${CUDA_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4505>")
+    target_compile_options(ppt_cuda_objects PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/wd4505>
+        $<$<COMPILE_LANGUAGE:CXX>:/MP>
+    )
 endif()
 
 # -- Main executable ---------------------------------------------------
 add_executable(photon_tracer
     ${CORE_SOURCES}
 )
+
+if(MSVC)
+    target_compile_options(photon_tracer PRIVATE /MP)
+endif()
+
 
 target_include_directories(photon_tracer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -267,6 +275,8 @@ if(PPT_BUILD_TESTS)
     add_dependencies(ppt_tests optix_ptx)
 
     if(MSVC)
+        target_compile_options(ppt_tests PRIVATE /MP)
+    endif()
         target_compile_options(ppt_tests PRIVATE /W4 /fp:fast)
     else()
         target_compile_options(ppt_tests PRIVATE -Wall -Wextra -O2)

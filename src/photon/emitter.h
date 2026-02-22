@@ -349,7 +349,10 @@ inline void trace_photons(const Scene& scene,
 
             // Update ray for next bounce
             float3 wi_world = frame.local_to_world(bsdf_sample.wi);
-            ray.origin    = hit.position + hit.shading_normal * EPSILON;
+            // Offset along +normal for reflection, −normal for refraction
+            // (bsdf_sample.wi.z > 0 ⇒ same hemisphere as normal ⇒ reflection)
+            ray.origin    = hit.position + hit.shading_normal * EPSILON *
+                            (bsdf_sample.wi.z > 0.f ? 1.f : -1.f);
             ray.direction = wi_world;
             ray.tmin      = 1e-4f;
             ray.tmax      = 1e20f;
