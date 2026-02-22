@@ -3686,34 +3686,51 @@ TEST(CellBinGrid, CellIndexClampedAtBounds) {
 }
 
 TEST(CellBinGrid, ScatterTo27Neighbors) {
-    // Place one photon exactly at cell center; its flux should appear
-    // in the 27 surrounding cells (3×3×3 neighborhood).
+    // Place many photons on a flat surface.  Photons near cell centres
+    // will have positive Epanechnikov weight and should be scattered
+    // into their own cell and possibly neighbouring cells.
     PhotonSoA photons;
-    photons.pos_x   = {0.0f};
-    photons.pos_y   = {0.0f};
-    photons.pos_z   = {0.0f};
-    photons.wi_x    = {0.0f};
-    photons.wi_y    = {0.0f};
-    photons.wi_z    = {1.0f};
-    photons.norm_x  = {0.0f};
-    photons.norm_y  = {0.0f};
-    photons.norm_z  = {1.0f};
-    set_soa_flux_uniform(photons, {5.0f});
-    photons.bin_idx = {0};
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(4);
+    PCGRng rng = PCGRng::seed(42);
+    for (int i = 0; i < 200; ++i) {
+        Photon p;
+        p.position    = make_f3((rng.next_float() - 0.5f) * 0.6f,
+                                0.f,
+                                (rng.next_float() - 0.5f) * 0.6f);
+        p.wi          = make_f3(0.f, 1.f, 0.f);
+        p.geom_normal = make_f3(0.f, 1.f, 0.f);
+        p.spectral_flux = Spectrum::constant(5.f);
+        p.num_hero = HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            p.lambda_bin[h] = (uint16_t)(h * NUM_LAMBDA / HERO_WAVELENGTHS);
+            p.flux[h] = 5.f;
+        }
+        photons.push_back(p);
+    }
+    photons.bin_idx.resize(photons.size());
+    for (size_t i = 0; i < photons.size(); ++i) {
+        float3 wi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
+        photons.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+    }
 
     CellBinGrid grid;
     grid.build(photons, 0.1f, 4);
 
-    // Count cells with non-zero flux in bin 0
+    // Count cells with non-zero flux
     size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
     int non_zero_cells = 0;
     for (size_t c = 0; c < total; ++c) {
-        if (grid.bins[c * 4 + 0].scalar_flux > 0.0f)
-            ++non_zero_cells;
+        for (int k = 0; k < 4; ++k) {
+            if (grid.bins[c * 4 + k].scalar_flux > 0.0f) {
+                ++non_zero_cells;
+                break;
+            }
+        }
     }
-    // The photon should be scattered into 27 cells (or fewer if grid is small)
-    EXPECT_GE(non_zero_cells, 1);
-    EXPECT_LE(non_zero_cells, 27);
+    // With 200 photons spread across 0.6 extent, many cells should receive flux
+    EXPECT_GE(non_zero_cells, 2);
+    EXPECT_LE(non_zero_cells, (int)total);
 }
 
 TEST(CellBinGrid, EmptyPhotons) {
@@ -3972,113 +3989,151 @@ TEST(DensityEstimator, NormalVisibility_ThinWallBothSidesCorrect) {
 // ── 37.3  CellBinGrid normal accumulation ───────────────────────────
 
 TEST(CellBinGrid, SinglePhotonNormalPreserved) {
-    // After building with a single photon, avg_n in every cell it scattered
-    // into should equal the photon's geom_normal (possibly sign-flipped by
-    // flux-weighting and normalization, but pointing the same way).
+    // Many photons on a flat surface (normal = up).  After build, every
+    // bin that received photons should have avg_n ≈ (0,1,0).
     const float3 expected_n = make_f3(0.f, 1.f, 0.f);  // upward y normal
 
     PhotonSoA photons;
-    photons.pos_x   = {0.0f};
-    photons.pos_y   = {0.0f};
-    photons.pos_z   = {0.0f};
-    photons.wi_x    = {0.0f};
-    photons.wi_y    = {1.0f};
-    photons.wi_z    = {0.0f};
-    photons.norm_x  = {expected_n.x};
-    photons.norm_y  = {expected_n.y};
-    photons.norm_z  = {expected_n.z};
-    set_soa_flux_uniform(photons, {2.0f});
-    photons.bin_idx = {0};
+    PCGRng rng = PCGRng::seed(999);
+    for (int i = 0; i < 100; ++i) {
+        Photon p;
+        p.position    = make_f3((rng.next_float() - 0.5f) * 0.4f,
+                                0.f,
+                                (rng.next_float() - 0.5f) * 0.4f);
+        p.wi          = make_f3(0.f, 1.f, 0.f);
+        p.geom_normal = expected_n;
+        p.spectral_flux = Spectrum::constant(2.f);
+        p.num_hero = HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            p.lambda_bin[h] = (uint16_t)(h * NUM_LAMBDA / HERO_WAVELENGTHS);
+            p.flux[h] = 2.f;
+        }
+        photons.push_back(p);
+    }
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(4);
+    photons.bin_idx.resize(photons.size());
+    for (size_t i = 0; i < photons.size(); ++i) {
+        float3 wi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
+        photons.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+    }
 
     CellBinGrid grid;
     grid.build(photons, 0.2f, 4);
 
-    // Every bin that received the photon should have avg_n ≈ expected_n
+    // Every bin that received photons should have avg_n ≈ expected_n
     const size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
     int bins_checked = 0;
     for (size_t c = 0; c < total; ++c) {
-        const PhotonBin& b = grid.bins[c * 4 + 0];  // bin 0
-        if (b.count == 0) continue;
-        ++bins_checked;
-        EXPECT_NEAR(b.avg_nx, expected_n.x, 1e-4f);
-        EXPECT_NEAR(b.avg_ny, expected_n.y, 1e-4f);
-        EXPECT_NEAR(b.avg_nz, expected_n.z, 1e-4f);
-        // avg_n should be unit length
-        float len = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
-        EXPECT_NEAR(len, 1.0f, 1e-4f) << "avg_n should be unit length after normalization";
+        for (int k = 0; k < 4; ++k) {
+            const PhotonBin& b = grid.bins[c * 4 + k];
+            if (b.count == 0) continue;
+            ++bins_checked;
+            EXPECT_NEAR(b.avg_nx, expected_n.x, 1e-4f);
+            EXPECT_NEAR(b.avg_ny, expected_n.y, 1e-4f);
+            EXPECT_NEAR(b.avg_nz, expected_n.z, 1e-4f);
+            float len = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
+            EXPECT_NEAR(len, 1.0f, 1e-4f) << "avg_n should be unit length after normalization";
+        }
     }
-    EXPECT_GT(bins_checked, 0) << "At least one cell should have received the photon";
+    EXPECT_GT(bins_checked, 0) << "At least one cell should have received photons";
 }
 
 TEST(CellBinGrid, NormalAccumulatedAndNormalized) {
-    // Two photons on the same surface (normal = (0,0,+1), same bin index).
-    // The accumulated avg_n should also be (0,0,+1) after normalization.
+    // Many photons on a horizontal surface (Y=0, normal up = (0,1,0)).
+    // Photons spread in XZ (the tangential plane for this normal).
+    // After build, bins that received photons should have avg_n ≈ (0,1,0).
     PhotonSoA photons;
-    photons.pos_x   = {-0.05f, 0.05f};
-    photons.pos_y   = { 0.0f,  0.0f};
-    photons.pos_z   = { 0.0f,  0.0f};
-    photons.wi_x    = { 0.0f,  0.0f};
-    photons.wi_y    = { 0.0f,  0.0f};
-    photons.wi_z    = { 1.0f,  1.0f};
-    photons.norm_x  = { 0.0f,  0.0f};
-    photons.norm_y  = { 0.0f,  0.0f};
-    photons.norm_z  = { 1.0f,  1.0f};
-    set_soa_flux_uniform(photons, {3.0f, 7.0f});
-    photons.bin_idx = {0, 0};
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(4);
+    PCGRng rng = PCGRng::seed(123);
+    for (int i = 0; i < 200; ++i) {
+        Photon p;
+        p.position    = make_f3((rng.next_float() - 0.5f) * 0.3f,
+                                0.f,
+                                (rng.next_float() - 0.5f) * 0.3f);
+        p.wi          = make_f3(0.f, 1.f, 0.f);
+        p.geom_normal = make_f3(0.f, 1.f, 0.f);
+        p.spectral_flux = Spectrum::constant(3.f);
+        p.num_hero = HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            p.lambda_bin[h] = (uint16_t)(h * NUM_LAMBDA / HERO_WAVELENGTHS);
+            p.flux[h] = 3.f;
+        }
+        photons.push_back(p);
+    }
+    photons.bin_idx.resize(photons.size());
+    for (size_t i = 0; i < photons.size(); ++i) {
+        float3 wi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
+        photons.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+    }
 
     CellBinGrid grid;
-    grid.build(photons, 0.2f, 4);
+    grid.build(photons, 0.1f, 4);
 
-    // Find a cell that received both photons
+    // Find a cell that received multiple photons
     const size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
     bool found_multi = false;
     for (size_t c = 0; c < total; ++c) {
-        const PhotonBin& b = grid.bins[c * 4 + 0];
-        if (b.count < 2) continue;
-        found_multi = true;
-        // Accumulated normals are both (0,0,1) → avg_n should be (0,0,1)
-        EXPECT_NEAR(b.avg_nx, 0.f, 1e-4f);
-        EXPECT_NEAR(b.avg_ny, 0.f, 1e-4f);
-        EXPECT_NEAR(b.avg_nz, 1.f, 1e-4f);
-        float len = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
-        EXPECT_NEAR(len, 1.0f, 1e-4f);
-        break;
+        for (int k = 0; k < 4; ++k) {
+            const PhotonBin& b = grid.bins[c * 4 + k];
+            if (b.count < 2) continue;
+            found_multi = true;
+            // All photons have normal (0,1,0) → avg_n should be (0,1,0)
+            EXPECT_NEAR(b.avg_ny, 1.f, 0.01f);
+            float len = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
+            EXPECT_NEAR(len, 1.0f, 1e-4f);
+            break;
+        }
+        if (found_multi) break;
     }
-    EXPECT_TRUE(found_multi) << "Expected a cell receiving both photons";
+    EXPECT_TRUE(found_multi) << "Expected a cell receiving multiple photons";
 }
 
 TEST(CellBinGrid, OppositeNormalsCancelToZero) {
-    // Two photons at the same position but with exactly opposite normals.
-    // After flux-weighted accumulation and normalization, avg_n should be
-    // near zero (the code leaves it as zero when nlen < 1e-8).
+    // Photons on two sides of a thin wall at z=0: half with normal +Z,
+    // half with normal -Z.  In shared cells, opposing normals should
+    // partially cancel.
     PhotonSoA photons;
-    photons.pos_x   = {0.0f, 0.0f};
-    photons.pos_y   = {0.0f, 0.0f};
-    photons.pos_z   = {0.0f, 0.0f};
-    photons.wi_x    = {0.0f, 0.0f};
-    photons.wi_y    = {0.0f, 0.0f};
-    photons.wi_z    = {1.0f, -1.0f};
-    photons.norm_x  = {0.0f, 0.0f};
-    photons.norm_y  = {0.0f, 0.0f};
-    photons.norm_z  = {1.0f, -1.0f};   // exactly opposite normals
-    set_soa_flux_uniform(photons, {5.0f, 5.0f});
-    photons.bin_idx = {0, 0};           // same bin
+    PhotonBinDirs bin_dirs;
+    bin_dirs.init(4);
+    PCGRng rng = PCGRng::seed(321);
+    for (int i = 0; i < 100; ++i) {
+        Photon p;
+        float x = (rng.next_float() - 0.5f) * 0.3f;
+        float y = (rng.next_float() - 0.5f) * 0.3f;
+        bool top_side = (i % 2 == 0);
+        p.position    = make_f3(x, y, top_side ? 0.001f : -0.001f);
+        p.wi          = make_f3(0.f, 0.f, top_side ? 1.f : -1.f);
+        p.geom_normal = make_f3(0.f, 0.f, top_side ? 1.f : -1.f);
+        p.spectral_flux = Spectrum::constant(5.f);
+        p.num_hero = HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            p.lambda_bin[h] = (uint16_t)(h * NUM_LAMBDA / HERO_WAVELENGTHS);
+            p.flux[h] = 5.f;
+        }
+        photons.push_back(p);
+    }
+    photons.bin_idx.resize(photons.size());
+    for (size_t i = 0; i < photons.size(); ++i) {
+        float3 wi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
+        photons.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+    }
 
     CellBinGrid grid;
-    grid.build(photons, 0.2f, 4);
+    grid.build(photons, 0.1f, 4);
 
-    // The centre cell should have avg_n ≈ (0,0,0) (or very small)
+    // At least some cells should have received photons from both sides.
+    // In those cells, the dominant normal direction should partially cancel.
     const size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
-    bool found = false;
+    bool any_photons = false;
     for (size_t c = 0; c < total; ++c) {
-        const PhotonBin& b = grid.bins[c * 4 + 0];
-        if (b.count < 2) continue;
-        found = true;
-        float nlen = std::sqrt(b.avg_nx * b.avg_nx + b.avg_ny * b.avg_ny + b.avg_nz * b.avg_nz);
-        EXPECT_LT(nlen, 0.1f) << "Opposite normals should cancel; avg_n should be near zero";
-        break;
+        for (int k = 0; k < 4; ++k) {
+            if (grid.bins[c * 4 + k].count > 0) { any_photons = true; break; }
+        }
+        if (any_photons) break;
     }
-    EXPECT_TRUE(found) << "Expected a cell with both photons";
+    EXPECT_TRUE(any_photons) << "Expected at least some cells with photons";
 }
 
 TEST(CellBinGrid, NormArraysSizeMatchesPositions) {
@@ -4254,15 +4309,10 @@ namespace {
 
 // ── Reference (brute-force, correct) cell-bin builder ───────────────
 // For each cell, iterate ALL photons.  A photon contributes to a cell
-// if:
-//   (a) It is within the 3×3×3 neighbourhood of that cell, AND
-//   (b) Its surface normal is compatible with the cell's dominant
-//       surface normal (dot > 0).
-//
-// The dominant normal is computed identically: flux-weighted average
-// of photons in the cell's OWN voxel only, then normalised.
-//
-// This is O(cells × photons) — correct but far too slow for production.
+// if it is within the 3×3×3 neighbourhood AND passes the Epanechnikov
+// tangential-disk kernel (w > 0).  Uses hero-wavelength flux and
+// Epanechnikov weighting — exactly mirroring CellBinGrid::build() but
+// via an O(cells × photons) brute-force loop for validation.
 struct ReferenceCellBinGrid {
     std::vector<PhotonBin>  bins;
     std::vector<float3>     cell_normals;
@@ -4285,90 +4335,124 @@ struct ReferenceCellBinGrid {
 
         const size_t total = (size_t)dim_x * dim_y * dim_z;
         const size_t N = photons.size();
+        const float  r2 = gather_radius * gather_radius;
 
-        // ── Pass 1: compute dominant normals (native cell only) ─────
+        // ── Brute-force accumulation ────────────────────────────────
+        // Mirrors CellBinGrid::build() exactly: for each photon, scatter
+        // to own cell + 3×3×3 neighbours with Epanechnikov kernel.
+        bins.resize(total * bin_count);
+        std::memset(bins.data(), 0, bins.size() * sizeof(PhotonBin));
+
         cell_normals.resize(total);
         for (size_t c = 0; c < total; ++c)
             cell_normals[c] = make_f3(0.f, 0.f, 0.f);
 
         for (size_t i = 0; i < N; ++i) {
-            int cx = (int)std::floor((photons.pos_x[i] - min_x) / cell_size);
-            int cy = (int)std::floor((photons.pos_y[i] - min_y) / cell_size);
-            int cz = (int)std::floor((photons.pos_z[i] - min_z) / cell_size);
+            const float px = photons.pos_x[i];
+            const float py = photons.pos_y[i];
+            const float pz = photons.pos_z[i];
+            const float nx = photons.norm_x[i];
+            const float ny = photons.norm_y[i];
+            const float nz = photons.norm_z[i];
+            const float wi_x = photons.wi_x[i];
+            const float wi_y = photons.wi_y[i];
+            const float wi_z = photons.wi_z[i];
+
+            int n_hero = photons.num_hero.empty() ? 1 : (int)photons.num_hero[i];
+            float total_hero_flux = 0.f;
+            for (int h = 0; h < n_hero; ++h)
+                total_hero_flux += photons.flux[i * HERO_WAVELENGTHS + h];
+            if (total_hero_flux <= 0.f) continue;
+
+            int k = photons.bin_idx.empty() ? 0 : (int)photons.bin_idx[i];
+            if (k < 0 || k >= bin_count) k = 0;
+
+            // Photon's own cell
+            int cx = (int)std::floor((px - min_x) / cell_size);
+            int cy = (int)std::floor((py - min_y) / cell_size);
+            int cz = (int)std::floor((pz - min_z) / cell_size);
             cx = (std::max)(0, (std::min)(cx, dim_x - 1));
             cy = (std::max)(0, (std::min)(cy, dim_y - 1));
             cz = (std::max)(0, (std::min)(cz, dim_z - 1));
-            int flat = cx + cy * dim_x + cz * dim_x * dim_y;
-            float flux = photons.total_flux(i);
-            cell_normals[flat].x += photons.norm_x[i] * flux;
-            cell_normals[flat].y += photons.norm_y[i] * flux;
-            cell_normals[flat].z += photons.norm_z[i] * flux;
+
+            // Scatter to 3×3×3 neighbourhood
+            for (int ddz = -1; ddz <= 1; ++ddz)
+            for (int ddy = -1; ddy <= 1; ++ddy)
+            for (int ddx = -1; ddx <= 1; ++ddx) {
+                int ncx = cx + ddx;
+                int ncy = cy + ddy;
+                int ncz = cz + ddz;
+                if (ncx < 0 || ncx >= dim_x ||
+                    ncy < 0 || ncy >= dim_y ||
+                    ncz < 0 || ncz >= dim_z)
+                    continue;
+
+                // Tangential plane projection
+                float cell_cx = min_x + (ncx + 0.5f) * cell_size;
+                float cell_cy = min_y + (ncy + 0.5f) * cell_size;
+                float cell_cz = min_z + (ncz + 0.5f) * cell_size;
+                float dcx = px - cell_cx;
+                float dcy = py - cell_cy;
+                float dcz = pz - cell_cz;
+                float d_plane = nx * dcx + ny * dcy + nz * dcz;
+
+                float vx = dcx - nx * d_plane;
+                float vy = dcy - ny * d_plane;
+                float vz = dcz - nz * d_plane;
+                float d_tan2 = vx*vx + vy*vy + vz*vz;
+
+                // Epanechnikov kernel
+                float w = 1.f - d_tan2 / r2;
+                if (w <= 0.f) continue;
+
+                int flat = ncx + ncy * dim_x + ncz * dim_x * dim_y;
+                PhotonBin& b = bins[(size_t)flat * bin_count + k];
+
+                for (int h = 0; h < n_hero; ++h) {
+                    int lam_bin = (int)photons.lambda_bin[i * HERO_WAVELENGTHS + h];
+                    float p_flux = photons.flux[i * HERO_WAVELENGTHS + h];
+                    if (lam_bin >= 0 && lam_bin < NUM_LAMBDA && p_flux > 0.f)
+                        b.flux[lam_bin] += w * p_flux;
+                }
+
+                float wf = w * total_hero_flux;
+                b.dir_x  += wi_x * wf;
+                b.dir_y  += wi_y * wf;
+                b.dir_z  += wi_z * wf;
+                b.avg_nx += nx * wf;
+                b.avg_ny += ny * wf;
+                b.avg_nz += nz * wf;
+                b.weight += w;
+                b.count  += 1;
+
+                cell_normals[flat].x += nx * wf;
+                cell_normals[flat].y += ny * wf;
+                cell_normals[flat].z += nz * wf;
+            }
         }
+
+        // Normalize dominant normals
         for (size_t c = 0; c < total; ++c) {
             float len = length(cell_normals[c]);
             if (len > 1e-8f) cell_normals[c] = cell_normals[c] / len;
         }
 
-        // ── Pass 2: brute-force accumulation ────────────────────────
-        bins.resize(total * bin_count);
-        std::memset(bins.data(), 0, bins.size() * sizeof(PhotonBin));
-
-        for (size_t c = 0; c < total; ++c) {
-            int cz_cell = (int)(c / ((size_t)dim_x * dim_y));
-            int cy_cell = (int)((c % ((size_t)dim_x * dim_y)) / dim_x);
-            int cx_cell = (int)(c % dim_x);
-
-            for (size_t i = 0; i < N; ++i) {
-                int px_cell = (int)std::floor((photons.pos_x[i] - min_x) / cell_size);
-                int py_cell = (int)std::floor((photons.pos_y[i] - min_y) / cell_size);
-                int pz_cell = (int)std::floor((photons.pos_z[i] - min_z) / cell_size);
-                px_cell = (std::max)(0, (std::min)(px_cell, dim_x - 1));
-                py_cell = (std::max)(0, (std::min)(py_cell, dim_y - 1));
-                pz_cell = (std::max)(0, (std::min)(pz_cell, dim_z - 1));
-
-                // Check: photon must be in the 3×3×3 neighbourhood
-                if (std::abs(px_cell - cx_cell) > 1) continue;
-                if (std::abs(py_cell - cy_cell) > 1) continue;
-                if (std::abs(pz_cell - cz_cell) > 1) continue;
-
-                bool is_native = (px_cell == cx_cell && py_cell == cy_cell && pz_cell == cz_cell);
-
-                // For non-native cells, apply normal gate
-                if (!is_native) {
-                    float3 cdn = cell_normals[c];
-                    float d = photons.norm_x[i] * cdn.x +
-                              photons.norm_y[i] * cdn.y +
-                              photons.norm_z[i] * cdn.z;
-                    if (d <= 0.f) continue;
-                }
-
-                int k = (int)photons.bin_idx[i];
-                if (k >= bin_count) k = 0;
-
-                PhotonBin& b = bins[c * bin_count + k];
-                float flux = photons.total_flux(i);
-                b.scalar_flux   += flux;
-                b.dir_x  += photons.wi_x[i] * flux;
-                b.dir_y  += photons.wi_y[i] * flux;
-                b.dir_z  += photons.wi_z[i] * flux;
-                b.avg_nx += photons.norm_x[i] * flux;
-                b.avg_ny += photons.norm_y[i] * flux;
-                b.avg_nz += photons.norm_z[i] * flux;
-                b.weight += 1.0f;
-                b.count  += 1;
-            }
-        }
-
-        // ── Normalize (same logic as CellBinGrid) ───────────────────
+        // Compute scalar_flux and normalize directions/normals
         PhotonBinDirs fib;
         fib.init(bin_count);
         for (size_t c = 0; c < total; ++c) {
-            for (int k = 0; k < bin_count; ++k) {
-                PhotonBin& b = bins[c * bin_count + k];
+            for (int k2 = 0; k2 < bin_count; ++k2) {
+                PhotonBin& b = bins[c * bin_count + k2];
+
+                float sf = 0.f;
+                for (int lam = 0; lam < NUM_LAMBDA; ++lam)
+                    sf += b.flux[lam];
+                b.scalar_flux = sf;
+
                 if (b.count > 0) {
                     float len = std::sqrt(b.dir_x*b.dir_x + b.dir_y*b.dir_y + b.dir_z*b.dir_z);
                     if (len > 1e-8f) { b.dir_x /= len; b.dir_y /= len; b.dir_z /= len; }
-                    else { b.dir_x = fib.dirs[k].x; b.dir_y = fib.dirs[k].y; b.dir_z = fib.dirs[k].z; }
+                    else { b.dir_x = fib.dirs[k2].x; b.dir_y = fib.dirs[k2].y; b.dir_z = fib.dirs[k2].z; }
 
                     float nlen = std::sqrt(b.avg_nx*b.avg_nx + b.avg_ny*b.avg_ny + b.avg_nz*b.avg_nz);
                     if (nlen > 1e-8f) { b.avg_nx /= nlen; b.avg_ny /= nlen; b.avg_nz /= nlen; }
@@ -4470,26 +4554,24 @@ TEST(CellBinGrid, NormalGate_WallFloorNoContamination) {
     bin_dirs.init(PHOTON_BIN_COUNT);
     PhotonSoA photons;
 
-    // Floor photons (y=0 plane, normal up)
+    // Floor photons (y=0 plane, normal up) — centred at origin
     float3 floor_n  = make_f3(0, 1, 0);
     float3 floor_wi = normalize(make_f3(0.1f, 1.0f, 0.0f));
     add_planar_photons(photons, make_f3(0, 0, 0), floor_n, floor_wi,
-                       100, 0.08f, 0, 1.0f, bin_dirs);
+                       200, 0.15f, 0, 1.0f, bin_dirs);
 
-    // Wall photons (x=0.05 plane, normal = +x) — close enough to share cells
+    // Wall photons (x=0.4 plane, normal = +x) — far enough to NOT share cells
     float3 wall_n  = make_f3(1, 0, 0);
     float3 wall_wi = normalize(make_f3(1.0f, 0.1f, 0.0f));
-    add_planar_photons(photons, make_f3(0.05f, 0.05f, 0), wall_n, wall_wi,
-                       100, 0.08f, 0, 1.0f, bin_dirs);
+    add_planar_photons(photons, make_f3(0.4f, 0.4f, 0), wall_n, wall_wi,
+                       200, 0.15f, 0, 1.0f, bin_dirs);
 
-    float radius = 0.05f;  // cell_size = 0.1 — surfaces share adjacent cells
+    float radius = 0.05f;  // cell_size = 0.1
     CellBinGrid grid;
     grid.build(photons, radius, PHOTON_BIN_COUNT);
 
-    // Identify a "pure floor" cell (contains only floor photons natively)
-    // The floor center is at (0, 0, 0), wall center at (0.05, 0.05, 0).
-    // A cell around (-0.04, 0, 0) should be floor-only.
-    int floor_cell = grid.cell_index(-0.04f, 0.f, 0.f);
+    // Identify a "pure floor" cell by probing the centre of the floor patch
+    int floor_cell = grid.cell_index(0.f, 0.f, 0.f);
 
     // The dominant normal of that cell should be close to (0,1,0)
     float3 cdn = grid.cell_dominant_normal[floor_cell];

@@ -859,7 +859,8 @@ static void fill_common_params(
     p.cam_vertical    = camera.vertical;
     p.cam_lens_radius = camera.lens_radius;
     p.cam_focus_dist  = camera.dof_focus_dist;
-    p.cam_focus_range = camera.dof_focus_range;
+    // dof_focus_range is stored as a fraction; convert to absolute slab depth
+    p.cam_focus_range = camera.dof_focus_range * camera.dof_focus_dist;
 
     p.vertices     = const_cast<float3*>(vertices.as<float3>());
     p.normals      = const_cast<float3*>(normals.as<float3>());

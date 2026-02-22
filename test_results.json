@@ -1,0 +1,182 @@
+{
+  "tests": 16,
+  "failures": 0,
+  "disabled": 0,
+  "errors": 0,
+  "timestamp": "2026-02-22T04:25:10Z",
+  "time": "0.026s",
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "CellBinGrid",
+      "tests": 16,
+      "failures": 0,
+      "disabled": 0,
+      "errors": 0,
+      "timestamp": "2026-02-22T04:25:10Z",
+      "time": "0.025s",
+      "testsuite": [
+        {
+          "name": "BuildBasic",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 3631,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "CellIndexClampedAtBounds",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 3659,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "ScatterTo27Neighbors",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 3688,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0.001s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "EmptyPhotons",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 3736,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "SinglePhotonNormalPreserved",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 3991,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalAccumulatedAndNormalized",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4042,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "OppositeNormalsCancelToZero",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4093,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormArraysSizeMatchesPositions",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4139,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_SinglePlaneSameAsReference",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4510,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0.001s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_WallFloorNoContamination",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4552,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0.004s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_BackToBackWalls",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4625,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0.001s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_NormalsAndDirectionsPreserved",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4667,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0.001s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_EmptyCellBlocksScatter",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4705,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_ThreeSurfaceCorner",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4737,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0.002s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_DominantNormalCorrectness",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4781,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0s",
+          "classname": "CellBinGrid"
+        },
+        {
+          "name": "NormalGate_FluxConservation_SingleSurface",
+          "file": "D:\\Dev\\photon_path_tracer\\photon_path_tracer\\tests\\test_main.cpp",
+          "line": 4818,
+          "status": "RUN",
+          "result": "COMPLETED",
+          "timestamp": "2026-02-22T04:25:10Z",
+          "time": "0.003s",
+          "classname": "CellBinGrid"
+        }
+      ]
+    }
+  ]
+}

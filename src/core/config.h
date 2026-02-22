@@ -30,12 +30,12 @@
 
 // Image dimensions in pixels.
 //   Preview: 512×512  |  Default: 1024×768  |  Final: 1920×1080+
-constexpr int DEFAULT_IMAGE_WIDTH  = 1024;
-constexpr int DEFAULT_IMAGE_HEIGHT = 768;
+constexpr int DEFAULT_IMAGE_WIDTH  = 1920;
+constexpr int DEFAULT_IMAGE_HEIGHT = 1080;
 
 // Samples per pixel (anti-aliasing + noise averaging).
 //   Preview: 1–4  |  Default: 16–64  |  Final: 64–256
-constexpr int DEFAULT_SPP = 32;
+constexpr int DEFAULT_SPP = 64;
 
 // Stratified sub-pixel jitter grid (§7.1).
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP (one sample per stratum).
@@ -59,8 +59,8 @@ constexpr int HERO_WAVELENGTHS = 4;
 // longer precomputation.  The photon map carries ALL multi-bounce
 // indirect transport in v2.
 //   Preview: 50k–200k  |  Default: 500k–1M  |  Final: 1M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;  // diffuse indirect photons
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // specular→diffuse caustic photons
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 10000000;  // diffuse indirect photons
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 5000000;   // specular→diffuse caustic photons
 
 // ── Photon path depth (§5.2) ────────────────────────────────────────
 // Maximum bounce depth for photon rays (the real path tracers in v2).
@@ -97,7 +97,7 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 // 90° = full hemisphere (Lambertian).  60° = 120° FOV (directional,
 // e.g. sunlight through windows).  Shared by CPU emitter.h
 // and GPU __raygen__photon_trace.
-constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
+constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 60.0f;
 
 // Debug: stop photon after first intersection (validate emission only).
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
@@ -247,7 +247,7 @@ constexpr bool  DEFAULT_DOF_ENABLED        = false;
 constexpr float DEFAULT_DOF_FOCUS_DISTANCE = 0.1f;    // distance to focus plane (scene units)
 constexpr float DEFAULT_DOF_F_NUMBER       = 8.0f;    // f-stop: lower = shallower DOF.  Range: 1.4–22
 constexpr float DEFAULT_DOF_SENSOR_HEIGHT  = 0.024f;  // sensor height in meters (0.024 = 24 mm full-frame)
-constexpr float DEFAULT_DOF_FOCUS_RANGE    = 0.2f;    // in-focus slab depth (scene units). 0 = razor-thin
+constexpr float DEFAULT_DOF_FOCUS_RANGE    = 0.05f;   // fraction of focus distance that stays sharp (0.05 = 5%). 0 = razor-thin
 
 // =====================================================================
 // §7  PHOTON MAP PERSISTENCE (§20)
@@ -406,7 +406,7 @@ constexpr ComplexityPreset COMPLEXITY_PRESETS[3] = {
     // Medium: moderate geometry, balanced quality
     { 1000000, 250000, 0.10f, 0.05f, 64, 4, 64 },
     // High:   complex geometry, high photon budget for coverage
-    { 2000000, 500000, 0.10f, 0.05f, 32, 6, 32 },
+    { 2000000, 500000, 0.10f, 0.05f, 64, 6, 64 },
 };
 
 // ── Runtime scene profile (for hotkey scene switching) ──────────────

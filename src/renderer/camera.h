@@ -20,7 +20,7 @@ struct Camera {
     float  dof_focus_dist  = DEFAULT_DOF_FOCUS_DISTANCE; // scene units
     float  dof_f_number    = DEFAULT_DOF_F_NUMBER;
     float  sensor_height   = DEFAULT_DOF_SENSOR_HEIGHT;  // metres (0.024 = 24 mm)
-    float  dof_focus_range = DEFAULT_DOF_FOCUS_RANGE;    // 0 = thin plane, >0 = in-focus slab depth
+    float  dof_focus_range = DEFAULT_DOF_FOCUS_RANGE;    // fraction of focus_dist that stays sharp (0.05 = 5%)
 
     // Derived DOF (computed by update())
     float  focal_length = 0.f;   // computed from sensor_height + fov_deg

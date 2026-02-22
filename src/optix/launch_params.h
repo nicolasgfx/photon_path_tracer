@@ -54,7 +54,7 @@ struct LaunchParams {
     float3 cam_vertical;
     float  cam_lens_radius;  // >0 enables thin-lens DOF
     float  cam_focus_dist;   // focus distance (scene units), needed for focus-range jitter
-    float  cam_focus_range;  // >0 widens the in-focus zone into a slab
+    float  cam_focus_range;  // absolute slab depth (scene units) around focus plane
 
     // Rendering parameters
     int    samples_per_pixel;

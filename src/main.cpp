@@ -336,11 +336,11 @@ static void render_help_overlay(int win_w, int win_h,
     // Build overlay text lines
     auto on_off = [](bool v) -> const char* { return v ? "ON " : "off"; };
 
-    // Scale text 2x for readability
-    float scale = 2.f;
+    // Scale text 1.6x for readability
+    float scale = 1.6f;
     float tx = bx + 12.f;
     float ty = by + 12.f;
-    float line_h = 14.f; // stb_easy_font is ~7px tall, scaled 2x = 14
+    float line_h = 11.2f; // stb_easy_font is ~7px tall, scaled 1.6x ≈ 11.2
 
     glPushMatrix();
     glTranslatef(tx, ty, 0.f);
