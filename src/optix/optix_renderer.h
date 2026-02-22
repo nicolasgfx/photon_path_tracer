@@ -320,6 +320,7 @@ private:
     DeviceBuffer d_ior_;
     DeviceBuffer d_mat_type_;
     DeviceBuffer d_diffuse_tex_;    // int [num_materials]
+    DeviceBuffer d_emission_tex_;   // int [num_materials]
 
     // Texture atlas (device)
     DeviceBuffer d_tex_atlas_;      // float [total_texels * 4]

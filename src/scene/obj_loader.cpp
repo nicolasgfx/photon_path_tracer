@@ -58,6 +58,48 @@ static FaceVertex parse_face_vertex(const std::string& token, int nv, int nvt, i
     return fv;
 }
 
+// ── Helper: load (or reuse) a texture by path ──────────────────────
+// Returns the texture index in scene.textures, or -1 on failure.
+static int load_or_reuse_texture(Scene& scene, const std::string& full_path,
+                                  const std::string& display_name,
+                                  int desired_channels = 4) {
+    // Deduplicate: if already loaded, return existing index
+    for (size_t ti = 0; ti < scene.textures.size(); ++ti) {
+        if (scene.textures[ti].path == full_path)
+            return (int)ti;
+    }
+    int w, h, c;
+    unsigned char* img = stbi_load(full_path.c_str(), &w, &h, &c, desired_channels);
+    if (!img) {
+        std::cerr << "[MTL] Failed to load texture: " << full_path << "\n";
+        return -1;
+    }
+    Texture tex;
+    tex.width    = w;
+    tex.height   = h;
+    tex.channels = desired_channels;
+    tex.path     = full_path;
+    tex.data.resize(w * h * desired_channels);
+    for (int p = 0; p < w * h * desired_channels; ++p)
+        tex.data[p] = img[p] / 255.0f;
+    stbi_image_free(img);
+    int idx = (int)scene.textures.size();
+    scene.textures.push_back(std::move(tex));
+    std::cout << "[MTL] Loaded texture: " << display_name
+              << " (" << w << "x" << h << ")\n";
+    return idx;
+}
+
+// ── Helper: resolve a texture path from the MTL line ────────────────
+static std::string resolve_tex_path(std::istringstream& ss,
+                                     const std::string& base_dir) {
+    std::string tex_path;
+    std::getline(ss >> std::ws, tex_path);
+    tex_path = trim(tex_path);
+    std::replace(tex_path.begin(), tex_path.end(), '\\', '/');
+    return base_dir + "/" + tex_path;
+}
+
 // ── Load MTL file ───────────────────────────────────────────────────
 static bool load_mtl(const std::string& filepath, Scene& scene,
                      std::unordered_map<std::string, uint32_t>& mat_map,
@@ -136,45 +178,64 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             // Store for deferred processing (Ks may not be parsed yet)
             illum_values[current_idx] = illum;
         }
+        else if (keyword == "Tf") {
+            float r, g, b;
+            ss >> r >> g >> b;
+            scene.materials[current_idx].Tf = rgb_to_spectrum_reflectance(r, g, b);
+        }
+        else if (keyword == "d") {
+            float d_val;
+            ss >> d_val;
+            scene.materials[current_idx].opacity = d_val;
+        }
+        else if (keyword == "Tr") {
+            float tr_val;
+            ss >> tr_val;
+            scene.materials[current_idx].opacity = 1.0f - tr_val;
+        }
+        else if (keyword == "Ka") {
+            // Ambient: irrelevant for GI renderer — parse and skip.
+            float r, g, b;
+            ss >> r >> g >> b;
+            (void)r; (void)g; (void)b;
+        }
         else if (keyword == "map_Kd") {
-            std::string tex_path;
-            std::getline(ss >> std::ws, tex_path);
-            tex_path = trim(tex_path);
-            // Normalize backslashes to forward slashes
-            std::replace(tex_path.begin(), tex_path.end(), '\\', '/');
-            std::string full_path = base_dir + "/" + tex_path;
-
-            // Check if this texture was already loaded
-            bool found = false;
-            for (size_t ti = 0; ti < scene.textures.size(); ++ti) {
-                if (scene.textures[ti].path == full_path) {
-                    scene.materials[current_idx].diffuse_tex = (int)ti;
-                    found = true;
-                    break;
+            std::string full_path = resolve_tex_path(ss, base_dir);
+            int ti = load_or_reuse_texture(scene, full_path, full_path);
+            if (ti >= 0) scene.materials[current_idx].diffuse_tex = ti;
+        }
+        else if (keyword == "map_Ks") {
+            std::string full_path = resolve_tex_path(ss, base_dir);
+            int ti = load_or_reuse_texture(scene, full_path, full_path);
+            if (ti >= 0) scene.materials[current_idx].specular_tex = ti;
+        }
+        else if (keyword == "map_d") {
+            std::string full_path = resolve_tex_path(ss, base_dir);
+            // Alpha mask — load as RGBA (R channel used as alpha)
+            int ti = load_or_reuse_texture(scene, full_path, full_path, 4);
+            if (ti >= 0) scene.materials[current_idx].alpha_tex = ti;
+        }
+        else if (keyword == "map_Ke") {
+            std::string full_path = resolve_tex_path(ss, base_dir);
+            int ti = load_or_reuse_texture(scene, full_path, full_path);
+            if (ti >= 0) {
+                scene.materials[current_idx].emission_tex = ti;
+                // Ensure material is flagged as emissive even if Ke is (0,0,0)
+                if (scene.materials[current_idx].Le.max_component() == 0.f) {
+                    scene.materials[current_idx].Le = Spectrum::constant(1.0f);
+                    scene.materials[current_idx].type = MaterialType::Emissive;
                 }
             }
-            if (!found) {
-                int w, h, c;
-                unsigned char* img = stbi_load(full_path.c_str(), &w, &h, &c, 4);
-                if (img) {
-                    Texture tex;
-                    tex.width    = w;
-                    tex.height   = h;
-                    tex.channels = 4;
-                    tex.path     = full_path;
-                    tex.data.resize(w * h * 4);
-                    // Convert to float [0,1]
-                    for (int p = 0; p < w * h * 4; ++p)
-                        tex.data[p] = img[p] / 255.0f;
-                    stbi_image_free(img);
-                    scene.materials[current_idx].diffuse_tex = (int)scene.textures.size();
-                    scene.textures.push_back(std::move(tex));
-                    std::cout << "[MTL] Loaded texture: " << tex_path
-                              << " (" << w << "x" << h << ")\n";
-                } else {
-                    std::cerr << "[MTL] Failed to load texture: " << full_path << "\n";
-                }
-            }
+        }
+        else if (keyword == "map_bump" || keyword == "bump") {
+            std::string full_path = resolve_tex_path(ss, base_dir);
+            int ti = load_or_reuse_texture(scene, full_path, full_path);
+            if (ti >= 0) scene.materials[current_idx].bump_tex = ti;
+        }
+        else if (keyword == "map_Ka") {
+            // Ambient texture: parse path but don't use in rendering.
+            // Kept for future AO-like darkening if desired.
+            resolve_tex_path(ss, base_dir);
         }
     }
 

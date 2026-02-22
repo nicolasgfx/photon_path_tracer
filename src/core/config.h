@@ -36,7 +36,7 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 768;
 
 // Samples per pixel (anti-aliasing + noise averaging).
 //   Preview: 1–4  |  Default: 16–64  |  Final: 64–256
-constexpr int DEFAULT_SPP = 32;
+constexpr int DEFAULT_SPP = 64;
 
 // Stratified sub-pixel jitter grid (§7.1).
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP (one sample per stratum).
@@ -188,7 +188,7 @@ constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 2;
 // Shadow rays cast to light sources at the camera first-hit.
 // More = softer shadows, less noise.  First-hit only in v2.
 //   Preview: 4–8  |  Default: 16–64  |  Final: 64+
-constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 64;
+constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 16;
 
 // ── NEE coverage-aware sampling (§7.2.1) ────────────────────────────
 // Mixture weight between power-weighted and area-weighted emitter

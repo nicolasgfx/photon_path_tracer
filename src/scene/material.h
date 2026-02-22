@@ -35,11 +35,18 @@ struct Material {
     float         cauchy_B     = 4200.0f;  // dispersion coefficient (nm²)
     bool          dispersion   = false;    // enable wavelength-dependent IOR
 
+    // Opacity: 1.0 = fully opaque, 0.0 = fully transparent
+    // Maps to MTL "d" (dissolve).  "Tr" = 1 - d.
+    float         opacity      = 1.0f;
+
     // Texture IDs (−1 = none)
     int           diffuse_tex  = -1;
-    int           specular_tex = -1;
+    int           specular_tex = -1;   // map_Ks: per-texel specular
+    int           alpha_tex    = -1;   // map_d:  alpha mask texture
+    int           emission_tex = -1;   // map_Ke: emission texture
+    int           bump_tex     = -1;   // map_bump / bump: bump map
 
-    bool is_emissive() const { return Le.max_component() > 0.f; }
+    bool is_emissive() const { return Le.max_component() > 0.f || emission_tex >= 0; }
     bool is_specular() const {
         return type == MaterialType::Mirror || type == MaterialType::Glass;
     }

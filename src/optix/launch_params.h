@@ -83,6 +83,7 @@ struct LaunchParams {
     float*    ior;               // [num_materials]
     uint8_t*  mat_type;          // [num_materials]
     int*      diffuse_tex;        // [num_materials]  texture ID or -1
+    int*      emission_tex;       // [num_materials]  texture ID or -1 (map_Ke)
 
     // Texture atlas (flat RGBA float buffer, all textures concatenated)
     float*      tex_atlas;        // [total_texels * 4]

@@ -246,7 +246,13 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
     for (size_t m = 0; m < num_mats; ++m) {
         const Material& mat = scene.materials[m];
         for (int l = 0; l < NUM_LAMBDA; ++l) {
-            Kd[m * NUM_LAMBDA + l] = mat.Kd.value[l];
+            // For glass materials, the GPU uses the Kd slot as the
+            // transmittance filter (Tf).  Copy Tf into Kd so that
+            // dev_get_Kd() on the device returns the correct filter.
+            if (mat.type == MaterialType::Glass)
+                Kd[m * NUM_LAMBDA + l] = mat.Tf.value[l];
+            else
+                Kd[m * NUM_LAMBDA + l] = mat.Kd.value[l];
             Ks[m * NUM_LAMBDA + l] = mat.Ks.value[l];
             Le[m * NUM_LAMBDA + l] = mat.Le.value[l];
         }
@@ -267,6 +273,12 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
     for (size_t m = 0; m < num_mats; ++m)
         diffuse_tex[m] = scene.materials[m].diffuse_tex;
     d_diffuse_tex_.upload(diffuse_tex);
+
+    // Per-material emission texture ID (-1 = none)
+    std::vector<int> emission_tex(num_mats);
+    for (size_t m = 0; m < num_mats; ++m)
+        emission_tex[m] = scene.materials[m].emission_tex;
+    d_emission_tex_.upload(emission_tex);
 
     // Texture atlas: concatenate all textures into one flat RGBA float buffer
     size_t num_textures = scene.textures.size();
@@ -299,7 +311,8 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
         d_normals_.bytes + d_texcoords_.bytes + d_material_ids_.bytes +
         d_Kd_.bytes + d_Ks_.bytes + d_Le_.bytes +
         d_roughness_.bytes + d_ior_.bytes + d_mat_type_.bytes +
-        d_diffuse_tex_.bytes + d_tex_atlas_.bytes + d_tex_descs_.bytes;
+        d_diffuse_tex_.bytes + d_emission_tex_.bytes +
+        d_tex_atlas_.bytes + d_tex_descs_.bytes;
     std::printf("[OptiX] Scene data: %zu mats  %zu tris  %zu textures  total=%.2f MB\n",
                 num_mats, num_tris, num_textures,
                 (double)scene_bytes / (1024.0 * 1024.0));
@@ -479,6 +492,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.ior               = d_ior_.as<float>();
     lp.mat_type          = d_mat_type_.as<uint8_t>();
     lp.diffuse_tex       = d_diffuse_tex_.d_ptr ? d_diffuse_tex_.as<int>() : nullptr;
+    lp.emission_tex      = d_emission_tex_.d_ptr ? d_emission_tex_.as<int>() : nullptr;
     lp.tex_atlas         = d_tex_atlas_.d_ptr   ? d_tex_atlas_.as<float>() : nullptr;
     lp.tex_descs         = d_tex_descs_.d_ptr   ? d_tex_descs_.as<GpuTexDesc>() : nullptr;
     lp.num_textures      = (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc));

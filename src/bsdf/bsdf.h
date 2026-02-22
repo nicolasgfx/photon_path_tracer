@@ -164,21 +164,22 @@ inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng) {
     bool do_reflect = (rng.next_float() < F);
 
     if (do_reflect) {
-        // Reflect
+        // Reflect — Tf is NOT applied to reflection.  Fresnel reflection
+        // off a dielectric surface is colour-neutral; only transmitted
+        // light is filtered by the glass body colour (Tf).
         s.wi = reflect_local(wo);
         s.pdf = F;
-        // Apply Tf to reflection (light passes through glass surface)
         if (mat.dispersion) {
             // Per-wavelength Fresnel weighting on reflection
             for (int b = 0; b < NUM_LAMBDA; ++b) {
                 float n_b  = mat.ior_at_lambda(lambda_of_bin(b));
                 float eta_b = entering ? (1.f / n_b) : n_b;
                 float F_b  = fresnel_dielectric(cos_i, eta_b);
-                s.f.value[b] = mat.Tf.value[b] * F_b / (fabsf(s.wi.z) + EPSILON);
+                s.f.value[b] = F_b / (fabsf(s.wi.z) + EPSILON);
             }
         } else {
             float base_factor = F / (fabsf(s.wi.z) + EPSILON);
-            s.f = mat.Tf * base_factor;
+            s.f = Spectrum::constant(base_factor);
         }
         s.is_specular = true;
     } else {
@@ -213,18 +214,20 @@ inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng) {
             }
             s.is_specular = true;
         } else {
-            // Total internal reflection fallback
+            // Total internal reflection fallback — no Tf (pure reflection)
             s.wi = reflect_local(wo);
             s.pdf = 1.f;
             float factor = 1.f / (fabsf(s.wi.z) + EPSILON);
-            s.f = mat.Tf * factor;
+            s.f = Spectrum::constant(factor);
             s.is_specular = true;
         }
     }
     return s;
 }
 
-// Legacy overload for backward compatibility (no material reference)
+// Legacy overload — DEPRECATED.  Use glass_sample(wo, mat, rng) instead.
+// Exists only for backward compatibility; creates a dummy Material with
+// neutral Tf and no dispersion.  External callers should migrate.
 inline HD BSDFSample glass_sample(float3 wo, float ior, PCGRng& rng) {
     Material m;
     m.ior = ior;

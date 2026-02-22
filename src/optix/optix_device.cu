@@ -157,6 +157,28 @@ float dev_get_ior(uint32_t mat_id) {
     return params.ior[mat_id];
 }
 
+// Sample any texture by texture ID at the given UV.
+// Returns linear RGB (0-1).  Falls back to (1,1,1) when no texture.
+__forceinline__ __device__
+float3 dev_sample_tex_by_id(int tex_id, float2 uv) {
+    if (tex_id < 0 || tex_id >= params.num_textures || params.tex_atlas == nullptr)
+        return make_f3(1.f, 1.f, 1.f);
+
+    GpuTexDesc desc = params.tex_descs[tex_id];
+    float u = uv.x - floorf(uv.x);
+    float v = uv.y - floorf(uv.y);
+    v = 1.f - v;
+    int ix = __float2int_rd(u * (float)desc.width)  % desc.width;
+    int iy = __float2int_rd(v * (float)desc.height) % desc.height;
+    if (ix < 0) ix += desc.width;
+    if (iy < 0) iy += desc.height;
+    int pixel = iy * desc.width + ix;
+    int base  = desc.offset + pixel * 4;
+    return make_f3(params.tex_atlas[base + 0],
+                   params.tex_atlas[base + 1],
+                   params.tex_atlas[base + 2]);
+}
+
 // Sample the flat texture atlas at the given UV for material mat_id.
 // Returns linear RGB (0-1).  Falls back to (0,0,0) when no texture.
 __forceinline__ __device__
@@ -196,11 +218,39 @@ Spectrum dev_get_Kd(uint32_t mat_id, float2 uv) {
     return s;
 }
 
+// Glass transmittance filter: base Tf (stored in Kd buffer) × diffuse texture.
+// When a glass material has a diffuse texture the texture colour modulates the
+// flat transmittance so that every texel can have its own spectral filter.
 __forceinline__ __device__
-Spectrum dev_get_Le(uint32_t mat_id) {
+Spectrum dev_get_Tf(uint32_t mat_id, float2 uv) {
+    // Base Tf lives in the Kd GPU buffer (uploaded from mat.Tf for glass)
+    Spectrum Tf;
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        Tf.value[i] = params.Kd[mat_id * NUM_LAMBDA + i];
+
+    // Modulate by diffuse texture when present
+    if (params.diffuse_tex != nullptr && params.diffuse_tex[mat_id] >= 0) {
+        float3 rgb = dev_sample_diffuse_tex(mat_id, uv);
+        Spectrum tex = rgb_to_spectrum_reflectance(rgb.x, rgb.y, rgb.z);
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            Tf.value[i] *= tex.value[i];
+    }
+    return Tf;
+}
+
+__forceinline__ __device__
+Spectrum dev_get_Le(uint32_t mat_id, float2 uv = make_float2(0.f, 0.f)) {
     Spectrum s;
     for (int i = 0; i < NUM_LAMBDA; ++i)
         s.value[i] = params.Le[mat_id * NUM_LAMBDA + i];
+    // Modulate by emission texture (map_Ke) when present.
+    // The texture acts as a spatial mask: bright texels emit, dark texels don't.
+    if (params.emission_tex != nullptr && params.emission_tex[mat_id] >= 0) {
+        float3 emi_rgb = dev_sample_tex_by_id(params.emission_tex[mat_id], uv);
+        float emi_lum = 0.2126f * emi_rgb.x + 0.7152f * emi_rgb.y + 0.0722f * emi_rgb.z;
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            s.value[i] *= emi_lum;
+    }
     return s;
 }
 
@@ -1201,7 +1251,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
 
     // Emission
     if (dev_is_emissive(mat_id))
-        return dev_get_Le(mat_id);
+        return dev_get_Le(mat_id, hit.uv);
 
     // Specular: one bounce then direct lighting
     float3 cur_pos = hit.position;
@@ -1213,19 +1263,50 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
 
     for (int bounce = 0; bounce < DEFAULT_MAX_SPECULAR_CHAIN; ++bounce) {
         if (!dev_is_specular(cur_mat)) break;
-        // Mirror reflection
-        cur_dir = cur_dir - cur_normal * (2.f * dot(cur_dir, cur_normal));
-        cur_pos = cur_pos + cur_normal * OPTIX_SCENE_EPSILON;
+
+        if (dev_is_glass(cur_mat)) {
+            // Glass: Fresnel reflect/refract (same logic as full_path_trace)
+            float eta = dev_get_ior(cur_mat);
+            bool entering = dot(cur_dir, cur_normal) < 0.f;
+            float3 outward_n = entering ? cur_normal : cur_normal * (-1.f);
+            float ni_nt = entering ? (1.f / eta) : eta;
+            float cos_i = fabsf(dot(cur_dir, outward_n));
+            float sin2_t = ni_nt * ni_nt * (1.f - cos_i * cos_i);
+            float fresnel = 1.f;
+            if (sin2_t < 1.f) {
+                float cos_t = sqrtf(1.f - sin2_t);
+                float rs = (ni_nt * cos_i - cos_t) / (ni_nt * cos_i + cos_t);
+                float rp = (cos_i - ni_nt * cos_t) / (cos_i + ni_nt * cos_t);
+                fresnel = 0.5f * (rs * rs + rp * rp);
+            }
+            // Apply transmittance filter (Tf × diffuse texture)
+            Spectrum Tf = dev_get_Tf(cur_mat, cur_uv);
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                throughput_s.value[i] *= Tf.value[i];
+
+            if (rng.next_float() < fresnel) {
+                cur_dir = cur_dir - outward_n * (2.f * dot(cur_dir, outward_n));
+                cur_pos = cur_pos + outward_n * OPTIX_SCENE_EPSILON;
+            } else {
+                float3 refracted = cur_dir * ni_nt +
+                    outward_n * (ni_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
+                cur_dir = normalize(refracted);
+                cur_pos = cur_pos - outward_n * OPTIX_SCENE_EPSILON;
+            }
+        } else {
+            // Mirror: pure reflection
+            cur_dir = cur_dir - cur_normal * (2.f * dot(cur_dir, cur_normal));
+            cur_pos = cur_pos + cur_normal * OPTIX_SCENE_EPSILON;
+        }
+
         TraceResult hit2 = trace_radiance(cur_pos, cur_dir);
         if (!hit2.hit) return Spectrum::zero();
         if (dev_is_emissive(hit2.material_id))
-            return throughput_s * dev_get_Le(hit2.material_id);
+            return throughput_s * dev_get_Le(hit2.material_id, hit2.uv);
         cur_pos = hit2.position;
         cur_normal = hit2.shading_normal;
         cur_mat = hit2.material_id;
         cur_uv = hit2.uv;
-        Spectrum Kd = dev_get_Kd(cur_mat, cur_uv);
-        for (int i = 0; i < NUM_LAMBDA; ++i) throughput_s.value[i] *= Kd.value[i];
     }
 
     // Diffuse/glossy hit: direct lighting via next-event estimation
@@ -1270,7 +1351,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                 cur_dir = wi_world;
 
                 if (dev_is_emissive(cur_mat)) {
-                    L += glossy_tp * dev_get_Le(cur_mat);
+                    L += glossy_tp * dev_get_Le(cur_mat, hit_g.uv);
                     break;
                 }
 
@@ -1278,13 +1359,38 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                 if (dev_is_specular(cur_mat)) {
                     for (int s = 0; s < DEFAULT_MAX_SPECULAR_CHAIN; ++s) {
                         float3 n = hit_g.shading_normal;
-                        cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
-                        cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
+                        if (dev_is_glass(cur_mat)) {
+                            float eta = dev_get_ior(cur_mat);
+                            bool entering = dot(cur_dir, n) < 0.f;
+                            float3 outward_n = entering ? n : n * (-1.f);
+                            float ni_nt = entering ? (1.f / eta) : eta;
+                            float cos_i = fabsf(dot(cur_dir, outward_n));
+                            float sin2_t = ni_nt * ni_nt * (1.f - cos_i * cos_i);
+                            float fresnel = 1.f;
+                            if (sin2_t < 1.f) {
+                                float cos_t = sqrtf(1.f - sin2_t);
+                                float rs = (ni_nt * cos_i - cos_t) / (ni_nt * cos_i + cos_t);
+                                float rp = (cos_i - ni_nt * cos_t) / (cos_i + ni_nt * cos_t);
+                                fresnel = 0.5f * (rs * rs + rp * rp);
+                            }
+                            if (rng.next_float() < fresnel) {
+                                cur_dir = cur_dir - outward_n * (2.f * dot(cur_dir, outward_n));
+                                cur_pos = hit_g.position + outward_n * OPTIX_SCENE_EPSILON;
+                            } else {
+                                float3 refracted = cur_dir * ni_nt +
+                                    outward_n * (ni_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
+                                cur_dir = normalize(refracted);
+                                cur_pos = hit_g.position - outward_n * OPTIX_SCENE_EPSILON;
+                            }
+                        } else {
+                            cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
+                            cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
+                        }
                         hit_g = trace_radiance(cur_pos, cur_dir);
                         if (!hit_g.hit) goto debug_done;
                         cur_mat = hit_g.material_id;
                         if (dev_is_emissive(cur_mat)) {
-                            L += glossy_tp * dev_get_Le(cur_mat);
+                            L += glossy_tp * dev_get_Le(cur_mat, hit_g.uv);
                             goto debug_done;
                         }
                         if (!dev_is_specular(cur_mat)) break;
@@ -1365,7 +1471,14 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                     float pdf_solid_angle = pdf_tri * pdf_area / geom;
 
                     uint32_t light_mat = params.material_ids[light_tri];
-                    Spectrum Le = dev_get_Le(light_mat);
+                    // Interpolate UV at sampled light point for emission texture
+                    float2 luv0 = params.texcoords[light_tri * 3 + 0];
+                    float2 luv1 = params.texcoords[light_tri * 3 + 1];
+                    float2 luv2 = params.texcoords[light_tri * 3 + 2];
+                    float2 light_uv = make_float2(
+                        luv0.x * bary.x + luv1.x * bary.y + luv2.x * bary.z,
+                        luv0.y * bary.x + luv1.y * bary.y + luv2.y * bary.z);
+                    Spectrum Le = dev_get_Le(light_mat, light_uv);
 
                     // Use full BSDF for glossy surfaces, Lambertian otherwise
                     float3 wi_local = frame.world_to_local(wi);
@@ -1433,21 +1546,50 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
             cur_dir = refl_dir;
 
             if (dev_is_emissive(cur_mat)) {
-                L += glossy_tp * dev_get_Le(cur_mat);
+                L += glossy_tp * dev_get_Le(cur_mat, hit_g.uv);
                 break;
             }
 
-            // Follow specular chain if we hit a perfect mirror
+            // Follow specular chain if we hit mirror/glass
             if (dev_is_specular(cur_mat)) {
                 for (int s = 0; s < DEFAULT_MAX_SPECULAR_CHAIN; ++s) {
                     float3 n = hit_g.shading_normal;
-                    cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
-                    cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
+                    if (dev_is_glass(cur_mat)) {
+                        float eta = dev_get_ior(cur_mat);
+                        bool entering = dot(cur_dir, n) < 0.f;
+                        float3 outward_n = entering ? n : n * (-1.f);
+                        float ni_nt = entering ? (1.f / eta) : eta;
+                        float cos_i = fabsf(dot(cur_dir, outward_n));
+                        float sin2_t = ni_nt * ni_nt * (1.f - cos_i * cos_i);
+                        float fresnel = 1.f;
+                        if (sin2_t < 1.f) {
+                            float cos_t = sqrtf(1.f - sin2_t);
+                            float rs = (ni_nt * cos_i - cos_t) / (ni_nt * cos_i + cos_t);
+                            float rp = (cos_i - ni_nt * cos_t) / (cos_i + ni_nt * cos_t);
+                            fresnel = 0.5f * (rs * rs + rp * rp);
+                        }
+                        // Apply transmittance filter
+                        Spectrum Tf_gs = dev_get_Tf(cur_mat, hit_g.uv);
+                        for (int i = 0; i < NUM_LAMBDA; ++i)
+                            glossy_tp.value[i] *= Tf_gs.value[i];
+                        if (rng.next_float() < fresnel) {
+                            cur_dir = cur_dir - outward_n * (2.f * dot(cur_dir, outward_n));
+                            cur_pos = hit_g.position + outward_n * OPTIX_SCENE_EPSILON;
+                        } else {
+                            float3 refracted = cur_dir * ni_nt +
+                                outward_n * (ni_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
+                            cur_dir = normalize(refracted);
+                            cur_pos = hit_g.position - outward_n * OPTIX_SCENE_EPSILON;
+                        }
+                    } else {
+                        cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
+                        cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
+                    }
                     hit_g = trace_radiance(cur_pos, cur_dir);
                     if (!hit_g.hit) goto debug_done;
                     cur_mat = hit_g.material_id;
                     if (dev_is_emissive(cur_mat)) {
-                        L += glossy_tp * dev_get_Le(cur_mat);
+                        L += glossy_tp * dev_get_Le(cur_mat, hit_g.uv);
                         goto debug_done;
                     }
                     if (!dev_is_specular(cur_mat)) break;
@@ -1602,7 +1744,14 @@ NeeResult dev_nee_guided(float3 pos, float3 normal, float3 wo_local,
             p_guided = guided_cdf[local_idx] - guided_cdf[local_idx - 1];
 
         uint32_t light_mat = params.material_ids[light_tri];
-        Spectrum Le = dev_get_Le(light_mat);
+        // Interpolate UV at sampled light point for emission texture
+        float2 luv0 = params.texcoords[light_tri * 3 + 0];
+        float2 luv1 = params.texcoords[light_tri * 3 + 1];
+        float2 luv2 = params.texcoords[light_tri * 3 + 2];
+        float2 light_uv = make_float2(
+            luv0.x * bary.x + luv1.x * bary.y + luv2.x * bary.z,
+            luv0.y * bary.x + luv1.y * bary.y + luv2.y * bary.z);
+        Spectrum Le = dev_get_Le(light_mat, light_uv);
 
         float3 wi_local = frame.world_to_local(wi);
         Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
@@ -1736,7 +1885,14 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
         float p_tri = (1.0f - c) * p_power + c * p_uniform;
 
         uint32_t light_mat = params.material_ids[light_tri];
-        Spectrum Le = dev_get_Le(light_mat);
+        // Interpolate UV at sampled light point for emission texture
+        float2 luv0_b = params.texcoords[light_tri * 3 + 0];
+        float2 luv1_b = params.texcoords[light_tri * 3 + 1];
+        float2 luv2_b = params.texcoords[light_tri * 3 + 2];
+        float2 light_uv_b = make_float2(
+            luv0_b.x * bary.x + luv1_b.x * bary.y + luv2_b.x * bary.z,
+            luv0_b.y * bary.x + luv1_b.y * bary.y + luv2_b.y * bary.z);
+        Spectrum Le = dev_get_Le(light_mat, light_uv_b);
 
         float3 wi_local = frame.world_to_local(wi);
         Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
@@ -1910,7 +2066,14 @@ NeeResult dev_nee_cached(float3 pos, float3 normal, float3 wo_local,
 
         // Emission and BSDF
         uint32_t light_mat = params.material_ids[light_tri];
-        Spectrum Le = dev_get_Le(light_mat);
+        // Interpolate UV at sampled light point for emission texture
+        float2 luv0_c = params.texcoords[light_tri * 3 + 0];
+        float2 luv1_c = params.texcoords[light_tri * 3 + 1];
+        float2 luv2_c = params.texcoords[light_tri * 3 + 2];
+        float2 light_uv_c = make_float2(
+            luv0_c.x * bary.x + luv1_c.x * bary.y + luv2_c.x * bary.z,
+            luv0_c.y * bary.x + luv1_c.y * bary.y + luv2_c.y * bary.z);
+        Spectrum Le = dev_get_Le(light_mat, light_uv_c);
 
         float3 wi_local = frame.world_to_local(wi);
         Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
@@ -2014,8 +2177,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
 
         // Emission: only on first bounce (camera sees a light)
         if (dev_is_emissive(mat_id) && bounce == 0) {
-            result.combined  += throughput * dev_get_Le(mat_id);
-            result.nee_direct += throughput * dev_get_Le(mat_id);
+            result.combined  += throughput * dev_get_Le(mat_id, hit.uv);
+            result.nee_direct += throughput * dev_get_Le(mat_id, hit.uv);
             break;
         }
         if (dev_is_emissive(mat_id)) break;  // specular chain hit a light
@@ -2040,9 +2203,9 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
                     fresnel = 0.5f * (rs * rs + rp * rp);
                 }
 
-                Spectrum Kd = dev_get_Kd(mat_id, hit.uv);
+                Spectrum Tf = dev_get_Tf(mat_id, hit.uv);
                 for (int i = 0; i < NUM_LAMBDA; ++i)
-                    throughput.value[i] *= Kd.value[i];
+                    throughput.value[i] *= Tf.value[i];
 
                 if (rng.next_float() < fresnel) {
                     direction = direction - outward_normal * (2.f * dot(direction, outward_normal));
@@ -2153,7 +2316,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             // The MIS weight scales this down when NEE would have had high
             // probability to reach this same emitter (p_nee >> pdf_bsdf).
             if (dev_is_emissive(mat_id)) {
-                Spectrum Le = dev_get_Le(mat_id);
+                Spectrum Le = dev_get_Le(mat_id, hit.uv);
                 float w_bsdf = 1.0f;
                 if (DEFAULT_USE_MIS) {
                     // p_nee: solid-angle PDF that the NEE strategy would assign
@@ -2187,9 +2350,9 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
                             float rp = (cos_in - ni_nt * cos_t) / (cos_in + ni_nt * cos_t);
                             fresnel = 0.5f * (rs * rs + rp * rp);
                         }
-                        Spectrum Kd_g = dev_get_Kd(mat_id, hit.uv);
+                        Spectrum Tf_g = dev_get_Tf(mat_id, hit.uv);
                         for (int i = 0; i < NUM_LAMBDA; ++i)
-                            throughput.value[i] *= Kd_g.value[i];
+                            throughput.value[i] *= Tf_g.value[i];
                         if (rng.next_float() < fresnel) {
                             direction = direction - outward_n * (2.f * dot(direction, outward_n));
                             origin = hit.position + outward_n * OPTIX_SCENE_EPSILON;
@@ -2210,8 +2373,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
                     if (!hit.hit) goto done;
                     mat_id = hit.material_id;
                     if (dev_is_emissive(mat_id)) {
-                        result.combined   += throughput * dev_get_Le(mat_id);
-                        result.nee_direct += throughput * dev_get_Le(mat_id);
+                        result.combined   += throughput * dev_get_Le(mat_id, hit.uv);
+                        result.nee_direct += throughput * dev_get_Le(mat_id, hit.uv);
                         goto done;
                     }
                     if (!dev_is_specular(mat_id)) break;  // fell through to diffuse/glossy
@@ -2542,7 +2705,14 @@ extern "C" __global__ void __raygen__photon_trace() {
     // 4. Sample HERO_WAVELENGTHS stratified wavelength bins
     //    Hero = sampled from Le CDF; companions at stratified offsets
     //    (Wilkie et al. 2002 / PBRT v4 style)
-    Spectrum Le = dev_get_Le(mat_id);
+    // Interpolate UV at emitter sample point for emission texture
+    float2 euv0 = params.texcoords[tri_idx * 3 + 0];
+    float2 euv1 = params.texcoords[tri_idx * 3 + 1];
+    float2 euv2 = params.texcoords[tri_idx * 3 + 2];
+    float2 emit_uv = make_float2(
+        euv0.x * bary.x + euv1.x * bary.y + euv2.x * bary.z,
+        euv0.y * bary.x + euv1.y * bary.y + euv2.y * bary.z);
+    Spectrum Le = dev_get_Le(mat_id, emit_uv);
     float Le_sum = 0.f;
     for (int i = 0; i < NUM_LAMBDA; ++i) Le_sum += Le.value[i];
     if (Le_sum <= 0.f) return;
@@ -2707,6 +2877,11 @@ extern "C" __global__ void __raygen__photon_trace() {
                     fresnel = 0.5f * (rs * rs + rp * rp);
                 }
 
+                // Apply transmittance filter to hero channels
+                Spectrum Tf_ph = dev_get_Tf(hit_mat, hit.uv);
+                for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+                    hero_flux[h] *= Tf_ph.value[hero_bins[h]];
+
                 if (rng.next_float() < fresnel) {
                     direction = direction - outward_normal * (2.f * dot(direction, outward_normal));
                     origin = hit.position + outward_normal * OPTIX_SCENE_EPSILON;
@@ -2716,7 +2891,7 @@ extern "C" __global__ void __raygen__photon_trace() {
                     direction = normalize(refracted);
                     origin = hit.position - outward_normal * OPTIX_SCENE_EPSILON;
                 }
-                // Glass: throughput unchanged (geometric-only), shared path
+                // Glass: geometric routing done; Tf applied above
             } else {
                 // Mirror reflection: throughput unchanged
                 float3 n = hit.shading_normal;
@@ -2790,7 +2965,7 @@ static __forceinline__ __device__ void sppm_camera_pass(
 
         // Emission seen directly or via specular chain
         if (dev_is_emissive(mat_id) && bounce == 0) {
-            Spectrum Le = dev_get_Le(mat_id);
+            Spectrum Le = dev_get_Le(mat_id, hit.uv);
             L_direct += throughput * Le;
         }
 
@@ -2811,6 +2986,11 @@ static __forceinline__ __device__ void sppm_camera_pass(
                 float rp = (cos_i - ni_over_nt * cos_t) / (cos_i + ni_over_nt * cos_t);
                 fresnel = 0.5f * (rs * rs + rp * rp);
             }
+
+            // Apply transmittance filter
+            Spectrum Tf_sp = dev_get_Tf(mat_id, hit.uv);
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                throughput.value[i] *= Tf_sp.value[i];
 
             if (rng.next_float() < fresnel) {
                 direction = direction - outward_normal * (2.f * dot(direction, outward_normal));
@@ -2902,7 +3082,14 @@ static __forceinline__ __device__ void sppm_camera_pass(
             float pdf_light = dist2 / (cos_emit * area * params.num_emissive);
             if (pdf_light <= 0.f) continue;
 
-            Spectrum Le = dev_get_Le(params.material_ids[tri_id]);
+            // Interpolate UV at sampled light point for emission texture
+            float2 sppm_luv0 = params.texcoords[tri_id * 3 + 0];
+            float2 sppm_luv1 = params.texcoords[tri_id * 3 + 1];
+            float2 sppm_luv2 = params.texcoords[tri_id * 3 + 2];
+            float2 sppm_light_uv = make_float2(
+                sppm_luv0.x * bary_a + sppm_luv1.x * bary_b + sppm_luv2.x * bary_c,
+                sppm_luv0.y * bary_a + sppm_luv1.y * bary_b + sppm_luv2.y * bary_c);
+            Spectrum Le = dev_get_Le(params.material_ids[tri_id], sppm_light_uv);
             float3 wi_local = frame.world_to_local(wi);
             Spectrum f_bsdf = dev_bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
 

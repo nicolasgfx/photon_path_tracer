@@ -402,7 +402,19 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                 HitRecord refl_hit = scene_->intersect(refl_ray);
                 if (!refl_hit.hit) break;
 
-                const auto& rmat = scene_->materials[refl_hit.material_id];
+                const auto& rmat_ref = scene_->materials[refl_hit.material_id];
+                // Apply diffuse texture to reflected material (same pattern as primary hit)
+                Material rmat = rmat_ref;
+                if (rmat.diffuse_tex >= 0 &&
+                    rmat.diffuse_tex < (int)scene_->textures.size()) {
+                    float3 rgb = scene_->textures[rmat.diffuse_tex].sample(refl_hit.uv);
+                    rmat.Kd = rgb_to_spectrum_reflectance(rgb.x, rgb.y, rgb.z);
+                }
+                if (rmat.specular_tex >= 0 &&
+                    rmat.specular_tex < (int)scene_->textures.size()) {
+                    float3 rgb = scene_->textures[rmat.specular_tex].sample(refl_hit.uv);
+                    rmat.Ks = rgb_to_spectrum_reflectance(rgb.x, rgb.y, rgb.z);
+                }
                 if (rmat.is_emissive()) {
                     // CPU glossy continuation uses a deterministic mirror
                     // direction (delta-function BSDF), so pdf_bsdf → ∞
