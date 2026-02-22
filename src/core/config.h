@@ -20,8 +20,8 @@
 // Runtime switching via keys 1–9 uses SCENE_PROFILES[] below.
 
 //#define SCENE_CORNELL_BOX
-//#define SCENE_CONFERENCE
-#define SCENE_LIVING_ROOM
+#define SCENE_CONFERENCE
+//#define SCENE_LIVING_ROOM
 //#define SCENE_SIBENIK
 
 // =====================================================================
@@ -59,8 +59,8 @@ constexpr int HERO_WAVELENGTHS = 4;
 // longer precomputation.  The photon map carries ALL multi-bounce
 // indirect transport in v2.
 //   Preview: 50k–200k  |  Default: 500k–1M  |  Final: 1M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;  // diffuse indirect photons
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 250000;   // specular→diffuse caustic photons
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;  // diffuse indirect photons
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // specular→diffuse caustic photons
 
 // ── Photon path depth (§5.2) ────────────────────────────────────────
 // Maximum bounce depth for photon rays (the real path tracers in v2).
@@ -97,7 +97,7 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 // 90° = full hemisphere (Lambertian).  60° = 120° FOV (directional,
 // e.g. sunlight through windows).  Shared by CPU emitter.h
 // and GPU __raygen__photon_trace.
-constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 10.0f;
+constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
 // Debug: stop photon after first intersection (validate emission only).
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;

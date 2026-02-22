@@ -6,34 +6,40 @@
 // per-photon walk.  Used by OptixRenderer when DEFAULT_USE_DENSE_GRID is
 // true (runtime toggle: G key).
 //
-// Build algorithm (single-pass, CPU, run after hash-grid build):
+// Build algorithm (CPU, run after hash-grid build):
 //
 //   For each photon:
 //     1. Compute its integer cell (cx, cy, cz) in the same grid as the
 //        hash grid (cell_size = 2 × gather_radius).
-//     2. Project the photon onto its cell's tangent plane (§7.1):
+//     2. For the photon's own cell AND all 26 neighbours (3×3×3 block),
+//        project the photon onto that cell's tangent plane (§7.1):
 //          d_plane = dot(photon_pos - cell_centre,  photon_normal)
 //          v_tan   = (photon_pos - cell_centre) - photon_normal * d_plane
 //          d_tan²  = |v_tan|²
-//        Apply surface tau filter (§6.4): skip if |d_plane| > tau.
 //        Apply Epanechnikov kernel:  w = max(0, 1 - d_tan²/r²).
 //        Skip if w ≤ 0 (photon outside tangential disk).
+//        NOTE: The surface tau filter (§6.4) is NOT applied at build
+//        time.  Tau = 0.02 targets query-point ↔ photon comparisons
+//        where both lie on surfaces; cell centres are arbitrary grid
+//        locations up to cell_size/2 (= gather_radius) from any surface,
+//        well beyond tau.  Cross-surface leakage is handled at query
+//        time by the per-bin normal gate.
 //     3. Scatter flux w × hero_flux into the photon's precomputed bin
-//        (bin_idx, already stored per-photon) in this cell.
-//        Also accumulate the flux-weighted surface normal for the cell's
-//        normal gate.
+//        (bin_idx, already stored per-photon) in that cell.
+//        Also accumulate the flux-weighted surface normal.
 //
-// Note: no neighbour scatter (pass 2).  Once Epanechnikov weight is baked
-// relative to the cell centre, any photon in cell C has d_tan ≥ r to ALL
-// adjacent cell centres (those are 2r away), so pass-2 weight = 0 for all
-// combinations.  Dropping pass 2 is mathematically correct here.
+// Neighbour scatter is necessary because cell_size = 2r and the
+// tangential-disk kernel can reach adjacent cell centres when the
+// photon's surface normal is aligned with the cell-to-cell axis
+// (e.g. photon at face boundary with normal along that axis gives
+// tangential distance = 0 to the adjacent cell centre, NOT ≥ r).
 //
-// GPU query (O(PHOTON_BIN_COUNT)):
-//   pos → cell index → bins[cell * N + k].
-//   Per-bin: normal gate (avg_n · filter_normal > 0),
-//            hemisphere gate (bin_dir · filter_normal > 0),
-//            diffuse BSDF eval at bin centroid direction.
-//   No extra spatial kernel weight at query time (kernel baked at build).
+// GPU query (O(8 × PHOTON_BIN_COUNT) — trilinear interpolation):
+//   pos → 8 trilinear-neighbour cells + interpolation weights.
+//   Per cell, per-bin: normal gate, hemisphere gate, diffuse BSDF eval.
+//   Trilinear blending smooths cell-boundary discontinuities and
+//   mitigates the kernel approximation (weight baked at cell centre
+//   rather than at the actual query point).
 //   Normalization: same inv_area = 2/(π r²) and 1/N_emitted as hash grid.
 //
 // Memory:  cells × PHOTON_BIN_COUNT × sizeof(PhotonBin)
@@ -198,20 +204,19 @@ struct CellBinGrid {
         // ── 3. Single-pass accumulation with tangential disk kernel ──
         // For each photon:
         //   a. Find its integer cell (cx, cy, cz).
-        //   b. Compute tangential distance from photon position to the
-        //      cell centre, projected along the photon surface normal
-        //      (§7.1 tangential plane projection).
-        //   c. Skip if |plane_distance| > DEFAULT_SURFACE_TAU (§6.4).
-        //   d. Apply Epanechnikov kernel: w = max(0, 1 - d_tan²/r²).
+        //   b. For own cell AND 26 neighbours (3×3×3 block):
+        //      Compute tangential distance from photon position to the
+        //      target cell centre, projected along the photon surface
+        //      normal (§7.1 tangential plane projection).
+        //   c. Apply Epanechnikov kernel: w = max(0, 1 - d_tan²/r²).
         //      Skip if w ≤ 0 (photon outside the disk).
-        //   e. Scatter w-weighted hero flux into the bin.
+        //   d. Scatter w-weighted hero flux into the target cell's bin.
         //
-        // Note: neighbour scatter (pass 2) is intentionally omitted.
-        // Once the Epanechnikov weight is computed relative to the cell
-        // centre, the distance from any photon in cell C to any adjacent
-        // cell centre is ≥ 2r (= cell_size), so the kernel weight for all
-        // neighbours is ≤ 0.  Dropping pass 2 is therefore mathematically
-        // exact here.
+        // Neighbour scatter is required because when the photon's surface
+        // normal is aligned with the cell-to-cell axis, the tangential
+        // distance to the adjacent cell centre can be 0 (not ≥ r as
+        // previously claimed).  Without scatter, cross-boundary photons
+        // are missed, causing up to 50% energy loss and grid artifacts.
         for (size_t i = 0; i < N; ++i) {
             const float px = photons.pos_x[i];
             const float py = photons.pos_y[i];
@@ -236,8 +241,7 @@ struct CellBinGrid {
             int k = photons.bin_idx.empty() ? 0 : (int)photons.bin_idx[i];
             if (k < 0 || k >= bin_count) k = 0;
 
-            // Integer cell coords (unclamped; AABB computed above guarantees
-            // all photons fall strictly inside [0, dim_*) after padding)
+            // Integer cell coords of photon's own cell
             int cx = (int)std::floor((px - min_x) / cell_size);
             int cy = (int)std::floor((py - min_y) / cell_size);
             int cz = (int)std::floor((pz - min_z) / cell_size);
@@ -245,63 +249,79 @@ struct CellBinGrid {
             cy = std::max(0, std::min(cy, dim_y - 1));
             cz = std::max(0, std::min(cz, dim_z - 1));
 
-            // ── Tangential plane projection (§7.1) ───────────────────
-            // Project cell-centre-to-photon vector onto the photon's
-            // surface normal to separate the plane component from the
-            // lateral (tangential) component.
-            const float cell_cx = min_x + (cx + 0.5f) * cell_size;
-            const float cell_cy = min_y + (cy + 0.5f) * cell_size;
-            const float cell_cz = min_z + (cz + 0.5f) * cell_size;
-            const float dcx = px - cell_cx;
-            const float dcy = py - cell_cy;
-            const float dcz = pz - cell_cz;
-            const float d_plane = nx * dcx + ny * dcy + nz * dcz;
+            // ── Scatter to own cell + 26 neighbours (3×3×3) ──────────
+            for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int ncx = cx + dx;
+                const int ncy = cy + dy;
+                const int ncz = cz + dz;
+                if (ncx < 0 || ncx >= dim_x ||
+                    ncy < 0 || ncy >= dim_y ||
+                    ncz < 0 || ncz >= dim_z)
+                    continue;
 
-            // Surface tau filter (§6.4): reject photon if too far from
-            // the cell's tangent plane (cross-surface leakage prevention).
-            if (std::fabsf(d_plane) > DEFAULT_SURFACE_TAU) continue;
+                // ── Tangential plane projection (§7.1) ───────────────
+                // Project photon-to-cell-centre vector onto the photon's
+                // surface normal to separate plane / tangential components.
+                const float cell_cx = min_x + (ncx + 0.5f) * cell_size;
+                const float cell_cy = min_y + (ncy + 0.5f) * cell_size;
+                const float cell_cz = min_z + (ncz + 0.5f) * cell_size;
+                const float dcx = px - cell_cx;
+                const float dcy = py - cell_cy;
+                const float dcz = pz - cell_cz;
+                const float d_plane = nx * dcx + ny * dcy + nz * dcz;
 
-            // Tangential distance from photon to cell centre
-            const float vx = dcx - nx * d_plane;
-            const float vy = dcy - ny * d_plane;
-            const float vz = dcz - nz * d_plane;
-            const float d_tan2 = vx*vx + vy*vy + vz*vz;
+                // NOTE: The surface tau filter (§6.4) is intentionally NOT
+                // applied here.  Tau = 0.02 is designed for query-point ↔
+                // photon comparisons where both lie on surfaces.  Cell
+                // centres are arbitrary grid points up to cell_size/2 =
+                // gather_radius (0.05) from any surface — well beyond tau.
+                // Applying the filter here rejects the majority of valid
+                // photons and produces near-black indirect images.
+                // Cross-surface leakage is prevented at GPU query time by
+                // the per-bin normal gate (dot(avg_n, filter_normal) > 0).
 
-            // Epanechnikov kernel weight (§6.3)
-            const float w = 1.f - d_tan2 / r2;
-            if (w <= 0.f) continue;  // outside disk
+                // Tangential distance from photon to target cell centre
+                const float vx = dcx - nx * d_plane;
+                const float vy = dcy - ny * d_plane;
+                const float vz = dcz - nz * d_plane;
+                const float d_tan2 = vx*vx + vy*vy + vz*vz;
 
-            // ── Accumulate into this cell's bin ──────────────────────
-            const int flat = cx + cy * dim_x + cz * dim_x * dim_y;
+                // Epanechnikov kernel weight (§6.3)
+                const float w = 1.f - d_tan2 / r2;
+                if (w <= 0.f) continue;  // outside disk
 
-            PhotonBin& b = bins[(size_t)flat * bin_count + k];
+                // ── Accumulate into target cell's bin ────────────────
+                const int flat = ncx + ncy * dim_x + ncz * dim_x * dim_y;
 
-            // Deposit each hero wavelength's flux into its spectral bin,
-            // weighted by the Epanechnikov kernel.  This matches the
-            // hash-grid path's per-wavelength accumulation exactly.
-            for (int h = 0; h < n_hero; ++h) {
-                int lam_bin = (int)photons.lambda_bin[i * HERO_WAVELENGTHS + h];
-                float p_flux = photons.flux[i * HERO_WAVELENGTHS + h];
-                if (lam_bin >= 0 && lam_bin < NUM_LAMBDA && p_flux > 0.f)
-                    b.flux[lam_bin] += w * p_flux;
-            }
+                PhotonBin& b = bins[(size_t)flat * bin_count + k];
 
-            // Flux-weighted direction and normal
-            // Use total hero flux for direction/normal weighting
-            const float wf = w * total_hero_flux;
-            b.dir_x  += wi_x * wf;
-            b.dir_y  += wi_y * wf;
-            b.dir_z  += wi_z * wf;
-            b.avg_nx += nx   * wf;
-            b.avg_ny += ny   * wf;
-            b.avg_nz += nz   * wf;
-            b.weight += w;     // Epanechnikov weight (for normalisation)
-            b.count  += 1;
+                // Deposit each hero wavelength's flux into its spectral bin,
+                // weighted by the Epanechnikov kernel.
+                for (int h = 0; h < n_hero; ++h) {
+                    int lam_bin = (int)photons.lambda_bin[i * HERO_WAVELENGTHS + h];
+                    float p_flux = photons.flux[i * HERO_WAVELENGTHS + h];
+                    if (lam_bin >= 0 && lam_bin < NUM_LAMBDA && p_flux > 0.f)
+                        b.flux[lam_bin] += w * p_flux;
+                }
 
-            // Flux-weighted dominant normal (for GPU normal gate)
-            cell_dominant_normal[flat].x += nx * wf;
-            cell_dominant_normal[flat].y += ny * wf;
-            cell_dominant_normal[flat].z += nz * wf;
+                // Flux-weighted direction and normal
+                const float wf = w * total_hero_flux;
+                b.dir_x  += wi_x * wf;
+                b.dir_y  += wi_y * wf;
+                b.dir_z  += wi_z * wf;
+                b.avg_nx += nx   * wf;
+                b.avg_ny += ny   * wf;
+                b.avg_nz += nz   * wf;
+                b.weight += w;
+                b.count  += 1;
+
+                // Flux-weighted dominant normal per cell
+                cell_dominant_normal[flat].x += nx * wf;
+                cell_dominant_normal[flat].y += ny * wf;
+                cell_dominant_normal[flat].z += nz * wf;
+            } // end 3×3×3 neighbour loop
         }
 
         // ── 4. Normalize dominant normals for each cell ─────────────

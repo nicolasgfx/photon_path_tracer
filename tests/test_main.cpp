@@ -82,9 +82,18 @@ static Photon make_test_photon(float3 pos, float3 wi, float3 gnorm, float flux_v
 // Set up SoA spectral_flux from per-photon scalar values (uniform across bins).
 static void set_soa_flux_uniform(PhotonSoA& soa, std::initializer_list<float> per_photon_flux) {
     soa.spectral_flux.clear();
+    soa.flux.clear();
+    soa.lambda_bin.clear();
+    soa.num_hero.clear();
     for (float f : per_photon_flux) {
         for (int b = 0; b < NUM_LAMBDA; ++b)
             soa.spectral_flux.push_back(f);
+        // Also populate hero-wavelength flux (used by CellBinGrid build)
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            soa.lambda_bin.push_back((uint16_t)(h * NUM_LAMBDA / HERO_WAVELENGTHS));
+            soa.flux.push_back(f);
+        }
+        soa.num_hero.push_back((uint8_t)HERO_WAVELENGTHS);
     }
 }
 
@@ -4389,6 +4398,15 @@ void add_planar_photons(PhotonSoA& photons, float3 center, float3 normal,
         p.wi          = wi_dir;
         p.geom_normal = normal;
         p.spectral_flux = Spectrum::constant(flux_each);
+        // Set hero-wavelength flux so CellBinGrid build can use it
+        // (CellBinGrid reads photons.flux[], not spectral_flux[])
+        p.num_hero = HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            // Distribute flux evenly across hero wavelengths with
+            // stratified lambda bins spanning the spectrum
+            p.lambda_bin[h] = (uint16_t)(h * NUM_LAMBDA / HERO_WAVELENGTHS);
+            p.flux[h]       = flux_each;
+        }
         photons.push_back(p);
     }
     // Precompute bin_idx for newly added photons

@@ -781,51 +781,84 @@ Spectrum dev_estimate_photon_density(
     Spectrum L = Spectrum::zero();
     if (params.num_photons == 0 || params.grid_table_size == 0) return L;
 
-    // ── Fast path: dense cell-bin gather O(PHOTON_BIN_COUNT) ─────────
+    // ── Fast path: dense cell-bin gather with trilinear blending ──────
     // Enabled when the cell-bin grid was uploaded and the runtime flag is
     // set (DEFAULT_USE_DENSE_GRID / G key).  The Epanechnikov tangential-
-    // disk kernel (§7.1) is already baked into bin.flux at CPU build time
-    // (see cell_bin_grid.h §3.5).  The surface tau filter is also applied
-    // at build time.  Here we only need the per-bin normal + hemisphere
-    // gates and the diffuse BSDF evaluation.
+    // disk kernel (§7.1) is baked into bin.flux at CPU build time with
+    // neighbour scatter (each photon deposited into up to 27 cells).
+    //
+    // At query time we blend 8 trilinear-neighbour cells to smooth the
+    // cell-boundary discontinuities caused by the kernel weight being
+    // baked relative to cell centres rather than the actual query point.
+    // Total work: O(8 × PHOTON_BIN_COUNT) — still ~30× faster than the
+    // per-photon hash-grid walk.
     if (params.use_dense_grid_gather && params.cell_grid_valid) {
-        const PhotonBin* bins = dev_cell_grid_lookup(pos);
-        if (bins != nullptr) {
-            const int  N       = params.photon_bin_count;
-            const float inv_area = 2.f / (PI * radius * radius);
-            const float norm     = 1.f / (float)params.num_photons_emitted;
+        float cs = params.cell_grid_cell_size;
+        if (cs > 0.f && params.cell_bin_grid != nullptr) {
+            // Continuous cell coordinates (cell centres at 0.5, 1.5, …)
+            float fx = (pos.x - params.cell_grid_min_x) / cs - 0.5f;
+            float fy = (pos.y - params.cell_grid_min_y) / cs - 0.5f;
+            float fz = (pos.z - params.cell_grid_min_z) / cs - 0.5f;
 
+            int ix0 = (int)floorf(fx);  float tx = fx - (float)ix0;
+            int iy0 = (int)floorf(fy);  float ty = fy - (float)iy0;
+            int iz0 = (int)floorf(fz);  float tz = fz - (float)iz0;
+
+            const int  N        = params.photon_bin_count;
+            const float inv_area = 2.f / (PI * radius * radius);
+            const float pnorm    = 1.f / (float)params.num_photons_emitted;
             DevONB frame = DevONB::from_normal(normal);
 
-            for (int k = 0; k < N; ++k) {
-                const PhotonBin& b = bins[k];
-                if (b.count == 0) continue;
+            for (int corner = 0; corner < 8; ++corner) {
+                int ix = (corner & 1) ? ix0 + 1 : ix0;
+                int iy = (corner & 2) ? iy0 + 1 : iy0;
+                int iz = (corner & 4) ? iz0 + 1 : iz0;
 
-                // Normal gate: bin's flux-weighted surface normal must face
-                // the same side as the query filter_normal (§15.1.2).
-                float3 avg_n = make_f3(b.avg_nx, b.avg_ny, b.avg_nz);
-                if (dot(avg_n, filter_normal) <= 0.f) continue;
+                // Clamp to grid bounds
+                if (ix < 0) ix = 0;
+                else if (ix >= params.cell_grid_dim_x) ix = params.cell_grid_dim_x - 1;
+                if (iy < 0) iy = 0;
+                else if (iy >= params.cell_grid_dim_y) iy = params.cell_grid_dim_y - 1;
+                if (iz < 0) iz = 0;
+                else if (iz >= params.cell_grid_dim_z) iz = params.cell_grid_dim_z - 1;
 
-                // Hemisphere gate: incident centroid direction must be above
-                // the surface (wi · filter_normal > 0).
-                float3 bin_dir = make_f3(b.dir_x, b.dir_y, b.dir_z);
-                if (dot(bin_dir, filter_normal) <= 0.f) continue;
+                float wx = (corner & 1) ? tx : (1.f - tx);
+                float wy = (corner & 2) ? ty : (1.f - ty);
+                float wz = (corner & 4) ? tz : (1.f - tz);
+                float tw = wx * wy * wz;
+                if (tw <= 0.f) continue;
 
-                float3 wi_local = frame.world_to_local(bin_dir);
-                if (wi_local.z <= 0.f) continue;
+                int cell_idx = ix
+                    + iy * params.cell_grid_dim_x
+                    + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
+                const PhotonBin* bins = &params.cell_bin_grid[cell_idx * N];
 
-                // Diffuse-only BSDF evaluation (§6 standard practice).
-                // Per-wavelength flux stored in b.flux[lam] — matches hash-grid
-                // path's per-wavelength accumulation exactly.
-                Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
-                // kernel weight already baked → scale by inv_area * norm only
-                for (int lam = 0; lam < NUM_LAMBDA; ++lam)
-                    L.value[lam] += f.value[lam] * b.flux[lam] * inv_area * norm;
+                for (int k = 0; k < N; ++k) {
+                    const PhotonBin& b = bins[k];
+                    if (b.count == 0) continue;
+
+                    // Normal gate (§15.1.2)
+                    float3 avg_n = make_f3(b.avg_nx, b.avg_ny, b.avg_nz);
+                    if (dot(avg_n, filter_normal) <= 0.f) continue;
+
+                    // Hemisphere gate
+                    float3 bin_dir = make_f3(b.dir_x, b.dir_y, b.dir_z);
+                    if (dot(bin_dir, filter_normal) <= 0.f) continue;
+
+                    float3 wi_local = frame.world_to_local(bin_dir);
+                    if (wi_local.z <= 0.f) continue;
+
+                    // Diffuse-only BSDF evaluation (§6)
+                    Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
+
+                    // Trilinear-weighted accumulation
+                    for (int lam = 0; lam < NUM_LAMBDA; ++lam)
+                        L.value[lam] += tw * f.value[lam] * b.flux[lam] * inv_area * pnorm;
+                }
             }
             return L;
         }
-        // cell_bin_grid returned nullptr (pos outside grid bounds):
-        // fall through to the hash-grid path below.
+        // cell_bin_grid invalid: fall through to hash-grid path.
     }
 
     // ── Exact path: per-photon hash-grid walk O(N_cell) ──────────────
