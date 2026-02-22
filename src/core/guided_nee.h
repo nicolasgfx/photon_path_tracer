@@ -1,5 +1,13 @@
 #pragma once
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════ DEPRECATED ═══════════════════════════
+// guided_nee.h — v1 photon-bin-guided NEE helpers (superseded in v2.1)
+// ────────────────────────────────────────────────────────────────────
+// The v2.1 renderer uses the coverage-aware NEE mixture (direct_light.h)
+// instead.  This file is retained because it is still #included by
+// optix_device.cu and some test files.  Do not use in new code.
+// TODO: Remove once all references have been cleaned up.
+// ════════════════════════════════════════════════════════════════════
+// ────────────────── Original documentation ────────────────────────
 // guided_nee.h – Small helpers for guided NEE (host + device)
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"

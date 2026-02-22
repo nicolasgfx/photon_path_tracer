@@ -35,6 +35,7 @@
 #include "debug/debug.h"
 #include "optix/optix_renderer.h"
 #include "core/test_data_io.h"
+#include "photon/photon_io.h"
 
 #include <GLFW/glfw3.h>
 
@@ -99,34 +100,132 @@ static bool write_png(const std::string& filename, const FrameBuffer& fb) {
 
 // -- Scene lighting helpers -------------------------------------------
 
+// Generate inward-facing emissive triangles on a (hemi)sphere.
+// theta_min = 0 → north pole.  theta_max = PI   → full sphere.
+//                               theta_max = PI/2 → upper hemisphere.
+static void generate_sphere_lights(
+    Scene& scene, uint32_t mat_id,
+    float radius, float3 center,
+    int n_slices, int n_stacks,
+    float theta_min, float theta_max)
+{
+    auto sphere_pt = [&](int stack, int slice) -> float3 {
+        float theta = theta_min + (theta_max - theta_min) * (float)stack / (float)n_stacks;
+        float phi   = 2.0f * 3.14159265358979f * (float)slice / (float)n_slices;
+        float st = sinf(theta);
+        return make_f3(
+            center.x + radius * st * cosf(phi),
+            center.y + radius * cosf(theta),
+            center.z + radius * st * sinf(phi));
+    };
+
+    float2 uv0 = make_f2(0, 0);
+    int count = 0;
+
+    for (int i = 0; i < n_stacks; ++i) {
+        for (int j = 0; j < n_slices; ++j) {
+            float3 p00 = sphere_pt(i,     j);
+            float3 p10 = sphere_pt(i + 1, j);
+            float3 p11 = sphere_pt(i + 1, j + 1);
+            float3 p01 = sphere_pt(i,     j + 1);
+
+            // Inward-facing normals (towards center)
+            auto inward_n = [&](float3 p) { return normalize(center - p); };
+
+            // Triangle 1: p00-p11-p10  (CW from outside = CCW from inside)
+            {
+                Triangle tri;
+                tri.v0 = p00; tri.v1 = p11; tri.v2 = p10;
+                tri.n0 = inward_n(p00); tri.n1 = inward_n(p11); tri.n2 = inward_n(p10);
+                tri.uv0 = tri.uv1 = tri.uv2 = uv0;
+                tri.material_id = mat_id;
+                if (tri.area() > 1e-8f) { scene.triangles.push_back(tri); ++count; }
+            }
+            // Triangle 2: p00-p01-p11
+            {
+                Triangle tri;
+                tri.v0 = p00; tri.v1 = p01; tri.v2 = p11;
+                tri.n0 = inward_n(p00); tri.n1 = inward_n(p01); tri.n2 = inward_n(p11);
+                tri.uv0 = tri.uv1 = tri.uv2 = uv0;
+                tri.material_id = mat_id;
+                if (tri.area() > 1e-8f) { scene.triangles.push_back(tri); ++count; }
+            }
+        }
+    }
+    std::cout << "[Scene]   Generated " << count << " emissive triangles "
+              << "(r=" << radius << ", stacks=" << n_stacks
+              << ", slices=" << n_slices << ")\n";
+}
+
 // Add appropriate light sources based on the scene's lighting mode.
-// Called when a scene has no emissive surfaces in the MTL, or when
-// the scene requires a non-standard light type (directional, env).
+// Called after scene load + normalize.  For MTL scenes the emissive
+// surfaces are already in the triangle list.  For environment-lit
+// scenes we generate tessellated (hemi)sphere geometry.
 static void add_scene_lights(Scene& scene, SceneLightMode mode) {
     if (mode == SceneLightMode::FromMTL && scene.num_emissive() > 0)
         return;  // MTL already has lights
 
-    // Fallback: add an area light on the ceiling (works for all modes
-    // as a baseline; directional and spherical are handled specially
-    // by the photon emitter which reads the light_mode field)
-    std::cout << "[Scene] Adding lights (mode: "
-              << (mode == SceneLightMode::FromMTL          ? "FromMTL/fallback" :
-                  mode == SceneLightMode::DirectionalToFloor ? "DirectionalToFloor" :
-                                                              "SphericalEnv")
-              << ")\n";
+    const char* mode_name =
+        mode == SceneLightMode::FromMTL            ? "FromMTL/fallback" :
+        mode == SceneLightMode::DirectionalToFloor  ? "DirectionalToFloor" :
+        mode == SceneLightMode::HemisphereEnv       ? "HemisphereEnv" :
+                                                      "SphericalEnv";
+    std::cout << "[Scene] Adding lights (mode: " << mode_name << ")\n";
 
+    // ── HemisphereEnv (Sponza): sky dome above the scene ────────────
+    if (mode == SceneLightMode::HemisphereEnv) {
+        Material sky_mat;
+        sky_mat.name = "__sky_dome__";
+        sky_mat.type = MaterialType::Emissive;
+        sky_mat.Le   = blackbody_spectrum(5800.f, 8e-9f);  // warm daylight
+        uint32_t sky_id = (uint32_t)scene.materials.size();
+        scene.materials.push_back(sky_mat);
+
+        // Hemisphere: theta 0→PI/2, centered slightly above the scene
+        float3 center = make_f3(0.0f, 0.0f, 0.0f);
+        generate_sphere_lights(scene, sky_id,
+            0.75f, center,       // radius just outside normalized [-0.5,0.5]
+            24, 8,               // 24 slices × 8 stacks = 384 tris
+            0.0f, 1.5707963f);   // theta 0→PI/2  (upper hemisphere)
+
+        scene.build_bvh();
+        scene.build_emissive_distribution();
+        std::cout << "[Scene] Hemisphere sky dome: "
+                  << scene.num_emissive() << " emissive triangles total\n";
+        return;
+    }
+
+    // ── SphericalEnv (Hairball): full sphere surrounding the scene ──
+    if (mode == SceneLightMode::SphericalEnv) {
+        Material env_mat;
+        env_mat.name = "__env_sphere__";
+        env_mat.type = MaterialType::Emissive;
+        env_mat.Le   = blackbody_spectrum(5500.f, 5e-9f);  // neutral daylight
+        uint32_t env_id = (uint32_t)scene.materials.size();
+        scene.materials.push_back(env_mat);
+
+        // Full sphere: theta 0→PI
+        float3 center = make_f3(0.0f, 0.0f, 0.0f);
+        generate_sphere_lights(scene, env_id,
+            0.80f, center,       // radius outside the model
+            32, 16,              // 32 slices × 16 stacks = 1024 tris
+            0.0f, 3.14159265f);  // theta 0→PI  (full sphere)
+
+        scene.build_bvh();
+        scene.build_emissive_distribution();
+        std::cout << "[Scene] Full environment sphere: "
+                  << scene.num_emissive() << " emissive triangles total\n";
+        return;
+    }
+
+    // ── DirectionalToFloor / FromMTL fallback: ceiling area light ───
     Material light_mat;
     light_mat.name = "__area_light__";
     light_mat.type = MaterialType::Emissive;
 
-    if (mode == SceneLightMode::SphericalEnv) {
-        // Brighter, warmer light for environment scenes
-        light_mat.Le = blackbody_spectrum(5500.f, 2e-8f);
-    } else if (mode == SceneLightMode::DirectionalToFloor) {
-        // Strong directional-like light for cathedral scenes
+    if (mode == SceneLightMode::DirectionalToFloor) {
         light_mat.Le = blackbody_spectrum(6500.f, 3e-8f);
     } else {
-        // Default ceiling area light
         light_mat.Le = blackbody_spectrum(6500.f, 1e-8f);
     }
 
@@ -482,6 +581,12 @@ struct Options {
     std::string scene_file;
     std::string output_file = "output/render.png";
     std::string save_test_data_file;   // if non-empty, dump photons to this binary file
+
+    // Photon cache I/O (§20)
+    std::string photon_file;           // path for photon cache (empty = auto)
+    bool        force_recompute = false;  // ignore existing cache
+    bool        save_photons    = true;   // save photon cache after trace
+
     RenderConfig config;
 };
 
@@ -539,6 +644,15 @@ static Options parse_args(int argc, char* argv[]) {
             opt.config.knn_k = std::stoi(argv[++i]);
         } else if (arg == "--max-specular-chain" && i + 1 < argc) {
             opt.config.max_specular_chain = std::stoi(argv[++i]);
+        // ── photon cache flags (§20) ─────────────────────────────────────
+        } else if (arg == "--photon-file" && i + 1 < argc) {
+            opt.photon_file = argv[++i];
+        } else if (arg == "--force-recompute") {
+            opt.force_recompute = true;
+        } else if (arg == "--no-save-photons") {
+            opt.save_photons = false;
+        } else if (arg == "--adaptive-radius") {
+            opt.config.use_knn_adaptive = true;
         } else if (arg[0] != '-') {
             opt.scene_file = arg;
         }
@@ -567,6 +681,9 @@ struct AppState {
 
     // Render cancellation
     bool       render_cancel_requested = false;
+
+    // Photon retrace request (P key)
+    bool       photon_retrace_requested = false;
 
     // Progressive final render state
     int        render_spp_done  = 0;      // samples completed so far
@@ -740,13 +857,10 @@ static void key_callback(GLFWwindow* window, int key,
 
     // P -> retrace photons (rebuild photon map)
     if (key == GLFW_KEY_P && !g_app.rendering) {
+        g_app.photon_retrace_requested = true;
         g_app.camera_moved  = true;  // reset accumulation
         g_app.showing_final = false;
         printf("[Photon] Retrace requested (rebuild photon maps)\n");
-        if (g_active_optix_renderer) {
-            // Will retrace on next frame via the interactive loop
-            g_app.render_requested = false; // cancel any pending render
-        }
         return;
     }
 
@@ -958,6 +1072,23 @@ static void run_interactive(
                                     + prof.display_name;
                 glfwSetWindowTitle(window, title.c_str());
             }
+        }
+
+        // ── Photon retrace request (P key) ────────────────────────────
+        if (g_app.photon_retrace_requested && !g_app.rendering) {
+            g_app.photon_retrace_requested = false;
+
+            std::cout << "[Photon] Re-tracing photon maps...\n";
+            auto tp0 = std::chrono::high_resolution_clock::now();
+            optix_renderer.trace_photons(scene, opt.config);
+            auto tp1 = std::chrono::high_resolution_clock::now();
+            double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+            std::cout << "[Photon] Retrace done in " << photon_ms << " ms\n";
+
+            frame = 0;
+            optix_renderer.clear_buffers();
+            g_app.camera_moved  = true;
+            g_app.showing_final = false;
         }
 
         // ── Light brightness change (+/- keys) ─────────────────────────
@@ -1438,14 +1569,61 @@ int main(int argc, char* argv[]) {
         optix_renderer.upload_emitter_data(scene);
         std::cout << "\n";
 
-        // -- GPU photon trace -----------------------------------------------
+        // -- GPU photon trace (with optional cache) ---------------------
         std::cout << "-- GPU Photon Trace --\n";
         {
-            auto tp0 = std::chrono::high_resolution_clock::now();
-            optix_renderer.trace_photons(scene, opt.config);
-            auto tp1 = std::chrono::high_resolution_clock::now();
-            double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
-            std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n\n";
+            // Derive default cache path from scene file if not specified
+            std::string cache_path = opt.photon_file;
+            if (cache_path.empty()) {
+                // e.g. "scenes/cornell_box/cornell_box.obj" -> "scenes/cornell_box/cornell_box.photons"
+                std::string base = opt.scene_file;
+                size_t dot = base.rfind('.');
+                if (dot != std::string::npos) base = base.substr(0, dot);
+                cache_path = base + ".photons";
+            }
+
+            uint64_t shash = compute_scene_hash(
+                opt.scene_file, (int)scene.num_triangles(),
+                opt.config.num_photons, opt.config.gather_radius);
+
+            bool loaded_from_cache = false;
+            if (!opt.force_recompute && photon_cache_valid(cache_path, shash)) {
+                std::cout << "[Photon] Loading from cache: " << cache_path << "\n";
+                PhotonSoA cached_photons;
+                HashGrid  cached_grid;
+                float     cached_radius = opt.config.gather_radius;
+                if (load_photon_cache(cache_path, cached_photons, cached_grid, cached_radius)) {
+                    opt.config.gather_radius = cached_radius;
+                    PhotonSoA empty_caustic;
+                    HashGrid  empty_cgrid;
+                    optix_renderer.upload_photon_data(
+                        cached_photons, cached_grid,
+                        empty_caustic,  empty_cgrid,
+                        cached_radius, opt.config.caustic_radius,
+                        opt.config.num_photons);
+                    loaded_from_cache = true;
+                    std::cout << "[Photon] Cache loaded (" << cached_photons.size() << " photons)\n\n";
+                } else {
+                    std::cout << "[Photon] Cache load failed, re-tracing...\n";
+                }
+            }
+
+            if (!loaded_from_cache) {
+                auto tp0 = std::chrono::high_resolution_clock::now();
+                optix_renderer.trace_photons(scene, opt.config);
+                auto tp1 = std::chrono::high_resolution_clock::now();
+                double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+                std::cout << "[Photon] GPU trace completed in " << photon_ms << " ms\n\n";
+
+                // Save to cache
+                if (opt.save_photons && optix_renderer.photons().size() > 0) {
+                    save_photon_cache(cache_path,
+                                      optix_renderer.photons(),
+                                      optix_renderer.grid(),
+                                      shash,
+                                      opt.config.gather_radius);
+                }
+            }
         }
 
         // -- Save test data (if requested) ----------------------------

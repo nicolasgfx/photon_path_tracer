@@ -185,7 +185,7 @@ inline void trace_photons(const Scene& scene,
         Spectrum spectral_flux = ep.spectral_flux;  // Full spectral throughput
         Ray ray = ep.ray;
 
-        bool on_caustic_path = true; // True until first diffuse bounce
+        bool on_caustic_path = false; // Set true on first specular bounce, false after diffuse
 
         for (int bounce = 0; bounce < config.max_bounces; ++bounce) {
             HitRecord hit = scene.intersect(ray);
@@ -245,6 +245,9 @@ inline void trace_photons(const Scene& scene,
                 }
 
                 on_caustic_path = false;
+            } else {
+                // Specular bounce: mark path as potentially caustic
+                on_caustic_path = true;
             }
 
             // §5.3.1: Cell-stratified bounce direction

@@ -127,7 +127,8 @@ enum DevMaterialType : uint8_t {
     DEV_MIRROR     = 1,
     DEV_GLASS      = 2,
     DEV_GLOSSY     = 3,
-    DEV_EMISSIVE   = 4
+    DEV_EMISSIVE   = 4,
+    DEV_GLOSSY_DIELECTRIC = 5
 };
 
 __forceinline__ __device__
@@ -336,6 +337,20 @@ bool dev_is_glossy(uint32_t mat_id) {
     return params.mat_type[mat_id] == DEV_GLOSSY;
 }
 
+__forceinline__ __device__
+bool dev_is_dielectric_glossy(uint32_t mat_id) {
+    return params.mat_type[mat_id] == DEV_GLOSSY_DIELECTRIC;
+}
+
+// Returns true for any glossy surface (metallic or dielectric).
+// Use this for glossy continuation gates; use dev_is_glossy() /
+// dev_is_dielectric_glossy() only when differentiating Fresnel model.
+__forceinline__ __device__
+bool dev_is_any_glossy(uint32_t mat_id) {
+    uint8_t t = params.mat_type[mat_id];
+    return t == DEV_GLOSSY || t == DEV_GLOSSY_DIELECTRIC;
+}
+
 // == GGX microfacet distribution (device-side) ========================
 
 __forceinline__ __device__
@@ -412,7 +427,7 @@ Spectrum dev_bsdf_evaluate(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
 
     Spectrum Kd = dev_get_Kd(mat_id, uv);
 
-    if (!dev_is_glossy(mat_id)) {
+    if (!dev_is_glossy(mat_id) && !dev_is_dielectric_glossy(mat_id)) {
         // Pure Lambertian
         return Kd * INV_PI;
     }
@@ -429,9 +444,22 @@ Spectrum dev_bsdf_evaluate(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
     float denom = 4.f * fabsf(wo.z) * fabsf(wi.z) + EPSILON;
 
     Spectrum f;
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        float Fr = dev_fresnel_schlick(VdotH, Ks.value[i]);
-        f.value[i] = (ndf * geo * Fr) / denom + Kd.value[i] * INV_PI;
+    if (dev_is_dielectric_glossy(mat_id)) {
+        // Dielectric Fresnel: F0 from IOR, Ks scales specular color
+        float ior = dev_get_ior(mat_id);
+        float F0 = ((ior - 1.f) / (ior + 1.f)) * ((ior - 1.f) / (ior + 1.f));
+        float Fr = dev_fresnel_schlick(VdotH, F0);
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            float spec = (ndf * geo * Fr * Ks.value[i]) / denom;
+            float diff = (1.f - Fr) * Kd.value[i] * INV_PI;
+            f.value[i] = spec + diff;
+        }
+    } else {
+        // Metallic: Ks is the Fresnel F0 per wavelength
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            float Fr = dev_fresnel_schlick(VdotH, Ks.value[i]);
+            f.value[i] = (ndf * geo * Fr) / denom + Kd.value[i] * INV_PI;
+        }
     }
     return f;
 }
@@ -442,15 +470,23 @@ float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
 
     float diff_pdf = fmaxf(0.f, wi.z) * INV_PI;
 
-    if (!dev_is_glossy(mat_id)) {
+    if (!dev_is_glossy(mat_id) && !dev_is_dielectric_glossy(mat_id)) {
         return diff_pdf;
     }
 
     // Glossy: mixed PDF = p_spec * spec_pdf + (1-p_spec) * diff_pdf
     Spectrum Ks = dev_get_Ks(mat_id);
     Spectrum Kd = dev_get_Kd(mat_id, make_float2(0.f, 0.f));
-    float spec_weight = Ks.max_component();
-    float diff_weight = Kd.max_component();
+    float spec_weight, diff_weight;
+    if (dev_is_dielectric_glossy(mat_id)) {
+        float ior = dev_get_ior(mat_id);
+        float F0 = ((ior - 1.f) / (ior + 1.f)) * ((ior - 1.f) / (ior + 1.f));
+        spec_weight = fmaxf(Ks.max_component() * F0, 0.05f);
+        diff_weight = Kd.max_component();
+    } else {
+        spec_weight = Ks.max_component();
+        diff_weight = Kd.max_component();
+    }
     float total = spec_weight + diff_weight;
     float p_spec = (total > 0.f) ? spec_weight / total : 0.5f;
 
@@ -487,7 +523,7 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv, PCGRng& rng
 
     Spectrum Kd = dev_get_Kd(mat_id, uv);
 
-    if (!dev_is_glossy(mat_id)) {
+    if (!dev_is_glossy(mat_id) && !dev_is_dielectric_glossy(mat_id)) {
         // Pure Lambertian: cosine hemisphere
         s.wi = sample_cosine_hemisphere_dev(rng);
         s.pdf = fmaxf(0.f, s.wi.z) * INV_PI;
@@ -499,9 +535,18 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv, PCGRng& rng
     Spectrum Ks = dev_get_Ks(mat_id);
     float roughness = dev_get_roughness(mat_id);
     float alpha = fmaxf(roughness * roughness, 0.001f);
+    bool is_diel = dev_is_dielectric_glossy(mat_id);
+    float ior_val = is_diel ? dev_get_ior(mat_id) : 1.5f;
+    float F0_diel = ((ior_val - 1.f) / (ior_val + 1.f)) * ((ior_val - 1.f) / (ior_val + 1.f));
 
-    float spec_weight = Ks.max_component();
-    float diff_weight = Kd.max_component();
+    float spec_weight, diff_weight;
+    if (is_diel) {
+        spec_weight = fmaxf(Ks.max_component() * F0_diel, 0.05f);
+        diff_weight = Kd.max_component();
+    } else {
+        spec_weight = Ks.max_component();
+        diff_weight = Kd.max_component();
+    }
     float total_w = spec_weight + diff_weight;
     float p_spec = (total_w > 0.f) ? spec_weight / total_w : 0.5f;
 
@@ -530,9 +575,18 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv, PCGRng& rng
         s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 
         float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            float Fr = dev_fresnel_schlick(VdotH, Ks.value[i]);
-            s.f.value[i] = (ndf * geo * Fr) / denom + Kd.value[i] * INV_PI;
+        if (is_diel) {
+            float Fr = dev_fresnel_schlick(VdotH, F0_diel);
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                float spec = (ndf * geo * Fr * Ks.value[i]) / denom;
+                float diff = (1.f - Fr) * Kd.value[i] * INV_PI;
+                s.f.value[i] = spec + diff;
+            }
+        } else {
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                float Fr = dev_fresnel_schlick(VdotH, Ks.value[i]);
+                s.f.value[i] = (ndf * geo * Fr) / denom + Kd.value[i] * INV_PI;
+            }
         }
     } else {
         // Sample diffuse lobe
@@ -555,9 +609,18 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv, PCGRng& rng
 
         float geo = dev_ggx_G(wo, s.wi, alpha);
         float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            float Fr = dev_fresnel_schlick(VdotH, Ks.value[i]);
-            s.f.value[i] = (ndf * geo * Fr) / denom + Kd.value[i] * INV_PI;
+        if (is_diel) {
+            float Fr = dev_fresnel_schlick(VdotH, F0_diel);
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                float spec = (ndf * geo * Fr * Ks.value[i]) / denom;
+                float diff = (1.f - Fr) * Kd.value[i] * INV_PI;
+                s.f.value[i] = spec + diff;
+            }
+        } else {
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                float Fr = dev_fresnel_schlick(VdotH, Ks.value[i]);
+                s.f.value[i] = (ndf * geo * Fr) / denom + Kd.value[i] * INV_PI;
+            }
         }
     }
 
@@ -1061,7 +1124,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         }
 
         // Glossy BSDF continuation: trace reflections for glossy surfaces
-        if (dev_is_glossy(cur_mat)) {
+        if (dev_is_any_glossy(cur_mat)) {
             Spectrum glossy_tp = Spectrum::constant(1.0f);
             for (int gb = 0; gb < DEFAULT_MAX_GLOSSY_BOUNCES; ++gb) {
                 DevBSDFSample bs = dev_bsdf_sample(cur_mat, wo_local, cur_uv, rng);
@@ -1122,7 +1185,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                     L += glossy_tp * L_ph;
                 }
 
-                if (!dev_is_glossy(cur_mat)) break;
+                if (!dev_is_any_glossy(cur_mat)) break;
             }
         }
     } else {
@@ -1192,26 +1255,58 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                 }
             }
 
-            // ── Glossy continuation: trace reflection bounce ──
-            if (!dev_is_glossy(cur_mat)) break;  // diffuse surfaces stop here
+            // ── Glossy continuation: specular reflection for glossy surfaces ──
+            // Trace a deterministic mirror-direction ray weighted by the correct
+            // Monte Carlo weight G(wo,wi) × F(cosθ).  The GGX NDF D cancels
+            // with the importance-sampling PDF, so we never evaluate D directly.
+            // Only for near-mirror surfaces (roughness < 0.1) where one ray
+            // at the specular peak is a reasonable approximation of the lobe.
+            if (!dev_is_any_glossy(cur_mat)) break;
+            if (dev_get_roughness(cur_mat) >= 0.1f) break;
 
-            DevBSDFSample bs = dev_bsdf_sample(cur_mat, wo_local, cur_uv, rng);
-            if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
+            // Mirror reflection direction (used as the half-vector = normal)
+            float3 refl_dir = cur_dir - cur_normal * (2.f * dot(cur_dir, cur_normal));
+            refl_dir = normalize(refl_dir);
 
-            float cos_theta = bs.wi.z;
-            for (int i = 0; i < NUM_LAMBDA; ++i)
-                glossy_tp.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
+            // Glossy continuation weight:
+            // We trace one ray at the mirror direction.  The correct Monte
+            // Carlo weight for a GGX-importance-sampled mirror direction is
+            //   weight = G(wo,wi) · F(cosθ)
+            // (the NDF D in the BRDF numerator cancels with the GGX sampling
+            // PDF).  This avoids the old D·G·F/(4cos²) blowout for smooth
+            // surfaces where D(n) → ∞.
+            float cos_view = fabsf(dot(normalize(-cur_dir), cur_normal));
+            float roughness_r = dev_get_roughness(cur_mat);
+            float alpha_r = fmaxf(roughness_r * roughness_r, 0.001f);
+
+            // Smith G for both wo and wi (same angle for mirror direction)
+            float G_val = dev_ggx_G1(wo_local, alpha_r);
+            G_val *= G_val;  // G(wo,wi) ≈ G1(wo)·G1(wi), same angle
+
+            Spectrum Ks_r = dev_get_Ks(cur_mat);
+            if (dev_is_dielectric_glossy(cur_mat)) {
+                float ior_r = dev_get_ior(cur_mat);
+                float F0_r = ((ior_r - 1.f) / (ior_r + 1.f)) * ((ior_r - 1.f) / (ior_r + 1.f));
+                float Fr_r = dev_fresnel_schlick(cos_view, F0_r);
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    glossy_tp.value[i] *= G_val * Fr_r * Ks_r.value[i];
+            } else {
+                // Metallic: per-channel Fresnel
+                for (int i = 0; i < NUM_LAMBDA; ++i) {
+                    float Fr_r = dev_fresnel_schlick(cos_view, Ks_r.value[i]);
+                    glossy_tp.value[i] *= G_val * Fr_r;
+                }
+            }
 
             float max_tp = glossy_tp.max_component();
-            if (max_tp < 0.01f) break;
+            if (max_tp < 0.001f) break;
 
-            float3 wi_world = frame.local_to_world(bs.wi);
             cur_pos = cur_pos + cur_normal * OPTIX_SCENE_EPSILON;
-            TraceResult hit_g = trace_radiance(cur_pos, wi_world);
+            TraceResult hit_g = trace_radiance(cur_pos, refl_dir);
             if (!hit_g.hit) break;
 
             cur_mat = hit_g.material_id;
-            cur_dir = wi_world;
+            cur_dir = refl_dir;
 
             if (dev_is_emissive(cur_mat)) {
                 L += glossy_tp * dev_get_Le(cur_mat);
@@ -1697,7 +1792,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         // reflection ray and continue gathering at subsequent hits.
         // This is what produces visible scene reflections on glossy
         // surfaces (not just specular highlights of light sources).
-        if (!dev_is_glossy(mat_id)) break;  // pure diffuse: stop
+        if (!dev_is_any_glossy(mat_id)) break;  // pure diffuse: stop
 
         // BSDF continuation loop for glossy surfaces
         for (int g_bounce = 0; g_bounce < DEFAULT_MAX_GLOSSY_BOUNCES; ++g_bounce) {
@@ -1825,7 +1920,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
             }
 
             // If the continuation hit is not glossy, stop
-            if (!dev_is_glossy(mat_id)) break;
+            if (!dev_is_any_glossy(mat_id)) break;
         }
 
         break;  // exit outer specular-chain loop
@@ -2299,7 +2394,7 @@ extern "C" __global__ void __raygen__photon_trace() {
                 direction = direction - n * (2.f * dot(direction, n));
                 origin = hit.position + n * OPTIX_SCENE_EPSILON;
             }
-        } else if (dev_is_glossy(hit_mat)) {
+        } else if (dev_is_any_glossy(hit_mat)) {
             DevONB bounce_frame = DevONB::from_normal(hit.shading_normal);
             float3 wo_local = bounce_frame.world_to_local(-direction);
             if (wo_local.z <= 0.f) break;

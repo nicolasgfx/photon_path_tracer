@@ -42,8 +42,6 @@ inline DirectLightSample sample_direct_light(
 
     if (scene.emissive_tri_indices.empty()) return result;
 
-    const int num_emissive = (int)scene.emissive_tri_indices.size();
-
     // ── Select emissive triangle via mixture ────────────────────────
     float u_select = rng.next_float();
     int local_idx;
@@ -57,18 +55,19 @@ inline DirectLightSample sample_direct_light(
 
         // Mixture PDF: p = (1-c)*p_power + c*p_area
         float p_power = scene.emissive_alias_table.pdf(local_idx);
-        float p_area_uniform = 1.0f / (float)num_emissive;
+        float p_area  = scene.emissive_area_alias_table.pdf(local_idx);
         pdf_tri = (1.0f - coverage_fraction) * p_power
-                + coverage_fraction * p_area_uniform;
+                +          coverage_fraction  * p_area;
     } else {
-        // Area-weighted branch (probability c): uniform over emissive items
-        local_idx = (int)(rng.next_float() * num_emissive);
-        if (local_idx >= num_emissive) local_idx = num_emissive - 1;
+        // Area-weighted branch (probability c): sample proportional to area
+        float u1 = rng.next_float();
+        float u2 = rng.next_float();
+        local_idx = scene.emissive_area_alias_table.sample(u1, u2);
 
         float p_power = scene.emissive_alias_table.pdf(local_idx);
-        float p_area_uniform = 1.0f / (float)num_emissive;
+        float p_area  = scene.emissive_area_alias_table.pdf(local_idx);
         pdf_tri = (1.0f - coverage_fraction) * p_power
-                + coverage_fraction * p_area_uniform;
+                +          coverage_fraction  * p_area;
     }
 
     uint32_t tri_idx = scene.emissive_tri_indices[local_idx];
@@ -152,19 +151,20 @@ inline float direct_light_pdf(
     const Triangle& tri = scene.triangles[hit.triangle_id];
     float area = tri.area();
 
-    // Find the local index in emissive_tri_indices
+    // Find which emissive triangle was hit and compute mixture PDF
     float p_power = 0.f;
+    float p_area  = 0.f;
     for (size_t i = 0; i < scene.emissive_tri_indices.size(); ++i) {
         if (scene.emissive_tri_indices[i] == hit.triangle_id) {
             p_power = scene.emissive_alias_table.pdf((int)i);
+            p_area  = scene.emissive_area_alias_table.pdf((int)i);
             break;
         }
     }
 
     // Coverage-aware mixture PDF (§7.2.1)
-    float p_area_uniform = 1.0f / (float)scene.emissive_tri_indices.size();
     float pdf_tri_mix = (1.0f - coverage_fraction) * p_power
-                      +          coverage_fraction  * p_area_uniform;
+                      +          coverage_fraction  * p_area;
 
     float pdf_pos = 1.0f / area;
     float dist2 = hit.t * hit.t;

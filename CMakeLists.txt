@@ -11,8 +11,19 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 find_package(CUDAToolkit REQUIRED)
 
 # OptiX (MANDATORY)
-if(DEFINED ENV{OptiX_INSTALL_DIR})
+# 1. Command-line -DOptiX_INSTALL_DIR=...  takes highest priority
+# 2. Environment variable OptiX_INSTALL_DIR
+# 3. Default Windows install path (NVIDIA Corporation\OptiX SDK 9.x.x)
+if(DEFINED ENV{OptiX_INSTALL_DIR} AND NOT OptiX_INSTALL_DIR)
     set(OptiX_INSTALL_DIR $ENV{OptiX_INSTALL_DIR})
+endif()
+if(NOT OptiX_INSTALL_DIR)
+    # Auto-detect: search ProgramData for the latest OptiX SDK
+    file(GLOB _optix_candidates "C:/ProgramData/NVIDIA Corporation/OptiX SDK *")
+    if(_optix_candidates)
+        list(SORT _optix_candidates)
+        list(GET _optix_candidates -1 OptiX_INSTALL_DIR)   # pick latest version
+    endif()
 endif()
 if(NOT OptiX_INSTALL_DIR)
     message(FATAL_ERROR
@@ -61,7 +72,7 @@ set(CORE_SOURCES
 set(CUDA_SOURCES
     src/photon/hash_grid.cu
     src/photon/emitter.cu
-    src/renderer/path_tracer.cu
+    # src/renderer/path_tracer.cu  -- removed (v1 stub, superseded by OptiX)
     src/renderer/direct_light.cu
     src/optix/adaptive_sampling.cu
 )

@@ -50,10 +50,12 @@ struct Scene {
     std::vector<Texture>   textures;
     std::vector<BVHNode>   bvh_nodes;
 
-    // Emissive triangle indices and alias table
+    // Emissive triangle indices and alias tables
     std::vector<uint32_t>  emissive_tri_indices;
-    AliasTable             emissive_alias_table;
+    AliasTable             emissive_alias_table;       // power-weighted
+    AliasTable             emissive_area_alias_table;  // area-weighted (§7.2.1)
     float                  total_emissive_power = 0.f;
+    float                  total_emissive_area  = 0.f;
 
     AABB                   scene_bounds;
 
@@ -125,21 +127,26 @@ inline void Scene::normalize_to_reference() {
 
 inline void Scene::build_emissive_distribution() {
     emissive_tri_indices.clear();
-    std::vector<float> weights;
+    std::vector<float> power_weights;
+    std::vector<float> area_weights;
 
     for (uint32_t i = 0; i < (uint32_t)triangles.size(); ++i) {
         const auto& tri = triangles[i];
         const auto& mat = materials[tri.material_id];
         if (mat.is_emissive()) {
-            float w = tri.area() * mat.mean_emission();
+            float a = tri.area();
+            float w = a * mat.mean_emission();
             emissive_tri_indices.push_back(i);
-            weights.push_back(w);
+            power_weights.push_back(w);
+            area_weights.push_back(a);
         }
     }
 
-    if (!weights.empty()) {
-        emissive_alias_table = AliasTable::build(weights);
-        total_emissive_power = emissive_alias_table.total_weight;
+    if (!power_weights.empty()) {
+        emissive_alias_table      = AliasTable::build(power_weights);
+        total_emissive_power      = emissive_alias_table.total_weight;
+        emissive_area_alias_table = AliasTable::build(area_weights);
+        total_emissive_area       = emissive_area_alias_table.total_weight;
     }
 }
 

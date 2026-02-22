@@ -11,6 +11,7 @@
 #include <vector>
 #include <cstring>
 #include <numeric>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <iomanip>
@@ -678,6 +679,54 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         double total = std::chrono::duration<double, std::milli>(t_now - t_phase_start).count();
         std::printf("[Timing] Photon total:      %8.1f ms\n", total);
     }
+
+    // ── Adaptive gather radius (k-NN, §C2) ──────────────────────────
+    // When use_knn_adaptive is set, compute a scene-representative
+    // gather radius by running knn_shell_expansion() on a random sample
+    // of stored photon positions and taking the median k-th distance.
+    // This replaces the fixed gather_radius_ for subsequent renders.
+    if (config.use_knn_adaptive && stored_photons_.size() > 0) {
+        const int   k           = config.knn_k;
+        const float tau         = DEFAULT_SURFACE_TAU;
+        const float max_radius  = DEFAULT_GPU_MAX_GATHER_RADIUS;
+        const int   num_samples = (std::min)((int)stored_photons_.size(), 256);
+        const size_t stride     = (std::max)((size_t)1,
+                                           stored_photons_.size() / num_samples);
+
+        std::vector<float> knn_radii;
+        knn_radii.reserve(num_samples);
+
+        std::vector<uint32_t> tmp_indices;
+        float tmp_max_dist2 = 0.f;
+
+        for (int s = 0; s < num_samples; ++s) {
+            size_t idx = (size_t)s * stride;
+            float3 pos    = make_f3(stored_photons_.pos_x[idx],
+                                    stored_photons_.pos_y[idx],
+                                    stored_photons_.pos_z[idx]);
+            float3 normal = make_f3(stored_photons_.norm_x[idx],
+                                    stored_photons_.norm_y[idx],
+                                    stored_photons_.norm_z[idx]);
+
+            stored_grid_.knn_shell_expansion(
+                pos, normal, k, tau,
+                stored_photons_, tmp_indices, tmp_max_dist2);
+
+            if (!tmp_indices.empty()) {
+                float r = sqrtf(fminf(tmp_max_dist2, max_radius * max_radius));
+                knn_radii.push_back(r);
+            }
+        }
+
+        if (!knn_radii.empty()) {
+            std::sort(knn_radii.begin(), knn_radii.end());
+            float median_r = knn_radii[knn_radii.size() / 2];
+            median_r = fminf(fmaxf(median_r, 1e-4f), max_radius);
+            std::printf("[k-NN] Adaptive gather radius: %.5f  (k=%d, %zu samples)\n",
+                        median_r, k, knn_radii.size());
+            gather_radius_ = median_r;
+        }
+    }
 }
 
 // =====================================================================
@@ -987,6 +1036,10 @@ void OptixRenderer::render_one_spp(
 // =====================================================================
 // build_cell_bin_grid() -- build dense 3D grid on CPU and upload to GPU
 // =====================================================================
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4702)  // unreachable code -- intentional §G11 dead path
+#endif
 void OptixRenderer::build_cell_bin_grid()
 {
     // Guideline v2.1 §G11: cell-bin grid is no longer used for rendering.
@@ -1105,6 +1158,9 @@ void OptixRenderer::build_volume_cell_bin_grid()
     double ms_total = std::chrono::duration<double, std::milli>(t_end - t_start).count();
     std::printf("[VolGrid] Upload done: %.1f ms total\n", ms_total);
 }
+#ifdef _MSC_VER
+#pragma warning(pop)  // restore C4702
+#endif
 
 // =====================================================================
 // render_final() -- full path tracing (is_final_render = 1)

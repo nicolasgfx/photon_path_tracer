@@ -73,6 +73,10 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
     // never leaves us with a dangling pointer.
     int current_idx = -1;
 
+    // Store raw illum values so we can apply type assignment AFTER all
+    // keywords are parsed (Ks may appear after illum in the file).
+    std::unordered_map<int, int> illum_values;
+
     std::string line;
     while (std::getline(file, line)) {
         line = trim(line);
@@ -129,30 +133,8 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
         else if (keyword == "illum") {
             int illum;
             ss >> illum;
-            // Don't let illum override an already-set Emissive type
-            // (Ke line may have been parsed before illum)
-            if (scene.materials[current_idx].type == MaterialType::Emissive) continue;
-            switch (illum) {
-                case 0: case 1:
-                    scene.materials[current_idx].type = MaterialType::Lambertian;
-                    break;
-                case 2:
-                    // Diffuse + specular
-                    if (scene.materials[current_idx].Ks.max_component() > 0.01f)
-                        scene.materials[current_idx].type = MaterialType::GlossyMetal;
-                    break;
-                case 3:
-                    scene.materials[current_idx].type = MaterialType::Mirror;
-                    break;
-                case 4: case 6: case 7:
-                    scene.materials[current_idx].type = MaterialType::Glass;
-                    break;
-                case 5:
-                    scene.materials[current_idx].type = MaterialType::Mirror;
-                    break;
-                default:
-                    break;
-            }
+            // Store for deferred processing (Ks may not be parsed yet)
+            illum_values[current_idx] = illum;
         }
         else if (keyword == "map_Kd") {
             std::string tex_path;
@@ -193,6 +175,37 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
                     std::cerr << "[MTL] Failed to load texture: " << full_path << "\n";
                 }
             }
+        }
+    }
+
+    // ── Post-processing: apply illum → MaterialType now that all
+    //    keywords (Kd, Ks, Ns, Ni, Ke, …) are fully parsed. ──────────
+    for (auto& [idx, illum] : illum_values) {
+        auto& mat = scene.materials[idx];
+        // Don't let illum override an already-set Emissive type
+        if (mat.type == MaterialType::Emissive) continue;
+        switch (illum) {
+            case 0: case 1:
+                mat.type = MaterialType::Lambertian;
+                break;
+            case 2:
+                // OBJ spec: illum 2 = Blinn-Phong diffuse + specular
+                // Always dielectric Fresnel (F0 from IOR).  Ks is the
+                // specular highlight colour/intensity, NOT metallic F0.
+                if (mat.Ks.max_component() > 0.01f)
+                    mat.type = MaterialType::GlossyDielectric;
+                break;
+            case 3:
+                mat.type = MaterialType::Mirror;
+                break;
+            case 4: case 6: case 7:
+                mat.type = MaterialType::Glass;
+                break;
+            case 5:
+                mat.type = MaterialType::Mirror;
+                break;
+            default:
+                break;
         }
     }
 

@@ -36,7 +36,7 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 768;
 
 // Samples per pixel (anti-aliasing + noise averaging).
 //   Preview: 1–4  |  Default: 16–64  |  Final: 64–256
-constexpr int DEFAULT_SPP = 64;
+constexpr int DEFAULT_SPP = 32;
 
 // Stratified sub-pixel jitter grid (§7.1).
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP (one sample per stratum).
@@ -61,7 +61,7 @@ constexpr int HERO_WAVELENGTHS = 4;
 // indirect transport in v2.
 //   Preview: 50k–200k  |  Default: 500k–1M  |  Final: 1M–5M
 constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;  // diffuse indirect photons
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 250000;   // specular→diffuse caustic photons
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // specular→diffuse caustic photons
 
 // ── Photon path depth (§5.2) ────────────────────────────────────────
 // Maximum bounce depth for photon rays (the real path tracers in v2).
@@ -95,7 +95,7 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 // Half-angle of the cosine-weighted emission cone (degrees).
 // 90° = full hemisphere (Lambertian).  Shared by CPU emitter.h
 // and GPU __raygen__photon_trace.
-constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 10.0f;
+constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
 // Debug: stop photon after first intersection (validate emission only).
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
@@ -267,10 +267,14 @@ constexpr float DEFAULT_VOLUME_MAX_T    = 2.0f;    // max march distance for mis
 // NO effect on v2 rendering.  Remove once all v1 code paths are deleted.
 
 // v1 multi-bounce camera features — all disabled in v2 (§22).
-constexpr bool  DEFAULT_USE_MIS           = false;   // no 3-way MIS at camera
-constexpr bool  DEFAULT_USE_PHOTON_GUIDED = false;   // no guided camera bouncing
-constexpr float DEFAULT_GUIDED_BSDF_MIX   = 0.80f;   // no guided BSDF at camera
-constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 4;       // no deep camera bounces
+// ── Dead v1 flags (kept for backward compat — no effect in v2.1) ───
+// These constants are unused by the rendering pipeline.  They remain
+// only to avoid breaking external callers that reference them.
+// TODO: Remove when all references have been cleaned from tests.
+constexpr bool  DEFAULT_USE_MIS           = false;   // v1 3-way MIS (removed)
+constexpr bool  DEFAULT_USE_PHOTON_GUIDED = false;   // v1 guided camera bounce (removed)
+constexpr float DEFAULT_GUIDED_BSDF_MIX   = 0.80f;  // v1 guided BSDF mix       (removed)
+constexpr int   DEFAULT_NEE_DEEP_SAMPLES  = 4;       // v1 deep NEE samples       (removed)
 
 // Photon-prefixed names → legacy aliases used across codebase.
 constexpr int   DEFAULT_MAX_BOUNCES    = DEFAULT_PHOTON_MAX_BOUNCES;
@@ -339,9 +343,10 @@ constexpr int   DEFAULT_NUM_PHOTONS    = DEFAULT_GLOBAL_PHOTON_BUDGET;
 // ── Scene lighting mode ──────────────────────────────────────────────
 // Describes how light enters the scene (from scenes_description.md).
 enum class SceneLightMode {
-    FromMTL,          // Emissive surfaces defined in .mtl file
+    FromMTL,            // Emissive surfaces defined in .mtl file
     DirectionalToFloor, // Directional light aimed at center floor (e.g. Sibenik)
-    SphericalEnv,     // Spherical environment light (photons from all directions)
+    HemisphereEnv,      // Upper hemisphere sky dome (e.g. Sponza open atrium)
+    SphericalEnv,       // Full sphere environment light (e.g. Hairball)
 };
 
 // ── Scene complexity level ──────────────────────────────────────────
@@ -430,10 +435,10 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
       SceneLightMode::DirectionalToFloor, SceneComplexity::High },
 
-    // 8: Sponza — high complexity, spherical environment light
+    // 8: Sponza — high complexity, hemisphere sky dome from above
     { "sponza/sponza.obj",                       "Sponza",            false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 60.0f, 0.5f,
-      SceneLightMode::SphericalEnv, SceneComplexity::High },
+      SceneLightMode::HemisphereEnv, SceneComplexity::High },
 
     // 9: Hairball — high complexity, spherical environment light
     { "hairball/hairball.obj",                   "Hairball",           false,

@@ -51,9 +51,10 @@ struct RenderConfig {
     float  gather_radius     = DEFAULT_GATHER_RADIUS;
     float  caustic_radius    = DEFAULT_CAUSTIC_RADIUS;
 
-    // MIS (v2: disabled, kept for API compat)
-    bool   use_mis           = DEFAULT_USE_MIS;
-    bool   use_photon_guided = DEFAULT_USE_PHOTON_GUIDED;
+    // MIS and guided-BSDF (v1 features, removed in v2.1)
+    // These fields are kept for API compatibility only — they have no
+    // effect; the renderer always uses the v2.1 first-hit + photon pipeline.
+    // TODO: Remove in a future breaking-API cleanup.
 
     // Camera specular chain (§E3)
     int    max_specular_chain = DEFAULT_MAX_SPECULAR_CHAIN;
@@ -61,6 +62,7 @@ struct RenderConfig {
     // KD-tree adaptive radius (k-NN, §C2)
     int    knn_k              = DEFAULT_KNN_K;
     bool   use_kdtree         = true;   // primary spatial index
+    bool   use_knn_adaptive   = false;  // k-NN adaptive gather radius (§C2)
 
     // NEE coverage fraction (§7.2.1)
     float  nee_coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION;

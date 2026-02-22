@@ -1,7 +1,16 @@
 #pragma once
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════ DEPRECATED ═══════════════════════════
+// cell_bin_grid.h — v1 dense 3D photon-bin grid (superseded in v2.1)
+// ────────────────────────────────────────────────────────────────────
+// The v2.1 renderer uses the tangential-disk hash-grid (hash_grid.h)
+// instead.  This file is retained only for the OptiX host-side path
+// (build_cell_bin_grid in optix_renderer.cpp) and test hooks.  Do not
+// use in new code.
+// TODO: Remove once build_cell_bin_grid is deleted from OptixRenderer.
+// ════════════════════════════════════════════════════════════════════
+// ────────────────── Original documentation ────────────────────────
 // cell_bin_grid.h – Dense 3D grid of precomputed photon directional bins
-// ─────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────
 // Two-pass normal-gated scatter:
 //
 //   Pass 1 – Each photon is accumulated into its OWN cell only.

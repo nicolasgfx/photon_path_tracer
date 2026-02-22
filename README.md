@@ -25,7 +25,7 @@ saved to disk, and loaded instantly for interactive camera exploration.
 | Spatial index (GPU)         | Hash grid with shell-expansion k-NN                                 |
 | Gather kernel               | Tangential disk (surface distance, not 3D Euclidean)                |
 | Default render mode         | SPPM progressive (Hachisuka & Jensen 2009)                          |
-| Photon persistence          | View-independent; press **P** to recompute on demand              |
+| Photon persistence          | Binary save/load with scene hash auto-invalidation                  |
 | Tone mapping                | ACES Filmic                                                          |
 | Sub-pixel sampling          | 4×4 stratified jittered strata (16 SPP default)                     |
 | Debug / preview             | Interactive GLFW viewer, 5 render modes, 9 overlay toggles          |
@@ -52,12 +52,16 @@ saved to disk, and loaded instantly for interactive camera exploration.
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼─────────────────────────────────┐
-│  PHOTON PASS                                                    │
+│  PHOTON PASS  (precomputed or cached)                           │
 │                                                                 │
-│  Emit N photons from lights                                     │
-│  Trace each photon: full BSDF bouncing, Russian roulette        │
-│  Deposit at diffuse hits (lightPathDepth ≥ 2 only)              │
-│  Build spatial index: KD-tree (CPU) / hash grid (GPU)           │
+│  IF photon_cache.bin exists AND scene unchanged:                │
+│     Load photon map + spatial index from cache                  │
+│  ELSE:                                                          │
+│     Emit N photons from lights                                  │
+│     Trace each photon: full BSDF bouncing, Russian roulette     │
+│     Deposit at diffuse hits (lightPathDepth ≥ 2 only)           │
+│     Build spatial index: KD-tree (CPU) / hash grid (GPU)        │
+│     Save to photon_cache.bin                                    │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼─────────────────────────────────┐
@@ -85,9 +89,9 @@ saved to disk, and loaded instantly for interactive camera exploration.
   and cross-surface photon leakage. The fix is in the kernel metric, not
   the spatial data structure.
 
-- **View-independent photon maps.** The photon map is view-independent.
-  Change the camera freely without recomputing photons.
-  Press **P** to recompute on demand.
+- **Precomputable photon maps.** The photon map is view-independent and
+  saved as a binary file with a scene hash. Change the camera freely
+  without recomputing photons. Press **P** to recompute on demand.
 
 - **Dual CPU/GPU renderer.** CPU KD-tree provides ground truth; GPU hash
   grid provides interactive speed. Both use the same tangential kernel and
@@ -177,6 +181,9 @@ run.bat clean        # Delete the build directory
 | `--radius R`    | Photon gather radius (scene units)                             | 0.05               |
 | `--output FILE` | Output PNG path                                                | output/render.png  |
 | `--mode MODE`   | `combined` \| `direct` \| `indirect` \| `photon` \| `normals` \| `material` \| `depth` | combined |
+| `--photon-file PATH` | Explicit photon cache file path                          | scene_dir/photon_cache.bin |
+| `--force-recompute`  | Ignore cached photon file, always recompute              |                    |
+| `--no-save-photons`  | Do not save photon cache after computation               |                    |
 | `--spatial MODE`      | `kdtree` \| `hashgrid` — spatial index for CPU           | kdtree             |
 | `--adaptive-radius`   | Enable k-NN adaptive gather radius                      |                    |
 | `--deterministic`     | Enable deterministic debug mode (for CPU↔GPU bisection) |                    |
@@ -231,21 +238,15 @@ verify photon map quality before committing to a full render.
 
 ### Scene Switching
 
-| Key   | Scene             | Lighting          | Complexity |
-|-------|-------------------|-------------------|------------|
-| **1** | Cornell Box       | MTL emitters      | Low        |
-| **2** | Conference Room   | MTL emitters      | Medium     |
-| **3** | Living Room       | MTL emitters      | Medium     |
-| **4** | Fireplace Room    | MTL emitters      | Medium     |
-| **5** | Salle de Bain     | MTL emitters      | Medium     |
-| **6** | Sibenik Cathedral | Directional (sun) | High       |
-| **7** | Sponza            | Spherical env     | High       |
-| **8** | Hairball          | Spherical env     | High       |
+| Key | Scene         |
+|-----|---------------|
+| **1** | Cornell Box |
+| **2** | Conference  |
+| **3** | Living Room |
+| **4** | Sibenik     |
 
-Switching scenes rebuilds the acceleration structure, applies a
-complexity-based parameter preset (photon budget, gather radius, SPP,
-bounces), sets the scene's lighting mode, loads the photon cache if a
-matching binary exists, and resets the camera.
+Switching scenes rebuilds the acceleration structure, loads photon cache
+(or recomputes if missing/stale), and resets the camera.
 
 ### Light Brightness
 
@@ -362,7 +363,7 @@ photon_path_tracer/
 │   │   ├── emitter.h / .cu          Emitter sampling, CDF construction
 │   │   ├── density_estimator.h      Tangential disk kernel density estimation
 │   │   ├── surface_filter.h         Surface consistency filter (tangential metric)
-│   │   └── photon_io.h / .cpp       Photon map I/O (placeholder)
+│   │   └── photon_io.h / .cpp       Binary save/load for photon map persistence
 │   ├── optix/
 │   │   ├── optix_device.cu          All OptiX raygen / closesthit programs
 │   │   ├── optix_renderer.h / .cpp  Host pipeline: SBT, GAS, launch params

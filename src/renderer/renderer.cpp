@@ -299,7 +299,95 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
             L_total += throughput * L_caustic;
         }
 
-        break;  // v2: stop at first diffuse hit (no BSDF continuation)
+        // ── Glossy continuation: specular reflection for glossy surfaces ──
+        // Trace mirror-direction rays weighted by G(wo,wi) × F(cosθ).
+        // The NDF D cancels with the sampling PDF, giving the correct energy.
+        // Only for near-mirror surfaces (roughness < 0.1) where one ray
+        // at the specular peak approximates the lobe well.
+        if ((mat.type == MaterialType::GlossyMetal ||
+             mat.type == MaterialType::GlossyDielectric) &&
+            mat.roughness < 0.1f) {
+
+            constexpr int MAX_GLOSSY_BOUNCES = 4;
+            Spectrum glossy_tp = throughput;
+            float3 g_pos = hit.position;
+            float3 g_dir = ray.direction;
+            float3 g_normal = hit.shading_normal;
+
+            for (int gb = 0; gb < MAX_GLOSSY_BOUNCES; ++gb) {
+                // Mirror reflection weighted by Cook-Torrance specular
+                float3 refl = g_dir - g_normal * (2.f * dot(g_dir, g_normal));
+                refl = normalize(refl);
+                float cos_v = fabsf(dot(normalize(g_dir * (-1.f)), g_normal));
+
+                float alpha_g = fmaxf(mat.roughness * mat.roughness, 0.001f);
+
+                // Smith G for mirror direction (wo = wi angle)
+                ONB gf = ONB::from_normal(g_normal);
+                float3 wo_g = gf.world_to_local(g_dir * (-1.f));
+                float G1 = ggx_G1(wo_g, alpha_g);
+                float G_val = G1 * G1;  // G(wo,wi) ≈ G1(wo)·G1(wi)
+
+                // Glossy continuation weight = G · F
+                // (the GGX NDF D in the BRDF cancels with the sampling PDF,
+                //  so the correct single-sample weight is just G × Fresnel)
+                if (mat.type == MaterialType::GlossyMetal) {
+                    for (int i = 0; i < NUM_LAMBDA; ++i) {
+                        float Fr = fresnel_schlick(cos_v, mat.Ks.value[i]);
+                        glossy_tp.value[i] *= G_val * Fr;
+                    }
+                } else {
+                    float f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
+                    float F0 = f0t * f0t;
+                    float Fr = fresnel_schlick(cos_v, F0);
+                    for (int i = 0; i < NUM_LAMBDA; ++i)
+                        glossy_tp.value[i] *= G_val * Fr * mat.Ks.value[i];
+                }
+
+                if (glossy_tp.max_component() < 0.001f) break;
+
+                // Trace reflection
+                Ray refl_ray{g_pos + g_normal * EPSILON, refl};
+                HitRecord refl_hit = scene_->intersect(refl_ray);
+                if (!refl_hit.hit) break;
+
+                const auto& rmat = scene_->materials[refl_hit.material_id];
+                if (rmat.is_emissive()) {
+                    L_total += glossy_tp * rmat.Le;
+                    break;
+                }
+
+                // NEE at reflected hit
+                if (config_.mode == RenderMode::Combined ||
+                    config_.mode == RenderMode::DirectOnly) {
+                    ONB rf = ONB::from_normal(refl_hit.shading_normal);
+                    float3 rwo = rf.world_to_local(refl * (-1.f));
+                    if (rwo.z > 0.f) {
+                        DirectLightSample rdls = sample_direct_light(
+                            refl_hit.position, refl_hit.shading_normal, *scene_, rng);
+                        if (rdls.visible && rdls.pdf_light > 0.f) {
+                            float3 rwi = rf.world_to_local(rdls.wi);
+                            float rcos = fmaxf(0.f, rwi.z);
+                            if (rcos > 0.f) {
+                                Spectrum rf_val = bsdf::evaluate(rmat, rwo, rwi);
+                                L_total += glossy_tp * rdls.Li * rf_val * (rcos / rdls.pdf_light);
+                            }
+                        }
+                    }
+                }
+
+                // Continue if reflected surface is also glossy AND near-mirror
+                if ((rmat.type != MaterialType::GlossyMetal &&
+                     rmat.type != MaterialType::GlossyDielectric) ||
+                    rmat.roughness >= 0.1f) break;
+
+                g_pos = refl_hit.position;
+                g_dir = refl;
+                g_normal = refl_hit.shading_normal;
+            }
+        }
+
+        break;  // stop at first diffuse/glossy hit (after glossy continuation)
     }
 
     return TraceResult{L_total, L_nee};

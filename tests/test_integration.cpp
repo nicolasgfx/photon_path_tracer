@@ -41,6 +41,7 @@
 #include "photon/emitter.h"
 #include "photon/surface_filter.h"
 #include "bsdf/bsdf.h"
+#include "optix/optix_renderer.h"
 
 #include <vector>
 #include <cmath>
@@ -144,6 +145,8 @@ protected:
     static HashGrid caustic_grid_;
     static KDTree global_kdtree_;
     static bool scene_loaded_;
+
+    friend class CpuGpuTest;
 };
 
 // Static member definitions
@@ -610,7 +613,7 @@ TEST_F(IntegrationTest, TangentialGatherRejectsOpposite) {
         // query_tangential should only return photons within tau of plane
         global_kdtree_.query_tangential(hit.position, hit.shading_normal,
             config_.gather_radius, tau, global_photons_,
-            [&](uint32_t idx, float d_tan2) {
+            [&](uint32_t idx, float /*d_tan2*/) {
                 float3 ppos = make_f3(global_photons_.pos_x[idx],
                                        global_photons_.pos_y[idx],
                                        global_photons_.pos_z[idx]);
@@ -954,4 +957,175 @@ TEST_F(IntegrationTest, FullRenderTangentialValid) {
     EXPECT_EQ(negative_count, 0) << "No pixel should have negative radiance";
     EXPECT_EQ(nan_count, 0) << "No pixel should have NaN/Inf radiance";
     EXPECT_GT(total, 0.f) << "Rendered image should have non-zero content";
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CPU ↔ GPU comparison tests (§12.3)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Validates that the CPU reference renderer and GPU OptiX path produce
+// images with PSNR ≥ threshold_db for the same scene / configuration.
+//
+//   threshold_db = 25 dB: NEE-direct only (deterministic at 1 spp)
+//   threshold_db = 20 dB: combined mode  (includes stochastic photon term)
+//
+// These tests are automatically skipped if:
+//   a) The Cornell Box scene file is not found, or
+//   b) OptiX cannot be initialised on the current machine.
+// ─────────────────────────────────────────────────────────────────────
+
+// Compute PSNR (dB) between two sRGB RGBA frame buffers.
+// Compares R/G/B channels only; MAX = 255.
+static float compute_psnr(const FrameBuffer& ref, const FrameBuffer& cmp) {
+    int n = ref.width * ref.height;
+    EXPECT_EQ(n, cmp.width * cmp.height) << "frame buffer size mismatch";
+    double mse = 0.0;
+    for (int i = 0; i < n; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            float d = (float)ref.srgb[i * 4 + c] - (float)cmp.srgb[i * 4 + c];
+            mse += (double)(d * d);
+        }
+    }
+    mse /= (double)(n * 3);
+    if (mse < 1e-10) return 100.f;
+    return 20.f * std::log10f(255.f) - 10.f * std::log10f((float)mse);
+}
+
+// Fixture for CPU↔GPU comparison tests.
+// Reuses the same Cornell Box scene loaded by IntegrationTest.
+class CpuGpuTest : public ::testing::Test {
+protected:
+    static bool scene_ok() { return IntegrationTest::scene_loaded_; }
+    static Scene*        scene()  { return IntegrationTest::scene_.get(); }
+    static RenderConfig  config() { return IntegrationTest::config_; }
+    static Camera        camera() { return IntegrationTest::camera_; }
+    static const PhotonSoA& global_photons()  { return IntegrationTest::global_photons_; }
+    static const HashGrid&  global_grid()     { return IntegrationTest::global_grid_; }
+    static const PhotonSoA& caustic_photons() { return IntegrationTest::caustic_photons_; }
+    static const HashGrid&  caustic_grid()    { return IntegrationTest::caustic_grid_; }
+};
+
+// ─ 16. CPU ↔ GPU: NEE direct component PSNR ≥ 25 dB ─────────────
+//
+// Render NEE-direct-only with CPU and GPU, compare PSNR.
+// At 1 spp the GPU path is nearly deterministic (shadow rays),
+// giving a tighter PSNR window.
+TEST_F(CpuGpuTest, NeeDirectPsnrAbove25dB) {
+    if (!scene_ok()) GTEST_SKIP() << "Cornell Box scene not available";
+
+    const int W = 32, H = 32;
+
+    // ── CPU reference ──
+    RenderConfig cfg = config();
+    cfg.image_width         = W;
+    cfg.image_height        = H;
+    cfg.samples_per_pixel   = 4;
+    cfg.mode                = RenderMode::DirectOnly;
+    cfg.num_photons         = 0;          // no photons needed for direct-only
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(scene());
+    Camera cam = camera();
+    cam.width  = W;
+    cam.height = H;
+    cam.update();
+    cpu_renderer.set_camera(cam);
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();     // builds empty maps (ok for direct-only)
+    cpu_renderer.render_frame();
+
+    const FrameBuffer& cpu_fb = cpu_renderer.framebuffer();
+
+    // ── GPU reference ──
+    OptixRenderer gpu;
+    try {
+        gpu.init();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "OptiX not available: " << e.what();
+    }
+    gpu.build_accel(*scene());
+    gpu.upload_scene_data(*scene());
+    gpu.upload_emitter_data(*scene());
+    gpu.resize(W, H);
+    gpu.clear_buffers();
+
+    // Upload zero photons (direct-only render will rely on NEE)
+    PhotonSoA empty_p;
+    HashGrid  empty_g;
+    gpu.upload_photon_data(empty_p, empty_g, empty_p, empty_g,
+                           cfg.gather_radius, cfg.caustic_radius, 1);
+
+    for (int s = 0; s < cfg.samples_per_pixel; ++s)
+        gpu.render_one_spp(cam, s, cfg.max_bounces);
+
+    FrameBuffer gpu_fb;
+    gpu.download_framebuffer(gpu_fb);
+
+    float psnr = compute_psnr(cpu_fb, gpu_fb);
+    std::printf("[CPU↔GPU] NEE direct PSNR: %.1f dB\n", psnr);
+    EXPECT_GE(psnr, 25.0f)
+        << "PSNR below 25 dB suggests a systematic divergence between "
+           "CPU and GPU NEE-direct rendering";
+}
+
+// ─ 17. CPU ↔ GPU: combined mode (NEE + photon) PSNR ≥ 20 dB ─────
+//
+// Render the combined mode (NEE + photon gather), compare PSNR.
+// The photon term is stochastic, so 20 dB is an achievable threshold
+// at 32×32.
+TEST_F(CpuGpuTest, CombinedPsnrAbove20dB) {
+    if (!scene_ok()) GTEST_SKIP() << "Cornell Box scene not available";
+    if (global_photons().size() == 0) GTEST_SKIP() << "No photons available";
+
+    const int W = 32, H = 32;
+
+    // ── CPU reference ──
+    RenderConfig cfg = config();
+    cfg.image_width       = W;
+    cfg.image_height      = H;
+    cfg.samples_per_pixel = 4;
+    cfg.mode              = RenderMode::Combined;
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(scene());
+    Camera cam = camera();
+    cam.width  = W;
+    cam.height = H;
+    cam.update();
+    cpu_renderer.set_camera(cam);
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+    cpu_renderer.render_frame();
+
+    const FrameBuffer& cpu_fb = cpu_renderer.framebuffer();
+
+    // ── GPU reference (same photon map via upload) ──
+    OptixRenderer gpu;
+    try {
+        gpu.init();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "OptiX not available: " << e.what();
+    }
+    gpu.build_accel(*scene());
+    gpu.upload_scene_data(*scene());
+    gpu.upload_emitter_data(*scene());
+    gpu.resize(W, H);
+    gpu.clear_buffers();
+    gpu.upload_photon_data(
+        global_photons(), global_grid(),
+        caustic_photons(), caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius,
+        cfg.num_photons);
+
+    for (int s = 0; s < cfg.samples_per_pixel; ++s)
+        gpu.render_one_spp(cam, s, cfg.max_bounces);
+
+    FrameBuffer gpu_fb;
+    gpu.download_framebuffer(gpu_fb);
+
+    float psnr = compute_psnr(cpu_fb, gpu_fb);
+    std::printf("[CPU↔GPU] Combined PSNR: %.1f dB\n", psnr);
+    EXPECT_GE(psnr, 20.0f)
+        << "PSNR below 20 dB suggests a systematic divergence between "
+           "CPU and GPU combined rendering";
 }

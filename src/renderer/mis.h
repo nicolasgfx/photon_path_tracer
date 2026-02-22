@@ -1,7 +1,15 @@
 #pragma once
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════ DEPRECATED ═══════════════════════════
+// mis.h — v1 3-way MIS implementation (superseded in v2.1)
+// ────────────────────────────────────────────────────────────────────
+// The v2.1 renderer does not use MIS — all indirect illumination comes
+// from the photon map and all direct from NEE.  This header is retained
+// because it is still #included by test files for legacy validation.
+// TODO: Remove once all test references have been cleaned up.
+// ════════════════════════════════════════════════════════════════════
+// ────────────────── Original documentation ────────────────────────
 // mis.h – Multiple Importance Sampling (Section 8)
-// ─────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────
 // 3-way MIS between:
 //   1. Light sampling (direct illumination)
 //   2. BSDF sampling
