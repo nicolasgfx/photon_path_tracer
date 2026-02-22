@@ -477,6 +477,9 @@ float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
     // Glossy: mixed PDF = p_spec * spec_pdf + (1-p_spec) * diff_pdf
     Spectrum Ks = dev_get_Ks(mat_id);
     Spectrum Kd = dev_get_Kd(mat_id, make_float2(0.f, 0.f));
+    float roughness = dev_get_roughness(mat_id);
+    float alpha = fmaxf(roughness * roughness, 0.001f);
+
     float spec_weight, diff_weight;
     if (dev_is_dielectric_glossy(mat_id)) {
         float ior = dev_get_ior(mat_id);
@@ -487,11 +490,12 @@ float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
         spec_weight = Ks.max_component();
         diff_weight = Kd.max_component();
     }
+    // Must match the roughness boost in dev_bsdf_sample()
+    float roughness_boost = 1.f / (1.f + 10.f * alpha);
+    spec_weight = fmaxf(spec_weight, roughness_boost);
+
     float total = spec_weight + diff_weight;
     float p_spec = (total > 0.f) ? spec_weight / total : 0.5f;
-
-    float roughness = dev_get_roughness(mat_id);
-    float alpha = fmaxf(roughness * roughness, 0.001f);
 
     float3 h = normalize(wo + wi);
     float ndf = dev_ggx_D(h, alpha);
@@ -547,6 +551,16 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv, PCGRng& rng
         spec_weight = Ks.max_component();
         diff_weight = Kd.max_component();
     }
+
+    // Boost specular sampling probability for low-roughness (near-mirror)
+    // surfaces.  Without this, a shiny dielectric with large Kd and small
+    // Ks*F0 sends ~94 % of samples to the diffuse cosine lobe, wasting
+    // almost all of them — they evaluate to near-zero specular BSDF at
+    // random directions far from the narrow GGX peak, adding pure noise.
+    // The boost smoothly fades to zero for rough surfaces (alpha → 1).
+    float roughness_boost = 1.f / (1.f + 10.f * alpha);
+    spec_weight = fmaxf(spec_weight, roughness_boost);
+
     float total_w = spec_weight + diff_weight;
     float p_spec = (total_w > 0.f) ? spec_weight / total_w : 0.5f;
 
