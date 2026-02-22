@@ -39,7 +39,7 @@ inline HD float guided_nee_bin_boost(
     int k = bin_dirs.find_nearest(wi);
     if (k < 0) k = 0;
     if (k >= N) k = N - 1;
-    float b = bins[k].flux / total_bin_flux;
+    float b = bins[k].scalar_flux / total_bin_flux;
     if (b < 0.0f) b = 0.0f;
     if (b > 1.0f) b = 1.0f;
     return b;

@@ -70,10 +70,10 @@ TEST(NEE, ShadowSampleCountPolicy) {
 // ---------------------------------------------------------------------
 
 TEST(PhotonBins, StructSizeMatchesComment) {
-    // Important for speed expectations; comment in core/photon_bins.h claims 36 bytes.
-    // (was 24 bytes before surface-normal visibility field avg_nx/y/z was added)
-    static_assert(sizeof(PhotonBin) == 36, "PhotonBin layout changed; update memory-footprint assumptions");
-    EXPECT_EQ(sizeof(PhotonBin), 36u);
+    // Important for speed expectations; comment in core/photon_bins.h claims 164 bytes.
+    // Per-wavelength flux[NUM_LAMBDA] + scalar_flux + direction + weight + count + avg normal.
+    static_assert(sizeof(PhotonBin) == 164, "PhotonBin layout changed; update memory-footprint assumptions");
+    EXPECT_EQ(sizeof(PhotonBin), 164u);
 }
 
 TEST(PhotonBins, DirsInitAndNearest) {
@@ -111,20 +111,20 @@ TEST(GuidedNEE, BinBoostIsNormalizedAndHemisphereGated) {
     dirs.init(N);
 
     PhotonBin bins[N] = {};
-    bins[0].flux = 10.0f;
-    bins[1].flux = 0.0f;
-    bins[2].flux = 5.0f;
-    bins[3].flux = 5.0f;
+    bins[0].scalar_flux = 10.0f;
+    bins[1].scalar_flux = 0.0f;
+    bins[2].scalar_flux = 5.0f;
+    bins[3].scalar_flux = 5.0f;
 
     float total = 0.0f;
-    for (int i = 0; i < N; ++i) total += bins[i].flux;
+    for (int i = 0; i < N; ++i) total += bins[i].scalar_flux;
     ASSERT_GT(total, 0.0f);
 
     // Positive hemisphere: normal aligned with wi.
     float3 wi = dirs.dirs[0];
     float3 n  = wi;
     float boost = guided_nee_bin_boost(wi, n, bins, N, dirs, total);
-    EXPECT_NEAR(boost, bins[0].flux / total, 1e-6f);
+    EXPECT_NEAR(boost, bins[0].scalar_flux / total, 1e-6f);
 
     // Negative hemisphere: no boost.
     float3 n_back = -wi;

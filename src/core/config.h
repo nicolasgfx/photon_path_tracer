@@ -22,7 +22,6 @@
 //#define SCENE_CORNELL_BOX
 //#define SCENE_CONFERENCE
 #define SCENE_LIVING_ROOM
-//#define SCENE_BREAKFAST_ROOM
 //#define SCENE_SIBENIK
 
 // =====================================================================
@@ -93,9 +92,12 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 
 // ── Photon emission cone angle (§5.1.2) ─────────────────────────────
 // Half-angle of the cosine-weighted emission cone (degrees).
-// 90° = full hemisphere (Lambertian).  Shared by CPU emitter.h
+// Controls ONLY the initial photon emission from light sources;
+// subsequent bounces are unrestricted (material-dependent BSDF).
+// 90° = full hemisphere (Lambertian).  60° = 120° FOV (directional,
+// e.g. sunlight through windows).  Shared by CPU emitter.h
 // and GPU __raygen__photon_trace.
-constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
+constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 10.0f;
 
 // Debug: stop photon after first intersection (validate emission only).
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
@@ -112,6 +114,26 @@ constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
 //   10% of scene = 0.10  |  5% = 0.05  |  Final quality: 0.02–0.05
 constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;   // global (diffuse) map — 10% of scene extent
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.05f;   // caustic map — 5% of scene extent
+
+// ── Dense cell-bin grid gather (§3.5, §6.7) ─────────────────────────
+// When true, the GPU gather uses the precomputed dense 3D cell-bin grid
+// (CellBinGrid) instead of the per-photon hash-grid walk.  The cell-bin
+// grid accumulates photon flux into PHOTON_BIN_COUNT directional bins per
+// spatial cell using the full tangential-disk kernel (§7.1) baked at
+// CPU build time.  GPU query is O(PHOTON_BIN_COUNT) instead of O(N_cell).
+//
+// The tangential plane projection (§7.1 guideline) is preserved:
+//   Build: Epanechnikov weight max(0, 1 - d_tan²/r²) relative to cell
+//          centre + surface tau filter (§6.4) applied per photon.
+//   Query: per-bin normal gate (avg_n · filter_normal > 0) + hemisphere
+//          gate (bin_dir · filter_normal > 0).
+//
+// Expected speedup: ~200× for the gather kernel (see §G12 analysis).
+// Mild approximation: indirect spectral distribution is flattened
+// (hero-wavelength flux summed to scalar; BSDF provides surface colour).
+// Toggle at runtime with G key.
+//   true = dense grid (default)  |  false = per-photon hash-grid walk
+constexpr bool DEFAULT_USE_DENSE_GRID = true;
 
 // ── k-NN adaptive radius (§C2, §6.5) ────────────────────────────────
 // In k-NN gather mode, the radius adapts to local photon density:
@@ -336,15 +358,6 @@ constexpr int   DEFAULT_NUM_PHOTONS    = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_FOV                = 50.0f;
   constexpr float SCENE_CAM_SPEED              = 0.5f;
 
-#elif defined(SCENE_BREAKFAST_ROOM)
-  constexpr const char* SCENE_OBJ_PATH        = "breakfast_room/breakfast_room.obj";
-  constexpr const char* SCENE_DISPLAY_NAME     = "Breakfast Room";
-  constexpr bool  SCENE_IS_REFERENCE           = false;
-  constexpr float SCENE_CAM_POS[]              = { 0.0f,  0.0f,  0.0f };
-  constexpr float SCENE_CAM_LOOKAT[]           = { 0.0f,  0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV                = 50.0f;
-  constexpr float SCENE_CAM_SPEED              = 0.5f;
-
 #elif defined(SCENE_SIBENIK)
   constexpr const char* SCENE_OBJ_PATH        = "sibenik/sibnek.obj";
   constexpr const char* SCENE_DISPLAY_NAME     = "Sibenik Cathedral";
@@ -414,9 +427,9 @@ struct SceneProfile {
     }
 };
 
-constexpr int NUM_SCENE_PROFILES = 9;
+constexpr int NUM_SCENE_PROFILES = 8;
 
-// Keys 1–9 map to indices 0–8 (from scenes_description.md)
+// Keys 1–8 map to indices 0–7 (from scenes_description.md)
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     // 1: Cornell Box — low complexity, emitters in MTL
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
@@ -438,27 +451,22 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
       SceneLightMode::FromMTL, SceneComplexity::Medium },
 
-    // 5: Breakfast Room — medium complexity, emitters in MTL
-    { "breakfast_room/The Breakfast Room BS.obj", "Breakfast Room",    false,
-      { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
-      SceneLightMode::FromMTL, SceneComplexity::Medium },
-
-    // 6: Salle de Bain — medium complexity, emitters in MTL
+    // 5: Salle de Bain — medium complexity, emitters in MTL
     { "salle_de_bain/salle_de_bain.obj",         "Salle de Bain",     false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
       SceneLightMode::FromMTL, SceneComplexity::Medium },
 
-    // 7: Sibenik Cathedral — high complexity, directional light to floor
+    // 6: Sibenik Cathedral — high complexity, directional light to floor
     { "sibenik/sibnek.obj",                      "Sibenik Cathedral",  false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
       SceneLightMode::DirectionalToFloor, SceneComplexity::High },
 
-    // 8: Sponza — high complexity, hemisphere sky dome from above
+    // 7: Sponza — high complexity, hemisphere sky dome from above
     { "sponza/sponza.obj",                       "Sponza",            false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 60.0f, 0.5f,
       SceneLightMode::HemisphereEnv, SceneComplexity::High },
 
-    // 9: Hairball — high complexity, spherical environment light
+    // 8: Hairball — high complexity, spherical environment light
     { "hairball/hairball.obj",                   "Hairball",           false,
       { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, -1.0f }, 50.0f, 0.5f,
       SceneLightMode::SphericalEnv, SceneComplexity::High },

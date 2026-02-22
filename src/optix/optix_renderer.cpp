@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <iomanip>
+#include <functional>
 
 #include <optix.h>
 #include <optix_stubs.h>
@@ -824,7 +825,8 @@ static void fill_common_params(
     float volume_albedo, int volume_samples, float volume_max_t,
     const DeviceBuffer& vol_cell_bin_grid_buf,
     const CellBinGrid&  vol_cell_grid,
-    bool                vol_cell_grid_uploaded)
+    bool                vol_cell_grid_uploaded,
+    bool                use_dense_grid)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -922,6 +924,7 @@ static void fill_common_params(
         ? reinterpret_cast<PhotonBin*>(cell_bin_grid_buf.d_ptr) : nullptr;
     p.photon_bin_count  = PHOTON_BIN_COUNT;
     p.cell_grid_valid   = cell_grid_uploaded ? 1 : 0;
+    p.use_dense_grid_gather = (use_dense_grid && cell_grid_uploaded) ? 1 : 0;
     p.cell_grid_min_x   = cell_grid.min_x;
     p.cell_grid_min_y   = cell_grid.min_y;
     p.cell_grid_min_z   = cell_grid.min_z;
@@ -984,7 +987,8 @@ void OptixRenderer::render_debug_frame(
         d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
-        d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
+        d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_,
+        use_dense_grid_);
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -1050,7 +1054,8 @@ void OptixRenderer::render_one_spp(
         d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
-        d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
+        d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_,
+        use_dense_grid_);
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -1084,20 +1089,8 @@ void OptixRenderer::render_one_spp(
 // =====================================================================
 // build_cell_bin_grid() -- build dense 3D grid on CPU and upload to GPU
 // =====================================================================
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4702)  // unreachable code -- intentional §G11 dead path
-#endif
 void OptixRenderer::build_cell_bin_grid()
 {
-    // Guideline v2.1 §G11: cell-bin grid is no longer used for rendering.
-    // The hash-grid gather with tangential-disk kernel replaces its
-    // functionality.  Skip the expensive build+upload to save time and
-    // GPU memory.  The infrastructure is retained so it can be re-enabled
-    // for debug/research if desired.
-    cell_grid_uploaded_ = false;
-    return;
-
     if (stored_photons_.size() == 0) {
         std::cout << "[CellGrid] No photons — skipping grid build.\n";
         cell_grid_uploaded_ = false;
@@ -1206,9 +1199,6 @@ void OptixRenderer::build_volume_cell_bin_grid()
     double ms_total = std::chrono::duration<double, std::milli>(t_end - t_start).count();
     std::printf("[VolGrid] Upload done: %.1f ms total\n", ms_total);
 }
-#ifdef _MSC_VER
-#pragma warning(pop)  // restore C4702
-#endif
 
 // =====================================================================
 // render_final() -- full path tracing (is_final_render = 1)
@@ -1262,7 +1252,8 @@ void OptixRenderer::render_final(
             d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
             config.volume_enabled, config.volume_density, config.volume_falloff,
             config.volume_albedo, config.volume_samples, config.volume_max_t,
-            d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_);
+            d_vol_cell_bin_grid_, vol_cell_bin_grid_, vol_cell_grid_uploaded_,
+            use_dense_grid_);
 
         // Runtime toggle (V key) overrides the RenderConfig value
         lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -1283,6 +1274,9 @@ void OptixRenderer::render_final(
             ? reinterpret_cast<float*>(d_lum_sum2_.d_ptr)  : nullptr;
         lp.active_mask = (adaptive && use_mask)
             ? reinterpret_cast<uint8_t*>(d_active_mask_.d_ptr) : nullptr;
+
+        // Per-pixel lobe balance (Bresenham accumulator, persists across frames)
+        lp.lobe_balance = reinterpret_cast<float*>(d_lobe_balance_.d_ptr);
 
         d_launch_params_.alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
@@ -1406,7 +1400,8 @@ void OptixRenderer::render_final(
 //     3. Gather pass   → query hash grid per pixel, progressive update
 // =====================================================================
 void OptixRenderer::render_sppm(
-    const Camera& camera, const RenderConfig& config, const Scene& scene)
+    const Camera& camera, const RenderConfig& config, const Scene& scene,
+    std::function<void(int, const FrameBuffer&)> iter_callback)
 {
     resize(config.image_width, config.image_height);
 
@@ -1472,7 +1467,8 @@ void OptixRenderer::render_sppm(
                 d_prof_photon_gather_, d_prof_bsdf_,
                 d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
                 false, 0.f, 0.f, 0.f, 0, 0.f,  // volume disabled for SPPM
-                d_vol_cell_bin_grid_, vol_cell_bin_grid_, false);
+                d_vol_cell_bin_grid_, vol_cell_bin_grid_, false,
+                use_dense_grid_);
 
             lp.sppm_mode            = 1;  // camera pass
             lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
@@ -1555,7 +1551,8 @@ void OptixRenderer::render_sppm(
                 d_prof_photon_gather_, d_prof_bsdf_,
                 d_cell_bin_grid_, cell_bin_grid_, cell_grid_uploaded_,
                 false, 0.f, 0.f, 0.f, 0, 0.f,
-                d_vol_cell_bin_grid_, vol_cell_bin_grid_, false);
+                d_vol_cell_bin_grid_, vol_cell_bin_grid_, false,
+                use_dense_grid_);
 
             lp.sppm_mode            = 2;  // gather pass
             lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
@@ -1595,6 +1592,13 @@ void OptixRenderer::render_sppm(
                 sizeof(LaunchParams), &sbt_,
                 width_, height_, 1));
             CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        // ── Per-iteration callback (e.g. save progress PNG) ────────
+        if (iter_callback) {
+            FrameBuffer iter_fb;
+            download_framebuffer(iter_fb);
+            iter_callback(k, iter_fb);
         }
 
         // ── Progress ────────────────────────────────────────────────

@@ -26,6 +26,7 @@
 #include <string>
 #include <iostream>
 #include <stdexcept>
+#include <functional>
 
 // -- CUDA error helpers -----------------------------------------------
 
@@ -166,8 +167,13 @@ public:
 
     /// Launch the SPPM render (iterative photon mapping, blocking).
     /// Each iteration: camera pass → photon trace → gather → update.
+    /// @param iter_callback  Optional callback invoked after every completed
+    ///                       iteration.  Arguments: (0-based iteration index,
+    ///                       current accumulated FrameBuffer).  Use this to
+    ///                       save per-iteration PNGs for progress tracking.
     void render_sppm(const Camera& camera, const RenderConfig& config,
-                     const Scene& scene);
+                     const Scene& scene,
+                     std::function<void(int, const FrameBuffer&)> iter_callback = {});
 
     /// Launch a single sample of full path tracing (progressive)
     void render_one_spp(const Camera& camera, int frame_number,
@@ -205,6 +211,11 @@ public:
     /// Overrides the compile-time DEFAULT_VOLUME_ENABLED for all render paths.
     void set_volume_enabled(bool v) { runtime_volume_enabled_ = v; }
     bool is_volume_enabled()  const { return runtime_volume_enabled_; }
+
+    /// Toggle between dense cell-bin gather (fast, O(bins)) and per-photon
+    /// hash-grid gather (exact, O(k)).  Mirrors the G key in main.cpp.
+    void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
+    bool is_use_dense_grid()  const { return use_dense_grid_; }
 
     /// Download GPU kernel profiling data and print a summary.
     /// Call after the final render completes.
@@ -266,6 +277,9 @@ private:
     // Component output buffers (for debug PNGs)
     DeviceBuffer d_nee_direct_buffer_;       // float [W*H*NUM_LAMBDA]
     DeviceBuffer d_photon_indirect_buffer_;  // float [W*H*NUM_LAMBDA]
+
+    // Per-pixel lobe balance (Bresenham accumulator)
+    DeviceBuffer d_lobe_balance_;     // float [W*H]
 
     // Adaptive sampling buffers
     DeviceBuffer d_lum_sum_;          // float [W*H]
@@ -378,6 +392,7 @@ private:
     int  num_emissive_ = 0;
     int  num_photons_emitted_ = 0;  // N_emitted for density normalisation
     bool runtime_volume_enabled_ = DEFAULT_VOLUME_ENABLED;  // toggled via V key
+    bool use_dense_grid_         = DEFAULT_USE_DENSE_GRID;  // toggled via G key
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
 };
 
@@ -399,6 +414,9 @@ inline void OptixRenderer::resize(int w, int h) {
     d_sample_counts_.alloc(pixels * sizeof(float));
     d_srgb_buffer_.alloc(pixels * 4 * sizeof(uint8_t));
 
+    // Per-pixel lobe balance
+    d_lobe_balance_.alloc(pixels * sizeof(float));
+
     // Adaptive sampling buffers
     d_lum_sum_.alloc(pixels * sizeof(float));
     d_lum_sum2_.alloc(pixels * sizeof(float));
@@ -419,6 +437,7 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_spectrum_buffer_.d_ptr, 0, d_spectrum_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
     CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr,     0, d_srgb_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_lobe_balance_.d_ptr,     0, d_lobe_balance_.bytes));
     CUDA_CHECK(cudaMemset(d_lum_sum_.d_ptr,          0, d_lum_sum_.bytes));
     CUDA_CHECK(cudaMemset(d_lum_sum2_.d_ptr,         0, d_lum_sum2_.bytes));
     CUDA_CHECK(cudaMemset(d_active_mask_.d_ptr,      0, d_active_mask_.bytes));

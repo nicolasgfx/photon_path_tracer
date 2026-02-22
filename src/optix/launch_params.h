@@ -159,6 +159,13 @@ struct LaunchParams {
     long long* prof_photon_gather;   // time in photon density estimation
     long long* prof_bsdf;            // time in BSDF eval + continuation
 
+    // ── Per-pixel lobe balance (Bresenham accumulator) ────────────────
+    // Persistent across frames.  Positive = specular deficit,
+    // negative = diffuse deficit.  Guarantees optimal lobe coverage
+    // so each pixel converges without redundant same-lobe paths.
+    // nullptr disables the feature (falls back to random coin flip).
+    float*   lobe_balance;  // [width * height]
+
     // ── Adaptive sampling ────────────────────────────────────────────
     // All three pointers are nullptr when adaptive sampling is disabled.
     float*   lum_sum;       // [width * height]  Σ Y_i   (linear luminance)
@@ -180,6 +187,7 @@ struct LaunchParams {
     PhotonBin* cell_bin_grid;        // [grid_total_cells * photon_bin_count]
     int        photon_bin_count;     // runtime copy of PHOTON_BIN_COUNT
     int        cell_grid_valid;      // 1 = grid uploaded, 0 = not available
+    int        use_dense_grid_gather; // 1 = use cell-bin path, 0 = hash-grid walk
     float      cell_grid_min_x;     // AABB min corner
     float      cell_grid_min_y;
     float      cell_grid_min_z;

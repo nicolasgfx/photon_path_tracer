@@ -322,7 +322,7 @@ static Spectrum gather_with_local_bins(
     total_bin_flux = 0.0f;
 
     for (int k = 0; k < num_bins; ++k) {
-        local_bins[k].flux   = 0.0f;
+        local_bins[k].scalar_flux   = 0.0f;
         local_bins[k].dir_x  = 0.0f;
         local_bins[k].dir_y  = 0.0f;
         local_bins[k].dir_z  = 0.0f;
@@ -364,7 +364,7 @@ static Spectrum gather_with_local_bins(
             float w = 1.0f - dist2 / r2;
             int k = (int)ds.photon_bin_idx[idx];
             if (k >= num_bins) k = 0;
-            local_bins[k].flux   += flux * w;
+            local_bins[k].scalar_flux   += flux * w;
             local_bins[k].dir_x  += wi_world.x * flux * w;
             local_bins[k].dir_y  += wi_world.y * flux * w;
             local_bins[k].dir_z  += wi_world.z * flux * w;
@@ -386,7 +386,7 @@ static Spectrum gather_with_local_bins(
                 local_bins[k].dir_z = d.z / len;
             }
         }
-        total_bin_flux += local_bins[k].flux;
+        total_bin_flux += local_bins[k].scalar_flux;
     }
 
     return L;
@@ -711,8 +711,8 @@ static PhotonLobeResult trace_photon_lobe(
             int best_bin = 0;
             float best_flux = 0.0f;
             for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
-                if (local_bins[k].flux > best_flux) {
-                    best_flux = local_bins[k].flux;
+                if (local_bins[k].scalar_flux > best_flux) {
+                    best_flux = local_bins[k].scalar_flux;
                     best_bin  = k;
                 }
             }

@@ -3493,7 +3493,7 @@ TEST(PhotonBins, BinPopulationBasic) {
     float kernel_w = 0.8f;
 
     int k = dirs.find_nearest(wi);
-    bins[k].flux  += flux * kernel_w;
+    bins[k].scalar_flux  += flux * kernel_w;
     bins[k].dir_x += wi.x * flux * kernel_w;
     bins[k].dir_y += wi.y * flux * kernel_w;
     bins[k].dir_z += wi.z * flux * kernel_w;
@@ -3501,7 +3501,7 @@ TEST(PhotonBins, BinPopulationBasic) {
     bins[k].count  += 1;
 
     EXPECT_EQ(k, 0);
-    EXPECT_FLOAT_EQ(bins[0].flux, 2.0f);
+    EXPECT_FLOAT_EQ(bins[0].scalar_flux, 2.0f);
     EXPECT_EQ(bins[0].count, 1);
     EXPECT_NEAR(bins[0].weight, 0.8f, 1e-6f);
 
@@ -3518,7 +3518,7 @@ TEST(PhotonBins, EmptyBinsHandled) {
     // All bins empty
     for (int k = 0; k < 16; ++k) {
         EXPECT_EQ(bins[k].count, 0);
-        EXPECT_FLOAT_EQ(bins[k].flux, 0.0f);
+        EXPECT_FLOAT_EQ(bins[k].scalar_flux, 0.0f);
     }
 }
 
@@ -3538,14 +3538,14 @@ TEST(PhotonBins, CentroidNormalization) {
         float f1 = 3.0f, f2 = 1.0f;
         float w1 = 0.9f, w2 = 0.7f;
 
-        bin.flux   += f1 * w1;
+        bin.scalar_flux   += f1 * w1;
         bin.dir_x  += wi1.x * f1 * w1;
         bin.dir_y  += wi1.y * f1 * w1;
         bin.dir_z  += wi1.z * f1 * w1;
         bin.weight += w1;
         bin.count  += 1;
 
-        bin.flux   += f2 * w2;
+        bin.scalar_flux   += f2 * w2;
         bin.dir_x  += wi2.x * f2 * w2;
         bin.dir_y  += wi2.y * f2 * w2;
         bin.dir_z  += wi2.z * f2 * w2;
@@ -3699,7 +3699,7 @@ TEST(CellBinGrid, ScatterTo27Neighbors) {
     size_t total = (size_t)grid.dim_x * grid.dim_y * grid.dim_z;
     int non_zero_cells = 0;
     for (size_t c = 0; c < total; ++c) {
-        if (grid.bins[c * 4 + 0].flux > 0.0f)
+        if (grid.bins[c * 4 + 0].scalar_flux > 0.0f)
             ++non_zero_cells;
     }
     // The photon should be scattered into 27 cells (or fewer if grid is small)
@@ -4338,7 +4338,7 @@ struct ReferenceCellBinGrid {
 
                 PhotonBin& b = bins[c * bin_count + k];
                 float flux = photons.total_flux(i);
-                b.flux   += flux;
+                b.scalar_flux   += flux;
                 b.dir_x  += photons.wi_x[i] * flux;
                 b.dir_y  += photons.wi_y[i] * flux;
                 b.dir_z  += photons.wi_z[i] * flux;
@@ -4436,7 +4436,7 @@ TEST(CellBinGrid, NormalGate_SinglePlaneSameAsReference) {
             const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
             const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
             if (a.count != b.count) ++mismatches;
-            if (std::fabs(a.flux - b.flux) > 1e-4f) ++mismatches;
+            if (std::fabs(a.scalar_flux - b.scalar_flux) > 1e-4f) ++mismatches;
         }
     }
     EXPECT_EQ(mismatches, 0)
@@ -4484,7 +4484,7 @@ TEST(CellBinGrid, NormalGate_WallFloorNoContamination) {
     for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
         const PhotonBin& b = grid.bins[(size_t)floor_cell * PHOTON_BIN_COUNT + k];
         total_count += b.count;
-        total_flux  += b.flux;
+        total_flux  += b.scalar_flux;
     }
 
     // For the reference, wall photons should NOT have contributed
@@ -4496,7 +4496,7 @@ TEST(CellBinGrid, NormalGate_WallFloorNoContamination) {
     for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
         const PhotonBin& b = ref.bins[(size_t)floor_cell * PHOTON_BIN_COUNT + k];
         ref_count += b.count;
-        ref_flux  += b.flux;
+        ref_flux  += b.scalar_flux;
     }
 
     // Our grid and reference should agree
@@ -4512,7 +4512,7 @@ TEST(CellBinGrid, NormalGate_WallFloorNoContamination) {
             const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
             const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
             if (a.count != b.count) ++mismatches;
-            if (std::fabs(a.flux - b.flux) > 1e-4f) ++mismatches;
+            if (std::fabs(a.scalar_flux - b.scalar_flux) > 1e-4f) ++mismatches;
         }
     }
     EXPECT_EQ(mismatches, 0)
@@ -4554,7 +4554,7 @@ TEST(CellBinGrid, NormalGate_BackToBackWalls) {
             const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
             const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
             if (a.count != b.count) ++mismatches;
-            if (std::fabs(a.flux - b.flux) > 1e-4f) ++mismatches;
+            if (std::fabs(a.scalar_flux - b.scalar_flux) > 1e-4f) ++mismatches;
         }
     }
     EXPECT_EQ(mismatches, 0)
@@ -4670,7 +4670,7 @@ TEST(CellBinGrid, NormalGate_ThreeSurfaceCorner) {
             const PhotonBin& a = grid.bins[c * PHOTON_BIN_COUNT + k];
             const PhotonBin& b = ref.bins[c * PHOTON_BIN_COUNT + k];
             if (a.count != b.count) ++count_mismatch;
-            if (std::fabs(a.flux - b.flux) > 1e-4f) ++flux_mismatch;
+            if (std::fabs(a.scalar_flux - b.scalar_flux) > 1e-4f) ++flux_mismatch;
         }
     }
     EXPECT_EQ(count_mismatch, 0);
@@ -4738,7 +4738,7 @@ TEST(CellBinGrid, NormalGate_FluxConservation_SingleSurface) {
     float total_flux = 0.f;
     for (size_t c = 0; c < (size_t)grid.total_cells(); ++c)
         for (int k = 0; k < PHOTON_BIN_COUNT; ++k)
-            total_flux += grid.bins[c * PHOTON_BIN_COUNT + k].flux;
+            total_flux += grid.bins[c * PHOTON_BIN_COUNT + k].scalar_flux;
 
     // Each photon scatters into its native cell + up to 26 neighbours.
     // With a large spread, most photons' neighbours are also occupied
@@ -4760,7 +4760,7 @@ TEST(CellBinGrid, NormalGate_FluxConservation_SingleSurface) {
     float ref_total = 0.f;
     for (size_t c = 0; c < (size_t)ref.dim_x * ref.dim_y * ref.dim_z; ++c)
         for (int k = 0; k < PHOTON_BIN_COUNT; ++k)
-            ref_total += ref.bins[c * PHOTON_BIN_COUNT + k].flux;
+            ref_total += ref.bins[c * PHOTON_BIN_COUNT + k].scalar_flux;
 
     EXPECT_NEAR(total_flux, ref_total, 1e-2f)
         << "Total flux should match reference implementation";

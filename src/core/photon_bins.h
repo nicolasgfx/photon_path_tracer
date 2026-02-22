@@ -8,11 +8,17 @@
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
 #include "core/config.h"
+#include "core/spectrum.h"    // NUM_LAMBDA
 
 // ── Per-bin data (GPU cache) ────────────────────────────────────────
-// 36 bytes per bin.  Per-pixel: 36 × PHOTON_BIN_COUNT.
+// Per-wavelength flux preserves spectral fidelity.  Each hero wavelength's
+// Epanechnikov-weighted flux is deposited into its own spectral bin during
+// the CPU build, matching the hash-grid path's per-wavelength accumulation.
+// Size: (NUM_LAMBDA + 8) * 4 + 4 = 164 bytes per bin (NUM_LAMBDA=32).
+// Memory: 1000 cells × 32 bins × 164 B ≈ 5.1 MB.
 struct PhotonBin {
-    float flux;       // total Epanechnikov-weighted scalar flux
+    float flux[NUM_LAMBDA]; // per-wavelength Epanechnikov-weighted flux
+    float scalar_flux;// sum of flux[] — used by guided bounce/NEE as importance weight
     float dir_x;      // flux-weighted centroid direction x
     float dir_y;      // flux-weighted centroid direction y
     float dir_z;      // flux-weighted centroid direction z

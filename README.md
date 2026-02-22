@@ -243,7 +243,11 @@ verify photon map quality before committing to a full render.
 | **1** | Cornell Box |
 | **2** | Conference  |
 | **3** | Living Room |
-| **4** | Sibenik     |
+| **4** | Fireplace Room |
+| **5** | Salle de Bain |
+| **6** | Sibenik     |
+| **7** | Sponza      |
+| **8** | Hairball    |
 
 Switching scenes rebuilds the acceleration structure, loads photon cache
 (or recomputes if missing/stale), and resets the camera.

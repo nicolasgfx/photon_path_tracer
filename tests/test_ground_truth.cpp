@@ -356,7 +356,7 @@ static Spectrum gather_with_local_bins(
 
     // Zero-initialize bins
     for (int k = 0; k < num_bins; ++k) {
-        local_bins[k].flux   = 0.0f;
+        local_bins[k].scalar_flux   = 0.0f;
         local_bins[k].dir_x  = 0.0f;
         local_bins[k].dir_y  = 0.0f;
         local_bins[k].dir_z  = 0.0f;
@@ -403,7 +403,7 @@ static Spectrum gather_with_local_bins(
             // Bin population (O(1) via precomputed index)
             int k = (int)ds.photon_bin_idx[idx];
             if (k >= num_bins) k = 0;
-            local_bins[k].flux   += flux * w_bin;
+            local_bins[k].scalar_flux   += flux * w_bin;
             local_bins[k].dir_x  += wi_world.x * flux * w_bin;
             local_bins[k].dir_y  += wi_world.y * flux * w_bin;
             local_bins[k].dir_z  += wi_world.z * flux * w_bin;
@@ -426,7 +426,7 @@ static Spectrum gather_with_local_bins(
                 local_bins[k].dir_z = d.z / len;
             }
         }
-        total_bin_flux += local_bins[k].flux;
+        total_bin_flux += local_bins[k].scalar_flux;
     }
 
     return L;

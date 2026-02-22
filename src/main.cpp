@@ -302,6 +302,7 @@ static void render_help_overlay(int win_w, int win_h,
                                  const DebugState& debug,
                                  const Camera& camera,
                                  bool volume_enabled,
+                                 bool use_dense_grid,
                                  int active_scene_index = -1,
                                  float light_scale = 1.0f) {
     // Set up 2D orthographic projection for overlay
@@ -406,6 +407,14 @@ static void render_help_overlay(int win_w, int win_h,
         float vg = volume_enabled ? 1.0f : 0.5f;
         float vb = volume_enabled ? 0.3f : 0.5f;
         draw_overlay_text(0, ly, vbuf, vr, vg, vb, 1.f);
+        ly += line_h * 0.7f;
+
+        char gbuf[64];
+        snprintf(gbuf, sizeof(gbuf), "G    Dense Grid [%s]", use_dense_grid ? "ON" : "OFF");
+        float gr = use_dense_grid ? 0.3f : 0.5f;
+        float gg = use_dense_grid ? 1.0f : 0.5f;
+        float gb = use_dense_grid ? 0.3f : 0.5f;
+        draw_overlay_text(0, ly, gbuf, gr, gg, gb, 1.f);
         ly += line_h * 0.7f;
     }
 
@@ -656,6 +665,7 @@ struct AppState {
     bool       render_requested = false;  // R key pressed
     bool       rendering        = false;
     bool       volume_enabled   = DEFAULT_VOLUME_ENABLED;  // V key toggle
+    bool       use_dense_grid   = DEFAULT_USE_DENSE_GRID;  // G key toggle
     bool       showing_final    = false;  // keep final render on-screen
 
     // Scene switching (keys 1-4)
@@ -755,6 +765,17 @@ static void key_callback(GLFWwindow* window, int key,
         if (g_active_optix_renderer)
             g_active_optix_renderer->set_volume_enabled(g_app.volume_enabled);
         printf("[Volume] Scattering: %s\n", g_app.volume_enabled ? "ON" : "OFF");
+        g_app.camera_moved  = true;  // reset accumulation
+        g_app.showing_final = false;
+        return;
+    }
+
+    // Gather mode toggle – G key (dense cell-bin grid vs per-photon hash walk)
+    if (key == GLFW_KEY_G) {
+        g_app.use_dense_grid = !g_app.use_dense_grid;
+        if (g_active_optix_renderer)
+            g_active_optix_renderer->set_use_dense_grid(g_app.use_dense_grid);
+        printf("[Gather] Dense grid: %s\n", g_app.use_dense_grid ? "ON" : "OFF");
         g_app.camera_moved  = true;  // reset accumulation
         g_app.showing_final = false;
         return;
@@ -932,6 +953,7 @@ static void run_interactive(
 
     // Sync initial volume state from AppState into the renderer
     optix_renderer.set_volume_enabled(g_app.volume_enabled);
+    optix_renderer.set_use_dense_grid(g_app.use_dense_grid);
 
     // Compute initial yaw/pitch from camera look direction
     {
@@ -1219,21 +1241,31 @@ static void run_interactive(
                           << "  alpha: " << opt.config.sppm_alpha << "\n";
                 std::cout << "========================================\n";
 
+                // Build timestamp prefix once so all iteration PNGs sort together.
+                auto sppm_start_tp = std::chrono::system_clock::now();
+                std::time_t sppm_start_t = std::chrono::system_clock::to_time_t(sppm_start_tp);
+                std::tm sppm_tm_buf;
+                localtime_s(&sppm_tm_buf, &sppm_start_t);
+                char sppm_ts[64];
+                std::strftime(sppm_ts, sizeof(sppm_ts), "%Y%m%d_%H%M%S", &sppm_tm_buf);
+                std::string sppm_run_prefix = std::string("output/sppm_") + sppm_ts;
+
+                // Per-iteration callback: save a progress PNG after each full iteration.
+                auto sppm_iter_cb = [&](int iter, const FrameBuffer& iter_fb) {
+                    char iter_str[16];
+                    std::snprintf(iter_str, sizeof(iter_str), "_iter%04d", iter + 1);
+                    write_png(sppm_run_prefix + iter_str + ".png", iter_fb);
+                };
+
                 // Run blocking SPPM render
                 optix_renderer.render_sppm(
-                    g_app.render_cam, opt.config, scene);
+                    g_app.render_cam, opt.config, scene, sppm_iter_cb);
 
-                // Download and save
+                // Download and save final composite
                 FrameBuffer final_fb;
                 optix_renderer.download_framebuffer(final_fb);
 
-                auto now_tp = std::chrono::system_clock::now();
-                std::time_t now_t = std::chrono::system_clock::to_time_t(now_tp);
-                std::tm tm_buf;
-                localtime_s(&tm_buf, &now_t);
-                char ts[64];
-                std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
-                std::string sppm_path = std::string("output/sppm_") + ts + ".png";
+                std::string sppm_path = sppm_run_prefix + "_final.png";
 
                 write_png(sppm_path, final_fb);
 
@@ -1462,7 +1494,7 @@ static void run_interactive(
         // Draw debug help overlay (if enabled)
         if (g_app.debug.show_help_overlay) {
             render_help_overlay(win_w, win_h, g_app.debug, camera, g_app.volume_enabled,
-                                g_app.active_scene_index, g_app.light_scale);
+                                g_app.use_dense_grid, g_app.active_scene_index, g_app.light_scale);
         }
 
         // Draw hover-cell overlay (when map mode toggles are active and

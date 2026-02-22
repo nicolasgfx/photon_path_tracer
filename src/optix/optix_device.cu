@@ -520,8 +520,11 @@ struct DevBSDFSample {
 };
 
 // Sample BSDF: handles Lambertian, GlossyMetal (Cook-Torrance + diffuse)
+// pixel_idx >= 0 enables the per-pixel Bresenham lobe balance accumulator
+// (pass -1 to fall back to a random coin flip, e.g. for photon tracing).
 __forceinline__ __device__
-DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv, PCGRng& rng) {
+DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
+                              PCGRng& rng, int pixel_idx = -1) {
     DevBSDFSample s;
     s.is_specular = false;
 
@@ -564,7 +567,27 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv, PCGRng& rng
     float total_w = spec_weight + diff_weight;
     float p_spec = (total_w > 0.f) ? spec_weight / total_w : 0.5f;
 
-    if (rng.next_float() < p_spec) {
+    // ── Lobe selection via Bresenham accumulator ─────────────────────
+    // When pixel_idx >= 0 and the lobe_balance buffer is available we
+    // use a Bresenham error accumulator instead of a random coin flip.
+    // Positive balance = specular deficit → choose specular this sample.
+    // This guarantees that over K samples the specular count is within
+    // 1 of K * p_spec, eliminating binomial variance in lobe counts.
+    bool choose_specular;
+    if (pixel_idx >= 0 && params.lobe_balance) {
+        float balance = params.lobe_balance[pixel_idx];
+        choose_specular = (balance >= 0.f);
+        // Update balance: positive means we owe more specular samples
+        if (choose_specular)
+            balance -= (1.f - p_spec);  // paid specular cost
+        else
+            balance += p_spec;          // paid diffuse cost
+        params.lobe_balance[pixel_idx] = balance;
+    } else {
+        choose_specular = (rng.next_float() < p_spec);
+    }
+
+    if (choose_specular) {
         // Sample GGX specular lobe
         float u1 = rng.next_float();
         float u2 = rng.next_float();
@@ -726,6 +749,28 @@ uint32_t dev_hash_cell(int cx, int cy, int cz, uint32_t table_size) {
     return h % table_size;
 }
 
+// == Dense cell-bin grid O(1) lookup (device-side) ====================
+// Returns a pointer to the PHOTON_BIN_COUNT precomputed bins for the
+// cell that contains pos, or nullptr if the grid is invalid / pos is
+// outside the grid.  Moved here so dev_estimate_photon_density can call it.
+__forceinline__ __device__
+const PhotonBin* dev_cell_grid_lookup(float3 pos) {
+    if (params.cell_grid_valid == 0 || params.cell_bin_grid == nullptr)
+        return nullptr;
+    float cs = params.cell_grid_cell_size;
+    if (cs <= 0.0f) return nullptr;
+    int ix = (int)floorf((pos.x - params.cell_grid_min_x) / cs);
+    int iy = (int)floorf((pos.y - params.cell_grid_min_y) / cs);
+    int iz = (int)floorf((pos.z - params.cell_grid_min_z) / cs);
+    // Clamp to grid bounds
+    if (ix < 0) ix = 0; else if (ix >= params.cell_grid_dim_x) ix = params.cell_grid_dim_x - 1;
+    if (iy < 0) iy = 0; else if (iy >= params.cell_grid_dim_y) iy = params.cell_grid_dim_y - 1;
+    if (iz < 0) iz = 0; else if (iz >= params.cell_grid_dim_z) iz = params.cell_grid_dim_z - 1;
+    int cell = ix + iy * params.cell_grid_dim_x
+             + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
+    return &params.cell_bin_grid[cell * params.photon_bin_count];
+}
+
 __forceinline__ __device__
 Spectrum dev_estimate_photon_density(
     float3 pos, float3 normal,       // shading normal (ONB / BSDF frame)
@@ -736,6 +781,54 @@ Spectrum dev_estimate_photon_density(
     Spectrum L = Spectrum::zero();
     if (params.num_photons == 0 || params.grid_table_size == 0) return L;
 
+    // ── Fast path: dense cell-bin gather O(PHOTON_BIN_COUNT) ─────────
+    // Enabled when the cell-bin grid was uploaded and the runtime flag is
+    // set (DEFAULT_USE_DENSE_GRID / G key).  The Epanechnikov tangential-
+    // disk kernel (§7.1) is already baked into bin.flux at CPU build time
+    // (see cell_bin_grid.h §3.5).  The surface tau filter is also applied
+    // at build time.  Here we only need the per-bin normal + hemisphere
+    // gates and the diffuse BSDF evaluation.
+    if (params.use_dense_grid_gather && params.cell_grid_valid) {
+        const PhotonBin* bins = dev_cell_grid_lookup(pos);
+        if (bins != nullptr) {
+            const int  N       = params.photon_bin_count;
+            const float inv_area = 2.f / (PI * radius * radius);
+            const float norm     = 1.f / (float)params.num_photons_emitted;
+
+            DevONB frame = DevONB::from_normal(normal);
+
+            for (int k = 0; k < N; ++k) {
+                const PhotonBin& b = bins[k];
+                if (b.count == 0) continue;
+
+                // Normal gate: bin's flux-weighted surface normal must face
+                // the same side as the query filter_normal (§15.1.2).
+                float3 avg_n = make_f3(b.avg_nx, b.avg_ny, b.avg_nz);
+                if (dot(avg_n, filter_normal) <= 0.f) continue;
+
+                // Hemisphere gate: incident centroid direction must be above
+                // the surface (wi · filter_normal > 0).
+                float3 bin_dir = make_f3(b.dir_x, b.dir_y, b.dir_z);
+                if (dot(bin_dir, filter_normal) <= 0.f) continue;
+
+                float3 wi_local = frame.world_to_local(bin_dir);
+                if (wi_local.z <= 0.f) continue;
+
+                // Diffuse-only BSDF evaluation (§6 standard practice).
+                // Per-wavelength flux stored in b.flux[lam] — matches hash-grid
+                // path's per-wavelength accumulation exactly.
+                Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
+                // kernel weight already baked → scale by inv_area * norm only
+                for (int lam = 0; lam < NUM_LAMBDA; ++lam)
+                    L.value[lam] += f.value[lam] * b.flux[lam] * inv_area * norm;
+            }
+            return L;
+        }
+        // cell_bin_grid returned nullptr (pos outside grid bounds):
+        // fall through to the hash-grid path below.
+    }
+
+    // ── Exact path: per-photon hash-grid walk O(N_cell) ──────────────
     float cell_size = params.grid_cell_size;
     int cx0 = (int)floorf((pos.x - radius) / cell_size);
     int cy0 = (int)floorf((pos.y - radius) / cell_size);
@@ -830,28 +923,6 @@ Spectrum dev_estimate_photon_density(
     return L;
 }
 
-// == Dense cell-bin grid O(1) lookup (device-side) ====================
-// Returns a pointer to the PHOTON_BIN_COUNT precomputed bins for the
-// cell that contains pos, or nullptr if the grid is invalid / pos is
-// outside the grid.
-__forceinline__ __device__
-const PhotonBin* dev_cell_grid_lookup(float3 pos) {
-    if (params.cell_grid_valid == 0 || params.cell_bin_grid == nullptr)
-        return nullptr;
-    float cs = params.cell_grid_cell_size;
-    if (cs <= 0.0f) return nullptr;
-    int ix = (int)floorf((pos.x - params.cell_grid_min_x) / cs);
-    int iy = (int)floorf((pos.y - params.cell_grid_min_y) / cs);
-    int iz = (int)floorf((pos.z - params.cell_grid_min_z) / cs);
-    // Clamp to grid bounds
-    if (ix < 0) ix = 0; else if (ix >= params.cell_grid_dim_x) ix = params.cell_grid_dim_x - 1;
-    if (iy < 0) iy = 0; else if (iy >= params.cell_grid_dim_y) iy = params.cell_grid_dim_y - 1;
-    if (iz < 0) iz = 0; else if (iz >= params.cell_grid_dim_z) iz = params.cell_grid_dim_z - 1;
-    int cell = ix + iy * params.cell_grid_dim_x
-             + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
-    return &params.cell_bin_grid[cell * params.photon_bin_count];
-}
-
 // == Cone sampling (uniform direction within cone of half-angle) ======
 __forceinline__ __device__
 float3 sample_cone_dev(float3 axis, float cos_half_angle, PCGRng& rng) {
@@ -911,7 +982,7 @@ float3 dev_sample_guided_bounce(
             cdf[k] = total;
             continue;
         }
-        total += bins[k].flux * cos_n;
+        total += bins[k].scalar_flux * cos_n;
         cdf[k] = total;
     }
 
@@ -933,14 +1004,14 @@ float3 dev_sample_guided_bounce(
             float3 bdir = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
             float cos_n = dot(bdir, normal);
             if (cos_n <= 0.0f || bins[k].count == 0) continue;
-            float wk = bins[k].flux * cos_n;
+            float wk = bins[k].scalar_flux * cos_n;
             // Find insertion position (descending)
             int pos = n_sorted;
             for (int j = 0; j < n_sorted; ++j) {
                 float3 bjd = make_f3(bins[sorted_k[j]].dir_x,
                                      bins[sorted_k[j]].dir_y,
                                      bins[sorted_k[j]].dir_z);
-                if (wk > bins[sorted_k[j]].flux * dot(bjd, normal)) {
+                if (wk > bins[sorted_k[j]].scalar_flux * dot(bjd, normal)) {
                     pos = j; break;
                 }
             }
@@ -1022,7 +1093,7 @@ float dev_guided_bounce_pdf(
         axis = (len > 1e-6f) ? axis * (1.0f / len) : bin_dirs.dirs[k];
         float cos_n = dot(axis, normal);
         if (cos_n <= 0.0f) continue;
-        total += bins[k].flux * cos_n;
+        total += bins[k].scalar_flux * cos_n;
     }
     if (total <= 0.0f) return 0.0f;
 
@@ -1035,7 +1106,7 @@ float dev_guided_bounce_pdf(
         float cos_n = dot(axis, normal);
         if (cos_n <= 0.0f) continue;
 
-        float w = bins[k].flux * cos_n;
+        float w = bins[k].scalar_flux * cos_n;
         float p_sel = w / total;
 
         // In-cone check: wi falls within this bin's cone
@@ -1396,7 +1467,7 @@ NeeResult dev_nee_guided(float3 pos, float3 normal, float3 wo_local,
 
     // Compute total bin flux (for early-out if bins are empty)
     float total_bin_flux = 0.0f;
-    for (int k = 0; k < N; ++k) total_bin_flux += bins[k].flux;
+    for (int k = 0; k < N; ++k) total_bin_flux += bins[k].scalar_flux;
     if (total_bin_flux <= 0.0f) {
         return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
     }
@@ -1812,7 +1883,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         for (int g_bounce = 0; g_bounce < DEFAULT_MAX_GLOSSY_BOUNCES; ++g_bounce) {
             // Sample BSDF for the reflection direction
             long long t_bsdf = clock64();
-            DevBSDFSample bs = dev_bsdf_sample(mat_id, wo_local, hit.uv, rng);
+            DevBSDFSample bs = dev_bsdf_sample(mat_id, wo_local, hit.uv, rng, pixel_idx);
             result.clk_bsdf += clock64() - t_bsdf;
 
             if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;

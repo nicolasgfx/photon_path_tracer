@@ -837,10 +837,10 @@ TEST(VolumeCellGrid, BinFluxNonNegative) {
     for (size_t c = 0; c < (size_t)grid.total_cells(); ++c) {
         for (int k = 0; k < PHOTON_BIN_COUNT; ++k) {
             const PhotonBin& b = grid.bins[c * PHOTON_BIN_COUNT + k];
-            EXPECT_GE(b.flux, 0.f);
+            EXPECT_GE(b.scalar_flux, 0.f);
             EXPECT_GE(b.count, 0);
             if (b.count > 0) {
-                EXPECT_GT(b.flux, 0.f);
+                EXPECT_GT(b.scalar_flux, 0.f);
                 // Direction should be unit
                 float len = sqrtf(b.dir_x * b.dir_x + b.dir_y * b.dir_y
                                 + b.dir_z * b.dir_z);
