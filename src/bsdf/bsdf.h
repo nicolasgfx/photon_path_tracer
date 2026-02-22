@@ -150,9 +150,14 @@ inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng) {
     BSDFSample s;
 
     bool entering = wo.z > 0.f;
-    float base_ior = mat.ior;
-    float eta = entering ? (1.f / base_ior) : base_ior;
     float cos_i = fabsf(wo.z);
+
+    // Hero wavelength (bin 0) determines the refraction direction when
+    // dispersion is enabled; all other bins get per-wavelength Fresnel
+    // weights but share the same ray direction (spectral MIS à la PBRT v4).
+    float hero_ior = mat.dispersion ? mat.ior_at_lambda(lambda_of_bin(0))
+                                    : mat.ior;
+    float eta = entering ? (1.f / hero_ior) : hero_ior;
 
     float F = fresnel_dielectric(cos_i, eta);
 
@@ -163,28 +168,47 @@ inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng) {
         s.wi = reflect_local(wo);
         s.pdf = F;
         // Apply Tf to reflection (light passes through glass surface)
-        float base_factor = F / (fabsf(s.wi.z) + EPSILON);
-        s.f = mat.Tf * base_factor;
+        if (mat.dispersion) {
+            // Per-wavelength Fresnel weighting on reflection
+            for (int b = 0; b < NUM_LAMBDA; ++b) {
+                float n_b  = mat.ior_at_lambda(lambda_of_bin(b));
+                float eta_b = entering ? (1.f / n_b) : n_b;
+                float F_b  = fresnel_dielectric(cos_i, eta_b);
+                s.f.value[b] = mat.Tf.value[b] * F_b / (fabsf(s.wi.z) + EPSILON);
+            }
+        } else {
+            float base_factor = F / (fabsf(s.wi.z) + EPSILON);
+            s.f = mat.Tf * base_factor;
+        }
         s.is_specular = true;
     } else {
-        // Refract
+        // Refract — direction from hero wavelength IOR
         float3 wt;
         if (refract_local(wo, eta, wt)) {
             s.wi = wt;
             s.pdf = 1.f - F;
-            float base_factor = (1.f - F) / (fabsf(s.wi.z) + EPSILON);
 
             if (mat.dispersion) {
-                // Per-wavelength Fresnel for chromatic dispersion
+                // Per-wavelength Fresnel for chromatic dispersion.
+                // Each bin uses its own IOR for the Fresnel coefficient but
+                // shares the hero-wavelength refraction direction.  Bins that
+                // would undergo TIR at their own IOR get zero weight.
                 for (int b = 0; b < NUM_LAMBDA; ++b) {
-                    float lam = lambda_of_bin(b);
-                    float n_b = mat.ior_at_lambda(lam);
+                    float lam  = lambda_of_bin(b);
+                    float n_b  = mat.ior_at_lambda(lam);
                     float eta_b = entering ? (1.f / n_b) : n_b;
+                    // Check per-bin TIR
+                    float sin2_t_b = eta_b * eta_b * (1.f - cos_i * cos_i);
+                    if (sin2_t_b >= 1.f) {
+                        s.f.value[b] = 0.f; // TIR for this wavelength
+                        continue;
+                    }
                     float F_b = fresnel_dielectric(cos_i, eta_b);
                     float factor_b = (1.f - F_b) / (fabsf(s.wi.z) + EPSILON);
                     s.f.value[b] = mat.Tf.value[b] * factor_b;
                 }
             } else {
+                float base_factor = (1.f - F) / (fabsf(s.wi.z) + EPSILON);
                 s.f = mat.Tf * base_factor;
             }
             s.is_specular = true;

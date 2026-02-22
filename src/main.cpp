@@ -62,6 +62,12 @@
 #include <cstdio>
 #include <iomanip>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <shellscalingapi.h>
+#pragma comment(lib, "Shcore.lib")
+#endif
+
 namespace fs = std::filesystem;
 
 // -- Image output -----------------------------------------------------
@@ -912,6 +918,10 @@ static void run_interactive(
     int win_h = opt.config.image_height;
 
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);
+#if GLFW_VERSION_MAJOR >= 3 && GLFW_VERSION_MINOR >= 4
+    glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
+#endif
     GLFWwindow* window = glfwCreateWindow(
         win_w, win_h,
         "Spectral Photon+Path Tracer [OptiX]", nullptr, nullptr);
@@ -920,6 +930,23 @@ static void run_interactive(
         std::cerr << "[GLFW] Failed to create window\n";
         glfwTerminate();
         return;
+    }
+
+    // Verify actual window and framebuffer sizes match the config
+    {
+        int actual_w, actual_h, fb_w, fb_h;
+        glfwGetWindowSize(window, &actual_w, &actual_h);
+        glfwGetFramebufferSize(window, &fb_w, &fb_h);
+        std::printf("[Window] Requested: %dx%d  Window: %dx%d  Framebuffer: %dx%d\n",
+                    win_w, win_h, actual_w, actual_h, fb_w, fb_h);
+        if (fb_w != win_w || fb_h != win_h) {
+            std::printf("[Window] WARNING: framebuffer size differs from config! "
+                        "DPI scale: %.2fx%.2f\n",
+                        (float)fb_w / win_w, (float)fb_h / win_h);
+            // Use framebuffer dimensions so rendering matches the actual pixel count
+            win_w = fb_w;
+            win_h = fb_h;
+        }
     }
 
     glfwMakeContextCurrent(window);
@@ -1496,6 +1523,25 @@ static void run_interactive(
 // -- Main -------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // Declare DPI awareness BEFORE any other init (CUDA, GLFW, etc.)
+    // to prevent Windows from applying DPI virtualisation / bitmap scaling.
+    // The manifest (photon_tracer.manifest) is the primary mechanism;
+    // this runtime call is a belt-and-suspenders fallback.
+    // Try the Win10 V2 API first, then fall back to the Win8.1 API.
+    {
+        typedef BOOL (WINAPI *PFN_SetProcessDpiAwarenessContext)(HANDLE);
+        auto fn = (PFN_SetProcessDpiAwarenessContext)GetProcAddress(
+            GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
+        if (fn) {
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ((HANDLE)-4)
+            fn((HANDLE)-4);
+        } else {
+            SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+        }
+    }
+#endif
+
     std::cout << "== Spectral Photon + Path Tracing Renderer (OptiX) ==\n";
     std::cout << "   Scene: " << SCENE_DISPLAY_NAME << "\n\n";
 

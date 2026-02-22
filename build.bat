@@ -15,11 +15,7 @@ set BUILD_DIR=build
 set BUILD_TYPE=Release
 set CMAKE_OPTS=
 set BUILD_TARGET=--target photon_tracer
-set CLEAN_FIRST=
-
-if /i "%1"=="rebuild" (
-    set CLEAN_FIRST=--clean-first
-)
+set CLEAN_FIRST=--clean-first
 
 REM -- Configure --
 echo [build.bat] Configuring (%BUILD_TYPE%)...

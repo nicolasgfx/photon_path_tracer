@@ -104,6 +104,18 @@ target_include_directories(photon_tracer PRIVATE
     ${OptiX_INCLUDE_DIR}
 )
 
+# Embed DPI-awareness manifest so Windows doesn't bitmap-scale the window.
+# The manifest is processed by the OS loader before any DLL init runs,
+# which is the only reliable way to prevent CUDA/NVIDIA drivers from
+# setting their own (wrong) DPI awareness first.
+if(MSVC)
+    set(MANIFEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/src/photon_tracer.manifest")
+    target_link_options(photon_tracer PRIVATE
+        "/MANIFEST:EMBED"
+        "/MANIFESTINPUT:${MANIFEST_FILE}"
+    )
+endif()
+
 find_package(OpenGL REQUIRED)
 find_package(OpenMP)
 
@@ -126,7 +138,7 @@ set_target_properties(photon_tracer PROPERTIES
 if(MSVC)
     # For C/C++ source files
     set_source_files_properties(${CORE_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "/wd4505;/FS")
+        COMPILE_OPTIONS "/wd4505")
 endif()
 
 # OptiX is always enabled
@@ -181,7 +193,7 @@ target_compile_definitions(photon_tracer PRIVATE
 # -- Compiler flags ----------------------------------------------------
 if(MSVC)
     target_compile_options(photon_tracer PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast /FS>
+        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>
         $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -Xcompiler=/W4>
     )
 else()

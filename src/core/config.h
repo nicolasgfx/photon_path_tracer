@@ -31,8 +31,8 @@
 
 // Image dimensions in pixels.
 //   Preview: 512×512  |  Default: 1024×768  |  Final: 1920×1080+
-constexpr int DEFAULT_IMAGE_WIDTH  = 1920;
-constexpr int DEFAULT_IMAGE_HEIGHT = 1080;
+constexpr int DEFAULT_IMAGE_WIDTH  = 1024;
+constexpr int DEFAULT_IMAGE_HEIGHT = 768;
 
 // Samples per pixel (anti-aliasing + noise averaging).
 //   Preview: 1–4  |  Default: 16–64  |  Final: 64–256
@@ -61,13 +61,13 @@ constexpr int HERO_WAVELENGTHS = 4;
 // indirect transport in v2.
 //   Preview: 50k–200k  |  Default: 500k–1M  |  Final: 1M–5M
 constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;  // diffuse indirect photons
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 500000;   // specular→diffuse caustic photons
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 750000;   // specular→diffuse caustic photons (75% of global)
 
 // ── Photon path depth (§5.2) ────────────────────────────────────────
 // Maximum bounce depth for photon rays (the real path tracers in v2).
 // Camera rays do NOT use this — see DEFAULT_MAX_SPECULAR_CHAIN.
-//   Preview: 3–4  |  Default: 4  |  High-quality: 6–8
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 4;
+//   Preview: 3–4  |  Default: 6  |  High-quality: 8–10
+constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 6;
 
 // ── Russian roulette (§5.2.2) ───────────────────────────────────────
 // After MIN_BOUNCES_RR bounces, each photon terminates with probability
@@ -75,7 +75,7 @@ constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 4;
 // divided by the survival probability to keep the estimator unbiased.
 //   min_bounces: 2–3  |  threshold: 0.80–0.90
 constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 2;
-constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.85f;
+constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.90f;
 
 // ── Photon emission mixture (§5.1, variance reduction) ──────────────
 // Fraction of photons emitted with area-uniform (rather than power-
@@ -98,7 +98,7 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 // 90° = full hemisphere (Lambertian).  60° = 120° FOV (directional,
 // e.g. sunlight through windows).  Shared by CPU emitter.h
 // and GPU __raygen__photon_trace.
-constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 60.0f;
+constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
 // Debug: stop photon after first intersection (validate emission only).
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
@@ -113,8 +113,8 @@ constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;
 // more bias.  Both maps use the tangential (surface) distance metric.
 // Scene is normalised to [-0.5, 0.5]³ (SCENE_REF_EXTENT = 1.0):
 //   10% of scene = 0.10  |  5% = 0.05  |  Final quality: 0.02–0.05
-constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;   // global (diffuse) map — 10% of scene extent
-constexpr float DEFAULT_CAUSTIC_RADIUS = 0.05f;   // caustic map — 5% of scene extent
+constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;   // global (diffuse) map — 5% of scene extent
+constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;  // caustic map — 2.5% of scene extent (tight for sharp caustics)
 
 // ── Dense cell-bin grid gather (§3.5, §6.7) ─────────────────────────
 // When true, the GPU gather uses the precomputed dense 3D cell-bin grid
@@ -133,7 +133,7 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.05f;   // caustic map — 5% of scene
 // Mild approximation: indirect spectral distribution is flattened
 // (hero-wavelength flux summed to scalar; BSDF provides surface colour).
 // Toggle at runtime with G key.
-//   true = dense grid (default)  |  false = per-photon hash-grid walk
+//   false = per-photon hash-grid walk (default)  |  true = dense grid
 // NOTE: Disabled by default since v2.2 — dense grid has 87% energy deficit
 //       due to Fibonacci bin discretisation.  Hash grid is exact.
 constexpr bool DEFAULT_USE_DENSE_GRID = false;
