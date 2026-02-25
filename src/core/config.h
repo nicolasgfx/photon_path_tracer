@@ -1,13 +1,13 @@
 #pragma once
 #include <cstdint>
 // ─────────────────────────────────────────────────────────────────────
-// config.h – Central configuration for the photon-centric renderer v2.2
+// config.h – Central configuration for the photon-centric renderer v2.3
 // ─────────────────────────────────────────────────────────────────────
 //
 //   Architecture: photon-centric (doc/architecture/architecture.md)
 //     Camera rays  → first-hit only → NEE + photon gather
 //     Photon rays  → full path tracing from lights (the real tracers)
-//     Gather       → tangential disk on surface, not 3D sphere
+//     Gather       → adaptive kNN on tangent plane, not fixed-radius 3D sphere
 //     Spatial index → KD-tree (CPU), hash grid (GPU)
 //
 //   Only scene-level and algorithm-level tunables belong here.
@@ -30,9 +30,13 @@
 // SCENE_PROFILES[] at the bottom of this file.
 
 #define SCENE_CORNELL_BOX
-//#define SCENE_CONFERENCE
+//#define SCENE_CORNELL_SPHERE
+//#define SCENE_CORNELL_MIRROR
+//#define SCENE_CORNELL_WATER
 //#define SCENE_LIVING_ROOM
-//#define SCENE_SIBENIK
+//#define SCENE_CONFERENCE
+//#define SCENE_SALLE_DE_BAIN
+//#define SCENE_MORI_KNOB
 
 // ── Photon tracing backend ──────────────────────────────────────────
 // Set to 1 to use the CPU photon tracer (emitter.h) instead of the GPU
@@ -59,8 +63,8 @@ constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 512;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 1024;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 1024;           // [R]
 
 
 // =====================================================================
@@ -73,11 +77,11 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
 // Anti-aliasing + noise averaging.  This is the single biggest
 // quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
-constexpr int DEFAULT_SPP = 4;                       // [R]
+constexpr int DEFAULT_SPP = 8;                       // [R]
 
 // Sub-pixel stratified jitter grid.
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP.
-constexpr int STRATA_X = 2;                           // 4 × 4 = 16 = DEFAULT_SPP
+constexpr int STRATA_X = 4;                           // 4 × 4 = 16 = DEFAULT_SPP
 constexpr int STRATA_Y = 2;
 
 // ── Photon budgets ──────────────────────────────────────────────────
@@ -85,11 +89,13 @@ constexpr int STRATA_Y = 2;
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
 constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 0;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 5000000;   // [R]  specular→diffuse caustics
 
-// ── Gather radii ────────────────────────────────────────────────────
-// Tangential disk kernel radius for photon density estimation.
-// Smaller = sharper but noisier;  larger = smoother but more bias.
+// ── Gather radii (max kNN search radius) ────────────────────────────
+// These set the MAXIMUM search radius for k-NN photon gathering.
+// The actual gather radius per hitpoint is adaptive: the tangential
+// distance to the K-th nearest photon (see DEFAULT_KNN_K).
+// These caps prevent pathologically large searches in sparse regions.
 // Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
 constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
@@ -318,13 +324,31 @@ constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_FOV            = 40.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
-#elif defined(SCENE_CONFERENCE)
-  constexpr const char* SCENE_OBJ_PATH    = "conference/conference.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Conference Room";
+#elif defined(SCENE_CORNELL_SPHERE)
+  constexpr const char* SCENE_OBJ_PATH    = "cornell_sphere/CornellBox-Sphere.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Cornell Sphere";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_FOV            = 40.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_CORNELL_MIRROR)
+  constexpr const char* SCENE_OBJ_PATH    = "cornell_mirror/CornellBox-Mirror.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Cornell Mirror";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 40.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_CORNELL_WATER)
+  constexpr const char* SCENE_OBJ_PATH    = "cornell_water/CornellBox-Water.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Cornell Water";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 40.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
 #elif defined(SCENE_LIVING_ROOM)
@@ -336,9 +360,27 @@ constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_FOV            = 50.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
-#elif defined(SCENE_SIBENIK)
-  constexpr const char* SCENE_OBJ_PATH    = "sibenik/sibnek.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Sibenik Cathedral";
+#elif defined(SCENE_CONFERENCE)
+  constexpr const char* SCENE_OBJ_PATH    = "conference/conference.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Conference Room";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_SALLE_DE_BAIN)
+  constexpr const char* SCENE_OBJ_PATH    = "salle_de_bain/salle_de_bain.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Salle de Bain";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_MORI_KNOB)
+  constexpr const char* SCENE_OBJ_PATH    = "mori_knob/testObj.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Mori Knob";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
@@ -371,21 +413,21 @@ struct SceneProfile {
 constexpr int NUM_SCENE_PROFILES = 8;
 
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
-    { "cornell_box/cornellbox.obj",      "Cornell Box",       true,
+    { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
       {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
-    { "conference/conference.obj",       "Conference Room",   false,
+    { "cornell_sphere/CornellBox-Sphere.obj",    "Cornell Sphere",    false,
+      {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
+    { "cornell_mirror/CornellBox-Mirror.obj",    "Cornell Mirror",    false,
+      {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
+    { "cornell_water/CornellBox-Water.obj",      "Cornell Water",     false,
+      {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
+    { "living_room/living_room.obj",             "Living Room",       false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
-    { "living_room/living_room.obj",     "Living Room",       false,
+    { "conference/conference.obj",               "Conference Room",   false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
-    { "Interior/interior.obj",           "Interior",          false,
+    { "salle_de_bain/salle_de_bain.obj",         "Salle de Bain",     false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
-    { "salle_de_bain/salle_de_bain.obj", "Salle de Bain",     false,
-      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
-    { "sibenik/sibnek.obj",              "Sibenik Cathedral",  false,
-      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::DirectionalToFloor },
-    { "sponza/sponza.obj",              "Sponza",             false,
-      {0,0,0}, {0,0,-1}, 60.f, 0.1f, SceneLightMode::HemisphereEnv },
-    { "mori_knob/testObj.obj",           "Mori Knob",          false,
+    { "mori_knob/testObj.obj",                   "Mori Knob",         false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
 };
 

@@ -760,8 +760,8 @@ struct AppState {
     bool       use_dense_grid   = DEFAULT_USE_DENSE_GRID;  // G key toggle
     bool       showing_final    = false;  // keep final render on-screen
 
-    // Scene switching (keys 1-4)
-    int        scene_switch_requested = -1;  // -1 = none, 0-3 = profile index
+    // Scene switching (keys 1-8)
+    int        scene_switch_requested = -1;  // -1 = none, 0-7 = profile index
     int        active_scene_index     = -1;  // currently loaded scene profile index
     float      active_cam_speed       = SCENE_CAM_SPEED; // runtime cam speed
 
@@ -1168,7 +1168,7 @@ static void run_interactive(
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // ── Runtime scene switch (keys 1-4) ────────────────────────────
+        // ── Runtime scene switch (keys 1-8) ────────────────────────────
         if (g_app.scene_switch_requested >= 0) {
             int idx = g_app.scene_switch_requested;
             g_app.scene_switch_requested = -1;
@@ -1913,12 +1913,20 @@ int main(int argc, char* argv[]) {
     SceneLightMode initial_light_mode = SceneLightMode::FromMTL;
     #if defined(SCENE_CORNELL_BOX)
         initial_light_mode = SCENE_PROFILES[0].light_mode;
-    #elif defined(SCENE_CONFERENCE)
+    #elif defined(SCENE_CORNELL_SPHERE)
         initial_light_mode = SCENE_PROFILES[1].light_mode;
-    #elif defined(SCENE_LIVING_ROOM)
+    #elif defined(SCENE_CORNELL_MIRROR)
         initial_light_mode = SCENE_PROFILES[2].light_mode;
-    #elif defined(SCENE_SIBENIK)
+    #elif defined(SCENE_CORNELL_WATER)
+        initial_light_mode = SCENE_PROFILES[3].light_mode;
+    #elif defined(SCENE_LIVING_ROOM)
+        initial_light_mode = SCENE_PROFILES[4].light_mode;
+    #elif defined(SCENE_CONFERENCE)
         initial_light_mode = SCENE_PROFILES[5].light_mode;
+    #elif defined(SCENE_SALLE_DE_BAIN)
+        initial_light_mode = SCENE_PROFILES[6].light_mode;
+    #elif defined(SCENE_MORI_KNOB)
+        initial_light_mode = SCENE_PROFILES[7].light_mode;
     #endif
     add_scene_lights(scene, initial_light_mode);
 

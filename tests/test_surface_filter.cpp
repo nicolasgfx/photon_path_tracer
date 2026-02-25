@@ -298,59 +298,6 @@ TEST(SurfaceFilter, PrefilterRejectPlane) {
 }
 
 // =====================================================================
-// Kernel weight functions (tangential based)
-// =====================================================================
-
-TEST(SurfaceFilter, BoxKernelInside) {
-    EXPECT_FLOAT_EQ(tangential_box_kernel(0.0f, 1.0f), 1.0f);
-    EXPECT_FLOAT_EQ(tangential_box_kernel(0.5f, 1.0f), 1.0f);
-    EXPECT_FLOAT_EQ(tangential_box_kernel(0.99f, 1.0f), 1.0f);
-}
-
-TEST(SurfaceFilter, BoxKernelOutside) {
-    EXPECT_FLOAT_EQ(tangential_box_kernel(1.0f, 1.0f), 0.0f);
-    EXPECT_FLOAT_EQ(tangential_box_kernel(1.5f, 1.0f), 0.0f);
-}
-
-TEST(SurfaceFilter, EpanechnikovKernelValues) {
-    // At center: w = 1 - 0/1 = 1
-    EXPECT_FLOAT_EQ(tangential_epanechnikov_kernel(0.0f, 1.0f), 1.0f);
-
-    // At 50% radius: w = 1 - 0.5/1 = 0.5
-    EXPECT_FLOAT_EQ(tangential_epanechnikov_kernel(0.5f, 1.0f), 0.5f);
-
-    // At boundary: w = 1 - 1.0/1.0 = 0
-    EXPECT_FLOAT_EQ(tangential_epanechnikov_kernel(1.0f, 1.0f), 0.0f);
-
-    // Outside: w = 0
-    EXPECT_FLOAT_EQ(tangential_epanechnikov_kernel(1.5f, 1.0f), 0.0f);
-}
-
-// =====================================================================
-// Kernel normalization constants
-// =====================================================================
-
-TEST(SurfaceFilter, BoxKernelNorm) {
-    float r2 = 0.25f;  // r = 0.5
-    float norm = box_kernel_norm(r2);
-    EXPECT_NEAR(norm, PI * 0.25f, EPS);
-}
-
-TEST(SurfaceFilter, EpanechnikovKernelNorm) {
-    float r2 = 0.25f;
-    float norm = epanechnikov_kernel_norm(r2);
-    EXPECT_NEAR(norm, 0.5f * PI * 0.25f, EPS);
-}
-
-TEST(SurfaceFilter, KernelNormRatio) {
-    // Epanechnikov norm should be half of box norm for same radius
-    float r2 = 1.0f;
-    float box_n = box_kernel_norm(r2);
-    float epa_n = epanechnikov_kernel_norm(r2);
-    EXPECT_NEAR(epa_n / box_n, 0.5f, EPS);
-}
-
-// =====================================================================
 // Edge cases and numerical robustness
 // =====================================================================
 

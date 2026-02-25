@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <iomanip>
 #include <functional>
+#include <unordered_set>
 
 #include <optix.h>
 #include <optix_stubs.h>
@@ -499,48 +500,88 @@ void OptixRenderer::cpu_trace_photons(const Scene& scene, const RenderConfig& co
     std::printf("[CPU-Photon] Traced %d photons in %.1f ms  global=%zu  caustic=%zu\n",
                 config.num_photons, ms1, global_map.size(), caustic_map.size());
 
-    // ── 2. Targeted caustic emission ─────────────────────────────────
+    // ── 2. Targeted caustic emission (separate map) ────────────────
+    //   Shoot photons directionally toward specular/translucent geometry.
+    //   Results go into a FRESH map (not caustic_map which duplicates
+    //   global_map entries) to avoid double-counting at gather.
+    PhotonSoA targeted_caustic_map;
+    int targeted_budget = 0;
     if (config.targeted_caustic_emission_enabled) {
         SpecularTargetSet target_set = SpecularTargetSet::build(scene);
         if (target_set.valid) {
             EmitterConfig tcfg = ecfg;
             tcfg.num_photons = config.caustic_photon_budget;
+            targeted_budget = (int)(config.caustic_photon_budget * config.targeted_caustic_mix);
             trace_targeted_caustic_emission(
-                scene, tcfg, target_set, caustic_map,
+                scene, tcfg, target_set, targeted_caustic_map,
                 config.targeted_caustic_mix);
         }
     }
 
     auto t2 = std::chrono::high_resolution_clock::now();
 
-    // ── 3. Merge global + caustic into stored_photons_ ───────────────
-    //  Tag: 0 = global non-caustic, 2 = caustic  (tag 1 skipped at gather)
-    //  Since CPU trace_photons already separates global/caustic, all
-    //  global photons are non-caustic (tag 0), all caustic photons (tag 2).
-    size_t n_global  = global_map.size();
-    size_t n_caustic = caustic_map.size();
-    size_t total     = n_global + n_caustic;
+    // ── 3. Merge global + targeted caustic into stored_photons_ ──────
+    //  Tag 0 = global (non-caustic diffuse indirect)
+    //  Tag 1 = global-pass caustic path (L→S+→D) – skipped at gather
+    //  Tag 2 = dedicated caustic-targeted pass
+    //
+    //  CPU trace_photons deposits caustic-path photons in BOTH global_map
+    //  and caustic_map.  To mirror the GPU tag system we mark those
+    //  global_map entries as tag 1 (skip at gather) so that caustic
+    //  contribution only comes from the dedicated tag-2 targeted map.
+    size_t n_global           = global_map.size();
+    size_t n_targeted_caustic = targeted_caustic_map.size();
+    size_t total              = n_global + n_targeted_caustic;
 
     stored_photons_.clear();
     stored_photons_.reserve(total);
     stored_photons_.append(global_map);
-    stored_photons_.append(caustic_map);
+    stored_photons_.append(targeted_caustic_map);
 
-    // Caustic pass flags
+    // Build caustic pass flags ────────────────────────────────────────
     caustic_pass_flags_.assign(total, 0);
-    if (n_caustic > 0) {
+
+    // Mark global-pass caustic photons as tag 1 (skip at gather).
+    // caustic_map from trace_photons contains exact duplicates of
+    // caustic-path entries in global_map (bit-exact positions).
+    if (caustic_map.size() > 0 && n_targeted_caustic > 0) {
+        std::unordered_set<uint64_t> caustic_pos_hashes;
+        caustic_pos_hashes.reserve(caustic_map.size());
+        for (size_t ci = 0; ci < caustic_map.size(); ++ci) {
+            uint32_t hx, hy, hz;
+            std::memcpy(&hx, &caustic_map.pos_x[ci], 4);
+            std::memcpy(&hy, &caustic_map.pos_y[ci], 4);
+            std::memcpy(&hz, &caustic_map.pos_z[ci], 4);
+            uint64_t key = (uint64_t)hx ^ ((uint64_t)hy << 21) ^ ((uint64_t)hz << 42);
+            caustic_pos_hashes.insert(key);
+        }
+        size_t n_tag1 = 0;
+        for (size_t gi = 0; gi < n_global; ++gi) {
+            uint32_t hx, hy, hz;
+            std::memcpy(&hx, &global_map.pos_x[gi], 4);
+            std::memcpy(&hy, &global_map.pos_y[gi], 4);
+            std::memcpy(&hz, &global_map.pos_z[gi], 4);
+            uint64_t key = (uint64_t)hx ^ ((uint64_t)hy << 21) ^ ((uint64_t)hz << 42);
+            if (caustic_pos_hashes.count(key)) {
+                caustic_pass_flags_[gi] = 1;  // skip at gather
+                ++n_tag1;
+            }
+        }
+        std::printf("[CPU-Photon] Tagged %zu global photons as tag-1 (caustic-path, skip)\n", n_tag1);
+    }
+
+    // Tag targeted caustics as 2
+    if (n_targeted_caustic > 0) {
         std::fill(caustic_pass_flags_.begin() + n_global,
                   caustic_pass_flags_.end(), (uint8_t)2);
     }
 
-    // N_caustic for dual-budget gather
-    int caustic_budget = config.caustic_photon_budget;
-    int targeted_budget = (int)(config.caustic_photon_budget * config.targeted_caustic_mix);
-    num_caustic_emitted_ = (n_caustic > 0) ? (caustic_budget + targeted_budget) : 0;
+    // N_caustic for dual-budget gather (matches GPU: only targeted budget)
+    num_caustic_emitted_ = (n_targeted_caustic > 0) ? targeted_budget : 0;
 
-    std::printf("[CPU-Photon] Merged: %zu global + %zu caustic = %zu total  "
+    std::printf("[CPU-Photon] Merged: %zu global + %zu targeted-caustic = %zu total  "
                 "N_emit=%d  N_caustic_emit=%d\n",
-                n_global, n_caustic, total,
+                n_global, n_targeted_caustic, total,
                 num_photons_emitted_, num_caustic_emitted_);
 
     // ── 4. Build hash grid on CPU ────────────────────────────────────
@@ -820,18 +861,17 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     }
 
     // ── Dual-budget caustic pass (Jensen 1996 two-budget) ────────────
-    // Emit additional caustic-targeted photons with caustic_only_store=1.
-    // These are stored only when the photon follows a specular→diffuse
-    // path.  They get their own normalisation 1/N_caustic, which is
-    // much smaller than 1/N_global, so each caustic photon carries more
-    // weight.  At gather time we take per-wavelength max(L_global,
-    // L_caustic) to avoid energy double-counting while keeping the
-    // physically correct estimate.
+    // When targeted caustic emission is enabled, we skip this blind
+    // caustic-only pass entirely — the targeted pass replaces it for
+    // consistency with the CPU pipeline (2 maps: global + targeted).
+    // When targeted is disabled, fall back to the blind caustic-only
+    // pass that re-emits photons with caustic_only_store=1.
     const unsigned int global_count = stored_count;
     const int caustic_budget = config.caustic_photon_budget;
-    num_caustic_emitted_ = caustic_budget;
+    num_caustic_emitted_ = 0;
 
-    if (caustic_budget > 0) {
+    if (caustic_budget > 0 && !config.targeted_caustic_emission_enabled) {
+        num_caustic_emitted_ = caustic_budget;
         std::printf("[OptiX] Caustic pass: emitting %d targeted photons\n", caustic_budget);
 
         // Zero the GPU counter for the second pass
@@ -912,6 +952,23 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     // ray tracing.  Results are appended to stored_photons_.
     if (config.targeted_caustic_emission_enabled) {
         SpecularTargetSet target_set = SpecularTargetSet::build(scene);
+        std::printf("[Targeted] targeted_caustic_emission_enabled=true  SpecularTargetSet.valid=%d  spec_tris=%zu\n",
+                    (int)target_set.valid, target_set.specular_tri_indices.size());
+        // Dump first few specular triangle indices + materials
+        for (size_t si = 0; si < (std::min)(target_set.specular_tri_indices.size(), (size_t)5); ++si) {
+            uint32_t ti = target_set.specular_tri_indices[si];
+            uint32_t mi = scene.triangles[ti].material_id;
+            const char* mname = "";
+            if (mi < scene.materials.size()) {
+                auto mt = scene.materials[mi].type;
+                if (mt == MaterialType::Glass) mname = "Glass";
+                else if (mt == MaterialType::Mirror) mname = "Mirror";
+                else if (mt == MaterialType::Translucent) mname = "Translucent";
+                else mname = "OTHER";
+            }
+            std::printf("[Targeted]   spec_tri[%zu] = tri#%u  mat#%u (%s)  area=%.6f\n",
+                        si, ti, mi, mname, target_set.tri_areas[si]);
+        }
         if (target_set.valid) {
             int targeted_budget = (int)(config.caustic_photon_budget * config.targeted_caustic_mix);
             if (targeted_budget > 0) {
@@ -1528,15 +1585,15 @@ void OptixRenderer::render_caustic_debug_pass(
         return;
     }
 
-    std::cout << "[CausticDebug] Building caustic-only photon map...\n";
+    std::cout << "[CausticDebug] Building tag-2 caustic-only photon map...\n";
     auto t_start = std::chrono::high_resolution_clock::now();
 
-    // 1. Filter stored photons to caustic-only
-    //    caustic_pass_flags_: 0=global-noncaustic, 1=global-caustic, 2=caustic-targeted
-    //    We include both 1 and 2 (all caustic photons).
+    // 1. Filter stored photons to targeted-caustic only (tag 2)
+    //    caustic_pass_flags_: 0=global-noncaustic, 1=global-caustic(skip), 2=caustic-targeted
+    //    Only include tag 2 — the dedicated targeted caustic pass.
     PhotonSoA caustic_soa;
     for (size_t i = 0; i < stored_photons_.size(); ++i) {
-        if (i >= caustic_pass_flags_.size() || caustic_pass_flags_[i] == 0) continue;
+        if (i >= caustic_pass_flags_.size() || caustic_pass_flags_[i] != 2) continue;
         caustic_soa.pos_x.push_back(stored_photons_.pos_x[i]);
         caustic_soa.pos_y.push_back(stored_photons_.pos_y[i]);
         caustic_soa.pos_z.push_back(stored_photons_.pos_z[i]);
@@ -1561,7 +1618,7 @@ void OptixRenderer::render_caustic_debug_pass(
         std::cout << "[CausticDebug] No caustic photons found — skipping.\n";
         return;
     }
-    std::printf("[CausticDebug] Filtered %zu caustic photons from %zu total\n",
+    std::printf("[CausticDebug] Filtered %zu tag-2 caustic photons from %zu total\n",
                 n_caustic, stored_photons_.size());
 
     // Diagnostic: flux statistics of caustic photons
@@ -1637,7 +1694,7 @@ void OptixRenderer::render_caustic_debug_pass(
             num_emissive_, 0.f,
             gas_handle_,
             gather_radius_,
-            num_photons_emitted_,  // use ORIGINAL N_emitted for correct normalization
+            num_caustic_emitted_,  // tag-2 only: normalise by caustic budget
             d_nee_direct_buffer_, d_photon_indirect_buffer_,
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
@@ -1645,10 +1702,10 @@ void OptixRenderer::render_caustic_debug_pass(
             config.volume_albedo, config.volume_samples, config.volume_max_t);
         fill_clearcoat_fabric_params(lp);
 
-        // Dual-budget caustic params
-        lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
-            ? d_photon_is_caustic_pass_.as<uint8_t>() : nullptr;
-        lp.num_caustic_emitted    = num_caustic_emitted_;
+        // Disable dual-budget for this debug pass — all photons are
+        // tag-2 caustic, so single-budget gather with N_caustic is correct.
+        lp.photon_is_caustic_pass = nullptr;
+        lp.num_caustic_emitted    = 0;
         lp.caustic_gather_radius  = caustic_radius_;
 
         lp.volume_enabled     = (int)runtime_volume_enabled_;

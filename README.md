@@ -287,13 +287,13 @@ Range: 0.1×–10.0×, default 1.0×.
 | Key | Scene | Light mode | Complexity |
 |---|---|---|---|
 | **1** | Cornell Box | MTL emitters | Low |
-| **2** | Conference Room | MTL emitters | Medium |
-| **3** | Living Room | MTL emitters | Medium |
-| **4** | Interior | MTL emitters | Medium |
-| **5** | Salle de Bain | MTL emitters | Medium |
-| **6** | Sibenik Cathedral | Area light (directional) | High |
-| **7** | Sponza | Hemisphere sky dome | High |
-| **8** | Mori Knob | Full-sphere environment | High |
+| **2** | Cornell Sphere | MTL emitters | Low |
+| **3** | Cornell Mirror | MTL emitters | Low |
+| **4** | Cornell Water | MTL emitters | Low |
+| **5** | Living Room | MTL emitters | Medium |
+| **6** | Conference Room | MTL emitters | Medium |
+| **7** | Salle de Bain | MTL emitters | Medium |
+| **8** | Mori Knob | MTL emitters | Medium |
 
 Switching loads the new scene, rebuilds the BVH and OptiX GAS, re-traces
 photons, and resets the camera to the scene's default position.

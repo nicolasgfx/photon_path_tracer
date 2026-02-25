@@ -1,9 +1,9 @@
-# Architecture — Spectral Photon-Centric Renderer (v2.1)
+# Architecture — Spectral Photon-Centric Renderer (v2.3)
 
 This document describes the complete rendering pipeline, its design
 rationale, mathematical foundations, and implementation details.
 
-**Architecture version:** v2.1 (photon-centric, surface-aware gather)
+**Architecture version:** v2.3 (photon-centric, adaptive kNN gather)
 
 ---
 
@@ -446,22 +446,20 @@ integrated in `Renderer::build_photon_maps()` in `src/renderer/renderer.cpp`.
 chosen by largest-extent heuristic. Leaf nodes contain $\leq$ `MAX_LEAF`
 photons (8–16).
 
-**Range query**: Recursive descent, pruning by bounding box. No cell-size
-constraint — any radius works. Distance metric is **tangential** (§6.3).
-
-**k-NN query**: Priority-queue k-NN on the KD-tree. Returns k closest
-photons and the tangential distance to the k-th (= adaptive radius).
+**k-NN query**: Priority-queue k-NN with tangential distance (§6.3).
+Returns k closest photons and the tangential distance to the k-th
+(= adaptive radius).
 
 Implementation: `src/photon/kd_tree.h` (header-only).
 
 ### 6.2 Uniform Grid / Hash Grid (GPU Primary)
 
 O(1) build (sort + prefix sum), O(cells) query. Cell size =
-`2 × max_radius`. GPU k-NN via **shell expansion** (§6.5).
+`2 × max_radius`. GPU k-NN via **max-heap in registers** (§6.5).
 
-The GPU does NOT need a KD-tree. The uniform grid with tangential kernel
-and shell-expansion k-NN achieves the same surface irradiance estimation
-quality as the CPU KD-tree.
+The GPU does NOT need a KD-tree. The uniform grid with tangential metric
+and register-allocated k-NN achieves the same surface irradiance estimation
+quality as the CPU KD-tree path.
 
 Hash function:
 $$
@@ -470,7 +468,7 @@ $$
 
 Implementation: `src/photon/hash_grid.h` + `src/photon/hash_grid.cu`.
 
-### 6.3 Tangential Disk Kernel (Mandatory)
+### 6.3 Tangential Distance Metric (Mandatory)
 
 **Root cause of planar blocking artifacts:** Using a full 3D spherical
 distance metric for surface irradiance estimation. Photon mapping estimates
@@ -479,9 +477,9 @@ photons from unrelated surfaces if they fall within $r$.
 
 This is NOT a spatial structure problem. KD-tree, hash grid, and uniform
 grid all exhibit the same artifact if the gather metric is spherical. The
-fix is the kernel metric, not the data structure.
+fix is the distance metric, not the data structure.
 
-**Solution: Replace spherical gather with tangent-plane metric.**
+**Solution: Replace spherical distance with tangent-plane metric.**
 
 Given query point $x$ with surface normal $n_x$ and photon position $x_i$:
 
@@ -493,7 +491,7 @@ v_{\text{tan}} = v - n_x \, d_{\text{plane}}, \quad d_{\text{tan}}^2 = \|v_{\tex
 $$
 
 The tangential distance $d_{\text{tan}}$ replaces the 3D Euclidean distance
-in **all** gather operations: range queries, k-NN, density estimation.
+in **all** gather operations: k-NN, range queries, density estimation.
 
 ```cpp
 inline float tangential_distance2(float3 query_pos, float3 query_normal,
@@ -520,7 +518,7 @@ Implementation: `src/photon/surface_filter.h` + `src/photon/density_estimator.h`
 ### 6.4 Surface Consistency Filter
 
 Reject photon $i$ unless ALL conditions pass:
-1. **Tangential distance**: $d_{\text{tan},i}^2 < r^2$
+1. **Tangential distance**: $d_{\text{tan},i}^2 < r_k^2$ (kNN adaptive radius)
 2. **Plane distance**: $|n_x \cdot (x_i - x)| < \tau$
 3. **Normal compatibility**: $\text{dot}(n_{\text{photon}}, n_{\text{query}}) > 0$
 4. **Direction consistency**: $\text{dot}(\omega_i, n_{\text{query}}) > 0$
@@ -528,55 +526,120 @@ Reject photon $i$ unless ALL conditions pass:
 Condition 1 uses tangential distance (the primary fix for planar blocking).
 Conditions 2–4 are additional safety filters.
 
-### 6.5 GPU-Friendly Adaptive k-NN via Grid Shell Expansion
+### 6.5 Adaptive k-NN Gather (Primary Algorithm)
+
+The k-NN (k-nearest neighbours) gather is the **primary density estimation
+algorithm** for both CPU and GPU.  It eliminates boundary bias at 90° edges
+that afflicted fixed-radius approaches.
+
+#### 6.5.1 Why k-NN?
+
+With a **fixed gather radius** $r$, a query point near a 90° edge includes
+a full tangential disk of area $\pi r^2$ as denominator, but photons only
+occupy the half of the disk that corresponds to the surface.  This halves
+the apparent density → dark line along the edge.
+
+With **k-NN**, the algorithm finds exactly $K$ nearest photons.  Near an
+edge, the adaptive radius $r_k$ grows automatically to compensate for the
+missing half-disk, keeping the $K / (\pi r_k^2)$ density ratio
+correct.
+
+#### 6.5.2 Three-Phase Algorithm
+
+The gather runs in three phases:
 
 ```
-layer = 0
-while found < k:
-    visit all cells at Manhattan distance == layer from query cell
-    for each photon in visited cells:
-        compute tangential distance (§6.3)
+Phase 1 — Collect candidates
+    For each photon within max_search_radius:
+        compute tangential distance d_tan² (§6.3)
         apply surface consistency filter (§6.4)
-        if passes: update k-NN candidate list
-    layer++
+        if passes: insert into max-heap of size K
+                   (evict farthest if heap is full)
 
-radius = sqrt(max tangential distance in k-NN list)
+Phase 2 — Determine adaptive radius
+    r_k² = tangential distance to the K-th nearest photon
+    if fewer than K photons found: r_k² = max_search_radius²
+
+Phase 3 — Accumulate
+    For each of the K nearest photons (d_tan² < r_k²):
+        w = 1                            (box weight)
+        L += w · f_s(x, ωi→ωo, λ) · Φi(λ) / (N · π r_k²)
 ```
 
-Properties: no recursion, no priority queues, no warp divergence, fully GPU
-compatible. Same result as tree-based k-NN (with tangential metric).
+#### 6.5.3 Worked Example
 
-**GPU k-NN radius policy:** Clamp to `max_radius` and accept fewer than k
-photons in sparse regions. This introduces bounded bias acceptable for the
-GPU interactive path. CPU KD-tree is unbounded for ground truth.
+Consider a flat floor with 500 photons uniformly distributed.  A query
+point $x$ lies at the centre.  Parameters: $K = 5$, $N = 500$.
+
+| Phase | Action | Result |
+|-------|--------|--------|
+| 1 | Scan photons in hash-grid cells near $x$, insert closest into max-heap | heap = $\{0.001, 0.002, 0.003, 0.005, 0.008\}$ (tangential $d^2$) |
+| 2 | Read heap-top $\Rightarrow r_k^2 = 0.008$ | Adaptive radius $r_k = 0.089$ |
+| 3 | Normalise: $A_k = \pi \times 0.008 = 0.0251$ | $L = \sum_{i=1}^{5} f_s \cdot \Phi_i / (N \cdot A_k)$ |
+
+If the same query point were near a 90° wall, the photons in the wall
+direction are filtered out by the surface consistency check.  Only floor
+photons survive, the heap needs to reach further ($r_k$ grows), and the
+larger denominator $\pi r_k^2$ compensates exactly — **no dark edge**.
+
+#### 6.5.4 GPU Implementation (Register Max-Heap)
+
+The GPU implementation in `optix_device.cu` uses a **register-allocated
+max-heap** of size $K$ (default 100).  Key details:
+
+- **No dynamic allocation**: `knn_d2[KNN_K]` and `knn_idx[KNN_K]` arrays
+  live in registers/local memory.
+- **Max-heap property**: the root (`knn_d2[0]`) is always the farthest
+  photon.  New photons are accepted only if `d_tan² < knn_d2[0]`.
+- **Sift-down**: standard binary heap sift-down after eviction.
+- Hash-grid cell traversal is flat (no recursion, no warp divergence).
+- Capped at `DEFAULT_GPU_MAX_GATHER_RADIUS` to prevent pathological search.
+
+#### 6.5.5 CPU Implementation (std::nth_element)
+
+The CPU path in `density_estimator.h` collects all candidates passing the
+surface filter into a `std::vector`, then uses `std::nth_element` for
+$O(N)$ selection of the $K$-th nearest.  This is simpler than a heap
+and optimal for the CPU's sequential access pattern.
+
+The KD-tree path uses `knn_tangential()` with a priority-queue heap for
+efficient pruning during tree traversal.
+
+#### 6.5.6 Configuration
+
+| Parameter | Default | Role |
+|-----------|---------|------|
+| `DEFAULT_KNN_K` | 100 | Number of nearest neighbours per query |
+| `DEFAULT_GATHER_RADIUS` | 0.05 | Max search radius — global map |
+| `DEFAULT_CAUSTIC_RADIUS` | 0.025 | Max search radius — caustic map |
+| `DEFAULT_GPU_MAX_GATHER_RADIUS` | 0.5 | Hard upper bound for GPU shell expansion |
+
+The gather radii are **not** the estimation radius — they are caps that
+prevent expensive search in sparse regions.  The actual estimation radius
+is always $r_k$, the distance to the $K$-th nearest photon.
 
 ### 6.6 Density Estimation
 
 At a diffuse camera hitpoint $x$ with outgoing direction $\omega_o$:
 
 $$
-L_{\text{photon}}(x,\omega_o,\lambda) = \frac{1}{\pi r^2}\sum_{i\in N(x)} W(d_{\text{tan},i}, r)\, \Phi_i(\lambda)\, f_s(x,\omega_i,\omega_o,\lambda)
+L_{\text{photon}}(x,\omega_o,\lambda) = \frac{1}{\pi r_k^2}\sum_{i=1}^{K} f_s(x,\omega_i,\omega_o,\lambda)\, \Phi_i(\lambda) \,/\, N
 $$
 
-Where $d_{\text{tan},i}$ is the tangential distance and $W(d, r)$ is the kernel:
+Where $r_k$ is the tangential distance to the $K$-th nearest photon
+(adaptive radius from §6.5) and $N$ is the total number of emitted photons.
 
-| Kernel | Normalisation denominator | Weight $W(d, r)$ |
-|--------|--------------------------|------------------|
-| Box | $\pi r^2$ | $1$ |
-| Epanechnikov | $\frac{\pi}{2} r^2$ | $1 - d_{\text{tan}}^2 / r^2$ |
-
-The area denominator $\pi r^2$ is the tangential disk area. The BSDF $f_s$
-is applied **per-photon** inside the sum, not as an overall multiplier.
+The BSDF $f_s$ is applied **per-photon** inside the sum, not as an
+overall multiplier.
 
 ### 6.7 Gather Radius Strategy
 
 | Mode | Radius per hitpoint |
 |------|---------------------|
-| Fixed | `config.gather_radius` (same for all pixels) |
-| k-NN adaptive | Find k nearest → radius = tangential distance to k-th |
+| k-NN adaptive (default) | Find K nearest → radius = tangential distance to K-th |
 | SPPM progressive | Per-pixel shrinking radius (Hachisuka & Jensen 2009) |
 
-Default: **k-NN adaptive** (k ≈ 100) for both CPU and GPU.
+Default: **k-NN adaptive** ($K = 100$) for both CPU and GPU.
 
 ### 6.8 Spatial Structure Comparison
 
@@ -585,16 +648,16 @@ Default: **k-NN adaptive** (k ≈ 100) for both CPU and GPU.
 | KD-tree | Yes (unbounded) | Poor (recursion, divergence) | **CPU reference only** |
 | Uniform/Hash Grid | Yes (bounded by max_radius) | **Excellent** | **GPU primary** |
 
-**Conclusion:** Kernel fix > structure change. The tangential disk kernel
-fixes the artifact regardless of spatial structure. The GPU uses the most
-GPU-friendly structure (uniform/hash grid), not the most flexible one
-(KD-tree).
+**Conclusion:** Metric fix > structure change. The tangential distance
+metric fixes planar blocking regardless of spatial structure. The GPU uses
+the most GPU-friendly structure (uniform/hash grid with register-allocated
+k-NN heap), not the most flexible one (KD-tree).
 
 ### 6.9 Optional: Triangle ID Filtering
 
 For scenes with clean, watertight geometry, store `triangle_id` per photon
 and accept only photons deposited on the same triangle or smoothing group.
-The tangential kernel + surface consistency filter is sufficient for most
+The tangential metric + surface consistency filter is sufficient for most
 scenes.
 
 ---

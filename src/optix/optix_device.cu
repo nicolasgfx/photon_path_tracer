@@ -2712,7 +2712,8 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
     if (!trace_shadow(shadow_origin, dir, dist)) return;  // occluded
 
     // Target-side cosine (for area→solid angle Jacobian)
-    float cos_target = fabsf(dot(dir * (-1.f), spec_normal));
+    // No fabsf — reject back-facing targets (backface culling)
+    float cos_target = dot(dir * (-1.f), spec_normal);
     if (cos_target < 1e-6f) return;
 
     // ── 5. Hero wavelength setup + flux with PDF correction ──────────

@@ -1771,34 +1771,6 @@ TEST(DensityEstimator, SameCellDifferentFacingRejected) {
 }
 
 // =====================================================================
-//  SECTION 16 - Kernel functions
-// =====================================================================
-
-TEST(Kernel, EpanechnikovBoundary) {
-    float r2 = 1.0f;
-    EXPECT_NEAR(epanechnikov_kernel(0.f, r2), 1.f, kTol);     // Center
-    EXPECT_NEAR(epanechnikov_kernel(r2, r2), 0.f, kTol);      // Edge
-    EXPECT_NEAR(epanechnikov_kernel(r2 * 2.f, r2), 0.f, kTol); // Outside
-}
-
-TEST(Kernel, EpanechnikovMonotonic) {
-    float r2 = 1.0f;
-    float prev = epanechnikov_kernel(0.f, r2);
-    for (float d = 0.1f; d <= 1.0f; d += 0.1f) {
-        float curr = epanechnikov_kernel(d * d, r2);
-        EXPECT_LE(curr, prev + kTol);
-        prev = curr;
-    }
-}
-
-TEST(Kernel, BoxBoundary) {
-    float r2 = 1.0f;
-    EXPECT_EQ(box_kernel(0.f, r2), 1.f);
-    EXPECT_EQ(box_kernel(r2, r2), 1.f);
-    EXPECT_EQ(box_kernel(r2 + 0.01f, r2), 0.f);
-}
-
-// =====================================================================
 //  SECTION 17 - MIS weight functions from mis.h
 // =====================================================================
 

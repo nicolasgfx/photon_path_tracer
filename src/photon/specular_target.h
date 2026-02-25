@@ -30,7 +30,8 @@ struct SpecularTargetSet {
             if (mat_id >= scene.materials.size()) continue;
             const Material& mat = scene.materials[mat_id];
             if (mat.type == MaterialType::Glass ||
-                mat.type == MaterialType::Mirror) {
+                mat.type == MaterialType::Mirror ||
+                mat.type == MaterialType::Translucent) {
                 s.specular_tri_indices.push_back((uint32_t)i);
             }
         }
@@ -105,6 +106,9 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
     float3 target_pt = spec_tri.v0 * b0 + spec_tri.v1 * b1
                      + spec_tri.v2 * (1.f - b0 - b1);
 
+    // Compute target triangle normal for backface culling
+    float3 spec_normal = spec_tri.geometric_normal();
+
     // 3. Pick an emitter and create a photon aimed at the specular point
     //    Use the emitter point set if available, otherwise pick from CDF
     if (!scene.emitter_points.points.empty()) {
@@ -119,6 +123,9 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
 
         // Check that direction faces outward from emitter
         if (dot(dir, ept.normal) <= 0.f) return tcp;
+
+        // Backface culling: reject if photon hits target from behind
+        if (dot(dir, spec_normal) >= 0.f) return tcp;
 
         // Visibility check (shadow ray)
         Ray shadow_ray;
@@ -176,6 +183,9 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
         float  dist = length(target_pt - origin);
 
         if (dot(dir, enrm) <= 0.f) return tcp;
+
+        // Backface culling: reject if photon hits target from behind
+        if (dot(dir, spec_normal) >= 0.f) return tcp;
 
         Ray shadow_ray;
         shadow_ray.origin    = origin + enrm * EPSILON;
