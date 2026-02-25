@@ -90,7 +90,6 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
     // 1. Pick a specular triangle (area-weighted)
     int spec_local = target_set.area_alias_table.sample(
         rng.next_float(), rng.next_float());
-    float pdf_spec = target_set.area_alias_table.pdf(spec_local);
     if (spec_local < 0 || spec_local >= (int)target_set.specular_tri_indices.size())
         return tcp;
 
@@ -138,7 +137,6 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
 
         float cos_theta = dot(dir, ept.normal);
         float emitter_area = emitter_tri.area();
-        float solid_angle_pdf = (dist * dist) / (target_set.tri_areas[spec_local] * fabsf(dot(dir, spec_tri.geometric_normal())));
 
         // flux = Le × area × cos(θ) / pdf_targeted
         //      approximate: scale Le by geometric factors
@@ -154,7 +152,6 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
         tcp.valid = true;
     } else {
         // Fallback: pick an emissive triangle from the CDF
-        float xi = rng.next_float();
         int emissive_idx = 0;
         for (int i = 0; i < (int)scene.emissive_tri_indices.size(); ++i) {
             // Simple linear search (could use binary search on CDF)

@@ -500,7 +500,6 @@ void OptixRenderer::cpu_trace_photons(const Scene& scene, const RenderConfig& co
                 config.num_photons, ms1, global_map.size(), caustic_map.size());
 
     // ── 2. Targeted caustic emission ─────────────────────────────────
-    size_t caustic_before_targeted = caustic_map.size();
     if (config.targeted_caustic_emission_enabled) {
         SpecularTargetSet target_set = SpecularTargetSet::build(scene);
         if (target_set.valid) {

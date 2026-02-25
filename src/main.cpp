@@ -149,7 +149,7 @@ static bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
             if (lb == std::string::npos || rb == std::string::npos) return false;
             std::string inner = s.substr(lb + 1, rb - lb - 1);
             float xyz[3];
-            int n = std::sscanf(inner.c_str(), "%f , %f , %f", &xyz[0], &xyz[1], &xyz[2]);
+            int n = sscanf_s(inner.c_str(), "%f , %f , %f", &xyz[0], &xyz[1], &xyz[2]);
             if (n != 3) return false;
             out = make_f3(xyz[0], xyz[1], xyz[2]);
             return true;

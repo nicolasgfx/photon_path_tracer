@@ -56,9 +56,20 @@ include(FetchContent)
 FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG        master
+    GIT_TAG        f1c79c02822848a9bed4315b12c8c8f3761e1296  # pinned
 )
 FetchContent_MakeAvailable(stb)
+
+# -- CUDA architecture -------------------------------------------------
+# Dev builds: compile only for the local GPU (fast).  Set PPT_CUDA_ARCH_ALL=ON
+# for release builds targeting multiple GPU generations.
+option(PPT_CUDA_ARCH_ALL "Build for all supported CUDA architectures (75;86;89)" OFF)
+if(PPT_CUDA_ARCH_ALL)
+    set(PPT_CUDA_ARCHS "75;86;89")
+else()
+    # native = detect GPU at configure time (CMake 3.24+)
+    set(PPT_CUDA_ARCHS "native")
+endif()
 
 # -- Source files ------------------------------------------------------
 set(CORE_SOURCES
@@ -79,7 +90,7 @@ set(CUDA_SOURCES
 # -- Shared CUDA static library (shared by photon_tracer and ppt_tests) --------
 add_library(ppt_cuda_objects STATIC ${CUDA_SOURCES})
 set_target_properties(ppt_cuda_objects PROPERTIES
-    CUDA_ARCHITECTURES "75;86;89"
+    CUDA_ARCHITECTURES "${PPT_CUDA_ARCHS}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     POSITION_INDEPENDENT_CODE ON
@@ -139,7 +150,7 @@ endif()
 
 # CUDA architecture (photon_tracer itself has no .cu files, symbols come via ppt_cuda_objects)
 set_target_properties(photon_tracer PROPERTIES
-    CUDA_ARCHITECTURES "75;86;89"
+    CUDA_ARCHITECTURES "${PPT_CUDA_ARCHS}"
 )
 
 # Suppress C4505 from CUDA/stb runtime headers (unreferenced internal functions)
@@ -213,7 +224,7 @@ else()
 endif()
 
 # -- Unit tests --------------------------------------------------------
-option(PPT_BUILD_TESTS "Build unit tests" ON)
+option(PPT_BUILD_TESTS "Build unit tests" OFF)
 if(PPT_BUILD_TESTS)
     include(FetchContent)
     FetchContent_Declare(
@@ -225,7 +236,7 @@ if(PPT_BUILD_TESTS)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
-    include(CTest)
+    enable_testing()
 
     set(TEST_SOURCES
         tests/test_main.cpp
@@ -252,7 +263,7 @@ if(PPT_BUILD_TESTS)
         ${TEST_SOURCES}
     )
     set_target_properties(ppt_tests PROPERTIES
-        CUDA_ARCHITECTURES "75;86;89"
+        CUDA_ARCHITECTURES "${PPT_CUDA_ARCHS}"
         MSVC_DEBUG_INFORMATION_FORMAT "Embedded"
     )
     target_include_directories(ppt_tests PRIVATE

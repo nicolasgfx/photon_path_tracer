@@ -18,17 +18,10 @@
             }
         },
         {
-            "label": "Build (Debug)",
+            "label": "Build (Release + Tests)",
             "type": "shell",
-            "command": "cmake",
-            "args": [
-                "--build",
-                "${workspaceFolder}/build",
-                "--config",
-                "Debug",
-                "-j",
-                "${env:NUMBER_OF_PROCESSORS}"
-            ],
+            "command": "${workspaceFolder}/build.bat",
+            "args": ["test"],
             "group": "build",
             "problemMatcher": [
                 "$msCompile"
@@ -37,7 +30,7 @@
         {
             "label": "Run Photon Tracer",
             "type": "shell",
-            "command": "${workspaceFolder}/build/Release/photon_tracer.exe",
+            "command": "${workspaceFolder}/build/photon_tracer.exe",
             "dependsOn": "Build (Release)",
             "group": {
                 "kind": "test",
@@ -49,10 +42,25 @@
             }
         },
         {
-            "label": "Run Tests",
+            "label": "Run Fast Tests",
             "type": "shell",
-            "command": "${workspaceFolder}/build/Release/ppt_tests.exe",
-            "dependsOn": "Build (Release)",
+            "command": "${workspaceFolder}/build/ppt_tests.exe",
+            "args": [
+                "--gtest_filter=-*Integration*:*PixelComparison*:*GroundTruth*:*PerRay*:*SpeedTest*:*SpeedTweaks*:*CpuGpu*"
+            ],
+            "dependsOn": "Build (Release + Tests)",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Run All Tests",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/ppt_tests.exe",
+            "args": ["--gtest_print_time=1"],
+            "dependsOn": "Build (Release + Tests)",
             "group": "test",
             "presentation": {
                 "reveal": "always",

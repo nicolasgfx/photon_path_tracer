@@ -6,7 +6,6 @@ REM
 REM  Usage:
 REM    overnight.bat                   Run all tests (Release)
 REM    overnight.bat --filter X        Run only matching tests
-REM    overnight.bat --debug           Build & run in Debug mode
 REM    overnight.bat --no-build        Skip build, run existing binary
 REM
 REM  Output:  tests\runs\YYYYMMDD_HHMMSS\
@@ -22,7 +21,6 @@ REM -------------------------------------------------------------------
 setlocal enabledelayedexpansion
 
 set BUILD_DIR=build
-set BUILD_TYPE=Release
 set GTEST_FILTER=*
 set DO_BUILD=1
 
@@ -32,11 +30,6 @@ if "%~1"=="" goto :args_done
 if "%~1"=="--filter" (
     set GTEST_FILTER=%~2
     shift
-    shift
-    goto :parse_args
-)
-if "%~1"=="--debug" (
-    set BUILD_TYPE=Debug
     shift
     goto :parse_args
 )
@@ -58,7 +51,6 @@ echo ===================================================================
 echo  overnight.bat -- Unattended overnight test run
 echo  %TIMESTAMP%
 echo ===================================================================
-echo  Build:  %BUILD_TYPE%
 echo  Filter: %GTEST_FILTER%
 echo  Output: %RUN_DIR%
 echo ===================================================================
@@ -73,36 +65,13 @@ echo [overnight] Started at %DATE% %TIME% > "%RUN_DIR%\timing.txt"
 REM -- Configure & build (unless --no-build) --------------------------
 if %DO_BUILD% EQU 0 goto :skip_build
 
-echo [overnight] Waiting for build lock...
-:wait_lock
-if exist "%BUILD_DIR%\build.lock" (
-    timeout /t 5 >nul
-    goto :wait_lock
-)
-if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
-echo locked > "%BUILD_DIR%\build.lock"
-
-echo [overnight] Configuring CMake...
-cmake -B %BUILD_DIR% -DPPT_BUILD_TESTS=ON > "%RUN_DIR%\build_log.txt" 2>&1
-if errorlevel 1 (
-    echo [overnight] ERROR: CMake configure failed!
-    echo See %RUN_DIR%\build_log.txt for details.
-    if exist "%BUILD_DIR%\build.lock" del "%BUILD_DIR%\build.lock"
-    exit /b 1
-)
-
-echo [overnight] Building all targets (%BUILD_TYPE%)...
-cmake --build %BUILD_DIR% --config %BUILD_TYPE% -j %NUMBER_OF_PROCESSORS% >> "%RUN_DIR%\build_log.txt" 2>&1
+echo [overnight] Building with tests...
+call build.bat test > "%RUN_DIR%\build_log.txt" 2>&1
 set BUILD_RES=%ERRORLEVEL%
-if exist "%BUILD_DIR%\build.lock" del "%BUILD_DIR%\build.lock"
 
 if %BUILD_RES% NEQ 0 (
     echo [overnight] ERROR: Build failed!
-    echo.
-    echo Build errors:
-    cmake --build %BUILD_DIR% --config %BUILD_TYPE% 2>&1 | findstr /i "error"
-    echo.
-    echo See %RUN_DIR%\build_log.txt for full details.
+    echo See %RUN_DIR%\build_log.txt for details.
     exit /b 1
 )
 echo [overnight] Build OK.
@@ -111,8 +80,8 @@ echo.
 :skip_build
 
 REM -- Verify binary exists -------------------------------------------
-if not exist "%BUILD_DIR%\%BUILD_TYPE%\ppt_tests.exe" (
-    echo [overnight] ERROR: ppt_tests.exe not found at %BUILD_DIR%\%BUILD_TYPE%\ppt_tests.exe
+if not exist "%BUILD_DIR%\ppt_tests.exe" (
+    echo [overnight] ERROR: ppt_tests.exe not found at %BUILD_DIR%\ppt_tests.exe
     exit /b 1
 )
 
@@ -129,7 +98,7 @@ echo.
 REM Run with --report-dir so the GTest listener writes structured reports,
 REM and also capture full stdout+stderr to full_output.txt.
 REM GTest XML output is also generated for CI/tooling compatibility.
-%BUILD_DIR%\%BUILD_TYPE%\ppt_tests.exe ^
+%BUILD_DIR%\ppt_tests.exe ^
     --gtest_print_time=1 ^
     --gtest_filter=%GTEST_FILTER% ^
     --gtest_output=xml:%RUN_DIR%\gtest_results.xml ^
