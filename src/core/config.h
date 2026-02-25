@@ -88,8 +88,8 @@ constexpr int STRATA_Y = 2;
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 2000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -99,7 +99,7 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diff
 // Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
 constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
-constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
+constexpr float DEFAULT_CAUSTIC_RADIUS = 0.005f;     // 0.025[R]  caustic map (tighter for sharp caustics)
 
 // ── NEE shadow rays ─────────────────────────────────────────────────
 // Shadow rays per shading point (bounce 0).  The bin/cache system
@@ -222,6 +222,14 @@ constexpr float PLANE_TAU_EPSILON_FACTOR   = 10.0f;   // robust τ floor = facto
 // CPU: KD-tree.  GPU: grid shell expansion (capped by MAX_GATHER_RADIUS).
 constexpr int   DEFAULT_KNN_K                = 100;
 constexpr float DEFAULT_GPU_MAX_GATHER_RADIUS = 0.5f;  // upper bound for GPU shell expansion
+
+// Tag-1 (global-pass caustic) gather gate.  When false, photons whose
+// on_caustic_path flag was set during the *global* photon pass (tag 1)
+// are excluded from the density estimate.  Tag-0 (non-caustic) and
+// tag-2 (dedicated targeted-caustic) are always gathered.
+//   true  = gather tag-1 normally into L_global  (default)
+//   false = skip tag-1 in gather (useful for A/B comparison)
+constexpr bool  DEFAULT_GATHER_TAG1_ENABLED  = false;
 
 // ── Cell cache (per-cell photon statistics) ─────────────────────────
 // Adaptive gather radius, empty-region skip, caustic hotspot detection.

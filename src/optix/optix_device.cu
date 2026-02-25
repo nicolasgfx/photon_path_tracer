@@ -1128,9 +1128,11 @@ Spectrum dev_estimate_photon_density(
 
             // Tag contract (applied in Phase 3 accumulation):
             //   tag 0 = global non-caustic  → L_global  (1/N_global)
-            //   tag 1 = global caustic      → L_global  (1/N_global)
+            //   tag 1 = global caustic      → L_global  (1/N_global)  [gated by DEFAULT_GATHER_TAG1_ENABLED]
             //   tag 2 = targeted caustic    → L_caustic (1/N_caustic)
-            // All photons are gathered — none skipped.
+            // When DEFAULT_GATHER_TAG1_ENABLED is false, tag-1 photons
+            // are still inserted into the kNN heap (affecting adaptive
+            // radius) but their flux contribution is suppressed.
 
             // ── Insert into max-heap ────────────────────────────────
             if (knn_count < KNN_K) {
@@ -1199,6 +1201,8 @@ Spectrum dev_estimate_photon_density(
 
         // Route to budget based on tag
         uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
+        if (!DEFAULT_GATHER_TAG1_ENABLED && tag == 1)
+            continue;   // skip global-caustic contribution (config gate)
         float   my_norm  = (tag == 2) ? norm_caustic : norm_global;
         Spectrum& L_target = (tag == 2) ? L_caustic : L_global;
 
