@@ -521,14 +521,13 @@ void OptixRenderer::cpu_trace_photons(const Scene& scene, const RenderConfig& co
     auto t2 = std::chrono::high_resolution_clock::now();
 
     // ── 3. Merge global + targeted caustic into stored_photons_ ──────
-    //  Tag 0 = global (non-caustic diffuse indirect)
-    //  Tag 1 = global-pass caustic path (L→S+→D) – skipped at gather
-    //  Tag 2 = dedicated caustic-targeted pass
+    //  Tag 0 = global (non-caustic diffuse indirect)  → L_global  (1/N_global)
+    //  Tag 1 = global-pass caustic path (L→S+→D)     → L_global  (1/N_global)
+    //  Tag 2 = dedicated caustic-targeted pass        → L_caustic (1/N_caustic)
     //
-    //  CPU trace_photons deposits caustic-path photons in BOTH global_map
-    //  and caustic_map.  To mirror the GPU tag system we mark those
-    //  global_map entries as tag 1 (skip at gather) so that caustic
-    //  contribution only comes from the dedicated tag-2 targeted map.
+    //  Global caustic photons (tag=1) are gathered into L_global with
+    //  correct 1/N_global weight.  Targeted caustic photons (tag=2) use
+    //  the dedicated 1/N_caustic weight for sharper caustics.
     size_t n_global           = global_map.size();
     size_t n_targeted_caustic = targeted_caustic_map.size();
     size_t total              = n_global + n_targeted_caustic;
@@ -541,7 +540,8 @@ void OptixRenderer::cpu_trace_photons(const Scene& scene, const RenderConfig& co
     // Build caustic pass flags ────────────────────────────────────────
     caustic_pass_flags_.assign(total, 0);
 
-    // Mark global-pass caustic photons as tag 1 (skip at gather).
+    // Mark global-pass caustic photons as tag 1 (gathered in L_global,
+    // NOT skipped — tag 1 now routes to L_global with 1/N_global weight).
     // caustic_map from trace_photons contains exact duplicates of
     // caustic-path entries in global_map (bit-exact positions).
     if (caustic_map.size() > 0 && n_targeted_caustic > 0) {
@@ -563,11 +563,11 @@ void OptixRenderer::cpu_trace_photons(const Scene& scene, const RenderConfig& co
             std::memcpy(&hz, &global_map.pos_z[gi], 4);
             uint64_t key = (uint64_t)hx ^ ((uint64_t)hy << 21) ^ ((uint64_t)hz << 42);
             if (caustic_pos_hashes.count(key)) {
-                caustic_pass_flags_[gi] = 1;  // skip at gather
+                caustic_pass_flags_[gi] = 1;  // global-caustic (gathered in L_global)
                 ++n_tag1;
             }
         }
-        std::printf("[CPU-Photon] Tagged %zu global photons as tag-1 (caustic-path, skip)\n", n_tag1);
+        std::printf("[CPU-Photon] Tagged %zu global photons as tag-1 (global-caustic)\n", n_tag1);
     }
 
     // Tag targeted caustics as 2
@@ -1084,11 +1084,12 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     }
 
     // Build per-photon caustic tags (3-valued):
-    //   0 = global-pass, non-caustic  → accumulate to L_indirect  (1/N_global)
-    //   1 = global-pass, caustic path → SKIP at gather (superseded by caustic map)
-    //   2 = caustic-targeted pass     → accumulate to L_caustic   (1/N_caustic)
-    // This avoids double-counting: non-caustic indirect from global map,
-    // caustic contribution from dedicated caustic map, summed at the end.
+    //   0 = global-pass, non-caustic  → accumulate to L_global   (1/N_global)
+    //   1 = global-pass, caustic path → accumulate to L_global   (1/N_global)
+    //   2 = caustic-targeted pass     → accumulate to L_caustic  (1/N_caustic)
+    // Global caustic photons (tag=1) contribute to L_global with their
+    // correct 1/N_global normalisation.  Targeted caustic photons (tag=2)
+    // use the dedicated 1/N_caustic weight for sharper caustics.
     caustic_pass_flags_.resize(stored_count, 0);
     for (size_t i = 0; i < global_count; ++i) {
         bool is_caustic_path = (i < caustic_flags_.size() && caustic_flags_[i]);
@@ -1106,8 +1107,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
             else if (t == 1) ++n_tag1;
             else if (t == 2) ++n_tag2;
         }
-        std::printf("[OptiX] Tag distribution: tag0=%zu (noncaustic)  tag1=%zu (skip)  "
-                    "tag2=%zu (caustic-pass)  total=%u\n",
+        std::printf("[OptiX] Tag distribution: tag0=%zu (noncaustic)  tag1=%zu (global-caustic)  "
+                    "tag2=%zu (targeted-caustic)  total=%u\n",
                     n_tag0, n_tag1, n_tag2, stored_count);
         std::printf("[OptiX] Dual-budget: N_global_emitted=%d  N_caustic_emitted=%d  "
                     "r_global=%.5f  r_caustic=%.5f\n",

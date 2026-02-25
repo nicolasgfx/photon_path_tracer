@@ -1687,7 +1687,7 @@ static void run_interactive(
                         write_png(std::string(snap_prefix) + "_photon_indirect.png", snap_photon_fb);
 
                         // Caustic-indirect via non-destructive snapshot pass
-                        {
+                        if constexpr (DEBUG_CAUSTIC_PNG) {
                             std::vector<float> caus_spec, caus_samp;
                             optix_renderer.render_caustic_snapshot(
                                 g_app.render_cam, opt.config, caus_spec, caus_samp);

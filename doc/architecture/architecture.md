@@ -1,9 +1,9 @@
-# Architecture — Spectral Photon-Centric Renderer (v2.3)
+# Architecture — Spectral Photon-Centric Renderer (v2.4)
 
 This document describes the complete rendering pipeline, its design
 rationale, mathematical foundations, and implementation details.
 
-**Architecture version:** v2.3 (photon-centric, adaptive kNN gather)
+**Architecture version:** v2.4 (photon-centric, adaptive kNN gather, IOR stack, geometric normals)
 
 ---
 
@@ -122,8 +122,12 @@ with $N \to \infty$ (consistency).
    c. Trace each photon through scene with full bounce logic:
       - Bounce 0: guided hemisphere/sphere coverage
       - Bounce 1+: BSDF importance sampling + Russian roulette
-      - Glass: wavelength-dependent IOR (Cauchy dispersion), Tf filter,
-        IOR stack for nested dielectrics, path flag tagging
+      - Glass/Translucent: wavelength-dependent IOR (Cauchy dispersion),
+        Tf filter, IOR stack for nested dielectrics (§5.2.6),
+        geometric normals for entering test (§5.2.7), path flag tagging
+      - Hero wavelength system (§5.1.2): PBRT v4 style, 4 stratified
+        wavelengths per photon, direction from hero bin,
+        per-wavelength Cauchy dispersion filter for companions
       - Deposit at each qualifying diffuse hit (lightPathDepth ≥ 2)
    d. Build spatial index (KD-tree on CPU, hash grid on GPU)
    e. Build CellInfoCache (per-cell photon statistics, §5.5)
@@ -159,14 +163,27 @@ to fit inside the Cornell Box reference frame $([-0.5, 0.5]^3)$.
 
 Supported material types:
 
-| Type        | MTL Cue                | Internal Enum       |
-|-------------|------------------------|---------------------|
-| Lambertian  | default                | `Lambertian`        |
-| Mirror      | `illum 3`, Ks > 0.99   | `Mirror`            |
-| Glass       | `illum 4`, Ni > 1      | `Glass`             |
-| GlossyMetal | `illum 2`, Ns > 0      | `GlossyMetal`       |
-| GlossyDiel. | `illum 7`              | `GlossyDielectric`  |
-| Emissive    | `Ke` present           | `Emissive`          |
+| Type        | MTL Cue / pb_brdf       | Internal Enum       | Delta? |
+|-------------|-------------------------|---------------------|--------|
+| Lambertian  | default / `lambert`     | `Lambertian`        | No     |
+| Mirror      | `illum 3/5` / `conductor` | `Mirror`          | Yes    |
+| Glass       | `illum 4` / `dielectric`  | `Glass`           | Yes    |
+| GlossyMetal | `illum 2` / `conductor`   | `GlossyMetal`     | No     |
+| Emissive    | `Ke` present / `emissive` | `Emissive`        | —      |
+| GlossyDiel. | `illum 7` / `dielectric`  | `GlossyDielectric`| No     |
+| Translucent | `dielectric` + medium     | `Translucent`     | Yes    |
+| Clearcoat   | `clearcoat`               | `Clearcoat`       | No     |
+| Fabric      | `fabric`                  | `Fabric`           | No     |
+
+**Translucent** = Glass-like Fresnel bounce + optional interior
+participating medium (subsurface scattering via Beer–Lambert). Created
+when `pb_brdf = dielectric` with `pb_medium_enabled = true`.
+
+**Opacity fix:** Glass and Translucent materials always have
+`opacity = 1.0`. Their transmission is handled by the specular bounce
+shader (Fresnel refraction), NOT by the anyhit alpha cutout. Without
+this, `pb_transmission 1.0` would set `opacity = 0.0`, making the
+material invisible to all ray intersections.
 
 ### 4.2 Acceleration Structure
 
@@ -222,6 +239,47 @@ $$
 where $\Phi_{\text{total},\lambda} = \pi \sum_t L_e(t,\lambda) \cdot A_t$
 and the combined PDF is $p_{tri} \cdot p_{pos} \cdot p_{dir} \cdot p_{\lambda}$.
 
+### 5.1.2 Hero Wavelength System (PBRT v4 Style)
+
+Each photon traces `HERO_WAVELENGTHS` (= 4) wavelength channels
+simultaneously. The **hero** (primary) wavelength determines the
+refraction direction; **companion** wavelengths are carried along with
+independent throughput weights.
+
+**Selection:** The hero bin is sampled from the emission spectrum CDF.
+Companions are deterministic stratified offsets:
+
+```
+companion[h] = (hero_bin + h * NUM_LAMBDA / HERO_WAVELENGTHS) % NUM_LAMBDA
+```
+
+This produces 4 evenly-spaced bins across the 32-bin spectrum, maximising
+wavelength diversity per photon.
+
+**Flux per hero:** Each hero channel carries:
+
+$$
+\Phi_h = \frac{L_e(\lambda_h) \cos\theta}{p_{tri} \cdot p_{pos} \cdot p_{dir} \cdot p_{\lambda_h}} \cdot \frac{1}{H}
+$$
+
+where $H$ = `HERO_WAVELENGTHS`.
+
+**Dispersion filter:** At each Glass/Translucent bounce, the hero
+wavelength determines the refraction direction. Companion wavelengths
+receive a per-bin Cauchy dispersion filter:
+
+- Refraction: `filter[b] = Tf[b] * (1 - F_b) / (1 - F_hero)`, where
+  `F_b = fresnel(cos_i, outside_ior / ior_at_lambda(b))`
+- Reflection: `filter[b] = F_b / F_hero`
+- TIR bins: `filter[b] = 0` (total internal reflection at that wavelength)
+
+This correctly handles spectral splitting: red and blue companions diverge
+in weight as they would physically separate at different refraction angles.
+
+**Camera path:** Uses D-line (~589 nm, `DLINE_BIN`) as hero instead of
+bin 0 (380 nm), because the D-line gives a typical glass IOR (1.52 for
+crown glass) rather than the UV-extreme IOR that bin 0 would produce.
+
 ### 5.1.1 Canonical PDFs
 
 | PDF | Symbol | Formula | Units |
@@ -252,8 +310,11 @@ Standard BSDF importance sampling:
 - Glass: Fresnel-weighted reflect/refract
 - Glossy: GGX/VNDF sampling
 
-Russian roulette after `MIN_BOUNCES_RR` (default 3):
+Russian roulette after `DEFAULT_PHOTON_MIN_BOUNCES_RR` (default 10):
 $p_{continue} = \min(\max_\lambda(T(\lambda)),\, \text{RR\_THRESHOLD})$
+
+**Russian roulette is skipped for specular/translucent bounces** — these
+are deterministic events that must continue to enable caustic formation.
 
 #### 5.2.3 Photon Deposition Rule (No Double Counting)
 
@@ -264,14 +325,36 @@ Deposit when:
 Delta (mirror/glass) surfaces: do NOT deposit, but MUST continue bouncing.
 Terminating at delta surfaces prevents caustic formation.
 
-#### 5.2.4 Separate Maps
+#### 5.2.4 Separate Maps & Three-Valued Tag System
 
-- **Global photon map**: deposits with `hasSpecularChain == false`
-- **Caustic photon map**: deposits with `hasSpecularChain == true`
-  (uses smaller gather radius for sharper caustics)
+Photons are separated into two maps with a three-valued tag for
+density estimation normalization:
 
-`hasSpecularChain == true` means at least one delta BSDF interaction
-occurred along the photon's path from the light source.
+| Tag | Name | Source | Gather bucket | Normalization |
+|-----|------|--------|---------------|---------------|
+| 0 | Non-caustic | Global pass, diffuse-only path | `L_global` | `1 / N_global` |
+| 1 | Global-caustic | Global pass, specular chain path (L→S+→D) | `L_global` | `1 / N_global` |
+| 2 | Targeted-caustic | Dedicated caustic-targeted pass | `L_caustic` | `1 / N_caustic` |
+
+**All photons are gathered — none are skipped.** Tags 0 and 1 both
+contribute to `L_global` with `1/N_global` normalization. Tag 2
+contributes to `L_caustic` with `1/N_caustic` normalization. The final
+result is `L = L_global + L_caustic`.
+
+**Tag assignment:**
+- **Global photon pass** (`__raygen__photon_trace`): writes tag 0 (non-caustic)
+  or 1 (caustic) based on `on_caustic_path` at deposition.
+- **Targeted caustic pass** (`__raygen__targeted_photon_trace`): host-side
+  fills tag 2 for all targeted photons via
+  `std::fill(caustic_pass_flags_.begin() + n_global, end, 2)`.
+
+**Why dual normalization?** Global and targeted passes emit different
+numbers of photons (`N_global` vs `N_caustic`). Each photon's flux was
+scaled by its pass budget at emission time. Using the correct per-budget
+normalizer prevents brightness artefacts in overlapping regions.
+
+The caustic map uses a smaller gather radius (`DEFAULT_CAUSTIC_RADIUS`)
+for sharper caustic features.
 
 ### 5.2.5 Photon Path Flags
 
@@ -292,20 +375,65 @@ Materials with `dispersion == true` trigger `DISPERSION`.
 
 ### 5.2.6 IOR Stack (Nested Dielectrics)
 
-An `IORStack` (4 deep) tracks the current refractive index during photon
-tracing. When entering glass, the material's IOR is pushed; when exiting,
-it is popped. The stack returns `current_ior()` for Fresnel and Snell
-calculations, handling nested glass objects correctly.
+An `IORStack` (4 deep) tracks the current surrounding medium's IOR during
+both photon tracing and camera specular chains. The stack starts empty
+(= air, IOR 1.0). When entering a dielectric, the material's nominal IOR
+is pushed; when exiting via refraction, the top is popped. **Reflection
+does not modify the stack** — the ray stays in the same medium.
 
-```cpp
+```cuda
 struct IORStack {
-    float stack[4] = {1.0f, 0, 0, 0};
-    int   depth    = 1;
-    void  push(float n);
-    void  pop();
-    float current_ior() const { return stack[depth - 1]; }
+    static constexpr int MAX_DEPTH = 4;
+    float iors[MAX_DEPTH];
+    int   depth;                          // 0 = empty = air
+    __forceinline__ __device__ IORStack() : depth(0) {}
+    __forceinline__ __device__ float top() const {
+        return depth > 0 ? iors[depth - 1] : 1.0f;   // air fallback
+    }
+    __forceinline__ __device__ void push(float ior) {
+        if (depth < MAX_DEPTH) iors[depth++] = ior;
+    }
+    __forceinline__ __device__ void pop() {
+        if (depth > 0) --depth;
+    }
 };
 ```
+
+**Usage in `dev_specular_bounce`:**
+- `outside_ior = ior_stack ? ior_stack->top() : 1.0f`
+- `eta = entering ? (outside_ior / hero_ior) : (hero_ior / outside_ior)`
+- On **refraction**: `push(hero_ior)` when entering, `pop()` when exiting.
+- On **reflection**: no stack change.
+- Per-wavelength Cauchy filter also uses `outside_ior` for all eta
+  computations (companion wavelengths).
+
+**Where IORStack is instantiated:**
+- `__raygen__photon_trace` bounce loop
+- `__raygen__targeted_photon_trace` bounce loop
+- `full_path_trace` (camera specular chain + glossy continuation)
+- `sppm_camera_pass` specular chain
+- `debug_first_hit` uses `nullptr` (no IOR tracking in debug mode).
+
+### 5.2.7 Geometric vs Shading Normals in Specular Bounces
+
+`dev_specular_bounce` receives **both** normals:
+
+| Normal | Parameter | Used For |
+|--------|-----------|----------|
+| Shading normal | `normal` | Fresnel `cos_i`, reflection direction, refraction direction (smooth surface appearance) |
+| Geometric normal | `geo_normal` | Entering/exiting test (`dot(dir, geo_normal) < 0`), epsilon offset (`pos ± outward_geo * EPSILON`) |
+
+**Why geometric for entering test?** Shading normals are interpolated
+and can flip sign near triangle edges, causing incorrect inside/outside
+classification. Geometric normals are flat per-triangle and always
+consistent with the actual surface orientation.
+
+**Why shading for direction?** Smooth surface appearance requires
+interpolated normals for reflection and refraction directions. Using
+geometric normals would produce faceted reflections.
+
+This split is applied consistently in all callers across photon trace,
+targeted trace, camera path trace, SPPM, and debug first-hit.
 
 ### 5.3 Photon Path Decorrelation
 
@@ -560,10 +688,14 @@ Phase 2 — Determine adaptive radius
     r_k² = tangential distance to the K-th nearest photon
     if fewer than K photons found: r_k² = max_search_radius²
 
-Phase 3 — Accumulate
+Phase 3 — Accumulate (dual-budget)
     For each of the K nearest photons (d_tan² < r_k²):
-        w = 1                            (box weight)
-        L += w · f_s(x, ωi→ωo, λ) · Φi(λ) / (N · π r_k²)
+        w = 1 - d_tan²/r_k²              (Epanechnikov weight)
+        tag = photon_is_caustic_pass[i]   (0, 1, or 2)
+        N_norm = (tag == 2) ? N_caustic : N_global
+        L_target = (tag == 2) ? L_caustic : L_global
+        L_target += w · f_s(x, ωi→ωo, λ) · Φi(λ) / (N_norm · ½π r_k²)
+    L = L_global + L_caustic
 ```
 
 #### 6.5.3 Worked Example
@@ -623,14 +755,23 @@ is always $r_k$, the distance to the $K$-th nearest photon.
 At a diffuse camera hitpoint $x$ with outgoing direction $\omega_o$:
 
 $$
-L_{\text{photon}}(x,\omega_o,\lambda) = \frac{1}{\pi r_k^2}\sum_{i=1}^{K} f_s(x,\omega_i,\omega_o,\lambda)\, \Phi_i(\lambda) \,/\, N
+L_{\text{photon}}(x,\omega_o,\lambda) = L_{\text{global}} + L_{\text{caustic}}
 $$
 
-Where $r_k$ is the tangential distance to the $K$-th nearest photon
-(adaptive radius from §6.5) and $N$ is the total number of emitted photons.
+where each budget is estimated independently:
 
-The BSDF $f_s$ is applied **per-photon** inside the sum, not as an
-overall multiplier.
+$$
+L_{\text{budget}}(x,\omega_o,\lambda) = \frac{1}{\pi r_k^2}\sum_{i \in \text{budget}} w_i \cdot f_s(x,\omega_i,\omega_o,\lambda)\, \Phi_i(\lambda) \,/\, N_{\text{budget}}
+$$
+
+- $r_k$ = tangential distance to the $K$-th nearest photon (adaptive, §6.5)
+- $w_i = 1 - d_{\text{tan},i}^2 / r_k^2$ (Epanechnikov kernel weight)
+- $N_{\text{budget}}$ = `N_global` for tag 0/1 photons, `N_caustic` for tag 2 photons
+- The BSDF $f_s$ is applied **per-photon** inside the sum, not as an
+  overall multiplier
+
+When the dual-budget system is inactive (no targeted caustics), all
+photons receive `1/N_global` normalization.
 
 ### 6.7 Gather Radius Strategy
 
@@ -687,12 +828,21 @@ continuation.
 
 ### 7.1.1 Specular Chain Throughput
 
+The camera maintains an `IORStack ior_stack` across specular bounces
+(shared with the glossy continuation loop). Each specular bounce calls
+`dev_specular_bounce(dir, pos, shading_normal, geo_normal, mat_id, uv,
+rng, nullptr, 0, &ior_stack)` — passing `nullptr` for hero bins
+(camera uses D-line, §5.1.2) and the IOR stack pointer.
+
 ```
-T = 1.0  // initial throughput
+T = 1.0  // initial throughput (per wavelength bin)
+IORStack ior_stack;  // empty = air (IOR 1.0)
 for each specular bounce:
-    // For perfect mirror:  T *= reflectance(λ)
-    // For glass refract:   T *= transmittance(λ) * (n_i/n_t)²
-    // For glass reflect:   T *= F(θ, λ)  (Fresnel reflectance)
+    sb = dev_specular_bounce(dir, pos, normal, geo_normal,
+                             mat_id, uv, rng, nullptr, 0, &ior_stack)
+    T *= sb.filter   // per-wavelength: Fresnel * Tf * dispersion correction
+    dir = sb.new_dir
+    pos = sb.new_pos
 
 // At diffuse endpoint:
 L_pixel = T * (L_emission + L_direct + L_indirect)
@@ -703,8 +853,15 @@ glass views will have **wrong brightness**.
 
 **Spectral dispersion:** For glass materials with wavelength-dependent IOR,
 the Fresnel reflectance, refraction direction, and transmittance are all
-$\lambda$-dependent. The BSDF sampling and PDF must be computed per
-wavelength bin.
+$\lambda$-dependent. The `SpecularBounceResult.filter` carries the
+per-wavelength correction factor (see §5.1.2).
+
+**Translucent surfaces in camera specular chain:**
+Currently treated identically to Glass (delta Fresnel bounce). This is
+physically reasonable for smooth dielectrics.
+
+> **TODO(D1):** Add NEE + photon gather at translucent surfaces —
+> requires dual-hemisphere gather and diffuse+specular BSDF split.
 
 ### 7.2 NEE (Direct Lighting)
 
@@ -833,11 +990,47 @@ ACES pipeline for fair PSNR comparison.
 | Lambertian | $K_d / \pi$                      | $\cos\theta / \pi$               |
 | Mirror     | ideal specular reflection         | delta distribution                |
 | Glass      | Fresnel-weighted reflect/refract  | Schlick approximation             |
+| Translucent| Glass-like Fresnel + interior medium | delta (surface) + Beer–Lambert |
 | Glossy     | GGX microfacet (Cook-Torrance)   | VNDF sampling (Heitz 2018)        |
 
 All BSDF evaluations are spectral: albedo $K_d(\lambda)$ or $K_s(\lambda)$
 is evaluated per-bin. For glass with wavelength-dependent IOR, Fresnel
 reflectance and refraction angle vary per bin (spectral dispersion).
+
+### 10.0.1 `dev_specular_bounce` (Unified Glass/Mirror/Translucent)
+
+All delta BSDF interactions (Glass, Mirror, Translucent) go through a
+single device function:
+
+```cuda
+SpecularBounceResult dev_specular_bounce(
+    float3 dir, float3 pos,
+    float3 normal,        // shading normal (direction computation)
+    float3 geo_normal,    // geometric normal (enter/exit + offset)
+    uint32_t mat_id, float2 uv, PCGRng& rng,
+    const int* hero_bins = nullptr,  // photon hero channels (nullptr = camera)
+    int num_hero = 0,
+    IORStack* ior_stack = nullptr);   // nested dielectric tracking
+```
+
+**Returns** `SpecularBounceResult { new_dir, new_pos, filter }` where
+`filter` is a per-wavelength throughput multiplier.
+
+**Glass/Translucent logic:**
+1. **Entering test** uses `geo_normal`: `entering = dot(dir, geo_normal) < 0`
+2. **Outside IOR** from stack: `outside_ior = ior_stack->top()` (air = 1.0)
+3. **Hero IOR**: `hero_ior = ior_at_lambda(hero_bin)` (D-line for camera,
+   `hero_bins[0]` for photons)
+4. **Eta**: `entering ? outside_ior/hero_ior : hero_ior/outside_ior`
+5. **Fresnel**: `F_hero = fresnel_dielectric(cos_i, eta_hero)`
+6. **Stochastic choice**: reflect if `rng < F_hero`, else refract
+7. **IOR stack update**: push on enter-refract, pop on exit-refract,
+   no change on reflect
+8. **Offset**: `pos ± outward_geo * EPSILON` (geometric normal)
+9. **Dispersion filter**: per-wavelength Cauchy correction (§5.1.2)
+
+**Mirror logic:** Pure reflection using shading normal for direction,
+geometric normal for epsilon offset. `filter = Ks`.
 
 ### 10.1 Chromatic Dispersion (Cauchy Equation)
 
@@ -1192,14 +1385,17 @@ with `--use_fast_math`.
 
 ### Programs
 
-| Program                    | Type        | Purpose                              |
-|----------------------------|-------------|--------------------------------------|
-| `__raygen__render`         | Ray Gen     | First-hit camera pass + NEE + gather |
-| `__raygen__photon_trace`   | Ray Gen     | GPU photon emission + tracing        |
-| `__closesthit__radiance`   | Closest-Hit | Unpack geometry at hit point         |
-| `__closesthit__shadow`     | Closest-Hit | Set "occluded" flag                  |
-| `__miss__radiance`         | Miss        | Return zero radiance                 |
-| `__miss__shadow`           | Miss        | Return "not occluded"                |
+| Program                           | Type        | Purpose                              |
+|-----------------------------------|-------------|--------------------------------------|
+| `__raygen__render`                | Ray Gen     | First-hit camera pass + NEE + gather |
+| `__raygen__photon_trace`          | Ray Gen     | GPU photon emission + tracing        |
+| `__raygen__targeted_photon_trace` | Ray Gen     | Targeted caustic photon emission     |
+| `__raygen__sppm_camera`           | Ray Gen     | SPPM camera pass (visible points)    |
+| `__raygen__sppm_gather`           | Ray Gen     | SPPM photon gather + progressive update |
+| `__closesthit__radiance`          | Closest-Hit | Unpack geometry at hit point         |
+| `__closesthit__shadow`            | Closest-Hit | Set "occluded" flag                  |
+| `__miss__radiance`                | Miss        | Return zero radiance                 |
+| `__miss__shadow`                  | Miss        | Return "not occluded"                |
 
 ### Payload Layout (14 values)
 
@@ -1241,24 +1437,31 @@ All tunable constants in `src/core/config.h`:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `NUM_LAMBDA` | 32 | Wavelength bins (380–780 nm) |
+| `HERO_WAVELENGTHS` | 4 | Hero wavelengths per photon (PBRT v4 style) |
 | `DEFAULT_SPP` | 16 | Samples per pixel |
-| `DEFAULT_MAX_BOUNCES` | 8 | Maximum path bounces |
-| `DEFAULT_MIN_BOUNCES_RR` | 3 | Bounces before Russian roulette |
-| `DEFAULT_RR_THRESHOLD` | 0.95 | Max RR survival probability |
+| `DEFAULT_PHOTON_MAX_BOUNCES` | 12 | Maximum photon bounce depth |
+| `DEFAULT_MAX_SPECULAR_CHAIN` | 12 | Camera ray specular bounce limit |
+| `DEFAULT_MAX_GLOSSY_BOUNCES` | 2 | Glossy continuation after first diffuse hit |
+| `DEFAULT_PHOTON_MIN_BOUNCES_RR` | 10 | Guaranteed bounces before Russian roulette |
+| `DEFAULT_PHOTON_RR_THRESHOLD` | 0.90 | Max RR survival probability |
+| `DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG` | 90.0 | Emission cone half-angle (90° = full hemisphere) |
 
 ### Photon Mapping
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `DEFAULT_NUM_PHOTONS` | 1,000,000 | Photons emitted per trace |
-| `DEFAULT_GATHER_RADIUS` | 0.05 | Photon gather radius |
-| `DEFAULT_CAUSTIC_RADIUS` | 0.02 | Caustic map gather radius |
+| `DEFAULT_GLOBAL_PHOTON_BUDGET` | 2,000,000 | Diffuse indirect photon budget |
+| `DEFAULT_CAUSTIC_PHOTON_BUDGET` | 2,000,000 | Caustic photon budget |
+| `DEFAULT_GATHER_RADIUS` | 0.05 | Global map max kNN radius |
+| `DEFAULT_CAUSTIC_RADIUS` | 0.025 | Caustic map max kNN radius |
 | `HASHGRID_CELL_FACTOR` | 2.0 | cell_size = factor × radius |
 | `DEFAULT_SURFACE_TAU` | 0.02 | Plane-distance filter thickness |
 | `DEFAULT_PLANE_DISTANCE_THRESHOLD` | 1e-3 | Max plane distance for tangential kernel |
 | `PLANE_TAU_EPSILON_FACTOR` | 10.0 | tau ≥ 10 × ray_epsilon |
 | `DEFAULT_PHOTON_BOUNCE_STRATA` | 64 | Max hemisphere strata for decorrelation |
 | `DEFAULT_GPU_MAX_GATHER_RADIUS` | 0.5 | Max gather radius for GPU grid k-NN |
+| `DEFAULT_KNN_K` | 100 | k-NN neighbour count |
+| `DEFAULT_TARGETED_CAUSTIC_MIX` | 1.0 | Fraction of caustic budget targeted |
 
 ### NEE
 
@@ -1501,6 +1704,21 @@ tests/
 14. **Adaptive caustic shooting.** Two-phase photon emission concentrates
     budget on high-variance caustic cells, reducing caustic noise.
 
+15. **IOR stack for nested dielectrics.** 4-deep stack tracks surrounding
+    medium IOR through nested glass objects, enabling correct Fresnel and
+    Snell calculations for glass-inside-glass configurations.
+
+16. **Geometric/shading normal split.** Entering test and epsilon offset
+    use face (geometric) normals for robustness; refraction/reflection
+    directions use interpolated (shading) normals for smooth appearance.
+
+17. **Hero wavelength system.** PBRT v4-style 4-wavelength tracing per
+    photon with stratified companion offsets maximises wavelength diversity
+    and enables per-wavelength Cauchy dispersion filtering.
+
+18. **Three-valued tag system.** Dual-budget photon gather with correct
+    per-budget normalization. No photons are discarded.
+
 ---
 
 ## 22. Weaknesses and Limitations
@@ -1522,6 +1740,10 @@ tests/
 
 8. **GPU k-NN bounded by max_radius.** Sparse regions may not find k photons.
 
+9. **Translucent camera shading incomplete.** Translucent materials are
+   treated as delta Fresnel bounces in the camera pass. Full NEE + photon
+   gather at translucent surfaces (dual-hemisphere gather) is TODO(D1).
+
 ---
 
 ## 23. Common Bugs to Avoid
@@ -1540,24 +1762,36 @@ tests/
 - **Omitting $N_{\text{photons}}$ in photon flux denominator** — brightness scales with count
 - **Using NEE solid-angle PDF with area-form integrand** (or vice versa)
 - **Using shading normals for tangential metric** — use geometric normals
+- **Using shading normals for entering test** — use geometric normals (§5.2.7)
+- **Not updating IOR stack on refract** — nested glass gets wrong eta
+- **Changing IOR stack on reflect** — ray stays in same medium
+- **Hardcoding outside_ior = 1.0** — fails for glass-inside-glass
+- **Using bin 0 (380 nm) IOR for camera refraction** — use D-line (~589 nm)
+- **Skipping tag=1 photons in gather** — discards valid global caustics
+- **Mixing N_global and N_caustic normalizers** — wrong brightness in dual-budget
 - CPU vs GPU: different structures OK, but gather metric must match
 
 ---
 
 ## 24. Architectural Differences from v1
 
-| Aspect | v1 (Previous) | v2.1 (Current) |
+| Aspect | v1 (Previous) | v2.4 (Current) |
 |--------|---------------|----------------|
-| Camera ray depth | Full path tracing (N bounces) | First hit only (specular chain N≤8 to first diffuse) |
+| Camera ray depth | Full path tracing (N bounces) | First hit only (specular chain N≤12 to first diffuse) |
 | Indirect lighting | Photon map + camera BSDF bouncing | Photon map only |
 | MIS | 3-way (NEE + BSDF + photon) | None at camera; standard BSDF in photon rays |
 | Photon bounce strategy | Standard BSDF | Stratified BSDF at bounce 0 |
+| Spectral sampling | One wavelength per photon | Hero wavelength system: 4 stratified bins per photon |
 | Spatial index | Hash grid only | KD-tree (CPU) + Hash grid (GPU) + tangential kernel |
 | Gather radius | Fixed or SPPM (bounded) | k-NN adaptive per hitpoint (tangential distance) |
 | Gather kernel | 3D spherical | Tangential disk kernel (fixes planar blocking) |
+| Photon tag system | Boolean caustic flag | Three-valued tag (0/1/2) with dual-budget normalization |
+| Nested dielectrics | Hardcoded outside_ior = 1.0 | IOR stack (4-deep, push/pop on refract) |
+| Specular entering test | Shading normal | Geometric normal (§5.2.7) |
+| Epsilon offset | Shading normal | Geometric normal (§5.2.7) |
 | Photon precomputation | Recomputes every launch | Binary save/load with scene hash invalidation |
 | Photon budget | Single budget | Separate `global_photon_budget` / `caustic_photon_budget` |
-| Caustic handling | Separate caustic map | Separate caustic map (retained) |
+| Caustic handling | Separate caustic map | Separate caustic map + targeted shooting |
 | Tone mapping | Reinhard | ACES Filmic |
 | Volume rendering | Rayleigh + Beer-Lambert | Temporarily disabled |
 | Default render mode | Progressive accumulation | SPPM progressive (radius shrinkage) |

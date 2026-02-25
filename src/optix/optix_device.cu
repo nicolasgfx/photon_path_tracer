@@ -1126,9 +1126,11 @@ Spectrum dev_estimate_photon_density(
                 params.photon_wi_z[idx]);
             if (dot(wi_world, filter_normal) <= 0.f) continue;
 
-            // Tag filter: skip global-pass caustic photons (tag==1)
-            uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
-            if (tag == 1) continue;
+            // Tag contract (applied in Phase 3 accumulation):
+            //   tag 0 = global non-caustic  → L_global  (1/N_global)
+            //   tag 1 = global caustic      → L_global  (1/N_global)
+            //   tag 2 = targeted caustic    → L_caustic (1/N_caustic)
+            // All photons are gathered — none skipped.
 
             // ── Insert into max-heap ────────────────────────────────
             if (knn_count < KNN_K) {
@@ -1209,9 +1211,11 @@ Spectrum dev_estimate_photon_density(
         }
     }
 
-    // Additive combination: non-caustic indirect from global map +
-    // caustic contribution from dedicated caustic map (no double-counting
-    // because global-pass caustic photons are tagged=1 and skipped above).
+    // Additive combination: global map (non-caustic + global caustic,
+    // each normalised by 1/N_global) plus the dedicated targeted caustic
+    // map (tag=2, normalised by 1/N_caustic).  Global caustic photons
+    // contribute to L_global with their correct 1/N_global weight rather
+    // than being discarded.
     if (dual_budget) {
         for (int lam = 0; lam < NUM_LAMBDA; ++lam)
             L.value[lam] = L_global.value[lam] + L_caustic.value[lam];
@@ -1384,6 +1388,30 @@ float dev_fresnel_dielectric(float cos_i, float eta) {
 // is 1 everywhere: reflect → filter = 1.0, refract → filter = Tf.
 // This recovers the original non-dispersive behaviour exactly.
 // =====================================================================
+
+// ── IOR stack for nested dielectric tracking ─────────────────────────
+// Tracks which dielectric medium the ray is currently inside.  Empty
+// stack ⇒ air (IOR 1.0).  Push on enter, pop on exit, no change on
+// reflect.  Works with Cauchy dispersion by storing the material's
+// nominal IOR (per-wavelength IOR is recomputed from the material).
+// =====================================================================
+struct IORStack {
+    static constexpr int MAX_DEPTH = 4;
+    float iors[MAX_DEPTH];
+    int   depth;
+
+    __forceinline__ __device__ IORStack() : depth(0) {}
+    __forceinline__ __device__ float top() const {
+        return depth > 0 ? iors[depth - 1] : 1.0f;
+    }
+    __forceinline__ __device__ void push(float ior) {
+        if (depth < MAX_DEPTH) iors[depth++] = ior;
+    }
+    __forceinline__ __device__ void pop() {
+        if (depth > 0) --depth;
+    }
+};
+
 struct SpecularBounceResult {
     float3   new_dir;
     float3   new_pos;
@@ -1392,17 +1420,28 @@ struct SpecularBounceResult {
 
 __forceinline__ __device__
 SpecularBounceResult dev_specular_bounce(
-    float3 dir, float3 pos, float3 normal,
+    float3 dir, float3 pos, float3 normal, float3 geo_normal,
     uint32_t mat_id, float2 uv, PCGRng& rng,
-    const int* hero_bins = nullptr, int num_hero = 0)
+    const int* hero_bins = nullptr, int num_hero = 0,
+    IORStack* ior_stack = nullptr)
 {
     SpecularBounceResult r;
     r.filter = Spectrum::constant(1.0f);
 
     if (dev_is_glass(mat_id) || dev_is_translucent(mat_id)) {
-        bool entering = dot(dir, normal) < 0.f;
+        // Use geometric normal for inside/outside test (immune to
+        // shading-normal interpolation artefacts on curved meshes).
+        bool entering = dot(dir, geo_normal) < 0.f;
+
+        // Flip shading normal to match the entering decision from geo_normal.
         float3 outward_n = entering ? normal : normal * (-1.f);
+        // Geometric outward normal for epsilon offset (push past geometry).
+        float3 outward_geo = entering ? geo_normal : geo_normal * (-1.f);
+
         float cos_i = fabsf(dot(dir, outward_n));
+
+        // Outside medium IOR from the IOR stack (air = 1.0 when empty).
+        float outside_ior = ior_stack ? ior_stack->top() : 1.0f;
 
         // Hero wavelength determines direction when dispersion is enabled.
         // When called from the camera path (no hero_bins), use the D-line
@@ -1411,7 +1450,7 @@ SpecularBounceResult dev_specular_bounce(
         constexpr int DLINE_BIN = (int)((589.0f - LAMBDA_MIN) / LAMBDA_STEP);
         int hero_bin = (hero_bins && num_hero > 0) ? hero_bins[0] : DLINE_BIN;
         float hero_ior = dev_ior_at_lambda(mat_id, lambda_of_bin(hero_bin));
-        float eta_hero = entering ? (1.f / hero_ior) : hero_ior;
+        float eta_hero = entering ? (outside_ior / hero_ior) : (hero_ior / outside_ior);
 
         // Fresnel reflectance at hero wavelength
         float F_hero = dev_fresnel_dielectric(cos_i, eta_hero);
@@ -1420,15 +1459,16 @@ SpecularBounceResult dev_specular_bounce(
         bool do_reflect = (rng.next_float() < F_hero);
 
         if (do_reflect) {
+            // Reflection: no IOR stack change.
             r.new_dir = dir - outward_n * (2.f * dot(dir, outward_n));
-            r.new_pos = pos + outward_n * OPTIX_SCENE_EPSILON;
+            r.new_pos = pos + outward_geo * OPTIX_SCENE_EPSILON;
 
             if (dev_has_dispersion(mat_id)) {
                 // Reflection filter: F_b / F_hero  (Tf NOT applied)
                 float inv_F_hero = 1.f / fmaxf(F_hero, 1e-8f);
                 for (int b = 0; b < NUM_LAMBDA; ++b) {
                     float n_b   = dev_ior_at_lambda(mat_id, lambda_of_bin(b));
-                    float eta_b = entering ? (1.f / n_b) : n_b;
+                    float eta_b = entering ? (outside_ior / n_b) : (n_b / outside_ior);
                     float F_b   = dev_fresnel_dielectric(cos_i, eta_b);
                     r.filter.value[b] = F_b * inv_F_hero;
                 }
@@ -1436,12 +1476,20 @@ SpecularBounceResult dev_specular_bounce(
             // else: non-dispersive → F_b == F_hero for all bins,
             //       ratio = 1.0, filter stays constant(1.0).  Correct.
         } else {
-            // Refract — direction from hero wavelength IOR
+            // Refract — direction from hero wavelength IOR.
+            // Update IOR stack: push on enter, pop on exit.
+            if (ior_stack) {
+                if (entering)
+                    ior_stack->push(hero_ior);
+                else
+                    ior_stack->pop();
+            }
+
             float sin2_hero = eta_hero * eta_hero * (1.f - cos_i * cos_i);
             float3 refracted = dir * eta_hero +
                 outward_n * (eta_hero * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_hero)));
             r.new_dir = normalize(refracted);
-            r.new_pos = pos - outward_n * OPTIX_SCENE_EPSILON;
+            r.new_pos = pos - outward_geo * OPTIX_SCENE_EPSILON;
 
             if (dev_has_dispersion(mat_id)) {
                 // Refraction filter: Tf[b] * (1 - F_b) / (1 - F_hero)
@@ -1449,7 +1497,7 @@ SpecularBounceResult dev_specular_bounce(
                 float inv_one_minus_F = 1.f / fmaxf(1.f - F_hero, 1e-8f);
                 for (int b = 0; b < NUM_LAMBDA; ++b) {
                     float n_b   = dev_ior_at_lambda(mat_id, lambda_of_bin(b));
-                    float eta_b = entering ? (1.f / n_b) : n_b;
+                    float eta_b = entering ? (outside_ior / n_b) : (n_b / outside_ior);
                     float F_b   = dev_fresnel_dielectric(cos_i, eta_b);
                     if (F_b >= 1.f) {
                         r.filter.value[b] = 0.f;  // TIR at this wavelength
@@ -1463,9 +1511,10 @@ SpecularBounceResult dev_specular_bounce(
             }
         }
     } else {
-        // Mirror: pure reflection
+        // Mirror: pure reflection (use shading normal for direction,
+        // geometric normal for epsilon offset).
         r.new_dir = dir - normal * (2.f * dot(dir, normal));
-        r.new_pos = pos + normal * OPTIX_SCENE_EPSILON;
+        r.new_pos = pos + geo_normal * OPTIX_SCENE_EPSILON;
     }
     return r;
 }
@@ -1515,6 +1564,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
     float3 cur_pos = hit.position;
     float3 cur_dir = direction;
     float3 cur_normal = hit.shading_normal;
+    float3 cur_geo_normal = hit.geo_normal;
     uint32_t cur_mat = mat_id;
     float2 cur_uv = hit.uv;
     Spectrum throughput_s = Spectrum::constant(1.0f);
@@ -1523,7 +1573,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         if (!dev_is_specular(cur_mat) && !dev_is_translucent(cur_mat)) break;
 
         SpecularBounceResult sb = dev_specular_bounce(
-            cur_dir, cur_pos, cur_normal, cur_mat, cur_uv, rng);
+            cur_dir, cur_pos, cur_normal, cur_geo_normal, cur_mat, cur_uv, rng);
         for (int i = 0; i < NUM_LAMBDA; ++i)
             throughput_s.value[i] *= sb.filter.value[i];
         cur_dir = sb.new_dir;
@@ -1535,6 +1585,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
             return throughput_s * dev_get_Le(hit2.material_id, hit2.uv);
         cur_pos = hit2.position;
         cur_normal = hit2.shading_normal;
+        cur_geo_normal = hit2.geo_normal;
         cur_mat = hit2.material_id;
         cur_uv = hit2.uv;
     }
@@ -1689,7 +1740,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
             if (dev_is_specular(cur_mat) || dev_is_translucent(cur_mat)) {
                 for (int s = 0; s < DEFAULT_MAX_SPECULAR_CHAIN; ++s) {
                     SpecularBounceResult sb = dev_specular_bounce(
-                        cur_dir, hit_g.position, hit_g.shading_normal,
+                        cur_dir, hit_g.position, hit_g.shading_normal, hit_g.geo_normal,
                         cur_mat, hit_g.uv, rng);
                     for (int i = 0; i < NUM_LAMBDA; ++i)
                         glossy_tp.value[i] *= sb.filter.value[i];
@@ -1903,6 +1954,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
     result.clk_bsdf          = 0;
 
     Spectrum throughput = Spectrum::constant(1.0f);
+    IORStack ior_stack;  // track nested dielectrics across camera bounces
 
     const int max_spec = DEFAULT_MAX_SPECULAR_CHAIN;
 
@@ -1926,8 +1978,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         // Specular bounce: follow the chain
         if (dev_is_specular(mat_id)) {
             SpecularBounceResult sb = dev_specular_bounce(
-                direction, hit.position, hit.shading_normal,
-                mat_id, hit.uv, rng);
+                direction, hit.position, hit.shading_normal, hit.geo_normal,
+                mat_id, hit.uv, rng, nullptr, 0, &ior_stack);
             for (int i = 0; i < NUM_LAMBDA; ++i)
                 throughput.value[i] *= sb.filter.value[i];
             direction = sb.new_dir;
@@ -1936,11 +1988,13 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         }
 
         // Translucent: Fresnel boundary bounce, then continue.
-        // Unlike glass, translucent is eligible for NEE and photon gather.
+        // Currently treated as a pure dielectric boundary (like glass).
+        // TODO(D1): add NEE + photon gather at translucent surfaces —
+        // requires dual-hemisphere gather and diffuse+specular BSDF split.
         if (dev_is_translucent(mat_id)) {
             SpecularBounceResult sb = dev_specular_bounce(
-                direction, hit.position, hit.shading_normal,
-                mat_id, hit.uv, rng);
+                direction, hit.position, hit.shading_normal, hit.geo_normal,
+                mat_id, hit.uv, rng, nullptr, 0, &ior_stack);
             for (int i = 0; i < NUM_LAMBDA; ++i)
                 throughput.value[i] *= sb.filter.value[i];
             direction = sb.new_dir;
@@ -2053,8 +2107,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
                 int spec_remain = max_spec - bounce;
                 for (int s = 0; s < spec_remain; ++s) {
                     SpecularBounceResult sb = dev_specular_bounce(
-                        direction, hit.position, hit.shading_normal,
-                        mat_id, hit.uv, rng);
+                        direction, hit.position, hit.shading_normal, hit.geo_normal,
+                        mat_id, hit.uv, rng, nullptr, 0, &ior_stack);
                     for (int i = 0; i < NUM_LAMBDA; ++i)
                         throughput.value[i] *= sb.filter.value[i];
                     direction = sb.new_dir;
@@ -2447,6 +2501,7 @@ extern "C" __global__ void __raygen__photon_trace() {
     // to false on diffuse/glossy.  Only L→S→D (or L→D→S→D) paths
     // are tagged as caustic.
     bool on_caustic_path = false;
+    IORStack ior_stack;  // track nested dielectrics across bounces
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
@@ -2511,10 +2566,9 @@ extern "C" __global__ void __raygen__photon_trace() {
         if (!dev_is_specular(hit_mat) && !dev_is_translucent(hit_mat) && bounce > 0) {
             // In caustic-only mode, skip non-caustic photons
             if (params.caustic_only_store && !on_caustic_path) {
-                // Don't store — but still bounce (diffuse/glossy may produce
-                // future caustic-path photons after further specular bounces?
-                // No — once on_caustic_path is false it stays false,
-                // so we can skip the store and continue bouncing normally.)
+                // Don't store non-caustic photon.  Note: on_caustic_path
+                // CAN become true again if a subsequent specular hit occurs
+                // (L→D→S→D path), so we continue bouncing rather than break.
             } else {
             uint32_t slot = atomicAdd(params.out_photon_count, 1u);
             if (slot < (uint32_t)params.max_stored_photons) {
@@ -2547,8 +2601,8 @@ extern "C" __global__ void __raygen__photon_trace() {
         if (dev_is_specular(hit_mat) || dev_is_translucent(hit_mat)) {
             on_caustic_path = true;  // specular → mark caustic (matches CPU emitter.h)
             SpecularBounceResult sb = dev_specular_bounce(
-                direction, hit.position, hit.shading_normal,
-                hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS);
+                direction, hit.position, hit.shading_normal, hit.geo_normal,
+                hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS, &ior_stack);
             // Apply transmittance filter to hero channels
             for (int h = 0; h < HERO_WAVELENGTHS; ++h)
                 hero_flux[h] *= sb.filter.value[hero_bins[h]];
@@ -2764,6 +2818,7 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
     float3 origin    = shadow_origin;
     float3 direction = dir;
     bool on_caustic_path = false;  // becomes true after first specular hit
+    IORStack ior_stack;  // track nested dielectrics across bounces
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
@@ -2818,8 +2873,8 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
         if (dev_is_specular(hit_mat) || dev_is_translucent(hit_mat)) {
             on_caustic_path = true;
             SpecularBounceResult sb = dev_specular_bounce(
-                direction, hit.position, hit.shading_normal,
-                hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS);
+                direction, hit.position, hit.shading_normal, hit.geo_normal,
+                hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS, &ior_stack);
             for (int h = 0; h < HERO_WAVELENGTHS; ++h)
                 hero_flux[h] *= sb.filter.value[hero_bins[h]];
             direction = sb.new_dir;
@@ -2879,6 +2934,7 @@ static __forceinline__ __device__ void sppm_camera_pass(
 {
     Spectrum throughput = Spectrum::constant(1.0f);
     Spectrum L_direct   = Spectrum::zero();
+    IORStack ior_stack;  // track nested dielectrics across camera bounces
 
     for (int bounce = 0; bounce <= DEFAULT_MAX_SPECULAR_CHAIN; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
@@ -2895,8 +2951,8 @@ static __forceinline__ __device__ void sppm_camera_pass(
         // Specular (glass/mirror/translucent): bounce through
         if (dev_is_specular(mat_id) || dev_is_translucent(mat_id)) {
             SpecularBounceResult sb = dev_specular_bounce(
-                direction, hit.position, hit.shading_normal,
-                mat_id, hit.uv, rng);
+                direction, hit.position, hit.shading_normal, hit.geo_normal,
+                mat_id, hit.uv, rng, nullptr, 0, &ior_stack);
             for (int i = 0; i < NUM_LAMBDA; ++i)
                 throughput.value[i] *= sb.filter.value[i];
             direction = sb.new_dir;
