@@ -419,6 +419,14 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             default:
                 break;
         }
+        // Glass/Translucent must stay opaque to the anyhit test.
+        // 'd' (dissolve) is for stochastic alpha cutouts — not for 
+        // refractive materials whose transmission is handled in the
+        // specular bounce shader.
+        if (mat.type == MaterialType::Glass ||
+            mat.type == MaterialType::Translucent) {
+            mat.opacity = 1.0f;
+        }
     }
 
     std::cout << "[MTL] Loaded " << scene.materials.size() << " materials\n";
@@ -592,6 +600,16 @@ static void finalize_pb_materials(Scene& scene) {
             float rx = (mat.pb_roughness_x > 0.f) ? mat.pb_roughness_x : mat.roughness;
             float ry = (mat.pb_roughness_y > 0.f) ? mat.pb_roughness_y : mat.roughness;
             mat.roughness = sqrtf(rx * ry);
+        }
+
+        // ── 8. Glass/Translucent must be opaque to the anyhit test ──
+        // Their transparency is handled by the specular bounce shader
+        // (Fresnel refraction), NOT by stochastic alpha.  Without this,
+        // pb_transmission 1.0 sets opacity=0.0, which makes the anyhit
+        // programs ignore every intersection — effectively invisible.
+        if (mat.type == MaterialType::Glass ||
+            mat.type == MaterialType::Translucent) {
+            mat.opacity = 1.0f;
         }
     }
 

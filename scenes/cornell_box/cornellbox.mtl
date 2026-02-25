@@ -57,20 +57,16 @@ Ke 23.92 20.28 10.4
 illum 1
 pb_brdf emissive
 
-# Glass block: refractive dielectric, IOR 1.5, fully transparent
+# Glass block: refractive dielectric, IOR 1.5, with chromatic dispersion
 newmtl ShortBox
-Kd 0.0 0.0 0.0
-Ka 0.0 0.0 0.0
-Ks 1.0 1.0 1.0
-Ns 10000
-Ni 1.5
-d 0.05
 illum 6
+Tf 0.98 0.98 0.98
 pb_brdf dielectric
 pb_semantic glass
 pb_eta 1.5
 pb_transmission 1.0
 pb_roughness 0.001
+pb_dispersion 4500.0
 
 newmtl TallBox
 Kd 0.73 0.73 0.73
