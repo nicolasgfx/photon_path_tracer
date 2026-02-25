@@ -72,10 +72,15 @@ struct MediumTestDataset {
 
         if (fs::exists(bin_path)) {
             if (!load_test_data(bin_path, photons, caustic_photons, header)) {
-                std::cerr << "[MediumTest] Failed to load " << bin_path << "\n";
-                return;
+                std::cout << "[MediumTest] Removing stale " << bin_path << "\n";
+                fs::remove(bin_path);
             }
-        } else {
+        }
+        if (photons.size() == 0) {
+            // Reset header so save writes current version/algo_version
+            // (load_test_data may have partially overwritten fields).
+            header = TestDataHeader{};
+
             header.num_photons_cfg = DEFAULT_NUM_PHOTONS;
             header.gather_radius   = DEFAULT_GATHER_RADIUS;
             header.caustic_radius  = DEFAULT_CAUSTIC_RADIUS;

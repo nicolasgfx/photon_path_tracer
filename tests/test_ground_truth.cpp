@@ -97,16 +97,23 @@ struct CornellBoxDataset {
 
         // ── 1. Try loading binary data from disk ─────────────────────
         if (fs::exists(bin_path)) {
-            if (!load_test_data(bin_path, photons, caustic_photons, header)) {
-                std::cerr << "[Dataset] Failed to load " << bin_path << "\n";
-                return;
+            if (load_test_data(bin_path, photons, caustic_photons, header)) {
+                loaded_from_disk = true;
+                std::cout << "[Dataset] Loaded REAL data from " << bin_path << "\n";
+            } else {
+                // Stale or corrupt — delete and regenerate below
+                std::cout << "[Dataset] Removing stale " << bin_path << "\n";
+                fs::remove(bin_path);
             }
-            loaded_from_disk = true;
-            std::cout << "[Dataset] Loaded REAL data from " << bin_path << "\n";
-        } else {
+        }
+        if (!loaded_from_disk) {
             // ── Fallback: generate on CPU (bootstrap) ────────────────
             std::cout << "[Dataset] Binary not found at " << bin_path
                       << " — generating via CPU photon trace (fallback)\n";
+
+            // Reset header so save writes current version/algo_version
+            // (load_test_data may have partially overwritten fields).
+            header = TestDataHeader{};
 
             // Use a smaller photon count for CPU bootstrap to keep it manageable.
             // The GPU renderer should be used for high-quality dataset generation.
@@ -1194,7 +1201,7 @@ TEST(GroundTruthComparison, BinaryRoundTrip) {
             if (loaded_global.pos_x[i] != ds.photons.pos_x[i]) diffs++;
             if (loaded_global.wi_x[i]  != ds.photons.wi_x[i])  diffs++;
             if (loaded_global.flux[i]  != ds.photons.flux[i])   diffs++;
-            if (loaded_global.bin_idx[i] != ds.photons.bin_idx[i]) diffs++;
+            // bin_idx is not serialized (derived from wi), skip comparison
         }
         EXPECT_EQ(diffs, 0) << diffs << " fields differ after round-trip";
     }

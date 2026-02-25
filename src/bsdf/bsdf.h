@@ -15,6 +15,7 @@
 #include "core/spectrum.h"
 #include "core/random.h"
 #include "scene/material.h"
+#include "bsdf/bsdf_shared.h"
 
 // ── BSDF evaluation result ──────────────────────────────────────────
 struct BSDFSample {
@@ -253,7 +254,7 @@ inline HD BSDFSample glass_sample(float3 wo, float ior, PCGRng& rng) {
 inline HD BSDFSample glossy_sample(const Spectrum& Kd, const Spectrum& Ks,
                                     float roughness, float3 wo, PCGRng& rng) {
     BSDFSample s;
-    float alpha = fmaxf(roughness * roughness, 0.001f);
+    float alpha = bsdf_roughness_to_alpha(roughness);
 
     // Choose between diffuse and specular lobe
     float spec_weight = Ks.max_component();
@@ -336,7 +337,7 @@ inline HD BSDFSample glossy_dielectric_sample(const Spectrum& Kd, const Spectrum
                                                float roughness, float ior,
                                                float3 wo, PCGRng& rng) {
     BSDFSample s;
-    float alpha = fmaxf(roughness * roughness, 0.001f);
+    float alpha = bsdf_roughness_to_alpha(roughness);
 
     // Dielectric F0 from IOR
     float f0t = (ior - 1.f) / (ior + 1.f);
@@ -425,7 +426,7 @@ inline HD BSDFSample clearcoat_sample(const Material& mat, float3 wo, PCGRng& rn
     BSDFSample s;
 
     float coat_weight = mat.pb_clearcoat;
-    float coat_alpha  = fmaxf(mat.pb_clearcoat_roughness * mat.pb_clearcoat_roughness, 0.001f);
+    float coat_alpha  = bsdf_roughness_to_alpha(mat.pb_clearcoat_roughness);
 
     // Coat IOR → F0
     float coat_f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
@@ -564,7 +565,7 @@ inline HD Spectrum evaluate(const Material& mat, float3 wo, float3 wi) {
             return lambertian_f(mat.Kd);
 
         case MaterialType::GlossyMetal: {
-            float alpha = fmaxf(mat.roughness * mat.roughness, 0.001f);
+            float alpha = bsdf_roughness_to_alpha(mat.roughness);
             float3 h = normalize(wo + wi);
             float ndf = ggx_D(h, alpha);
             float geo = ggx_G(wo, wi, alpha);
@@ -579,7 +580,7 @@ inline HD Spectrum evaluate(const Material& mat, float3 wo, float3 wi) {
         }
 
         case MaterialType::GlossyDielectric: {
-            float alpha = fmaxf(mat.roughness * mat.roughness, 0.001f);
+            float alpha = bsdf_roughness_to_alpha(mat.roughness);
             float3 h = normalize(wo + wi);
             float ndf = ggx_D(h, alpha);
             float geo = ggx_G(wo, wi, alpha);
@@ -606,7 +607,7 @@ inline HD Spectrum evaluate(const Material& mat, float3 wo, float3 wi) {
             return lambertian_f(mat.Kd);
 
         case MaterialType::Clearcoat: {
-            float coat_alpha = fmaxf(mat.pb_clearcoat_roughness * mat.pb_clearcoat_roughness, 0.001f);
+            float coat_alpha = bsdf_roughness_to_alpha(mat.pb_clearcoat_roughness);
             float coat_f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
             float coat_F0  = coat_f0t * coat_f0t;
             float3 h = normalize(wo + wi);
@@ -651,7 +652,7 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
             return lambertian_pdf(wi);
 
         case MaterialType::GlossyMetal: {
-            float alpha = fmaxf(mat.roughness * mat.roughness, 0.001f);
+            float alpha = bsdf_roughness_to_alpha(mat.roughness);
             float spec_weight = mat.Ks.max_component();
             float diff_weight = mat.Kd.max_component();
             float total = spec_weight + diff_weight;
@@ -667,7 +668,7 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
         }
 
         case MaterialType::GlossyDielectric: {
-            float alpha = fmaxf(mat.roughness * mat.roughness, 0.001f);
+            float alpha = bsdf_roughness_to_alpha(mat.roughness);
             float f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
             float F0 = f0t * f0t;
             float spec_weight = mat.Ks.max_component() * F0;
@@ -691,7 +692,7 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
             return 0.f; // Delta distribution
 
         case MaterialType::Clearcoat: {
-            float coat_alpha = fmaxf(mat.pb_clearcoat_roughness * mat.pb_clearcoat_roughness, 0.001f);
+            float coat_alpha = bsdf_roughness_to_alpha(mat.pb_clearcoat_roughness);
             float coat_f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
             float coat_F0  = coat_f0t * coat_f0t;
             float p_coat = fmaxf(fminf(mat.pb_clearcoat * coat_F0, 0.95f), 0.05f);

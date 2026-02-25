@@ -79,6 +79,10 @@ inline Spectrum estimate_photon_density(
     float inv_N    = 1.0f / (float)config.num_photons_total;
     float tau      = effective_tau(config.surface_tau);
 
+    // Boundary-bias tracking (mirrors GPU dev_estimate_photon_density)
+    int n_accepted = 0;
+    int n_adjacent = 0;
+
     ONB frame = ONB::from_normal(hit_normal);
 
     grid.query_tangential(hit_pos, hit_normal, gather_radius, tau, photons,
@@ -86,12 +90,19 @@ inline Spectrum estimate_photon_density(
             // Surface consistency filter (§6.4): conditions 3 & 4
             // (conditions 1 & 2 already applied by query_tangential)
 
-            // Condition 3: normal compatibility
+            // Condition 3: normal compatibility — with boundary counting
             if (!photons.norm_x.empty()) {
                 float3 photon_n = make_f3(photons.norm_x[idx],
                                           photons.norm_y[idx],
                                           photons.norm_z[idx]);
-                if (dot(photon_n, hit_normal) <= 0.0f) return;
+                float cos_nn = dot(photon_n, hit_normal);
+                if (cos_nn <= 0.0f) {
+                    // Count perpendicular-surface photons (cos≈0) for
+                    // boundary-bias correction; skip back-face (cos≈-1).
+                    if (cos_nn > -0.5f && d_tan2 <= r2)
+                        n_adjacent++;
+                    return;
+                }
             }
 
             // Condition 4: direction consistency
@@ -110,12 +121,24 @@ inline Spectrum estimate_photon_density(
             float3 wi_local = frame.world_to_local(photon_wi);
             Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_local);
 
-            // Full spectral accumulation
+            // Full spectral accumulation (inv_area deferred for boundary fix)
             Spectrum photon_flux = photons.get_flux(idx);
             for (int b = 0; b < NUM_LAMBDA; ++b)
                 L_estimate.value[b] += w * photon_flux.value[b] * inv_N
-                                     * f.value[b] * inv_area;
+                                     * f.value[b];
+            n_accepted++;
         });
+
+    // Boundary-bias correction: compensate for partial-disk coverage at
+    // geometric edges using the ratio of accepted to total nearby photons.
+    if (n_accepted > 0) {
+        float alpha = (n_adjacent > 0)
+            ? std::max((float)n_accepted / (float)(n_accepted + n_adjacent), 0.15f)
+            : 1.f;
+        float scale = inv_area / alpha;
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            L_estimate.value[b] *= scale;
+    }
 
     return L_estimate;
 }

@@ -38,7 +38,21 @@
 // Set to 1 to use the CPU photon tracer (emitter.h) instead of the GPU
 // OptiX kernels.  Useful for A/B comparison; GPU rendering (camera rays,
 // gather, etc.) still runs on the GPU — only photon emission is on CPU.
-#define USE_CPU_PHOTON_TRACE 1
+#define USE_CPU_PHOTON_TRACE 0
+
+// ── v2.2 Consistency Reset Flags ────────────────────────────────────
+// GPU photon tracing: disabled by default (CPU is ground truth until
+// a fully equivalent OptiX photon tracer exists).
+constexpr bool DEFAULT_USE_GPU_PHOTON_TRACING = false;
+
+// Bresenham per-pixel lobe balance (GPU BSDF heuristic):
+// disabled by default for CPU↔GPU consistency.  Enable only after
+// CPU has the same mechanism and equivalence tests pass.
+constexpr bool DEFAULT_ENABLE_BRESENHAM_BSDF = false;
+
+// EmitterPointSet primary emission path: disabled by default.
+// v2.2 uses alias-table + cosine hemisphere only, for consistency.
+constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 
 
 // =====================================================================

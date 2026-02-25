@@ -31,6 +31,9 @@
 #include "core/nee_sampling.h"
 #include "core/medium.h"
 #include "core/phase_function.h"
+#include "bsdf/bsdf_shared.h"
+#include "core/material_flags.h"
+#include "renderer/nee_shared.h"
 
 // ---------------------------------------------------------------------
 // Module-local implementation constants
@@ -594,7 +597,7 @@ Spectrum dev_bsdf_evaluate(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
     // Cook-Torrance glossy: specular lobe + diffuse
     Spectrum Ks = dev_get_Ks(mat_id);
     float roughness = dev_get_roughness(mat_id);
-    float alpha = fmaxf(roughness * roughness, 0.001f);
+    float alpha = bsdf_roughness_to_alpha(roughness);
 
     float3 h = normalize(wo + wi);
     float ndf = dev_ggx_D(h, alpha);
@@ -659,7 +662,7 @@ float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
     Spectrum Ks = dev_get_Ks(mat_id);
     Spectrum Kd = dev_get_Kd(mat_id, make_float2(0.f, 0.f));
     float roughness = dev_get_roughness(mat_id);
-    float alpha = fmaxf(roughness * roughness, 0.001f);
+    float alpha = bsdf_roughness_to_alpha(roughness);
 
     float spec_weight, diff_weight;
     if (dev_is_dielectric_glossy(mat_id)) {
@@ -794,7 +797,7 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
     // Cook-Torrance glossy with diffuse+specular lobe selection
     Spectrum Ks = dev_get_Ks(mat_id);
     float roughness = dev_get_roughness(mat_id);
-    float alpha = fmaxf(roughness * roughness, 0.001f);
+    float alpha = bsdf_roughness_to_alpha(roughness);
     bool is_diel = dev_is_dielectric_glossy(mat_id);
     float ior_val = is_diel ? dev_get_ior(mat_id) : 1.5f;
     float F0_diel = ((ior_val - 1.f) / (ior_val + 1.f)) * ((ior_val - 1.f) / (ior_val + 1.f));
@@ -821,21 +824,26 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
     float p_spec = (total_w > 0.f) ? spec_weight / total_w : 0.5f;
 
     // ── Lobe selection via Bresenham accumulator ─────────────────────
+    // v2.2: Gated behind DEFAULT_ENABLE_BRESENHAM_BSDF (off by default
+    // to ensure CPU↔GPU consistency).
     // When pixel_idx >= 0 and the lobe_balance buffer is available we
     // use a Bresenham error accumulator instead of a random coin flip.
     // Positive balance = specular deficit → choose specular this sample.
     // This guarantees that over K samples the specular count is within
     // 1 of K * p_spec, eliminating binomial variance in lobe counts.
     bool choose_specular;
-    if (pixel_idx >= 0 && params.lobe_balance) {
-        float balance = params.lobe_balance[pixel_idx];
-        choose_specular = (balance >= 0.f);
-        // Update balance: positive means we owe more specular samples
-        if (choose_specular)
-            balance -= (1.f - p_spec);  // paid specular cost
-        else
-            balance += p_spec;          // paid diffuse cost
-        params.lobe_balance[pixel_idx] = balance;
+    if constexpr (DEFAULT_ENABLE_BRESENHAM_BSDF) {
+        if (pixel_idx >= 0 && params.lobe_balance) {
+            float balance = params.lobe_balance[pixel_idx];
+            choose_specular = (balance >= 0.f);
+            if (choose_specular)
+                balance -= (1.f - p_spec);
+            else
+                balance += p_spec;
+            params.lobe_balance[pixel_idx] = balance;
+        } else {
+            choose_specular = (rng.next_float() < p_spec);
+        }
     } else {
         choose_specular = (rng.next_float() < p_spec);
     }
@@ -951,7 +959,7 @@ float dev_light_pdf(uint32_t tri_id, float3 geo_normal, float3 wi, float t) {
     if (cos_o <= 0.f) return 0.f;
 
     float dist2 = t * t;
-    return pdf_tri * (1.f / area) * dist2 / cos_o;
+    return nee_pdf_area_to_solid_angle(pdf_tri, 1.f / area, dist2, cos_o);
 }
 
 // == Debug render modes ===============================================
@@ -1038,6 +1046,14 @@ Spectrum dev_estimate_photon_density(
     Spectrum L_global  = Spectrum::zero();
     Spectrum L_caustic = Spectrum::zero();
 
+    // Boundary-bias correction: count accepted photons and photons on
+    // adjacent perpendicular surfaces to estimate the visible disk fraction.
+    // At 90° edges the gather disk is clipped by the adjacent wall; the
+    // ratio  n_accepted / (n_accepted + n_adjacent)  approximates the
+    // visible fraction α, and we divide by α to compensate.
+    int n_global  = 0,  n_adj_global  = 0;
+    int n_caustic = 0,  n_adj_caustic = 0;
+
     float cell_size = params.grid_cell_size;
     int cx0 = (int)floorf((pos.x - r_max) / cell_size);
     int cy0 = (int)floorf((pos.y - r_max) / cell_size);
@@ -1093,16 +1109,30 @@ Spectrum dev_estimate_photon_density(
             float plane_dist = fabsf(d_plane);
             if (plane_dist > DEFAULT_SURFACE_TAU) continue;
 
-            // Visibility term: photon must be on the same side of the surface
-            // as the query point.  This rejects photons deposited on the back
-            // face of a wall (stored normal faces away → dot < 0) and prevents
-            // irradiance leaking through thin geometry even when surface_tau is
-            // too loose to catch the discrepancy via plane distance alone.
+            // ── Route photon to budget (moved early for boundary counting) ──
+            uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
+            if (tag == 1) continue;  // skip global-pass caustic photons
+            bool is_caustic_pass = (tag == 2);
+            float my_r2   = is_caustic_pass ? r2_caustic  : r2_global;
+            float my_norm = is_caustic_pass ? norm_caustic : norm_global;
+
+            // ── Normal gate with boundary-bias counting ─────────────────
+            // Photons on a perpendicular adjacent surface (cos≈0) are rejected
+            // for radiance but counted so we can estimate the visible disk
+            // fraction.  Back-face photons (cos≈-1) from thin geometry are
+            // excluded from the count to avoid false brightening.
             float3 photon_n = make_f3(
                 params.photon_norm_x[idx],
                 params.photon_norm_y[idx],
                 params.photon_norm_z[idx]);
-            if (dot(photon_n, filter_normal) <= 0.0f) continue;
+            float cos_nn = dot(photon_n, filter_normal);
+            if (cos_nn <= 0.0f) {
+                if (cos_nn > -0.5f && d_tan2 <= my_r2) {
+                    if (is_caustic_pass) n_adj_caustic++;
+                    else                 n_adj_global++;
+                }
+                continue;
+            }
 
             float3 wi_world = make_f3(
                 params.photon_wi_x[idx],
@@ -1118,17 +1148,6 @@ Spectrum dev_estimate_photon_density(
             // Full Cook-Torrance creates 50x+ variance on glossy surfaces.
             Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
 
-            // Route to appropriate accumulator based on 3-value tag:
-            //   0 = global noncaustic → L_global   (1/N_global, r_global)
-            //   1 = global caustic    → SKIP       (superseded by caustic map)
-            //   2 = caustic pass      → L_caustic  (1/N_caustic, r_caustic)
-            uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
-            if (tag == 1) continue;  // skip global-pass caustic photons
-            bool is_caustic_pass = (tag == 2);
-            float my_r2       = is_caustic_pass ? r2_caustic      : r2_global;
-            float my_inv_area = is_caustic_pass ? inv_area_caustic : inv_area_global;
-            float my_norm     = is_caustic_pass ? norm_caustic     : norm_global;
-
             // Per-budget radius check
             if (d_tan2 > my_r2) continue;
 
@@ -1137,15 +1156,43 @@ Spectrum dev_estimate_photon_density(
 
             Spectrum& L_target = is_caustic_pass ? L_caustic : L_global;
 
-            // Accumulate HERO_WAVELENGTHS bins per photon (multi-hero transport)
+            // Count accepted photons for boundary correction
+            if (is_caustic_pass) n_caustic++;
+            else                 n_global++;
+
+            // Accumulate unnormalized: f * flux * w * (1/N_emitted)
+            // Area normalization deferred to post-loop boundary correction.
             int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
             for (int h = 0; h < n_hero; ++h) {
                 float p_flux = params.photon_flux[idx * HERO_WAVELENGTHS + h];
                 int bin = (int)params.photon_lambda[idx * HERO_WAVELENGTHS + h];
                 if (bin >= 0 && bin < NUM_LAMBDA)
-                    L_target.value[bin] += f.value[bin] * p_flux * w * my_inv_area * my_norm;
+                    L_target.value[bin] += f.value[bin] * p_flux * w * my_norm;
             }
         }
+    }
+
+    // ── Boundary-bias correction + area normalisation ───────────────
+    // At geometric edges the gather disk is partially clipped by adjacent
+    // surfaces, yielding fewer photons for the same theoretical disk area.
+    // We estimate the visible fraction α = n_accepted/(n_accepted+n_adj)
+    // and divide by α so the density estimate stays unbiased.
+    // Clamped to [0.15, 1] to avoid extreme amplification from noisy counts.
+    if (n_global > 0) {
+        float alpha = (n_adj_global > 0)
+            ? fmaxf((float)n_global / (float)(n_global + n_adj_global), 0.15f)
+            : 1.f;
+        float scale = inv_area_global / alpha;
+        for (int lam = 0; lam < NUM_LAMBDA; ++lam)
+            L_global.value[lam] *= scale;
+    }
+    if (n_caustic > 0) {
+        float alpha = (n_adj_caustic > 0)
+            ? fmaxf((float)n_caustic / (float)(n_caustic + n_adj_caustic), 0.15f)
+            : 1.f;
+        float scale = inv_area_caustic / alpha;
+        for (int lam = 0; lam < NUM_LAMBDA; ++lam)
+            L_caustic.value[lam] *= scale;
     }
 
     // Additive combination: non-caustic indirect from global map +
@@ -1248,9 +1295,8 @@ NeeSampleResult dev_nee_evaluate_sample(
     float3 wi_local = frame.world_to_local(wi);
     Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
 
-    // PDF conversion: area → solid angle
-    float p_y_area = p_tri / light_area;
-    float p_wi     = p_y_area * dist2 / cos_y;
+    // PDF conversion: area → solid angle (shared helper)
+    float p_wi = nee_pdf_area_to_solid_angle(p_tri, 1.f / light_area, dist2, cos_y);
 
     // MIS vs BSDF sampling
     float w_mis = 1.0f;
@@ -1580,7 +1626,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
             // PDF).  This avoids the old D·G·F/(4cos²) blowout for smooth
             // surfaces where D(n) → ∞.
             float cos_view = fabsf(dot(normalize(-cur_dir), cur_normal));
-            float alpha_r = fmaxf(cont_roughness * cont_roughness, 0.001f);
+            float alpha_r = bsdf_roughness_to_alpha(cont_roughness);
 
             // Smith G for both wo and wi (same angle for mirror direction)
             float G_val = dev_ggx_G1(wo_local, alpha_r);
@@ -2675,9 +2721,8 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
         hero_bins[h] = (hero_bin + offset) % NUM_LAMBDA;
     }
 
-    // PDF of target direction in solid angle (from the light):
-    //   pdf_target_sa = pdf_spec_tri * pdf_on_tri * dist² / |cos_target|
-    float pdf_target_sa = pdf_spec_tri * pdf_on_tri * dist_sq / cos_target;
+    // PDF of target direction in solid angle (from the light, shared helper):
+    float pdf_target_sa = nee_pdf_area_to_solid_angle(pdf_spec_tri, pdf_on_tri, dist_sq, cos_target);
     if (pdf_target_sa <= 0.f) return;
 
     // Flux: Φ(λ_h) = Le(λ_h) * cos_light * light_area / (pdf_emitter * pdf_target_sa * pdf_lambda_h)

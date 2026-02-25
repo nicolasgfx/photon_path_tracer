@@ -32,7 +32,7 @@ if "%1"=="test-all" (
     call build.bat test
     if errorlevel 1 goto :error
     echo.
-    echo [run.bat] Running ALL tests (this may take hours)...
+    echo [run.bat] Running ALL tests ^(this may take hours^)...
     %BUILD_DIR%\ppt_tests.exe --gtest_print_time=1
     goto :done
 )
@@ -63,8 +63,9 @@ echo.
 echo [run.bat] Running renderer...
 echo ------------------------------------------------
 %EXE% %RUN_ARGS%
+set PPT_RET=%errorlevel%
 echo ------------------------------------------------
-goto :done
+endlocal & exit /b %PPT_RET%
 
 :error
 echo.

@@ -161,12 +161,18 @@ struct PerRayDataset {
         std::string bin_path = test_data_path();
 
         if (fs::exists(bin_path)) {
-            if (!load_test_data(bin_path, photons, caustic_photons, header)) {
-                std::cerr << "[PerRayDataset] Failed to load " << bin_path << "\n";
-                return;
+            if (load_test_data(bin_path, photons, caustic_photons, header)) {
+                loaded_from_disk = true;
+            } else {
+                std::cout << "[PerRayDataset] Removing stale " << bin_path << "\n";
+                fs::remove(bin_path);
             }
-            loaded_from_disk = true;
-        } else {
+        }
+        if (!loaded_from_disk) {
+            // Reset header so save writes current version/algo_version
+            // (load_test_data may have partially overwritten fields).
+            header = TestDataHeader{};
+
             // Fallback: CPU trace
             header.num_photons_cfg = DEFAULT_NUM_PHOTONS;
             header.gather_radius   = DEFAULT_GATHER_RADIUS;

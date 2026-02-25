@@ -14,6 +14,7 @@
 #include "core/config.h"
 #include "core/cell_cache.h"
 #include "renderer/camera.h"
+#include "renderer/pixel_lighting.h"
 #include "scene/scene.h"
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
@@ -208,9 +209,16 @@ public:
     const CellInfoCache& cell_cache()  const { return cell_cache_; }
 
     // Result of a single camera ray (first-hit + specular chain)
+    // v2.2: Uses PixelLighting for explicit per-channel decomposition.
     struct TraceResult {
-        Spectrum combined;    ///< full radiance (NEE + photon + emission)
-        Spectrum nee_direct;  ///< direct-lighting-only component
+        PixelLighting lighting;  ///< decomposed per-channel radiance
+        Spectrum combined;       ///< full combined radiance (= lighting.combined())
+        Spectrum nee_direct;     ///< direct-lighting component (= lighting.direct_nee)
+
+        /// Construct from a filled PixelLighting; auto-computes combined / nee_direct.
+        static TraceResult from(const PixelLighting& pl) {
+            return { pl, pl.combined(), pl.direct_nee };
+        }
     };
 
     // v2: First-hit camera ray with specular chain (§E3).

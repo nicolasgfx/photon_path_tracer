@@ -11,6 +11,7 @@
 #include "core/random.h"
 #include "core/config.h"
 #include "core/alias_table.h"
+#include "core/material_flags.h"
 #include "scene/scene.h"
 #include "bsdf/bsdf.h"
 #include "photon/photon.h"
@@ -54,13 +55,25 @@ struct EmittedPhoton {
 };
 
 // Sample an emitted photon given the scene's emissive distribution
+// ─────────────────────────────────────────────────────────────────
+// v2.2 CANONICAL EMISSION SAMPLER:
+//   1. Sample emissive triangle via power-weighted alias table
+//   2. Sample point on triangle uniformly (barycentric)
+//   3. Sample direction: cosine-weighted hemisphere (Lambertian, pdf=cos/π)
+//   4. Flux = Le(λ) · cos_θ / (p_tri · p_pos · p_dir)
+//
+// The EmitterPointSet primary path is disabled by default
+// (DEFAULT_USE_EMITTER_POINT_SET = false).  The cosine cone has been
+// replaced with full cosine hemisphere for physically correct emission.
+// ─────────────────────────────────────────────────────────────────
 inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
     EmittedPhoton ep;
 
     const auto& epts = scene.emitter_points.points;
 
-    if (!epts.empty()) {
-        // ── Primary path: pick uniformly from the shared emitter points ──
+    if constexpr (DEFAULT_USE_EMITTER_POINT_SET) {
+     if (!epts.empty()) {
+        // ── Legacy EmitterPointSet path (gated, off by default) ──────
         int pt_idx = (int)(rng.next_float() * (float)epts.size());
         if (pt_idx >= (int)epts.size()) pt_idx = (int)epts.size() - 1;
         const EmitterPoint& ept = epts[pt_idx];
@@ -75,16 +88,13 @@ inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
 
         float pdf_point = 1.0f / (float)epts.size();
 
-        // Sample cosine-weighted direction within emission cone
-        const float cone_half_rad = DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG * (PI / 180.0f);
-        const float cos_cone_max  = cosf(cone_half_rad);
-        float3 local_dir = sample_cosine_cone(rng.next_float(), rng.next_float(), cos_cone_max);
+        // Cosine-weighted hemisphere emission (replaces cone)
+        float3 local_dir = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
         ONB frame = ONB::from_normal(n);
         float3 world_dir = frame.local_to_world(local_dir);
         float cos_theta = local_dir.z;
-        float pdf_dir = cosine_cone_pdf(cos_theta, cos_cone_max);
+        float pdf_dir = cosine_hemisphere_pdf(cos_theta);
 
-        // Phi(lambda) = Le(lambda) * cos_theta * area / (p_point * p_dir)
         float denom = pdf_point * pdf_dir;
         if (denom > 0.f) {
             float scale = cos_theta * area / denom;
@@ -97,9 +107,12 @@ inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
         ep.ray.origin    = pos + n * EPSILON;
         ep.ray.direction = world_dir;
         ep.source_emissive_idx = ept.emissive_local_idx;
+        return ep;
+     } // end if (!epts.empty()) — fall through to canonical path
+    } // end if constexpr
 
-    } else {
-        // ── Fallback: alias-table + random barycentric sampling ──
+    {
+        // ── Canonical path: alias-table + cosine hemisphere ──────────
         float u1 = rng.next_float();
         float u2 = rng.next_float();
         int local_idx = scene.emissive_alias_table.sample(u1, u2);
@@ -115,13 +128,13 @@ inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
         float  area = tri.area();
         float  pdf_pos = 1.0f / area;
 
-        const float cone_half_rad = DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG * (PI / 180.0f);
-        const float cos_cone_max  = cosf(cone_half_rad);
-        float3 local_dir = sample_cosine_cone(rng.next_float(), rng.next_float(), cos_cone_max);
+        // v2.2: Cosine-weighted hemisphere (replaces cosine cone)
+        // pdf_dir = cos_θ / π
+        float3 local_dir = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
         ONB frame = ONB::from_normal(n);
         float3 world_dir = frame.local_to_world(local_dir);
         float cos_theta = local_dir.z;
-        float pdf_dir = cosine_cone_pdf(cos_theta, cos_cone_max);
+        float pdf_dir = cosine_hemisphere_pdf(cos_theta);
 
         float denom = pdf_tri * pdf_pos * pdf_dir;
         if (denom > 0.f) {
@@ -170,14 +183,12 @@ inline EmittedPhoton sample_emitted_photon_adaptive(
     const Material& mat = scene.materials[tri.material_id];
     float area = tri.area();
 
-    // Direction sampling — exact same cosine cone as baseline
-    const float cone_half_rad = DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG * (PI / 180.0f);
-    const float cos_cone_max  = cosf(cone_half_rad);
-    float3 local_dir = sample_cosine_cone(rng.next_float(), rng.next_float(), cos_cone_max);
+    // Direction sampling — cosine-weighted hemisphere (v2.2 canonical)
+    float3 local_dir = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
     ONB frame = ONB::from_normal(n);
     float3 world_dir = frame.local_to_world(local_dir);
     float cos_theta = local_dir.z;
-    float pdf_dir = cosine_cone_pdf(cos_theta, cos_cone_max);
+    float pdf_dir = cosine_hemisphere_pdf(cos_theta);
 
     // Flux: Le * cos_theta * area / (pdf_point * pdf_dir)
     float denom = pdf_point * pdf_dir;
@@ -379,9 +390,11 @@ inline void trace_photons(const Scene& scene,
 
             // ── Volume photon deposit (Beer–Lambert free-flight) ─────
             // Legacy atmospheric fog volume photon system.
+            // Volume point deposits — runtime gated via config.volume_enabled.
             // IMPORTANT (H3 fix): skip this when the photon is inside an
             // object-attached medium that will be handled by the beam
             // system below, to prevent double-attenuation.
+            {
             int cur_med_id_legacy = medium_stack.current_medium_id();
             bool beam_handles_medium = beam_enabled && cur_med_id_legacy >= 0 &&
                 cur_med_id_legacy < (int)scene.media.size();
@@ -430,6 +443,7 @@ inline void trace_photons(const Scene& scene,
                         spectral_flux.value[b] *= expf(-med.sigma_t.value[b] * seg_t);
                 }
             }
+            } // end volume point deposits
 
             // ── Photon-beam medium free-flight + segment recording ─────
             // When the photon is inside a participating medium (tracked
@@ -574,8 +588,17 @@ inline void trace_photons(const Scene& scene,
 
             const Material& mat = scene.materials[hit.material_id];
 
-            // Store photon at diffuse surfaces
-            if (!mat.is_specular()) {
+            // ── v2.2 Canonical photon deposit rules ─────────────────────
+            // Use classify_for_photons() as the single source of truth.
+            // Deposit rules:
+            //   - GlobalPhoton:  non-delta hit, bounce >= 1
+            //   - CausticPhoton: non-delta hit, bounce >= 1, caustic_eligible
+            // Specular transport flag:
+            //   - Set when path undergoes delta interaction on a caustic_caster
+            MaterialFlags mat_flags = classify_for_photons(mat);
+
+            if (!mat_flags.is_delta) {
+                // Non-specular surface: deposit photon(s)
                 Photon p;
                 p.position      = hit.position;
                 p.wi            = ray.direction * (-1.f); // Flip: stored as incoming
@@ -586,10 +609,6 @@ inline void trace_photons(const Scene& scene,
                 p.bounce_count  = (uint8_t)bounce;
 
                 // Fill hero wavelength bins for GPU gather compatibility.
-                // GPU density estimator reads lambda_bin[]/flux[], not
-                // spectral_flux.  Scale by NUM_LAMBDA/HERO to compensate
-                // for stratified hero coverage (each bin is covered
-                // ~HERO/NUM_LAMBDA of the time across many photons).
                 {
                     int primary = (int)(rng.next_float() * NUM_LAMBDA);
                     if (primary >= NUM_LAMBDA) primary = NUM_LAMBDA - 1;
@@ -604,17 +623,20 @@ inline void trace_photons(const Scene& scene,
                     p.num_hero = HERO_WAVELENGTHS;
                 }
 
-                if (on_caustic_path && bounce > 0) {
-                    caustic_map.push_back(p);
-                }
                 if (bounce > 0) {
                     global_map.push_back(p);
+                }
+                if (on_caustic_path && bounce > 0) {
+                    caustic_map.push_back(p);
                 }
 
                 on_caustic_path = false;
             } else {
-                // Specular bounce: track glass traversal and caustic flags
-                on_caustic_path = true;
+                // Delta/specular bounce: track caustic eligibility
+                // Only set caustic flag if this material is a caustic caster
+                if (mat_flags.caustic_caster) {
+                    on_caustic_path = true;
+                }
                 if (mat.type == MaterialType::Glass ||
                     mat.type == MaterialType::Translucent) {
                     path_flags |= PHOTON_FLAG_TRAVERSED_GLASS;
@@ -880,8 +902,10 @@ inline void trace_targeted_caustic_emission(
 
             const Material& mat = scene.materials[hit.material_id];
 
-            // Store photon at diffuse surfaces
-            if (!mat.is_specular()) {
+            // ── v2.2 Canonical deposit rules (targeted caustic) ──────
+            MaterialFlags mat_flags = classify_for_photons(mat);
+
+            if (!mat_flags.is_delta) {
                 if (on_caustic_path && bounce > 0) {
                     Photon p;
                     p.position          = hit.position;
@@ -892,11 +916,6 @@ inline void trace_targeted_caustic_emission(
                     p.path_flags        = path_flags;
                     p.bounce_count      = (uint8_t)bounce;
 
-                    // Fill hero wavelength bins for GPU gather compatibility.
-                    // GPU density estimator reads lambda_bin[]/flux[], not
-                    // spectral_flux.  Scale by NUM_LAMBDA/HERO to compensate
-                    // for stratified hero coverage (each bin is covered
-                    // ~HERO/NUM_LAMBDA of the time across many photons).
                     {
                         PCGRng hero_rng = PCGRng::seed(
                             (uint64_t)photon_idx * 997 + 0xBEEF01UL,
@@ -921,8 +940,10 @@ inline void trace_targeted_caustic_emission(
                 // this photon (we only care about caustic deposits).
                 break;
             } else {
-                // Specular bounce: continue tracing
-                on_caustic_path = true;
+                // Delta bounce: track caustic eligibility
+                if (mat_flags.caustic_caster) {
+                    on_caustic_path = true;
+                }
                 if (mat.type == MaterialType::Glass ||
                     mat.type == MaterialType::Translucent) {
                     path_flags |= PHOTON_FLAG_TRAVERSED_GLASS;

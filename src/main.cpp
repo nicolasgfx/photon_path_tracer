@@ -1457,6 +1457,18 @@ static void run_interactive(
             g_app.render_spp_total = opt.config.samples_per_pixel;
             g_app.render_start = std::chrono::high_resolution_clock::now();
 
+            // Clean stale progress snapshots from previous runs
+            if constexpr (PROGRESS_SNAPSHOT_ENABLED) {
+                fs::path progress_dir("output/progress");
+                if (fs::exists(progress_dir)) {
+                    std::error_code ec;
+                    for (auto& entry : fs::directory_iterator(progress_dir, ec)) {
+                        if (entry.is_regular_file(ec))
+                            fs::remove(entry.path(), ec);
+                    }
+                }
+            }
+
             optix_renderer.resize(opt.config.image_width, opt.config.image_height);
             optix_renderer.clear_buffers();  // ensure clean accumulation
 
@@ -1674,6 +1686,36 @@ static void run_interactive(
                         snap_spectral_to_fb(snap_photon, snap_photon_fb);
                         write_png(std::string(snap_prefix) + "_photon_indirect.png", snap_photon_fb);
 
+                        // Caustic-indirect via non-destructive snapshot pass
+                        {
+                            std::vector<float> caus_spec, caus_samp;
+                            optix_renderer.render_caustic_snapshot(
+                                g_app.render_cam, opt.config, caus_spec, caus_samp);
+                            if (!caus_spec.empty()) {
+                                FrameBuffer snap_caus_fb;
+                                snap_caus_fb.resize(cw, ch);
+                                for (int y2 = 0; y2 < ch; ++y2) {
+                                    for (int x2 = 0; x2 < cw; ++x2) {
+                                        int px2 = y2 * cw + x2;
+                                        float n2 = caus_samp[px2];
+                                        Spectrum avg2 = Spectrum::zero();
+                                        if (n2 > 0.f)
+                                            for (int k2 = 0; k2 < NUM_LAMBDA; ++k2)
+                                                avg2.value[k2] = caus_spec[px2 * NUM_LAMBDA + k2] / n2;
+                                        float3 rgb2 = spectrum_to_srgb(avg2);
+                                        rgb2.x = fminf(fmaxf(rgb2.x, 0.f), 1.f);
+                                        rgb2.y = fminf(fmaxf(rgb2.y, 0.f), 1.f);
+                                        rgb2.z = fminf(fmaxf(rgb2.z, 0.f), 1.f);
+                                        snap_caus_fb.srgb[px2 * 4 + 0] = (uint8_t)(rgb2.x * 255.f);
+                                        snap_caus_fb.srgb[px2 * 4 + 1] = (uint8_t)(rgb2.y * 255.f);
+                                        snap_caus_fb.srgb[px2 * 4 + 2] = (uint8_t)(rgb2.z * 255.f);
+                                        snap_caus_fb.srgb[px2 * 4 + 3] = 255;
+                                    }
+                                }
+                                write_png(std::string(snap_prefix) + "_caustic_indirect.png", snap_caus_fb);
+                            }
+                        }
+
                         std::printf("\n  [Snapshot] %d spp → %s_*.png\n", spp, snap_prefix);
                     }
                 }
@@ -1695,90 +1737,10 @@ static void run_interactive(
                 std::string prefix = std::string("output/render_") + ts;
 
                 std::string final_path   = prefix + ".png";
-                std::string nee_path     = prefix + "_nee_direct.png";
-                std::string photon_path  = prefix + "_photon_indirect.png";
-                std::string caustic_path = prefix + "_caustic_indirect.png";
 
                 FrameBuffer final_fb;
                 optix_renderer.download_framebuffer(final_fb);
                 write_png(final_path, final_fb);
-
-                // Write component PNGs (NEE direct, Photon indirect)
-                {
-                    std::vector<float> nee_spec, photon_spec, samp_counts;
-                    optix_renderer.download_component_buffers(
-                        nee_spec, photon_spec, samp_counts);
-
-                    int cw = final_fb.width;
-                    int ch = final_fb.height;
-
-                    // Helper: spectral buffer → sRGB FrameBuffer
-                    auto spectral_to_fb = [&](const std::vector<float>& spec_buf,
-                                              FrameBuffer& fb) {
-                        fb.resize(cw, ch);
-                        for (int y = 0; y < ch; ++y) {
-                            for (int x = 0; x < cw; ++x) {
-                                int px = y * cw + x;
-                                float n = samp_counts[px];
-                                Spectrum avg = Spectrum::zero();
-                                if (n > 0.f) {
-                                    for (int k = 0; k < NUM_LAMBDA; ++k)
-                                        avg.value[k] = spec_buf[px * NUM_LAMBDA + k] / n;
-                                }
-                                float3 rgb = spectrum_to_srgb(avg);
-                                rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
-                                rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
-                                rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
-                                fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
-                                fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
-                                fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
-                                fb.srgb[px * 4 + 3] = 255;
-                            }
-                        }
-                    };
-
-                    FrameBuffer nee_fb, photon_fb;
-
-                    spectral_to_fb(nee_spec, nee_fb);
-                    write_png(nee_path, nee_fb);
-
-                    spectral_to_fb(photon_spec, photon_fb);
-                    write_png(photon_path, photon_fb);
-                }
-
-                // Render caustic-only debug pass (gated by DEBUG_CAUSTIC_PNG)
-                if constexpr (DEBUG_CAUSTIC_PNG) {
-                    std::vector<float> caustic_spec, caustic_samp;
-                    optix_renderer.render_caustic_debug_pass(
-                        camera, opt.config, caustic_spec, caustic_samp);
-
-                    if (!caustic_spec.empty()) {
-                        int cw = final_fb.width;
-                        int ch = final_fb.height;
-                        FrameBuffer caustic_fb;
-                        caustic_fb.resize(cw, ch);
-                        for (int y = 0; y < ch; ++y) {
-                            for (int x = 0; x < cw; ++x) {
-                                int px = y * cw + x;
-                                float n = caustic_samp[px];
-                                Spectrum avg = Spectrum::zero();
-                                if (n > 0.f) {
-                                    for (int k = 0; k < NUM_LAMBDA; ++k)
-                                        avg.value[k] = caustic_spec[px * NUM_LAMBDA + k] / n;
-                                }
-                                float3 rgb = spectrum_to_srgb(avg);
-                                rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
-                                rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
-                                rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
-                                caustic_fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
-                                caustic_fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
-                                caustic_fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
-                                caustic_fb.srgb[px * 4 + 3] = 255;
-                            }
-                        }
-                        write_png(caustic_path, caustic_fb);
-                    }
-                }
 
                 // Restore mouse capture state
                 if (g_app.mouse_was_captured) {
@@ -1790,11 +1752,14 @@ static void run_interactive(
                 // Reset to debug view
                 g_app.rendering = false;
                 g_app.showing_final = true;
+
+                // Keep display_fb at render resolution for final display —
+                // the texture blit handles resolution mismatch.
+                // Resize renderer back to preview on next user action
+                // (showing_final → false triggers preview path).
+
                 std::cout << "========================================\n";
                 std::cout << "  Saved: " << final_path << "\n";
-                std::cout << "  NEE:   " << nee_path << "\n";
-                std::cout << "  Phot:  " << photon_path << "\n";
-                std::cout << "  Caus:  " << caustic_path << "\n";
                 std::cout << "========================================\n\n";
                 }
             }
@@ -1824,10 +1789,24 @@ static void run_interactive(
             }
         }
 
-        // Blit to OpenGL texture
+        // Blit to OpenGL texture (handle resolution changes between preview and render)
+        int fb_w = display_fb.width;
+        int fb_h = display_fb.height;
         glBindTexture(GL_TEXTURE_2D, tex);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, win_w, win_h,
-                        GL_RGBA, GL_UNSIGNED_BYTE, display_fb.srgb.data());
+        {
+            // Query current texture dimensions
+            int cur_tex_w = 0, cur_tex_h = 0;
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH,  &cur_tex_w);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &cur_tex_h);
+            if (cur_tex_w != fb_w || cur_tex_h != fb_h) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fb_w, fb_h, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, display_fb.srgb.data());
+                glViewport(0, 0, fb_w, fb_h);
+            } else {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fb_w, fb_h,
+                                GL_RGBA, GL_UNSIGNED_BYTE, display_fb.srgb.data());
+            }
+        }
 
         glClear(GL_COLOR_BUFFER_BIT);
         glColor4f(1.f, 1.f, 1.f, 1.f); // reset — overlay may have changed it

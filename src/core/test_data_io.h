@@ -13,13 +13,14 @@
 // Binary layout (little-endian):
 //   [Header]
 //     magic           : uint32  = 0x50505444 ("PPTD")
-//     version         : uint32  = 1
+//     version         : uint32  = 3
 //     num_photons_cfg : uint32  (number of photons emitted)
 //     gather_radius   : float
 //     caustic_radius  : float
 //     max_bounces     : uint32
 //     min_bounces_rr  : uint32
 //     rr_threshold    : float
+//     algo_version    : uint32  (v3+; PHOTON_ALGORITHM_VERSION at save time)
 //     scene_path_len  : uint32
 //     scene_path      : char[scene_path_len]  (relative, e.g. "cornell_box/cornellbox.obj")
 //   [Global photons]
@@ -30,9 +31,8 @@
 //     wi_x            : float[count]
 //     wi_y            : float[count]
 //     wi_z            : float[count]
-//     lambda_bin      : uint16[count]
-//     flux            : float[count]
-//     bin_idx         : uint8[count]
+//     lambda_bin      : uint16[count]   (primary hero only)
+//     flux            : float[count]    (primary hero only)
 //     norm_x          : float[count]  (v2+)
 //     norm_y          : float[count]  (v2+)
 //     norm_z          : float[count]  (v2+)
@@ -47,7 +47,12 @@
 
 // Magic number: "PPTD" = Photon Path Tracer Data
 constexpr uint32_t PPTD_MAGIC   = 0x50505444u;
-constexpr uint32_t PPTD_VERSION = 2u;  // v2: added norm_x/y/z (geometric normal)
+constexpr uint32_t PPTD_VERSION = 3u;  // v3: added algo_version for staleness detection
+
+// Photon algorithm version — bump this whenever trace_photons() semantics
+// change (emission sampling, deposit rules, material classification, etc.).
+// A stale binary snapshot will be auto-regenerated on the next test run.
+constexpr uint32_t PHOTON_ALGORITHM_VERSION = 1u;  // v2.2: cosine hemisphere + classify_for_photons
 
 // ── Header stored in the binary ─────────────────────────────────────
 struct TestDataHeader {
@@ -59,6 +64,7 @@ struct TestDataHeader {
     uint32_t max_bounces    = 0;
     uint32_t min_bounces_rr = 0;
     float    rr_threshold   = 0.f;
+    uint32_t algo_version   = PHOTON_ALGORITHM_VERSION; // v3+
     std::string scene_path;         // relative to scenes/ dir
 };
 
@@ -101,8 +107,24 @@ inline void write_photons(std::ofstream& f, const PhotonSoA& p) {
     write_vec(f, p.wi_x);
     write_vec(f, p.wi_y);
     write_vec(f, p.wi_z);
-    write_vec(f, p.lambda_bin);
-    write_vec(f, p.flux);
+
+    // Binary format stores 1 lambda_bin + 1 flux per photon (primary hero).
+    // In memory, these arrays may hold HERO_WAVELENGTHS entries per photon
+    // (from trace_photons) or just 1 per photon (from a previous load).
+    if (n > 0 && p.lambda_bin.size() == n * HERO_WAVELENGTHS && HERO_WAVELENGTHS > 1) {
+        std::vector<uint16_t> lb(n);
+        std::vector<float>    fl(n);
+        for (uint64_t i = 0; i < n; ++i) {
+            lb[i] = p.lambda_bin[i * HERO_WAVELENGTHS];
+            fl[i] = p.flux       [i * HERO_WAVELENGTHS];
+        }
+        write_vec(f, lb);
+        write_vec(f, fl);
+    } else {
+        write_vec(f, p.lambda_bin);
+        write_vec(f, p.flux);
+    }
+
     write_vec(f, p.norm_x);
     write_vec(f, p.norm_y);
     write_vec(f, p.norm_z);
@@ -165,6 +187,7 @@ inline bool save_test_data(
     detail::write_val(f, hdr.max_bounces);
     detail::write_val(f, hdr.min_bounces_rr);
     detail::write_val(f, hdr.rr_threshold);
+    detail::write_val(f, hdr.algo_version);
 
     uint32_t path_len = (uint32_t)hdr.scene_path.size();
     detail::write_val(f, path_len);
@@ -209,9 +232,9 @@ inline bool load_test_data(
                   << std::dec << ")\n";
         return false;
     }
-    if (hdr.version != PPTD_VERSION && hdr.version != 1) {
+    if (hdr.version != PPTD_VERSION && hdr.version != 2 && hdr.version != 1) {
         std::cerr << "[TestDataIO] Version mismatch (expected "
-                  << PPTD_VERSION << " or 1, got " << hdr.version << ")\n";
+                  << PPTD_VERSION << " or 1-2, got " << hdr.version << ")\n";
         return false;
     }
     if (hdr.version == 1) {
@@ -224,6 +247,21 @@ inline bool load_test_data(
     hdr.max_bounces     = detail::read_val<uint32_t>(f);
     hdr.min_bounces_rr  = detail::read_val<uint32_t>(f);
     hdr.rr_threshold    = detail::read_val<float>(f);
+
+    // v3+: read and validate photon algorithm version
+    if (hdr.version >= 3) {
+        hdr.algo_version = detail::read_val<uint32_t>(f);
+        if (hdr.algo_version != PHOTON_ALGORITHM_VERSION) {
+            std::cerr << "[TestDataIO] Stale snapshot (algo v"
+                      << hdr.algo_version << " vs current v"
+                      << PHOTON_ALGORITHM_VERSION << ") — will regenerate\n";
+            return false;
+        }
+    } else {
+        // Pre-v3 files have no algo_version → always stale
+        std::cerr << "[TestDataIO] Pre-v3 snapshot has no algo_version — will regenerate\n";
+        return false;
+    }
 
     uint32_t path_len = detail::read_val<uint32_t>(f);
     hdr.scene_path.resize(path_len);

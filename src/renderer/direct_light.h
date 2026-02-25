@@ -16,6 +16,7 @@
 #include "core/config.h"
 #include "scene/scene.h"
 #include "bsdf/bsdf.h"
+#include "renderer/nee_shared.h"
 
 struct DirectLightSample {
     Spectrum Li;           // Incident radiance (spectral)
@@ -53,11 +54,9 @@ inline DirectLightSample sample_direct_light(
         float u2 = rng.next_float();
         local_idx = scene.emissive_alias_table.sample(u1, u2);
 
-        // Mixture PDF: p = (1-c)*p_power + c*p_area
         float p_power = scene.emissive_alias_table.pdf(local_idx);
         float p_area  = scene.emissive_area_alias_table.pdf(local_idx);
-        pdf_tri = (1.0f - coverage_fraction) * p_power
-                +          coverage_fraction  * p_area;
+        pdf_tri = nee_mixture_pdf(p_power, p_area, coverage_fraction);
     } else {
         // Area-weighted branch (probability c): sample proportional to area
         float u1 = rng.next_float();
@@ -66,8 +65,7 @@ inline DirectLightSample sample_direct_light(
 
         float p_power = scene.emissive_alias_table.pdf(local_idx);
         float p_area  = scene.emissive_area_alias_table.pdf(local_idx);
-        pdf_tri = (1.0f - coverage_fraction) * p_power
-                +          coverage_fraction  * p_area;
+        pdf_tri = nee_mixture_pdf(p_power, p_area, coverage_fraction);
     }
 
     uint32_t tri_idx = scene.emissive_tri_indices[local_idx];
@@ -79,8 +77,6 @@ inline DirectLightSample sample_direct_light(
     float3 light_pos = light_tri.interpolate_position(bary.x, bary.y, bary.z);
     float3 light_normal = light_tri.geometric_normal();
     float  light_area = light_tri.area();
-
-    float pdf_pos = 1.0f / light_area;
 
     // 3. Compute direction and distance
     float3 to_light = light_pos - hit_pos;
@@ -96,16 +92,16 @@ inline DirectLightSample sample_direct_light(
         return result;
     }
 
-    // 4. Convert area PDF to solid angle PDF
-    // p_omega = p_area * dist^2 / cos_theta_emitter
-    float pdf_solid_angle = pdf_tri * pdf_pos * dist2 / cos_theta_emitter;
+    // 4. Convert area PDF to solid angle PDF (shared helper)
+    float pdf_solid_angle = nee_pdf_area_to_solid_angle(
+        pdf_tri, 1.0f / light_area, dist2, cos_theta_emitter);
 
     // 5. Visibility test (shadow ray)
     Ray shadow_ray;
-    shadow_ray.origin    = hit_pos + hit_normal * EPSILON;
+    shadow_ray.origin    = nee_shadow_ray_origin(hit_pos, hit_normal);
     shadow_ray.direction = wi;
-    shadow_ray.tmin      = 1e-4f;
-    shadow_ray.tmax      = dist - 2e-4f;
+    shadow_ray.tmin      = NEE_RAY_EPSILON;
+    shadow_ray.tmax      = nee_shadow_ray_tmax(dist);
 
     HitRecord shadow_hit = scene.intersect(shadow_ray);
     if (shadow_hit.hit) {
@@ -162,12 +158,10 @@ inline float direct_light_pdf(
         }
     }
 
-    // Coverage-aware mixture PDF (§7.2.1)
-    float pdf_tri_mix = (1.0f - coverage_fraction) * p_power
-                      +          coverage_fraction  * p_area;
+    // Coverage-aware mixture PDF (§7.2.1, shared helper)
+    float pdf_tri_mix = nee_mixture_pdf(p_power, p_area, coverage_fraction);
 
-    float pdf_pos = 1.0f / area;
     float dist2 = hit.t * hit.t;
 
-    return pdf_tri_mix * pdf_pos * dist2 / cos_theta;
+    return nee_pdf_area_to_solid_angle(pdf_tri_mix, 1.0f / area, dist2, cos_theta);
 }

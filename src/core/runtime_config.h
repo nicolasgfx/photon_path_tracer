@@ -126,12 +126,12 @@ inline bool load_runtime_config(
             flags.exposure_changed = true;
         }
 
-        // §6 – Depth of field (Camera fields)
-        else if (key == "dof_enabled")        { cam.dof_enabled      = as_bool();  flags.dof_changed = true; }
-        else if (key == "dof_focus_distance") { cam.dof_focus_dist   = as_float(); flags.dof_changed = true; }
-        else if (key == "dof_f_number")       { cam.dof_f_number     = as_float(); flags.dof_changed = true; }
-        else if (key == "dof_sensor_height")  { cam.sensor_height    = as_float(); flags.dof_changed = true; }
-        else if (key == "dof_focus_range")    { cam.dof_focus_range  = as_float(); flags.dof_changed = true; }
+        // §6 – Depth of field (Camera fields) — only flag change when value differs
+        else if (key == "dof_enabled")        { bool  v = as_bool();  if (v != cam.dof_enabled)     { cam.dof_enabled     = v; flags.dof_changed = true; } }
+        else if (key == "dof_focus_distance") { float v = as_float(); if (v != cam.dof_focus_dist)  { cam.dof_focus_dist  = v; flags.dof_changed = true; } }
+        else if (key == "dof_f_number")       { float v = as_float(); if (v != cam.dof_f_number)    { cam.dof_f_number   = v; flags.dof_changed = true; } }
+        else if (key == "dof_sensor_height")  { float v = as_float(); if (v != cam.sensor_height)   { cam.sensor_height  = v; flags.dof_changed = true; } }
+        else if (key == "dof_focus_range")    { float v = as_float(); if (v != cam.dof_focus_range) { cam.dof_focus_range = v; flags.dof_changed = true; } }
         // All other keys fall through silently.
     };
 

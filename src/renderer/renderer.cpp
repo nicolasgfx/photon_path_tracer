@@ -208,8 +208,7 @@ static Spectrum estimate_density_knn(
 // ── First-hit + specular chain + NEE + photon gather (v2 §E3) ───────
 
 Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
-    Spectrum L_total    = Spectrum::zero();
-    Spectrum L_nee      = Spectrum::zero();
+    PixelLighting pl = PixelLighting::zero();
     Spectrum throughput = Spectrum::constant(1.0f);
 
     DensityEstimatorConfig de_config;
@@ -234,21 +233,21 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
 
         // Emission: only on first bounce (camera sees a light)
         if (mat.is_emissive() && bounce == 0) {
-            L_total += throughput * mat.Le;
+            pl.emission += throughput * mat.Le;
         }
 
         // Debug render modes (return immediately)
         if (config_.mode != RenderMode::Combined) {
             switch (config_.mode) {
                 case RenderMode::Normals:
-                    { auto s = render_normals(hit);     return TraceResult{s, s}; }
+                    { PixelLighting d = PixelLighting::zero(); d.emission = render_normals(hit);     return TraceResult::from(d); }
                 case RenderMode::MaterialID:
-                    { auto s = render_material_id(hit); return TraceResult{s, s}; }
+                    { PixelLighting d = PixelLighting::zero(); d.emission = render_material_id(hit); return TraceResult::from(d); }
                 case RenderMode::Depth:
-                    { auto s = render_depth(hit, 5.0f); return TraceResult{s, s}; }
+                    { PixelLighting d = PixelLighting::zero(); d.emission = render_depth(hit, 5.0f); return TraceResult::from(d); }
                 case RenderMode::PhotonMap:
-                    { auto s = render_photon_density(hit, ray.direction * (-1.f));
-                      return TraceResult{s, s}; }
+                    { PixelLighting d = PixelLighting::zero(); d.emission = render_photon_density(hit, ray.direction * (-1.f));
+                      return TraceResult::from(d); }
                 default: break;
             }
         }
@@ -289,8 +288,7 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                 if (cos_theta > 0.f) {
                     Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
                     Spectrum contrib = dls.Li * f * (cos_theta / dls.pdf_light);
-                    L_total += throughput * contrib;
-                    L_nee   += throughput * contrib;
+                    pl.direct_nee += throughput * contrib;
                 }
             }
         }
@@ -320,7 +318,7 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                     global_photons_, global_grid_, de_config,
                     eff_radius);
             }
-            L_total += throughput * L_photon;
+            pl.indirect_global += throughput * L_photon;
         }
 
         // 3. Caustic map gather
@@ -346,7 +344,7 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                         caustic_photons_, caustic_grid_, de_config,
                         config_.caustic_radius);
                 }
-                L_total += throughput * L_caustic;
+                pl.indirect_caustic += throughput * L_caustic;
             }
         }
 
@@ -371,7 +369,7 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                 refl = normalize(refl);
                 float cos_v = fabsf(dot(normalize(g_dir * (-1.f)), g_normal));
 
-                float alpha_g = fmaxf(mat.roughness * mat.roughness, 0.001f);
+                float alpha_g = bsdf_roughness_to_alpha(mat.roughness);
 
                 // Smith G for mirror direction (wo = wi angle)
                 ONB gf = ONB::from_normal(g_normal);
@@ -425,7 +423,7 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                     // here.  (DEFAULT_USE_MIS has no numerical effect for the
                     // CPU mirror path; it will matter when stochastic BSDF
                     // sampling replaces the mirror continuation.)
-                    L_total += glossy_tp * rmat.Le;
+                    pl.glossy_indirect += glossy_tp * rmat.Le;
                     break;
                 }
 
@@ -442,7 +440,7 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                             float rcos = fmaxf(0.f, rwi.z);
                             if (rcos > 0.f) {
                                 Spectrum rf_val = bsdf::evaluate(rmat, rwo, rwi);
-                                L_total += glossy_tp * rdls.Li * rf_val * (rcos / rdls.pdf_light);
+                                pl.glossy_indirect += glossy_tp * rdls.Li * rf_val * (rcos / rdls.pdf_light);
                             }
                         }
                     }
@@ -462,7 +460,7 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
         break;  // stop at first diffuse/glossy hit (after glossy continuation)
     }
 
-    return TraceResult{L_total, L_nee};
+    return TraceResult::from(pl);
 }
 
 // ── Legacy wrapper (backward compatibility) ─────────────────────────
