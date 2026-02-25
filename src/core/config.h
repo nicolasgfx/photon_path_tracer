@@ -84,8 +84,8 @@ constexpr int STRATA_Y = 2;
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 750000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 0;   // [R]  specular→diffuse caustics
 
 // ── Gather radii ────────────────────────────────────────────────────
 // Tangential disk kernel radius for photon density estimation.

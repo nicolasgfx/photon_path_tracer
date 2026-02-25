@@ -1,16 +1,16 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// surface_filter.h – Tangential disk kernel & surface consistency (§6.3, §6.4)
+// surface_filter.h – Tangential distance metric & surface consistency (§6.3, §6.4)
 // ─────────────────────────────────────────────────────────────────────
 // Shared by CPU (KD-tree) and GPU (hash grid) gather paths.
 //
 // Root cause of planar blocking artifacts: using 3D spherical distance
 // for surface irradiance estimation.  Photon mapping estimates irradiance
-// ON SURFACES, not in volume.  The fix is the kernel metric, not the
+// ON SURFACES, not in volume.  The fix is the distance metric, not the
 // data structure.
 //
 // This header provides:
-//   1. tangential_distance2()  – 2D disk distance on the tangent plane
+//   1. tangential_distance2()  – 2D distance on the tangent plane
 //   2. surface_consistency()   – 4-condition accept/reject filter
 //   3. plane_distance()        – signed distance to the query tangent plane
 //   4. effective_tau()         – robust τ with epsilon factor
@@ -136,34 +136,4 @@ inline HD bool surface_prefilter(
     return (tr.d_tan2 < radius2) && (fabsf(tr.d_plane) < tau);
 }
 
-// ── Kernel weight functions (tangential distance) ───────────────────
-//
-// These operate on d_tan^2 (tangential distance squared), not 3D distance.
-// Normalization denominator is the area of the tangential disk: π r² (box)
-// or (π/2) r² (Epanechnikov).
 
-// Box kernel: uniform weight 1 within radius, 0 outside
-inline HD float tangential_box_kernel(float d_tan2, float r2) {
-    return (d_tan2 < r2) ? 1.0f : 0.0f;
-}
-
-// Epanechnikov kernel: W(d,r) = 1 - d_tan^2 / r^2
-inline HD float tangential_epanechnikov_kernel(float d_tan2, float r2) {
-    if (d_tan2 >= r2) return 0.0f;
-    return 1.0f - d_tan2 / r2;
-}
-
-// ── Kernel normalization constants (§15.1.3) ────────────────────────
-//
-// | Kernel        | Normalization denominator  |
-// |---------------|----------------------------|
-// | Box           | π r²                       |
-// | Epanechnikov  | (π/2) r²                   |
-
-inline HD float box_kernel_norm(float r2) {
-    return PI * r2;
-}
-
-inline HD float epanechnikov_kernel_norm(float r2) {
-    return 0.5f * PI * r2;  // π/2 · r²
-}

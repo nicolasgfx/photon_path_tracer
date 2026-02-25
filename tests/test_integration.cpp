@@ -481,38 +481,40 @@ TEST_F(IntegrationTest, TangentialKDTreeMatchesHashGrid) {
             hit.position, hit.shading_normal, wo_local, mat,
             global_photons_, global_grid_, de_config, config_.gather_radius);
 
-        // KD-tree tangential estimate (same tangential kernel)
+        // KD-tree kNN estimate (adaptive radius)
         Spectrum L_kdtree = Spectrum::zero();
-        float r2  = config_.gather_radius * config_.gather_radius;
-        float tau = effective_tau(DEFAULT_SURFACE_TAU);
-        float inv_area = 1.0f / fmaxf(box_kernel_norm(r2), 1e-20f);
-        float inv_N = 1.0f / (float)config_.num_photons;
+        {
+            std::vector<uint32_t> knn_indices;
+            float knn_max_dist2 = 0.f;
+            float tau = effective_tau(DEFAULT_SURFACE_TAU);
+            global_kdtree_.knn_tangential(hit.position, hit.shading_normal,
+                DEFAULT_KNN_K, tau, global_photons_,
+                knn_indices, knn_max_dist2);
 
-        global_kdtree_.query_tangential(hit.position, hit.shading_normal,
-            config_.gather_radius, tau, global_photons_,
-            [&](uint32_t idx, float d_tan2) {
-                // conditions 3 & 4
-                if (!global_photons_.norm_x.empty()) {
-                    float3 pn = make_f3(global_photons_.norm_x[idx],
-                                        global_photons_.norm_y[idx],
-                                        global_photons_.norm_z[idx]);
-                    if (dot(pn, hit.shading_normal) <= 0.0f) return;
+            if (!knn_indices.empty()) {
+                float inv_area = 1.0f / (PI * fmaxf(knn_max_dist2, 1e-20f));
+                float inv_N = 1.0f / (float)config_.num_photons;
+                for (uint32_t idx : knn_indices) {
+                    if (!global_photons_.norm_x.empty()) {
+                        float3 pn = make_f3(global_photons_.norm_x[idx],
+                                            global_photons_.norm_y[idx],
+                                            global_photons_.norm_z[idx]);
+                        if (dot(pn, hit.shading_normal) <= 0.0f) continue;
+                    }
+                    float3 wi = make_f3(global_photons_.wi_x[idx],
+                                        global_photons_.wi_y[idx],
+                                        global_photons_.wi_z[idx]);
+                    if (dot(wi, hit.shading_normal) <= 0.f) continue;
+
+                    float3 wi_loc = frame.world_to_local(wi);
+                    Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_loc);
+                    Spectrum flux = global_photons_.get_flux(idx);
+                    for (int b = 0; b < NUM_LAMBDA; ++b)
+                        L_kdtree.value[b] += flux.value[b] * inv_N
+                                           * f.value[b] * inv_area;
                 }
-                float3 wi = make_f3(global_photons_.wi_x[idx],
-                                    global_photons_.wi_y[idx],
-                                    global_photons_.wi_z[idx]);
-                if (dot(wi, hit.shading_normal) <= 0.f) return;
-
-                float w = tangential_box_kernel(d_tan2, r2);
-                if (w <= 0.f) return;
-
-                float3 wi_loc = frame.world_to_local(wi);
-                Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_loc);
-                Spectrum flux = global_photons_.get_flux(idx);
-                for (int b = 0; b < NUM_LAMBDA; ++b)
-                    L_kdtree.value[b] += w * flux.value[b] * inv_N
-                                       * f.value[b] * inv_area;
-            });
+            }
+        }
 
         float g = L_grid.sum();
         float k = L_kdtree.sum();

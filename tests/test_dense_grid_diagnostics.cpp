@@ -47,52 +47,50 @@
 #include <numeric>
 #include <cstdio>
 
-// ── KD-tree density estimate (reimplemented inline for tests) ────────
-// Mirrors the static function in renderer.cpp (§6.3 tangential kernel).
+// ── KD-tree kNN density estimate (reimplemented inline for tests) ────
+// Mirrors the kNN gather in renderer.cpp (§6.3 tangential kernel).
 static Spectrum kdtree_density_estimate(
     float3 hit_pos, float3 hit_normal, float3 wo_local,
     const Material& mat,
     const PhotonSoA& photons, const KDTree& tree,
     float gather_radius, int num_photons_total,
-    bool use_epanechnikov = false)
+    bool /*use_epanechnikov*/ = false)
 {
-    Spectrum L = Spectrum::zero();
-    float r2       = gather_radius * gather_radius;
-    float norm     = use_epanechnikov
-                   ? epanechnikov_kernel_norm(r2)
-                   : box_kernel_norm(r2);
-    float inv_area = 1.0f / fmaxf(norm, 1e-20f);
+    (void)gather_radius;  // kNN determines its own adaptive radius
+
+    std::vector<uint32_t> indices;
+    float max_dist2 = 0.f;
+    float tau = effective_tau(DEFAULT_SURFACE_TAU);
+    tree.knn_tangential(hit_pos, hit_normal, DEFAULT_KNN_K, tau, photons,
+                        indices, max_dist2);
+
+    if (indices.empty()) return Spectrum::zero();
+
+    float inv_area = 1.0f / (PI * fmaxf(max_dist2, 1e-20f));
     float inv_N    = 1.0f / (float)num_photons_total;
-    float tau      = effective_tau(DEFAULT_SURFACE_TAU);
     ONB frame      = ONB::from_normal(hit_normal);
 
-    tree.query_tangential(hit_pos, hit_normal, gather_radius, tau, photons,
-        [&](uint32_t idx, float d_tan2) {
-            if (!photons.norm_x.empty()) {
-                float3 pn = make_f3(photons.norm_x[idx],
-                                    photons.norm_y[idx],
-                                    photons.norm_z[idx]);
-                if (dot(pn, hit_normal) <= 0.0f) return;
-            }
-            float3 wi = make_f3(photons.wi_x[idx],
-                                photons.wi_y[idx],
-                                photons.wi_z[idx]);
-            if (dot(wi, hit_normal) <= 0.f) return;
+    Spectrum L = Spectrum::zero();
+    for (uint32_t idx : indices) {
+        if (!photons.norm_x.empty()) {
+            float3 pn = make_f3(photons.norm_x[idx],
+                                photons.norm_y[idx],
+                                photons.norm_z[idx]);
+            if (dot(pn, hit_normal) <= 0.0f) continue;
+        }
+        float3 wi = make_f3(photons.wi_x[idx],
+                            photons.wi_y[idx],
+                            photons.wi_z[idx]);
+        if (dot(wi, hit_normal) <= 0.f) continue;
 
-            float w = use_epanechnikov
-                    ? tangential_epanechnikov_kernel(d_tan2, r2)
-                    : tangential_box_kernel(d_tan2, r2);
-            if (w <= 0.f) return;
+        float3 wi_loc = frame.world_to_local(wi);
+        Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_loc);
 
-            float3 wi_loc = frame.world_to_local(wi);
-            Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_loc);
-
-            Spectrum photon_flux = photons.get_flux(idx);
-            for (int b = 0; b < NUM_LAMBDA; ++b)
-                L.value[b] += w * photon_flux.value[b] * inv_N
-                            * f.value[b] * inv_area;
-        });
-
+        Spectrum photon_flux = photons.get_flux(idx);
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            L.value[b] += photon_flux.value[b] * inv_N
+                        * f.value[b] * inv_area;
+    }
     return L;
 }
 
@@ -236,7 +234,7 @@ static Spectrum cpu_brute_force_density(
 {
     Spectrum L = Spectrum::zero();
     float r2       = gather_radius * gather_radius;
-    float inv_area = 1.0f / epanechnikov_kernel_norm(r2);
+    float inv_area = 2.0f / (PI * r2);  // Epanechnikov normalization = 2 / (π r²)
     float inv_N    = 1.0f / (float)num_emitted;
     float tau      = effective_tau(DEFAULT_SURFACE_TAU);
     ONB frame      = ONB::from_normal(hit_normal);
@@ -260,9 +258,9 @@ static Spectrum cpu_brute_force_density(
         float3 pwi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
         if (dot(pwi, hit_normal) <= 0.0f) continue;
 
-        // Epanechnikov kernel weight
-        float w = tangential_epanechnikov_kernel(tr.d_tan2, r2);
-        if (w <= 0.0f) continue;
+        // Epanechnikov kernel weight: w = 1 − d²/r²
+        if (tr.d_tan2 >= r2) continue;
+        float w = 1.0f - tr.d_tan2 / r2;
 
         // BSDF
         float3 wi_local = frame.world_to_local(pwi);
@@ -590,7 +588,7 @@ TEST_F(DenseGridDiagnostics, KernelWeight_PerQueryVsBakedAtCellCentre) {
         float3 ppos = make_f3(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
         TangentialResult tr = compute_tangential(qpos, qnorm, ppos);
         if (fabsf(tr.d_plane) > tau || tr.d_tan2 >= r2) continue;
-        float w = tangential_epanechnikov_kernel(tr.d_tan2, r2);
+        float w = 1.0f - tr.d_tan2 / r2;   // Epanechnikov
         if (w <= 0.0f) continue;
         total_per_photon_weight += w;
         ++per_photon_count;
@@ -1352,7 +1350,7 @@ TEST_F(DenseGridDiagnostics, StepByStep_IsolateDeviation) {
         if (dot(pn, qnorm) <= 0.0f) continue;
         float3 pwi = make_f3(photons.wi_x[i], photons.wi_y[i], photons.wi_z[i]);
         if (dot(pwi, qnorm) <= 0.0f) continue;
-        float w = tangential_epanechnikov_kernel(tr.d_tan2, r2);
+        float w = (tr.d_tan2 < r2) ? (1.0f - tr.d_tan2 / r2) : 0.0f;  // Epanechnikov
         cpu_kernel_sum += w;
     }
 

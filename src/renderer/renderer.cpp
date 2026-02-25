@@ -103,60 +103,7 @@ void Renderer::build_photon_maps() {
     }
 }
 
-// ── KD-tree density estimate helper (§6.3 tangential kernel) ─────────
-//
-// Fixed-radius gather via KD-tree.  Uses tangential distance (v2.1).
-
-static Spectrum estimate_density_kdtree(
-    float3 hit_pos, float3 hit_normal, float3 wo_local,
-    const Material& mat,
-    const PhotonSoA& photons, const KDTree& tree,
-    float gather_radius, int num_photons_total,
-    bool use_epanechnikov = false)
-{
-    Spectrum L = Spectrum::zero();
-    float r2       = gather_radius * gather_radius;
-    float norm     = use_epanechnikov
-                   ? epanechnikov_kernel_norm(r2)
-                   : box_kernel_norm(r2);
-    float inv_area = 1.0f / fmaxf(norm, 1e-20f);
-    float inv_N    = 1.0f / (float)num_photons_total;
-    float tau      = effective_tau(DEFAULT_SURFACE_TAU);
-    ONB frame = ONB::from_normal(hit_normal);
-
-    tree.query_tangential(hit_pos, hit_normal, gather_radius, tau, photons,
-        [&](uint32_t idx, float d_tan2) {
-            // Surface consistency: conditions 3 & 4
-            if (!photons.norm_x.empty()) {
-                float3 pn = make_f3(photons.norm_x[idx],
-                                    photons.norm_y[idx],
-                                    photons.norm_z[idx]);
-                if (dot(pn, hit_normal) <= 0.0f) return;
-            }
-
-            float3 wi = make_f3(photons.wi_x[idx],
-                                photons.wi_y[idx],
-                                photons.wi_z[idx]);
-            if (dot(wi, hit_normal) <= 0.f) return;
-
-            float w = use_epanechnikov
-                    ? tangential_epanechnikov_kernel(d_tan2, r2)
-                    : tangential_box_kernel(d_tan2, r2);
-            if (w <= 0.f) return;
-
-            float3 wi_loc = frame.world_to_local(wi);
-            Spectrum f = bsdf::evaluate_diffuse(mat, wo_local, wi_loc);
-
-            Spectrum photon_flux = photons.get_flux(idx);
-            for (int b = 0; b < NUM_LAMBDA; ++b)
-                L.value[b] += w * photon_flux.value[b] * inv_N
-                            * f.value[b] * inv_area;
-        });
-
-    return L;
-}
-
-// ── k-NN density estimate helper (§6.3 tangential kernel) ───────────
+// ── k-NN density estimate via KD-tree (§6.3 tangential kernel) ──────
 //
 // Adaptive-radius gather: find the k nearest photons using tangential
 // distance, use distance to the k-th as the effective radius.
@@ -306,11 +253,10 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
 
             Spectrum L_photon;
             if (config_.use_kdtree && !global_kdtree_.empty()) {
-                L_photon = estimate_density_kdtree(
+                L_photon = estimate_density_knn(
                     hit.position, hit.normal, wo_local, mat,
                     global_photons_, global_kdtree_,
-                    eff_radius, config_.num_photons,
-                    true /* Epanechnikov §6.3 */);
+                    DEFAULT_KNN_K, config_.num_photons);
             } else {
                 de_config.radius = eff_radius;
                 L_photon = estimate_photon_density(
@@ -333,11 +279,10 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
             if (!skip_caustic) {
                 Spectrum L_caustic;
                 if (config_.use_kdtree && !caustic_kdtree_.empty()) {
-                    L_caustic = estimate_density_kdtree(
+                    L_caustic = estimate_density_knn(
                         hit.position, hit.normal, wo_local, mat,
                         caustic_photons_, caustic_kdtree_,
-                        config_.caustic_radius, config_.num_photons,
-                        true /* Epanechnikov §6.3 */);
+                        DEFAULT_KNN_K, config_.num_photons);
                 } else {
                     L_caustic = estimate_photon_density(
                         hit.position, hit.normal, wo_local, mat,

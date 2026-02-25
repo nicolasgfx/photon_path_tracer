@@ -1020,39 +1020,43 @@ Spectrum dev_estimate_photon_density(
     Spectrum L = Spectrum::zero();
     if (params.num_photons == 0 || params.grid_table_size == 0) return L;
 
-    // ── Per-photon hash-grid walk O(N_cell) ──────────────────────────
-    // Dual-budget caustic gather (Jensen 1996 two-budget approach).
-    // Three-tag system (0=global noncaustic, 1=global caustic, 2=caustic pass):
-    //   tag 0 → L_global    normalised by 1/N_global  with gather_radius
-    //   tag 1 → SKIPPED     (superseded by dedicated caustic map)
-    //   tag 2 → L_caustic   normalised by 1/N_caustic with caustic_gather_radius
-    // Result = L_global + L_caustic (additive, no double-counting).
+    // ── kNN adaptive-radius photon density estimation ────────────────
+    // Phase 1: Collect the K nearest valid photons into a max-heap
+    //          (tangential distance, photon index).
+    // Phase 2: Determine adaptive radius r_k = distance to k-th nearest.
+    // Phase 3: Accumulate contributions using r_k for Epanechnikov
+    //          kernel + area normalisation.
+    //
+    // At geometric edges, fewer coplanar photons exist inside the search
+    // radius → the k-th nearest is farther → r_k grows → the larger
+    // denominator (π r_k²) compensates for reduced photon count.
+    // Boundary bias vanishes by construction (no heuristic correction).
 
     const bool dual_budget = (params.photon_is_caustic_pass != nullptr
                               && params.num_caustic_emitted > 0);
 
-    // Radii and normalisation for each budget
+    // Search radius: maximum of the two budgets' fixed radii.
+    // This is the upper bound for kNN — if fewer than K photons are found,
+    // we fall back to this as the normalisation radius.
     float r_global  = radius;
     float r_caustic = dual_budget ? params.caustic_gather_radius : radius;
-    float r_max     = fmaxf(r_global, r_caustic);  // search radius for cell traversal
+    float r_max     = fmaxf(r_global, r_caustic);
+    float r2_max    = r_max * r_max;
 
-    float r2_global  = r_global * r_global;
-    float r2_caustic = r_caustic * r_caustic;
-    float inv_area_global  = 2.f / (PI * r2_global);
-    float inv_area_caustic = dual_budget ? 2.f / (PI * r2_caustic) : inv_area_global;
     float norm_global  = 1.f / (float)params.num_photons_emitted;
-    float norm_caustic = dual_budget ? 1.f / (float)params.num_caustic_emitted : norm_global;
+    float norm_caustic = dual_budget ? 1.f / (float)params.num_caustic_emitted
+                                     : norm_global;
 
     Spectrum L_global  = Spectrum::zero();
     Spectrum L_caustic = Spectrum::zero();
 
-    // Boundary-bias correction: count accepted photons and photons on
-    // adjacent perpendicular surfaces to estimate the visible disk fraction.
-    // At 90° edges the gather disk is clipped by the adjacent wall; the
-    // ratio  n_accepted / (n_accepted + n_adjacent)  approximates the
-    // visible fraction α, and we divide by α to compensate.
-    int n_global  = 0,  n_adj_global  = 0;
-    int n_caustic = 0,  n_adj_caustic = 0;
+    // ── Phase 1: kNN candidate collection ────────────────────────────
+    // Max-heap of (d_tan², photon_index).  The root (index 0) holds the
+    // farthest candidate — replaced when a closer photon is found.
+    constexpr int KNN_K = DEFAULT_KNN_K;
+    float    knn_d2[KNN_K];
+    uint32_t knn_idx[KNN_K];
+    int      knn_count = 0;
 
     float cell_size = params.grid_cell_size;
     int cx0 = (int)floorf((pos.x - r_max) / cell_size);
@@ -1062,10 +1066,6 @@ Spectrum dev_estimate_photon_density(
     int cy1 = (int)floorf((pos.y + r_max) / cell_size);
     int cz1 = (int)floorf((pos.z + r_max) / cell_size);
 
-    float r2_search = r_max * r_max;  // broad search, per-photon radius check below
-
-    // Track visited bucket keys to avoid double-processing hash-colliding cells
-    // (same bucket can be reached from multiple distinct (ix,iy,iz) coordinates).
     uint32_t visited_keys[27];
     int num_visited = 0;
 
@@ -1077,7 +1077,6 @@ Spectrum dev_estimate_photon_density(
     for (int ix = cx0; ix <= cx1; ++ix) {
         uint32_t key = dev_hash_cell(ix, iy, iz, params.grid_table_size);
 
-        // Skip if this hash bucket was already processed
         bool already_visited = false;
         for (int v = 0; v < num_visited; ++v) {
             if (visited_keys[v] == key) { already_visited = true; break; }
@@ -1103,96 +1102,111 @@ Spectrum dev_estimate_photon_density(
             float3 v_tan = diff - filter_normal * d_plane;
             float d_tan2 = dot(v_tan, v_tan);
 
-            // Broad-phase: reject beyond max radius
-            if (d_tan2 > r2_search) continue;
+            // Broad-phase: reject beyond search radius
+            if (d_tan2 > r2_max) continue;
+
+            // Early reject: if heap is full and this photon is farther
+            // than the current k-th nearest, skip immediately.
+            if (knn_count >= KNN_K && d_tan2 >= knn_d2[0]) continue;
 
             float plane_dist = fabsf(d_plane);
             if (plane_dist > DEFAULT_SURFACE_TAU) continue;
 
-            // ── Route photon to budget (moved early for boundary counting) ──
-            uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
-            if (tag == 1) continue;  // skip global-pass caustic photons
-            bool is_caustic_pass = (tag == 2);
-            float my_r2   = is_caustic_pass ? r2_caustic  : r2_global;
-            float my_norm = is_caustic_pass ? norm_caustic : norm_global;
-
-            // ── Normal gate with boundary-bias counting ─────────────────
-            // Photons on a perpendicular adjacent surface (cos≈0) are rejected
-            // for radiance but counted so we can estimate the visible disk
-            // fraction.  Back-face photons (cos≈-1) from thin geometry are
-            // excluded from the count to avoid false brightening.
+            // Normal gate: reject photons on opposite-facing surfaces
             float3 photon_n = make_f3(
                 params.photon_norm_x[idx],
                 params.photon_norm_y[idx],
                 params.photon_norm_z[idx]);
-            float cos_nn = dot(photon_n, filter_normal);
-            if (cos_nn <= 0.0f) {
-                if (cos_nn > -0.5f && d_tan2 <= my_r2) {
-                    if (is_caustic_pass) n_adj_caustic++;
-                    else                 n_adj_global++;
-                }
-                continue;
-            }
+            if (dot(photon_n, filter_normal) <= 0.0f) continue;
 
+            // Wi direction gate
             float3 wi_world = make_f3(
                 params.photon_wi_x[idx],
                 params.photon_wi_y[idx],
                 params.photon_wi_z[idx]);
-
-            // photon_wi points away from surface toward light
-            // (stored as -direction in photon tracer) — do NOT negate
             if (dot(wi_world, filter_normal) <= 0.f) continue;
-            float3 wi_local = frame.world_to_local(wi_world);
 
-            // Diffuse-only BSDF for density estimation (§6 standard practice).
-            // Full Cook-Torrance creates 50x+ variance on glossy surfaces.
-            Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
+            // Tag filter: skip global-pass caustic photons (tag==1)
+            uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
+            if (tag == 1) continue;
 
-            // Per-budget radius check
-            if (d_tan2 > my_r2) continue;
-
-            // Epanechnikov kernel weight (§6.3 guideline)
-            float w = 1.0f - d_tan2 / my_r2;
-
-            Spectrum& L_target = is_caustic_pass ? L_caustic : L_global;
-
-            // Count accepted photons for boundary correction
-            if (is_caustic_pass) n_caustic++;
-            else                 n_global++;
-
-            // Accumulate unnormalized: f * flux * w * (1/N_emitted)
-            // Area normalization deferred to post-loop boundary correction.
-            int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
-            for (int h = 0; h < n_hero; ++h) {
-                float p_flux = params.photon_flux[idx * HERO_WAVELENGTHS + h];
-                int bin = (int)params.photon_lambda[idx * HERO_WAVELENGTHS + h];
-                if (bin >= 0 && bin < NUM_LAMBDA)
-                    L_target.value[bin] += f.value[bin] * p_flux * w * my_norm;
+            // ── Insert into max-heap ────────────────────────────────
+            if (knn_count < KNN_K) {
+                // Heap not full: append and sift up
+                knn_d2[knn_count]  = d_tan2;
+                knn_idx[knn_count] = idx;
+                knn_count++;
+                // Sift up
+                int ci = knn_count - 1;
+                while (ci > 0) {
+                    int pi = (ci - 1) / 2;
+                    if (knn_d2[ci] <= knn_d2[pi]) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
+                    ci = pi;
+                }
+            } else {
+                // Heap full and d_tan2 < root: replace root and sift down
+                knn_d2[0]  = d_tan2;
+                knn_idx[0] = idx;
+                int ci = 0;
+                while (true) {
+                    int left = 2 * ci + 1, right = 2 * ci + 2, largest = ci;
+                    if (left  < KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
+                    if (right < KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
+                    if (largest == ci) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
+                    ci = largest;
+                }
             }
         }
     }
 
-    // ── Boundary-bias correction + area normalisation ───────────────
-    // At geometric edges the gather disk is partially clipped by adjacent
-    // surfaces, yielding fewer photons for the same theoretical disk area.
-    // We estimate the visible fraction α = n_accepted/(n_accepted+n_adj)
-    // and divide by α so the density estimate stays unbiased.
-    // Clamped to [0.15, 1] to avoid extreme amplification from noisy counts.
-    if (n_global > 0) {
-        float alpha = (n_adj_global > 0)
-            ? fmaxf((float)n_global / (float)(n_global + n_adj_global), 0.15f)
-            : 1.f;
-        float scale = inv_area_global / alpha;
-        for (int lam = 0; lam < NUM_LAMBDA; ++lam)
-            L_global.value[lam] *= scale;
-    }
-    if (n_caustic > 0) {
-        float alpha = (n_adj_caustic > 0)
-            ? fmaxf((float)n_caustic / (float)(n_caustic + n_adj_caustic), 0.15f)
-            : 1.f;
-        float scale = inv_area_caustic / alpha;
-        for (int lam = 0; lam < NUM_LAMBDA; ++lam)
-            L_caustic.value[lam] *= scale;
+    if (knn_count == 0) return L;
+
+    // ── Phase 2: Determine adaptive radius ───────────────────────────
+    // If we found >= K photons, use the distance to the k-th nearest
+    // (heap root = farthest in heap).  Otherwise fall back to the fixed
+    // search radius so sparse areas render identically to before.
+    float r_k2 = (knn_count >= KNN_K) ? knn_d2[0] : r2_max;
+    r_k2 = fmaxf(r_k2, 1e-12f);  // guard against degenerate zero
+    float inv_area_knn = 2.f / (PI * r_k2);   // Epanechnikov normalisation
+
+    // ── Phase 3: Accumulate contributions from the k nearest ─────────
+    for (int i = 0; i < knn_count; ++i) {
+        uint32_t idx  = knn_idx[i];
+        float d_tan2  = knn_d2[i];
+
+        // Skip photons outside the adaptive radius (possible when
+        // knn_count < K and some heap entries exceed r_k2 — shouldn't
+        // happen, but defensive).
+        if (d_tan2 >= r_k2) continue;
+
+        // Epanechnikov kernel weight with adaptive radius
+        float w = 1.0f - d_tan2 / r_k2;
+
+        // Re-read wi for BSDF evaluation (L1-cached from Phase 1)
+        float3 wi_world = make_f3(
+            params.photon_wi_x[idx],
+            params.photon_wi_y[idx],
+            params.photon_wi_z[idx]);
+        float3 wi_local = frame.world_to_local(wi_world);
+
+        Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
+
+        // Route to budget based on tag
+        uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
+        float   my_norm  = (tag == 2) ? norm_caustic : norm_global;
+        Spectrum& L_target = (tag == 2) ? L_caustic : L_global;
+
+        int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
+        for (int h = 0; h < n_hero; ++h) {
+            float p_flux = params.photon_flux[idx * HERO_WAVELENGTHS + h];
+            int bin = (int)params.photon_lambda[idx * HERO_WAVELENGTHS + h];
+            if (bin >= 0 && bin < NUM_LAMBDA)
+                L_target.value[bin] += f.value[bin] * p_flux * w * inv_area_knn * my_norm;
+        }
     }
 
     // Additive combination: non-caustic indirect from global map +
