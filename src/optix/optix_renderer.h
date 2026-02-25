@@ -16,7 +16,6 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "core/cell_bin_grid.h"
-#include "core/emitter_points.h"
 #include "optix/launch_params.h"
 
 #include <cuda_runtime.h>
@@ -134,6 +133,11 @@ public:
     void init();
     void build_accel(const Scene& scene);
     void upload_scene_data(const Scene& scene);
+
+    /// Set clearcoat/fabric per-material pointers in launch params.
+    /// Called after fill_common_params() at every launch site.
+    void fill_clearcoat_fabric_params(LaunchParams& lp) const;
+
     void upload_photon_data(const PhotonSoA& global_photons,
                             const HashGrid& global_grid,
                             const PhotonSoA& caustic_photons,
@@ -144,6 +148,12 @@ public:
 
     /// Upload emitter data to device (for GPU photon tracing)
     void upload_emitter_data(const Scene& scene);
+
+    /// CPU photon tracing fallback: uses emitter.h trace_photons() +
+    /// targeted caustic emission on the CPU, then merges, builds hash
+    /// grid, and uploads to GPU for the OptiX gather.  Enabled when
+    /// USE_CPU_PHOTON_TRACE is 1 in config.h.
+    void cpu_trace_photons(const Scene& scene, const RenderConfig& config);
 
     /// Trace photons entirely on the GPU. Downloads results, builds
     /// the hash grid on CPU, uploads the grid + photon data back.
@@ -188,18 +198,13 @@ public:
                                    std::vector<float>& caustic_spec,
                                    std::vector<float>& samp_counts);
 
-    /// Render a coverage debug PNG: each pixel shows the normalised
-    /// shadow-ray coverage count of the light-cache cell it falls in.
-    /// Bright = many targets, dark = few.  Writes directly to a FrameBuffer.
-    void render_coverage_debug_png(const Camera& camera, FrameBuffer& out_fb);
-
-    /// Build the dense 3D cell-bin grid from stored photons and upload
-    /// it to the device.  Called once after trace_photons().
-    void build_cell_bin_grid();
-
-    /// Build the dense 3D cell-bin grid from VOLUME photons and upload.
-    /// Called once after trace_photons() when volume is enabled.
-    void build_volume_cell_bin_grid();
+    /// Non-destructive caustic snapshot: saves/restores progressive
+    /// accumulation state around render_caustic_debug_pass().
+    /// Safe to call during progressive rendering (e.g. progress snapshots).
+    void render_caustic_snapshot(const Camera& camera,
+                                const RenderConfig& config,
+                                std::vector<float>& caustic_spec,
+                                std::vector<float>& caustic_samp);
 
     /// Read back the sRGB buffer from the device
     void download_framebuffer(FrameBuffer& fb) const;
@@ -226,14 +231,21 @@ public:
     void set_volume_enabled(bool v) { runtime_volume_enabled_ = v; }
     bool is_volume_enabled()  const { return runtime_volume_enabled_; }
 
-    /// Toggle between dense cell-bin gather (fast, O(bins)) and per-photon
-    /// hash-grid gather (exact, O(k)).  Mirrors the G key in main.cpp.
-    void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
-    bool is_use_dense_grid()  const { return use_dense_grid_; }
-
     /// Runtime exposure multiplier (render_config.json §5, applied before tone mapping).
     void set_exposure(float e)   { exposure_ = e; }
     float get_exposure()   const { return exposure_; }
+
+    /// Toggle per-triangle photon irradiance heatmap in preview mode.
+    void set_photon_heatmap(bool v) { show_photon_heatmap_ = v; }
+    bool is_photon_heatmap() const  { return show_photon_heatmap_; }
+
+    /// Toggle dense cell-bin grid path vs hash-grid walk.
+    void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
+    bool is_use_dense_grid() const  { return use_dense_grid_; }
+
+    /// Render coverage debug PNG (stub — no-op when DEBUG_COVERAGE_PNG is false).
+    template<typename CamT, typename FbT>
+    void render_coverage_debug_png(const CamT&, const FbT&) {}
 
     /// Download GPU kernel profiling data and print a summary.
     /// Call after the final render completes.
@@ -244,23 +256,18 @@ public:
     const PhotonSoA& photons() const { return stored_photons_; }
     const HashGrid&  grid()    const { return stored_grid_; }
 
+    /// Cell-bin grid test accessors (returns empty grid when dense grid is disabled)
+    const CellBinGrid& cell_bin_grid_for_test() const { return cell_bin_grid_; }
+    size_t cell_bin_grid_bytes_for_test() const {
+        return (size_t)cell_bin_grid_.total_cells() * cell_bin_grid_.bin_count * sizeof(PhotonBin);
+    }
+
     /// Test hook: returns the last LaunchParams struct used for an OptiX launch
     /// (copied on the host just before uploading to the device).
     const LaunchParams& last_launch_params_for_test() const { return last_launch_params_host_; }
 
-    /// Test hook: allocated byte size for cell-bin grid.
-    size_t cell_bin_grid_bytes_for_test() const { return d_cell_bin_grid_.bytes; }
-    /// Test hook: access the host-side cell-bin grid.
-    const CellBinGrid& cell_bin_grid_for_test() const { return cell_bin_grid_; }
-
     /// Test hooks for volume photon grid.
-    size_t vol_cell_bin_grid_bytes_for_test() const { return d_vol_cell_bin_grid_.bytes; }
-    const CellBinGrid& vol_cell_bin_grid_for_test() const { return vol_cell_bin_grid_; }
     const PhotonSoA& volume_photons() const { return volume_photons_; }
-
-    /// Test hooks for light importance cache.
-    const LightCache& light_cache_for_test() const { return light_cache_; }
-    bool is_light_cache_uploaded() const { return light_cache_uploaded_; }
 
     void cleanup();
 
@@ -279,6 +286,7 @@ private:
     // Program groups
     OptixProgramGroup        raygen_pg_          = nullptr;
     OptixProgramGroup        raygen_photon_pg_   = nullptr;  // photon trace
+    OptixProgramGroup        raygen_targeted_pg_ = nullptr;  // targeted caustic photon trace
     OptixProgramGroup        miss_pg_            = nullptr;
     OptixProgramGroup        miss_shadow_pg_     = nullptr;
     OptixProgramGroup        hitgroup_pg_        = nullptr;
@@ -318,12 +326,6 @@ private:
     // Test hook: last launch params copied on host (for unit/integration tests)
     LaunchParams last_launch_params_host_ = {};
 
-    // Dense 3D cell-bin grid (surface photons)
-    DeviceBuffer d_cell_bin_grid_;          // PhotonBin [total_cells*PHOTON_BIN_COUNT]
-
-    // Dense 3D cell-bin grid (volume photons)
-    DeviceBuffer d_vol_cell_bin_grid_;      // PhotonBin [total_cells*PHOTON_BIN_COUNT]
-
     // Scene geometry (device)
     DeviceBuffer d_vertices_;
     DeviceBuffer d_normals_;
@@ -336,10 +338,19 @@ private:
     DeviceBuffer d_Le_;
     DeviceBuffer d_roughness_;
     DeviceBuffer d_ior_;
+    DeviceBuffer d_cauchy_A_;           // float  [num_materials]
+    DeviceBuffer d_cauchy_B_;           // float  [num_materials]
+    DeviceBuffer d_mat_dispersion_;     // uint8  [num_materials]
     DeviceBuffer d_mat_type_;
     DeviceBuffer d_diffuse_tex_;    // int [num_materials]
     DeviceBuffer d_emission_tex_;   // int [num_materials]
     DeviceBuffer d_opacity_;        // float [num_materials]
+
+    // Clearcoat / Fabric per-material data
+    DeviceBuffer d_clearcoat_weight_;    // float [num_materials]
+    DeviceBuffer d_clearcoat_roughness_; // float [num_materials]
+    DeviceBuffer d_sheen_;               // float [num_materials]
+    DeviceBuffer d_sheen_tint_;          // float [num_materials]
 
     // Texture atlas (device)
     DeviceBuffer d_tex_atlas_;      // float [total_texels * 4]
@@ -351,12 +362,20 @@ private:
     DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
     DeviceBuffer d_photon_lambda_, d_photon_flux_;
     DeviceBuffer d_photon_num_hero_;  // uint8_t [num_photons] hero count per photon
-    DeviceBuffer d_photon_bin_idx_;  // uint8_t [num_photons] precomputed bin index
+    DeviceBuffer d_photon_is_caustic_pass_;  // uint8_t [num_photons] 0=global, 1=caustic-targeted
     DeviceBuffer d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_;
 
     // Emitter data (device -- for GPU photon tracing)
     DeviceBuffer d_emissive_indices_;
     DeviceBuffer d_emissive_cdf_;
+
+    // Targeted caustic specular triangle data (device)
+    DeviceBuffer d_targeted_spec_tri_indices_;   // uint32_t [N]
+    DeviceBuffer d_targeted_spec_alias_prob_;    // float    [N]
+    DeviceBuffer d_targeted_spec_alias_idx_;     // uint32_t [N]
+    DeviceBuffer d_targeted_spec_pdf_;           // float    [N]
+    DeviceBuffer d_targeted_spec_areas_;         // float    [N]
+    int          num_targeted_spec_tris_ = 0;
 
     // Photon output buffers (device -- written by __raygen__photon_trace)
     DeviceBuffer d_out_photon_pos_x_, d_out_photon_pos_y_, d_out_photon_pos_z_;
@@ -366,7 +385,12 @@ private:
     DeviceBuffer d_out_photon_num_hero_;  // uint8_t [max_stored] hero count per photon
     DeviceBuffer d_out_photon_source_emissive_;  // uint16_t [max_stored] source emissive idx
     DeviceBuffer d_out_photon_is_caustic_;       // uint8_t  [max_stored] caustic flag
+    DeviceBuffer d_out_photon_tri_id_;           // uint32_t [max_stored] deposit triangle
     DeviceBuffer d_out_photon_count_;
+
+    // Per-triangle photon irradiance heatmap (for preview visualization)
+    DeviceBuffer d_tri_photon_irradiance_;   // float [num_tris]
+    int          num_tris_ = 0;              // host triangle count
 
     // Volume photon output buffers (device -- written by __raygen__photon_trace)
     DeviceBuffer d_out_vol_photon_pos_x_, d_out_vol_photon_pos_y_, d_out_vol_photon_pos_z_;
@@ -377,6 +401,7 @@ private:
     // SBT record buffers
     DeviceBuffer d_raygen_record_;
     DeviceBuffer d_raygen_photon_record_;
+    DeviceBuffer d_raygen_targeted_record_;
     DeviceBuffer d_miss_records_;
     DeviceBuffer d_hitgroup_records_;
 
@@ -392,27 +417,10 @@ private:
     std::vector<Triangle> host_triangles_;
 
     // Host-side cell-bin grid (kept after build for save/test access)
-    CellBinGrid cell_bin_grid_;
-    bool cell_grid_uploaded_ = false;
+    CellBinGrid cell_bin_grid_;  // empty unless dense grid is built
 
-    // Light importance cache (per-cell top-K lights for NEE)
-    LightCache light_cache_;
-    bool light_cache_uploaded_ = false;
-    DeviceBuffer d_light_cache_entries_;          // CellLightEntry [TABLE_SIZE * TOP_K]
-    DeviceBuffer d_light_cache_count_;            // int [TABLE_SIZE]
-    DeviceBuffer d_light_cache_total_importance_; // float [TABLE_SIZE]
-
-    // Coverage-based shadow ray targets (variable-length per cell)
-    EmitterPointSet emitter_points_;
-    DeviceBuffer d_shadow_ray_targets_;           // ShadowRayTarget [total_targets]
-    DeviceBuffer d_shadow_ray_cell_offset_;       // int [TABLE_SIZE]
-    DeviceBuffer d_shadow_ray_cell_count_;        // int [TABLE_SIZE]
-    bool shadow_ray_cache_uploaded_ = false;
-
-    // Volume photon storage and cell-bin grid
+    // Volume photon storage
     PhotonSoA volume_photons_;
-    CellBinGrid vol_cell_bin_grid_;
-    bool vol_cell_grid_uploaded_ = false;
 
     // SPPM per-pixel buffers (GPU side)
     DeviceBuffer d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_;
@@ -432,9 +440,13 @@ private:
     bool initialised_ = false;
     int  num_emissive_ = 0;
     int  num_photons_emitted_ = 0;  // N_emitted for density normalisation
+    int  num_caustic_emitted_ = 0;  // N_caustic for dual-budget caustic normalisation
+    std::vector<uint8_t> caustic_pass_flags_;  // per-photon: 0=global, 1=caustic-targeted
     bool runtime_volume_enabled_ = DEFAULT_VOLUME_ENABLED;  // toggled via V key
-    bool use_dense_grid_         = DEFAULT_USE_DENSE_GRID;  // toggled via G key
+    bool show_photon_heatmap_    = false;                    // toggled via F-key
+    bool use_dense_grid_         = false;                    // dense cell-bin grid path
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
+    float caustic_radius_ = DEFAULT_CAUSTIC_RADIUS;   // tighter radius for caustic gather
     float exposure_      = DEFAULT_EXPOSURE;          // runtime exposure (set_exposure / R key)
 };
 
@@ -557,6 +569,7 @@ inline void OptixRenderer::cleanup() {
     if (pipeline_)             { optixPipelineDestroy(pipeline_);              pipeline_ = nullptr; }
     if (raygen_pg_)            { optixProgramGroupDestroy(raygen_pg_);         raygen_pg_ = nullptr; }
     if (raygen_photon_pg_)     { optixProgramGroupDestroy(raygen_photon_pg_);  raygen_photon_pg_ = nullptr; }
+    if (raygen_targeted_pg_)   { optixProgramGroupDestroy(raygen_targeted_pg_); raygen_targeted_pg_ = nullptr; }
     if (miss_pg_)              { optixProgramGroupDestroy(miss_pg_);           miss_pg_ = nullptr; }
     if (miss_shadow_pg_)       { optixProgramGroupDestroy(miss_shadow_pg_);    miss_shadow_pg_ = nullptr; }
     if (hitgroup_pg_)          { optixProgramGroupDestroy(hitgroup_pg_);       hitgroup_pg_ = nullptr; }

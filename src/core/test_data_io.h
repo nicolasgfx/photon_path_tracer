@@ -103,7 +103,6 @@ inline void write_photons(std::ofstream& f, const PhotonSoA& p) {
     write_vec(f, p.wi_z);
     write_vec(f, p.lambda_bin);
     write_vec(f, p.flux);
-    write_vec(f, p.bin_idx);
     write_vec(f, p.norm_x);
     write_vec(f, p.norm_y);
     write_vec(f, p.norm_z);
@@ -120,7 +119,6 @@ inline bool read_photons(std::ifstream& f, PhotonSoA& p, uint32_t version = PPTD
     read_vec(f, p.wi_z,       (size_t)n);
     read_vec(f, p.lambda_bin, (size_t)n);
     read_vec(f, p.flux,       (size_t)n);
-    read_vec(f, p.bin_idx,    (size_t)n);
     if (version >= 2) {
         read_vec(f, p.norm_x, (size_t)n);
         read_vec(f, p.norm_y, (size_t)n);

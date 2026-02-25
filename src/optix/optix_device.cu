@@ -3,9 +3,10 @@
 // ---------------------------------------------------------------------
 //
 // Programs:
-//   __raygen__render        - debug first-hit OR full path tracing
-//   __raygen__photon_trace  - GPU photon emission + tracing
-//   __closesthit__radiance  - closest-hit for radiance rays
+//   __raygen__render                  - debug first-hit OR full path tracing
+//   __raygen__photon_trace            - GPU photon emission + tracing
+//   __raygen__targeted_photon_trace   - GPU targeted caustic emission (Jensen §9.2)
+//   __closesthit__radiance            - closest-hit for radiance rays
 //   __closesthit__shadow    - closest-hit for shadow rays
 //   __miss__radiance        - miss for radiance rays
 //   __miss__shadow          - miss for shadow rays
@@ -26,10 +27,8 @@
 #include "core/random.h"
 #include "core/spectrum.h"
 #include "core/config.h"
-#include "core/photon_bins.h"
 #include "core/cdf.h"
 #include "core/nee_sampling.h"
-#include "core/guided_nee.h"
 #include "core/medium.h"
 #include "core/phase_function.h"
 
@@ -49,6 +48,40 @@ namespace {
     constexpr uint32_t HASHGRID_PRIME_2 = 19349663u;
     constexpr uint32_t HASHGRID_PRIME_3 = 83492791u;
 }
+
+// ── Precomputed CIE 1931 colour-matching LUTs (Wyman et al. 2013) ───
+// Evaluated at bin centres: λ_i = 380 + (i + 0.5) × 12.5 nm, i = 0..31.
+__device__ const float CIE_XBAR[NUM_LAMBDA] = {
+    0.00085280f, 0.00948721f, 0.05744076f, 0.18924914f,
+    0.33911000f, 0.34859709f, 0.27100800f, 0.15654349f,
+    0.05396928f, 0.00357322f, 0.02105945f, 0.09939486f,
+    0.23283069f, 0.41356647f, 0.62452582f, 0.83222873f,
+    0.99022381f, 1.05553252f, 0.98618610f, 0.78291581f,
+    0.52804653f, 0.30257481f, 0.14729811f, 0.06092078f,
+    0.02140610f, 0.00639019f, 0.00162067f, 0.00034920f,
+    0.00006392f, 0.00000994f, 0.00000131f, 0.00000015f,
+};
+__device__ const float CIE_YBAR[NUM_LAMBDA] = {
+    0.00042785f, 0.00116282f, 0.00294402f, 0.00694358f,
+    0.01525596f, 0.03122631f, 0.05956898f, 0.10636988f,
+    0.18173774f, 0.31073917f, 0.52575729f, 0.77789306f,
+    0.92738762f, 0.99189733f, 0.98786222f, 0.92528632f,
+    0.80659971f, 0.65076114f, 0.48388622f, 0.33010563f,
+    0.20584746f, 0.11703822f, 0.06058265f, 0.02852724f,
+    0.01221501f, 0.00475528f, 0.00168297f, 0.00054148f,
+    0.00015838f, 0.00004211f, 0.00001018f, 0.00000224f,
+};
+__device__ const float CIE_ZBAR[NUM_LAMBDA] = {
+    0.01360229f, 0.05277060f, 0.23976472f, 0.92140354f,
+    1.67860453f, 1.78376062f, 1.64162010f, 1.10660676f,
+    0.57342498f, 0.28956506f, 0.14509460f, 0.06643900f,
+    0.02705018f, 0.00976209f, 0.00312229f, 0.00088504f,
+    0.00022233f, 0.00004950f, 0.00000977f, 0.00000171f,
+    0.00000026f, 0.00000004f, 0.00000000f, 0.00000000f,
+    0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f,
+    0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f,
+};
+__device__ const float CIE_YBAR_SUM_INV = 1.0f / 8.55521603f;
 
 extern "C" {
     __constant__ LaunchParams params;
@@ -128,7 +161,10 @@ enum DevMaterialType : uint8_t {
     DEV_GLASS      = 2,
     DEV_GLOSSY     = 3,
     DEV_EMISSIVE   = 4,
-    DEV_GLOSSY_DIELECTRIC = 5
+    DEV_GLOSSY_DIELECTRIC = 5,
+    DEV_TRANSLUCENT = 6,
+    DEV_CLEARCOAT   = 7,
+    DEV_FABRIC      = 8
 };
 
 __forceinline__ __device__
@@ -145,6 +181,14 @@ bool dev_is_specular(uint32_t mat_id) {
 __forceinline__ __device__
 bool dev_is_glass(uint32_t mat_id) {
     return params.mat_type[mat_id] == DEV_GLASS;
+}
+
+// Translucent: dielectric surface + interior participating medium.
+// NOT a pure delta specular; eligible for NEE and photon gather,
+// but still uses Fresnel reflect/refract at the boundary.
+__forceinline__ __device__
+bool dev_is_translucent(uint32_t mat_id) {
+    return params.mat_type[mat_id] == DEV_TRANSLUCENT;
 }
 
 __forceinline__ __device__
@@ -308,33 +352,14 @@ struct DevONB {
 __forceinline__ __device__
 float3 dev_spectrum_to_srgb(const Spectrum& s) {
     float X = 0.f, Y = 0.f, Z = 0.f;
-    float Y_integral = 0.f;
     for (int i = 0; i < NUM_LAMBDA; ++i) {
-        float lam = LAMBDA_MIN + (i + 0.5f) * LAMBDA_STEP;
-        float x1 = (lam - 442.0f) * ((lam < 442.0f) ? 0.0624f : 0.0374f);
-        float x2 = (lam - 599.8f) * ((lam < 599.8f) ? 0.0264f : 0.0323f);
-        float x3 = (lam - 501.1f) * ((lam < 501.1f) ? 0.0490f : 0.0382f);
-        float xbar =  0.362f*expf(-0.5f*x1*x1)
-                     + 1.056f*expf(-0.5f*x2*x2)
-                     - 0.065f*expf(-0.5f*x3*x3);
-
-        float y1 = (lam - 568.8f) * ((lam < 568.8f) ? 0.0213f : 0.0247f);
-        float y2 = (lam - 530.9f) * ((lam < 530.9f) ? 0.0613f : 0.0322f);
-        float ybar = 0.821f*expf(-0.5f*y1*y1) + 0.286f*expf(-0.5f*y2*y2);
-
-        float z1 = (lam - 437.0f) * ((lam < 437.0f) ? 0.0845f : 0.0278f);
-        float z2 = (lam - 459.0f) * ((lam < 459.0f) ? 0.0385f : 0.0725f);
-        float zbar = 1.217f*expf(-0.5f*z1*z1) + 0.681f*expf(-0.5f*z2*z2);
-
-        X += s.value[i] * xbar;
-        Y += s.value[i] * ybar;
-        Z += s.value[i] * zbar;
-        Y_integral += ybar;
+        X += s.value[i] * CIE_XBAR[i];
+        Y += s.value[i] * CIE_YBAR[i];
+        Z += s.value[i] * CIE_ZBAR[i];
     }
 
     // Normalise: divide by sum(ybar) so flat-1.0 -> Y=1
-    float scale = (Y_integral > 0.f) ? 1.0f / Y_integral : 0.f;
-    X *= scale; Y *= scale; Z *= scale;
+    X *= CIE_YBAR_SUM_INV; Y *= CIE_YBAR_SUM_INV; Z *= CIE_YBAR_SUM_INV;
 
     // Apply exposure (runtime — set via render_config.json and R key)
     X *= params.exposure; Y *= params.exposure; Z *= params.exposure;
@@ -383,6 +408,26 @@ float dev_get_roughness(uint32_t mat_id) {
 }
 
 __forceinline__ __device__
+float dev_get_clearcoat_weight(uint32_t mat_id) {
+    return params.clearcoat_weight ? params.clearcoat_weight[mat_id] : 1.0f;
+}
+
+__forceinline__ __device__
+float dev_get_clearcoat_roughness(uint32_t mat_id) {
+    return params.clearcoat_roughness ? params.clearcoat_roughness[mat_id] : 0.03f;
+}
+
+__forceinline__ __device__
+float dev_get_sheen(uint32_t mat_id) {
+    return params.sheen ? params.sheen[mat_id] : 0.0f;
+}
+
+__forceinline__ __device__
+float dev_get_sheen_tint(uint32_t mat_id) {
+    return params.sheen_tint ? params.sheen_tint[mat_id] : 0.0f;
+}
+
+__forceinline__ __device__
 bool dev_is_glossy(uint32_t mat_id) {
     return params.mat_type[mat_id] == DEV_GLOSSY;
 }
@@ -392,13 +437,23 @@ bool dev_is_dielectric_glossy(uint32_t mat_id) {
     return params.mat_type[mat_id] == DEV_GLOSSY_DIELECTRIC;
 }
 
-// Returns true for any glossy surface (metallic or dielectric).
+__forceinline__ __device__
+bool dev_is_clearcoat(uint32_t mat_id) {
+    return params.mat_type[mat_id] == DEV_CLEARCOAT;
+}
+
+__forceinline__ __device__
+bool dev_is_fabric(uint32_t mat_id) {
+    return params.mat_type[mat_id] == DEV_FABRIC;
+}
+
+// Returns true for any glossy surface (metallic, dielectric, or clearcoat).
 // Use this for glossy continuation gates; use dev_is_glossy() /
 // dev_is_dielectric_glossy() only when differentiating Fresnel model.
 __forceinline__ __device__
 bool dev_is_any_glossy(uint32_t mat_id) {
     uint8_t t = params.mat_type[mat_id];
-    return t == DEV_GLOSSY || t == DEV_GLOSSY_DIELECTRIC;
+    return t == DEV_GLOSSY || t == DEV_GLOSSY_DIELECTRIC || t == DEV_CLEARCOAT;
 }
 
 // == GGX microfacet distribution (device-side) ========================
@@ -468,6 +523,22 @@ __forceinline__ __device__
 Spectrum dev_bsdf_evaluate_diffuse(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
     if (wi.z <= 0.f || wo.z <= 0.f) return Spectrum::zero();
     Spectrum Kd = dev_get_Kd(mat_id, uv);
+
+    // Clearcoat: diffuse portion attenuated by coat energy loss
+    if (dev_is_clearcoat(mat_id)) {
+        float coat_w = dev_get_clearcoat_weight(mat_id);
+        float ior = dev_get_ior(mat_id);
+        float coat_f0t = (ior - 1.f) / (ior + 1.f);
+        float coat_F0  = coat_f0t * coat_f0t;
+        float cos_o = fabsf(wo.z);
+        float Fr = dev_fresnel_schlick(cos_o, coat_F0);
+        Spectrum f;
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            f.value[i] = (1.f - coat_w * Fr) * Kd.value[i] * INV_PI;
+        return f;
+    }
+
+    // Fabric: diffuse base only (no sheen for photon gather)
     return Kd * INV_PI;
 }
 
@@ -476,6 +547,44 @@ Spectrum dev_bsdf_evaluate(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
     if (wi.z <= 0.f || wo.z <= 0.f) return Spectrum::zero();
 
     Spectrum Kd = dev_get_Kd(mat_id, uv);
+
+    // ── Clearcoat: dielectric coat GGX + attenuated Lambert base ────
+    if (dev_is_clearcoat(mat_id)) {
+        float coat_w = dev_get_clearcoat_weight(mat_id);
+        float coat_r = dev_get_clearcoat_roughness(mat_id);
+        float coat_alpha = fmaxf(coat_r * coat_r, 0.001f);
+        float ior = dev_get_ior(mat_id);
+        float coat_f0t = (ior - 1.f) / (ior + 1.f);
+        float coat_F0  = coat_f0t * coat_f0t;
+
+        float3 h = normalize(wo + wi);
+        float ndf_c = dev_ggx_D(h, coat_alpha);
+        float geo_c = dev_ggx_G(wo, wi, coat_alpha);
+        float VdotH = fabsf(dot(wo, h));
+        float Fr = dev_fresnel_schlick(VdotH, coat_F0);
+        float denom = 4.f * fabsf(wo.z) * fabsf(wi.z) + EPSILON;
+        float coat_spec = coat_w * (ndf_c * geo_c * Fr) / denom;
+        Spectrum f;
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            f.value[i] = coat_spec + (1.f - coat_w * Fr) * Kd.value[i] * INV_PI;
+        return f;
+    }
+
+    // ── Fabric: diffuse + sheen lobe ────────────────────────────────
+    if (dev_is_fabric(mat_id)) {
+        float sheen_w = dev_get_sheen(mat_id);
+        float tint    = dev_get_sheen_tint(mat_id);
+        float3 h = normalize(wo + wi);
+        float cos_theta_h = fabsf(dot(wo, h));
+        float t = 1.f - cos_theta_h;
+        float t5 = t * t * t * t * t;
+        Spectrum f;
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            float sheen_col = (1.f - tint) * 1.0f + tint * Kd.value[i];
+            f.value[i] = Kd.value[i] * INV_PI + sheen_w * sheen_col * t5 * INV_PI;
+        }
+        return f;
+    }
 
     if (!dev_is_glossy(mat_id) && !dev_is_dielectric_glossy(mat_id)) {
         // Pure Lambertian
@@ -519,6 +628,28 @@ float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
     if (wi.z <= 0.f || wo.z <= 0.f) return 0.f;
 
     float diff_pdf = fmaxf(0.f, wi.z) * INV_PI;
+
+    // ── Clearcoat: mixed coat-GGX + cosine pdf ─────────────────────
+    if (dev_is_clearcoat(mat_id)) {
+        float coat_w = dev_get_clearcoat_weight(mat_id);
+        float coat_r = dev_get_clearcoat_roughness(mat_id);
+        float coat_alpha = fmaxf(coat_r * coat_r, 0.001f);
+        float ior = dev_get_ior(mat_id);
+        float coat_f0t = (ior - 1.f) / (ior + 1.f);
+        float coat_F0  = coat_f0t * coat_f0t;
+        float p_coat = fmaxf(fminf(coat_w * coat_F0, 0.95f), 0.05f);
+
+        float3 h = normalize(wo + wi);
+        float ndf_c = dev_ggx_D(h, coat_alpha);
+        float VdotH = fabsf(dot(wo, h));
+        float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        return p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
+    }
+
+    // ── Fabric: cosine hemisphere only ──────────────────────────────
+    if (dev_is_fabric(mat_id)) {
+        return diff_pdf;
+    }
 
     if (!dev_is_glossy(mat_id) && !dev_is_dielectric_glossy(mat_id)) {
         return diff_pdf;
@@ -579,6 +710,78 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
     s.is_specular = false;
 
     Spectrum Kd = dev_get_Kd(mat_id, uv);
+
+    // ── Clearcoat: sample coat GGX or base Lambert ──────────────────
+    if (dev_is_clearcoat(mat_id)) {
+        float coat_w = dev_get_clearcoat_weight(mat_id);
+        float coat_r = dev_get_clearcoat_roughness(mat_id);
+        float coat_alpha = fmaxf(coat_r * coat_r, 0.001f);
+        float ior = dev_get_ior(mat_id);
+        float coat_f0t = (ior - 1.f) / (ior + 1.f);
+        float coat_F0  = coat_f0t * coat_f0t;
+        float p_coat = fmaxf(fminf(coat_w * coat_F0, 0.95f), 0.05f);
+
+        if (rng.next_float() < p_coat) {
+            // Sample coat GGX lobe
+            float3 h = dev_ggx_sample_halfvector(wo, coat_alpha,
+                                                  rng.next_float(), rng.next_float());
+            s.wi = make_f3(2.f * dot(wo, h) * h.x - wo.x,
+                           2.f * dot(wo, h) * h.y - wo.y,
+                           2.f * dot(wo, h) * h.z - wo.z);
+            if (s.wi.z <= 0.f) { s.pdf = 0.f; s.f = Spectrum::zero(); return s; }
+
+            float VdotH = fabsf(dot(wo, h));
+            float Fr = dev_fresnel_schlick(VdotH, coat_F0);
+            float ndf_c = dev_ggx_D(h, coat_alpha);
+            float geo_c = dev_ggx_G(wo, s.wi, coat_alpha);
+            float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            float diff_pdf = fmaxf(0.f, s.wi.z) * INV_PI;
+            s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
+
+            float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
+            float coat_spec = coat_w * (ndf_c * geo_c * Fr) / denom;
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                s.f.value[i] = coat_spec + (1.f - coat_w * Fr) * Kd.value[i] * INV_PI;
+        } else {
+            // Sample base Lambert
+            s.wi = sample_cosine_hemisphere_dev(rng);
+            if (s.wi.z <= 0.f) { s.pdf = 0.f; s.f = Spectrum::zero(); return s; }
+
+            float diff_pdf = fmaxf(0.f, s.wi.z) * INV_PI;
+            float3 h = normalize(wo + s.wi);
+            float ndf_c = dev_ggx_D(h, coat_alpha);
+            float VdotH = fabsf(dot(wo, h));
+            float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
+
+            float Fr = dev_fresnel_schlick(VdotH, coat_F0);
+            float geo_c = dev_ggx_G(wo, s.wi, coat_alpha);
+            float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
+            float coat_spec = coat_w * (ndf_c * geo_c * Fr) / denom;
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                s.f.value[i] = coat_spec + (1.f - coat_w * Fr) * Kd.value[i] * INV_PI;
+        }
+        return s;
+    }
+
+    // ── Fabric: cosine hemisphere + sheen ───────────────────────────
+    if (dev_is_fabric(mat_id)) {
+        s.wi = sample_cosine_hemisphere_dev(rng);
+        if (s.wi.z <= 0.f) { s.pdf = 0.f; s.f = Spectrum::zero(); return s; }
+        s.pdf = fmaxf(0.f, s.wi.z) * INV_PI;
+
+        float sheen_w = dev_get_sheen(mat_id);
+        float tint    = dev_get_sheen_tint(mat_id);
+        float3 h = normalize(wo + s.wi);
+        float cos_theta_h = fabsf(dot(wo, h));
+        float t = 1.f - cos_theta_h;
+        float t5 = t * t * t * t * t;
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            float sheen_col = (1.f - tint) * 1.0f + tint * Kd.value[i];
+            s.f.value[i] = Kd.value[i] * INV_PI + sheen_w * sheen_col * t5 * INV_PI;
+        }
+        return s;
+    }
 
     if (!dev_is_glossy(mat_id) && !dev_is_dielectric_glossy(mat_id)) {
         // Pure Lambertian: cosine hemisphere
@@ -799,28 +1002,6 @@ uint32_t dev_hash_cell(int cx, int cy, int cz, uint32_t table_size) {
     return h % table_size;
 }
 
-// == Dense cell-bin grid O(1) lookup (device-side) ====================
-// Returns a pointer to the PHOTON_BIN_COUNT precomputed bins for the
-// cell that contains pos, or nullptr if the grid is invalid / pos is
-// outside the grid.  Moved here so dev_estimate_photon_density can call it.
-__forceinline__ __device__
-const PhotonBin* dev_cell_grid_lookup(float3 pos) {
-    if (params.cell_grid_valid == 0 || params.cell_bin_grid == nullptr)
-        return nullptr;
-    float cs = params.cell_grid_cell_size;
-    if (cs <= 0.0f) return nullptr;
-    int ix = (int)floorf((pos.x - params.cell_grid_min_x) / cs);
-    int iy = (int)floorf((pos.y - params.cell_grid_min_y) / cs);
-    int iz = (int)floorf((pos.z - params.cell_grid_min_z) / cs);
-    // Clamp to grid bounds
-    if (ix < 0) ix = 0; else if (ix >= params.cell_grid_dim_x) ix = params.cell_grid_dim_x - 1;
-    if (iy < 0) iy = 0; else if (iy >= params.cell_grid_dim_y) iy = params.cell_grid_dim_y - 1;
-    if (iz < 0) iz = 0; else if (iz >= params.cell_grid_dim_z) iz = params.cell_grid_dim_z - 1;
-    int cell = ix + iy * params.cell_grid_dim_x
-             + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
-    return &params.cell_bin_grid[cell * params.photon_bin_count];
-}
-
 __forceinline__ __device__
 Spectrum dev_estimate_photon_density(
     float3 pos, float3 normal,       // shading normal (ONB / BSDF frame)
@@ -831,98 +1012,41 @@ Spectrum dev_estimate_photon_density(
     Spectrum L = Spectrum::zero();
     if (params.num_photons == 0 || params.grid_table_size == 0) return L;
 
-    // ── Fast path: dense cell-bin gather with trilinear blending ──────
-    // Enabled when the cell-bin grid was uploaded and the runtime flag is
-    // set (DEFAULT_USE_DENSE_GRID / G key).  The Epanechnikov tangential-
-    // disk kernel (§7.1) is baked into bin.flux at CPU build time with
-    // neighbour scatter (each photon deposited into up to 27 cells).
-    //
-    // At query time we blend 8 trilinear-neighbour cells to smooth the
-    // cell-boundary discontinuities caused by the kernel weight being
-    // baked relative to cell centres rather than the actual query point.
-    // Total work: O(8 × PHOTON_BIN_COUNT) — still ~30× faster than the
-    // per-photon hash-grid walk.
-    if (params.use_dense_grid_gather && params.cell_grid_valid) {
-        float cs = params.cell_grid_cell_size;
-        if (cs > 0.f && params.cell_bin_grid != nullptr) {
-            // Continuous cell coordinates (cell centres at 0.5, 1.5, …)
-            float fx = (pos.x - params.cell_grid_min_x) / cs - 0.5f;
-            float fy = (pos.y - params.cell_grid_min_y) / cs - 0.5f;
-            float fz = (pos.z - params.cell_grid_min_z) / cs - 0.5f;
+    // ── Per-photon hash-grid walk O(N_cell) ──────────────────────────
+    // Dual-budget caustic gather (Jensen 1996 two-budget approach).
+    // Three-tag system (0=global noncaustic, 1=global caustic, 2=caustic pass):
+    //   tag 0 → L_global    normalised by 1/N_global  with gather_radius
+    //   tag 1 → SKIPPED     (superseded by dedicated caustic map)
+    //   tag 2 → L_caustic   normalised by 1/N_caustic with caustic_gather_radius
+    // Result = L_global + L_caustic (additive, no double-counting).
 
-            int ix0 = (int)floorf(fx);  float tx = fx - (float)ix0;
-            int iy0 = (int)floorf(fy);  float ty = fy - (float)iy0;
-            int iz0 = (int)floorf(fz);  float tz = fz - (float)iz0;
+    const bool dual_budget = (params.photon_is_caustic_pass != nullptr
+                              && params.num_caustic_emitted > 0);
 
-            const int  N        = params.photon_bin_count;
-            const float inv_area = 2.f / (PI * radius * radius);
-            const float pnorm    = 1.f / (float)params.num_photons_emitted;
-            DevONB frame = DevONB::from_normal(normal);
+    // Radii and normalisation for each budget
+    float r_global  = radius;
+    float r_caustic = dual_budget ? params.caustic_gather_radius : radius;
+    float r_max     = fmaxf(r_global, r_caustic);  // search radius for cell traversal
 
-            for (int corner = 0; corner < 8; ++corner) {
-                int ix = (corner & 1) ? ix0 + 1 : ix0;
-                int iy = (corner & 2) ? iy0 + 1 : iy0;
-                int iz = (corner & 4) ? iz0 + 1 : iz0;
+    float r2_global  = r_global * r_global;
+    float r2_caustic = r_caustic * r_caustic;
+    float inv_area_global  = 2.f / (PI * r2_global);
+    float inv_area_caustic = dual_budget ? 2.f / (PI * r2_caustic) : inv_area_global;
+    float norm_global  = 1.f / (float)params.num_photons_emitted;
+    float norm_caustic = dual_budget ? 1.f / (float)params.num_caustic_emitted : norm_global;
 
-                // Clamp to grid bounds
-                if (ix < 0) ix = 0;
-                else if (ix >= params.cell_grid_dim_x) ix = params.cell_grid_dim_x - 1;
-                if (iy < 0) iy = 0;
-                else if (iy >= params.cell_grid_dim_y) iy = params.cell_grid_dim_y - 1;
-                if (iz < 0) iz = 0;
-                else if (iz >= params.cell_grid_dim_z) iz = params.cell_grid_dim_z - 1;
+    Spectrum L_global  = Spectrum::zero();
+    Spectrum L_caustic = Spectrum::zero();
 
-                float wx = (corner & 1) ? tx : (1.f - tx);
-                float wy = (corner & 2) ? ty : (1.f - ty);
-                float wz = (corner & 4) ? tz : (1.f - tz);
-                float tw = wx * wy * wz;
-                if (tw <= 0.f) continue;
-
-                int cell_idx = ix
-                    + iy * params.cell_grid_dim_x
-                    + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
-                const PhotonBin* bins = &params.cell_bin_grid[cell_idx * N];
-
-                for (int k = 0; k < N; ++k) {
-                    const PhotonBin& b = bins[k];
-                    if (b.count == 0) continue;
-
-                    // Normal gate (§15.1.2)
-                    float3 avg_n = make_f3(b.avg_nx, b.avg_ny, b.avg_nz);
-                    if (dot(avg_n, filter_normal) <= 0.f) continue;
-
-                    // Hemisphere gate
-                    float3 bin_dir = make_f3(b.dir_x, b.dir_y, b.dir_z);
-                    if (dot(bin_dir, filter_normal) <= 0.f) continue;
-
-                    float3 wi_local = frame.world_to_local(bin_dir);
-                    if (wi_local.z <= 0.f) continue;
-
-                    // Diffuse-only BSDF evaluation (§6)
-                    Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
-
-                    // Trilinear-weighted accumulation
-                    for (int lam = 0; lam < NUM_LAMBDA; ++lam)
-                        L.value[lam] += tw * f.value[lam] * b.flux[lam] * inv_area * pnorm;
-                }
-            }
-            return L;
-        }
-        // cell_bin_grid invalid: fall through to hash-grid path.
-    }
-
-    // ── Exact path: per-photon hash-grid walk O(N_cell) ──────────────
     float cell_size = params.grid_cell_size;
-    int cx0 = (int)floorf((pos.x - radius) / cell_size);
-    int cy0 = (int)floorf((pos.y - radius) / cell_size);
-    int cz0 = (int)floorf((pos.z - radius) / cell_size);
-    int cx1 = (int)floorf((pos.x + radius) / cell_size);
-    int cy1 = (int)floorf((pos.y + radius) / cell_size);
-    int cz1 = (int)floorf((pos.z + radius) / cell_size);
+    int cx0 = (int)floorf((pos.x - r_max) / cell_size);
+    int cy0 = (int)floorf((pos.y - r_max) / cell_size);
+    int cz0 = (int)floorf((pos.z - r_max) / cell_size);
+    int cx1 = (int)floorf((pos.x + r_max) / cell_size);
+    int cy1 = (int)floorf((pos.y + r_max) / cell_size);
+    int cz1 = (int)floorf((pos.z + r_max) / cell_size);
 
-    float r2 = radius * radius;
-    float inv_area = 2.f / (PI * r2);  // Epanechnikov 2D normalization
-    float norm = 1.f / (float)params.num_photons_emitted; // 1/N_emitted (§5.3)
+    float r2_search = r_max * r_max;  // broad search, per-photon radius check below
 
     // Track visited bucket keys to avoid double-processing hash-colliding cells
     // (same bucket can be reached from multiple distinct (ix,iy,iz) coordinates).
@@ -962,7 +1086,9 @@ Spectrum dev_estimate_photon_density(
             float d_plane = dot(diff, filter_normal);
             float3 v_tan = diff - filter_normal * d_plane;
             float d_tan2 = dot(v_tan, v_tan);
-            if (d_tan2 > r2) continue;
+
+            // Broad-phase: reject beyond max radius
+            if (d_tan2 > r2_search) continue;
 
             float plane_dist = fabsf(d_plane);
             if (plane_dist > DEFAULT_SURFACE_TAU) continue;
@@ -978,8 +1104,6 @@ Spectrum dev_estimate_photon_density(
                 params.photon_norm_z[idx]);
             if (dot(photon_n, filter_normal) <= 0.0f) continue;
 
-            // Epanechnikov kernel weight (§6.3 guideline)
-            float w = 1.0f - d_tan2 / r2;
             float3 wi_world = make_f3(
                 params.photon_wi_x[idx],
                 params.photon_wi_y[idx],
@@ -993,212 +1117,50 @@ Spectrum dev_estimate_photon_density(
             // Diffuse-only BSDF for density estimation (§6 standard practice).
             // Full Cook-Torrance creates 50x+ variance on glossy surfaces.
             Spectrum f = dev_bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
+
+            // Route to appropriate accumulator based on 3-value tag:
+            //   0 = global noncaustic → L_global   (1/N_global, r_global)
+            //   1 = global caustic    → SKIP       (superseded by caustic map)
+            //   2 = caustic pass      → L_caustic  (1/N_caustic, r_caustic)
+            uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
+            if (tag == 1) continue;  // skip global-pass caustic photons
+            bool is_caustic_pass = (tag == 2);
+            float my_r2       = is_caustic_pass ? r2_caustic      : r2_global;
+            float my_inv_area = is_caustic_pass ? inv_area_caustic : inv_area_global;
+            float my_norm     = is_caustic_pass ? norm_caustic     : norm_global;
+
+            // Per-budget radius check
+            if (d_tan2 > my_r2) continue;
+
+            // Epanechnikov kernel weight (§6.3 guideline)
+            float w = 1.0f - d_tan2 / my_r2;
+
+            Spectrum& L_target = is_caustic_pass ? L_caustic : L_global;
+
             // Accumulate HERO_WAVELENGTHS bins per photon (multi-hero transport)
             int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
             for (int h = 0; h < n_hero; ++h) {
                 float p_flux = params.photon_flux[idx * HERO_WAVELENGTHS + h];
                 int bin = (int)params.photon_lambda[idx * HERO_WAVELENGTHS + h];
                 if (bin >= 0 && bin < NUM_LAMBDA)
-                    L.value[bin] += f.value[bin] * p_flux * w * inv_area * norm;
+                    L_target.value[bin] += f.value[bin] * p_flux * w * my_inv_area * my_norm;
             }
         }
+    }
+
+    // Additive combination: non-caustic indirect from global map +
+    // caustic contribution from dedicated caustic map (no double-counting
+    // because global-pass caustic photons are tagged=1 and skipped above).
+    if (dual_budget) {
+        for (int lam = 0; lam < NUM_LAMBDA; ++lam)
+            L.value[lam] = L_global.value[lam] + L_caustic.value[lam];
+    } else {
+        L = L_global;
     }
     return L;
 }
 
-// == Cone sampling (uniform direction within cone of half-angle) ======
-__forceinline__ __device__
-float3 sample_cone_dev(float3 axis, float cos_half_angle, PCGRng& rng) {
-    // Sample uniformly within a cone aligned to +Z, then rotate to axis
-    float u1 = rng.next_float();
-    float u2 = rng.next_float();
-    float cos_theta = 1.0f - u1 * (1.0f - cos_half_angle);
-    float sin_theta = sqrtf(fmaxf(0.f, 1.0f - cos_theta * cos_theta));
-    float phi = TWO_PI * u2;
-    float3 local = make_f3(sin_theta * cosf(phi), sin_theta * sinf(phi), cos_theta);
-
-    // Build ONB around axis and transform
-    DevONB frame = DevONB::from_normal(axis);
-    return frame.local_to_world(local);
-}
-
-// == Guided BSDF bounce from bin flux CDF ============================
-// Returns a direction sampled proportional to bin flux, jittered within
-// the selected bin's solid angle.  Falls back to cosine hemisphere if
-// bins carry no flux in the positive hemisphere.
-//
-// Bin selection is depth-dependent to maximise per-SPP convergence:
-//
-//   bounce_depth == 0  (throughput = 1, dominant variance contribution):
-//     SORTED CYCLIC SCHEDULE — sample s visits the s-th most important
-//     bin by flux weight w_k = flux_k * cos(theta_n_k), cycling through
-//     all active hemisphere bins.  Sample 0 always hits the top bin,
-//     sample 1 the second, etc.  After n_active samples every bin has
-//     been visited at least once; subsequent cycles repeat in the same
-//     order.  This is depth-first convergence: the first diffuse bounce
-//     (highest throughput) is coverage-optimised before deeper,
-//     attenuated bounces.
-//
-//   bounce_depth >= 1  (throughput <= albedo^b, already attenuated):
-//     STOCHASTIC STRATIFICATION — CDF interval [0,W) is split into S
-//     strata; sample s uses stratum (s + b*97) % S, mixing in the bounce
-//     depth via prime stride 97 > MAX_BOUNCES to break per-bounce
-//     correlation within a single path.
-//
-// In both cases the flux-proportional PDF p(bin k) = w_k/W is used for
-// MIS — unchanged from the baseline so dev_guided_bounce_pdf() needs no
-// modification.
-__forceinline__ __device__
-float3 dev_sample_guided_bounce(
-    const PhotonBin* bins, int N, float3 normal,
-    const PhotonBinDirs& bin_dirs, PCGRng& rng,
-    int sample_index, int total_spp, int bounce_depth)
-{
-    // Build CDF from bin fluxes — ONLY positive-hemisphere bins
-    // (bins whose centroid has dot(dir, normal) > 0)
-    float cdf[MAX_PHOTON_BIN_COUNT];
-    float total = 0.0f;
-    for (int k = 0; k < N; ++k) {
-        float3 bdir = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
-        float cos_n = dot(bdir, normal);
-        if (cos_n <= 0.0f || bins[k].count == 0) {
-            cdf[k] = total;
-            continue;
-        }
-        total += bins[k].scalar_flux * cos_n;
-        cdf[k] = total;
-    }
-
-    // Fallback to cosine hemisphere if no flux in positive hemisphere
-    if (total <= 0.0f) {
-        return sample_cosine_hemisphere_dev(rng);
-    }
-
-    // ── Bin selection — strategy depends on bounce depth ─────────────
-    int selected = N - 1;
-
-    if (bounce_depth == 0) {
-        // Bounce-0: sorted cyclic schedule.
-        // Build sorted index array by w_k (descending).
-        // Insertion sort, O(N²/2) — negligible for N <= 32.
-        int sorted_k[MAX_PHOTON_BIN_COUNT];
-        int n_sorted = 0;
-        for (int k = 0; k < N; ++k) {
-            float3 bdir = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
-            float cos_n = dot(bdir, normal);
-            if (cos_n <= 0.0f || bins[k].count == 0) continue;
-            float wk = bins[k].scalar_flux * cos_n;
-            // Find insertion position (descending)
-            int pos = n_sorted;
-            for (int j = 0; j < n_sorted; ++j) {
-                float3 bjd = make_f3(bins[sorted_k[j]].dir_x,
-                                     bins[sorted_k[j]].dir_y,
-                                     bins[sorted_k[j]].dir_z);
-                if (wk > bins[sorted_k[j]].scalar_flux * dot(bjd, normal)) {
-                    pos = j; break;
-                }
-            }
-            for (int j = n_sorted; j > pos; --j) sorted_k[j] = sorted_k[j - 1];
-            sorted_k[pos] = k;
-            n_sorted++;
-        }
-        if (n_sorted > 0) selected = sorted_k[sample_index % n_sorted];
-    } else {
-        // Deeper bounces: stochastic stratification with per-bounce rotation.
-        float strat_u = (total_spp > 1)
-            ? ((float)((sample_index + bounce_depth * 97) % total_spp) + rng.next_float()) / (float)total_spp
-            : rng.next_float();
-        float xi = strat_u * total;
-        for (int k = 0; k < N; ++k) {
-            if (xi <= cdf[k]) { selected = k; break; }
-        }
-    }
-
-    // Jitter within bin solid angle (cone around bin centroid)
-    float3 bin_dir = make_f3(bins[selected].dir_x,
-                             bins[selected].dir_y,
-                             bins[selected].dir_z);
-    float len = length(bin_dir);
-    if (len < 1e-6f) bin_dir = bin_dirs.dirs[selected]; // fallback to Fibonacci center
-    else bin_dir = bin_dir * (1.0f / len);
-
-    // Cone half-angle ≈ arccos(1 - 2/N)
-    float cos_half = 1.0f - 2.0f / (float)N;
-
-    // Sample cone direction; resample if it falls below hemisphere
-    // (only possible for near-horizon bins where cone straddles tangent plane)
-    float3 wi;
-    const int MAX_RESAMPLE = 8;
-    for (int attempt = 0; attempt < MAX_RESAMPLE; ++attempt) {
-        wi = sample_cone_dev(bin_dir, cos_half, rng);
-        if (dot(wi, normal) > 0.0f) return wi;
-    }
-
-    // All resamples went below hemisphere — use bin centroid directly
-    // (it is guaranteed positive-hemisphere by the CDF filter above)
-    return bin_dir;
-}
-
-// == Guided bounce PDF (solid-angle) =================================
-// Matches dev_sample_guided_bounce():
-//   - Only positive-hemisphere bins participate (dot(dir, normal) > 0)
-//   - Select bin with weight flux * dot(bin_dir, normal)
-//   - Sample uniformly in a cone about that bin's centroid
-//   - Below-hemisphere jitter is rejected (resampled), not reflected
-//
-// The PDF is simply: sum over all bins that could produce wi
-//   p(wi) = Σ_k [ p_select(k) × p_cone(wi | k) ]
-// where p_cone is nonzero only if wi falls within bin k's cone.
-__forceinline__ __device__
-float dev_guided_bounce_pdf(
-    float3 wi,
-    const PhotonBin* bins, int N, float3 normal,
-    const PhotonBinDirs& bin_dirs)
-{
-    if (bins == nullptr || N <= 0) return 0.0f;
-    if (dot(wi, normal) <= 0.0f) return 0.0f;
-
-    // Cone half-angle used in sampling
-    float cos_half = 1.0f - 2.0f / (float)N;
-    cos_half = fminf(fmaxf(cos_half, -1.0f), 1.0f);
-
-    // Uniform cone PDF = 1 / (2π(1 - cos_half))
-    float cone_omega = TWO_PI * (1.0f - cos_half);
-    if (cone_omega <= 1e-12f) return 0.0f;
-    float pdf_cone = 1.0f / cone_omega;
-
-    // Build selection weights — only positive-hemisphere bins (same as sampler)
-    float total = 0.0f;
-    for (int k = 0; k < N; ++k) {
-        if (bins[k].count == 0) continue;
-        float3 axis = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
-        float len = length(axis);
-        axis = (len > 1e-6f) ? axis * (1.0f / len) : bin_dirs.dirs[k];
-        float cos_n = dot(axis, normal);
-        if (cos_n <= 0.0f) continue;
-        total += bins[k].scalar_flux * cos_n;
-    }
-    if (total <= 0.0f) return 0.0f;
-
-    float pdf = 0.0f;
-    for (int k = 0; k < N; ++k) {
-        if (bins[k].count == 0) continue;
-        float3 axis = make_f3(bins[k].dir_x, bins[k].dir_y, bins[k].dir_z);
-        float len = length(axis);
-        axis = (len > 1e-6f) ? axis * (1.0f / len) : bin_dirs.dirs[k];
-        float cos_n = dot(axis, normal);
-        if (cos_n <= 0.0f) continue;
-
-        float w = bins[k].scalar_flux * cos_n;
-        float p_sel = w / total;
-
-        // In-cone check: wi falls within this bin's cone
-        if (dot(axis, wi) >= cos_half)
-            pdf += p_sel * pdf_cone;
-    }
-
-    return pdf;
-}
+// NOTE: CDF binary search lives in core/cdf.h (host+device).
 
 // == Sample triangle barycentric (device) =============================
 __forceinline__ __device__
@@ -1212,23 +1174,241 @@ float3 sample_triangle_dev(float u1, float u2) {
 
 // NOTE: CDF binary search lives in core/cdf.h (host+device).
 
-// NeeResult: returned by dev_nee_direct (defined below)
+// NeeResult: returned by all NEE variants
 struct NeeResult {
     Spectrum L;                // direct lighting contribution
     float    visibility;       // fraction of unoccluded shadow samples [0,1]
 };
 
-// Forward declaration (used by debug_first_hit when shadow rays are on)
-__forceinline__ __device__
-NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
-                         uint32_t mat_id, PCGRng& rng, int bounce = 0,
-                         float2 uv = make_float2(0.f, 0.f));
+// =====================================================================
+// dev_nee_evaluate_sample -- shared inner loop for all NEE variants
+//
+// Given a selected emissive triangle (local_idx) and its selection
+// probability (p_tri), samples a point on the triangle, casts a shadow
+// ray, evaluates emission × BSDF × MIS, and returns the single-sample
+// contribution.  Each NEE variant only needs to implement its own
+// emitter selection strategy and PDF computation, then call this helper.
+// =====================================================================
+struct NeeSampleResult {
+    Spectrum L;       // MIS-weighted contribution (zero if occluded/backfacing)
+    bool     visible; // shadow ray unoccluded?
+};
 
-// Forward declaration – dispatches to cached or direct NEE
 __forceinline__ __device__
-NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
-                           uint32_t mat_id, PCGRng& rng, int bounce = 0,
-                           float2 uv = make_float2(0.f, 0.f));
+NeeSampleResult dev_nee_evaluate_sample(
+    int local_idx, float p_tri,
+    float3 pos, float3 normal, float3 wo_local,
+    uint32_t mat_id, const DevONB& frame, float2 uv, PCGRng& rng)
+{
+    NeeSampleResult r;
+    r.L = Spectrum::zero();
+    r.visible = false;
+
+    uint32_t light_tri = params.emissive_tri_indices[local_idx];
+
+    // Sample uniform point on triangle
+    float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+    float3 lv0 = params.vertices[light_tri * 3 + 0];
+    float3 lv1 = params.vertices[light_tri * 3 + 1];
+    float3 lv2 = params.vertices[light_tri * 3 + 2];
+    float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
+
+    float3 le1 = lv1 - lv0;
+    float3 le2 = lv2 - lv0;
+    float3 light_normal = normalize(cross(le1, le2));
+    float  light_area   = length(cross(le1, le2)) * 0.5f;
+
+    // Direction, distance, cosines
+    float3 to_light = light_pos - pos;
+    float dist2 = dot(to_light, to_light);
+    float dist  = sqrtf(dist2);
+    float3 wi   = to_light * (1.f / dist);
+
+    float cos_x = dot(wi, normal);
+    float cos_y = -dot(wi, light_normal);
+    if (cos_x <= 0.f || cos_y <= 0.f) return r;
+
+    // Shadow ray
+    if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
+        return r;
+    r.visible = true;
+
+    if (p_tri <= 0.f) return r;
+
+    // Emission and BSDF
+    uint32_t light_mat = params.material_ids[light_tri];
+    float2 luv0 = params.texcoords[light_tri * 3 + 0];
+    float2 luv1 = params.texcoords[light_tri * 3 + 1];
+    float2 luv2 = params.texcoords[light_tri * 3 + 2];
+    float2 light_uv = make_float2(
+        luv0.x * bary.x + luv1.x * bary.y + luv2.x * bary.z,
+        luv0.y * bary.x + luv1.y * bary.y + luv2.y * bary.z);
+    Spectrum Le = dev_get_Le(light_mat, light_uv);
+
+    float3 wi_local = frame.world_to_local(wi);
+    Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
+
+    // PDF conversion: area → solid angle
+    float p_y_area = p_tri / light_area;
+    float p_wi     = p_y_area * dist2 / cos_y;
+
+    // MIS vs BSDF sampling
+    float w_mis = 1.0f;
+    if (DEFAULT_USE_MIS) {
+        float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
+        w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
+    }
+
+    // MIS-weighted: f * Le * cos_x / p_wi
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        r.L.value[i] = w_mis * f.value[i] * Le.value[i]
+                      * cos_x / fmaxf(p_wi, 1e-8f);
+    return r;
+}
+
+// =====================================================================
+// Cauchy dispersion helpers (§10.1)
+// n(λ) = A + B / λ²   (λ in nm).
+// Falls back to constant IOR when dispersion is disabled.
+// =====================================================================
+__forceinline__ __device__
+float dev_ior_at_lambda(uint32_t mat_id, float lambda_nm) {
+    if (params.mat_dispersion && params.mat_dispersion[mat_id])
+        return params.cauchy_A[mat_id] + params.cauchy_B[mat_id] / (lambda_nm * lambda_nm);
+    return dev_get_ior(mat_id);
+}
+
+__forceinline__ __device__
+bool dev_has_dispersion(uint32_t mat_id) {
+    return params.mat_dispersion && params.mat_dispersion[mat_id];
+}
+
+// =====================================================================
+// dev_fresnel_dielectric — Fresnel reflectance for a dielectric boundary.
+// eta = n_i / n_t (ratio of IORs).  cos_i = |cosine of incident angle|.
+// Returns F (reflectance), 0..1.   F == 1.0 when TIR.
+// =====================================================================
+__forceinline__ __device__
+float dev_fresnel_dielectric(float cos_i, float eta) {
+    float sin2_t = eta * eta * (1.f - cos_i * cos_i);
+    if (sin2_t >= 1.f) return 1.f;       // total internal reflection
+    float cos_t = sqrtf(1.f - sin2_t);
+    float rs = (eta * cos_i - cos_t) / (eta * cos_i + cos_t);
+    float rp = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
+    return 0.5f * (rs * rs + rp * rp);
+}
+
+// =====================================================================
+// dev_specular_bounce — Shared helper for glass (Fresnel dielectric) and
+// mirror reflection.  Returns the new ray direction, offset position, and
+// a spectral throughput filter.
+//
+// The filter already accounts for the stochastic Fresnel choice: the
+// hero wavelength decides reflect vs refract (probability F_hero for
+// reflection, 1-F_hero for refraction), and the filter re-weights every
+// wavelength bin by the ratio of that bin's Fresnel to the hero's.
+//
+// This ensures identical energy accounting to the CPU BSDF
+// (bsdf.h glass_sample), where:
+//   reflect: throughput *= (F_b / F_hero)                 — no Tf
+//   refract: throughput *= Tf[b] * (1 - F_b) / (1 - F_hero) — with Tf
+//   (bins with TIR get zero weight)
+//
+// Chromatic dispersion (Cauchy equation, §10.1):
+// When dispersion is enabled, the hero wavelength (hero_bins[0] if
+// provided, else bin 0) determines the refraction direction.  All other
+// wavelength bins share that direction but receive per-wavelength Fresnel
+// weights in `filter`.
+//
+// Without dispersion: all bins share the same IOR/Fresnel, the ratio
+// is 1 everywhere: reflect → filter = 1.0, refract → filter = Tf.
+// This recovers the original non-dispersive behaviour exactly.
+// =====================================================================
+struct SpecularBounceResult {
+    float3   new_dir;
+    float3   new_pos;
+    Spectrum filter;   // throughput multiplier for the chosen path
+};
+
+__forceinline__ __device__
+SpecularBounceResult dev_specular_bounce(
+    float3 dir, float3 pos, float3 normal,
+    uint32_t mat_id, float2 uv, PCGRng& rng,
+    const int* hero_bins = nullptr, int num_hero = 0)
+{
+    SpecularBounceResult r;
+    r.filter = Spectrum::constant(1.0f);
+
+    if (dev_is_glass(mat_id) || dev_is_translucent(mat_id)) {
+        bool entering = dot(dir, normal) < 0.f;
+        float3 outward_n = entering ? normal : normal * (-1.f);
+        float cos_i = fabsf(dot(dir, outward_n));
+
+        // Hero wavelength determines direction when dispersion is enabled.
+        // When called from the camera path (no hero_bins), use the D-line
+        // bin (~589 nm) so the refraction direction uses the nominal IOR
+        // instead of the extreme UV bin 0 (380 nm, IOR much too high).
+        constexpr int DLINE_BIN = (int)((589.0f - LAMBDA_MIN) / LAMBDA_STEP);
+        int hero_bin = (hero_bins && num_hero > 0) ? hero_bins[0] : DLINE_BIN;
+        float hero_ior = dev_ior_at_lambda(mat_id, lambda_of_bin(hero_bin));
+        float eta_hero = entering ? (1.f / hero_ior) : hero_ior;
+
+        // Fresnel reflectance at hero wavelength
+        float F_hero = dev_fresnel_dielectric(cos_i, eta_hero);
+
+        Spectrum Tf = dev_get_Tf(mat_id, uv);
+        bool do_reflect = (rng.next_float() < F_hero);
+
+        if (do_reflect) {
+            r.new_dir = dir - outward_n * (2.f * dot(dir, outward_n));
+            r.new_pos = pos + outward_n * OPTIX_SCENE_EPSILON;
+
+            if (dev_has_dispersion(mat_id)) {
+                // Reflection filter: F_b / F_hero  (Tf NOT applied)
+                float inv_F_hero = 1.f / fmaxf(F_hero, 1e-8f);
+                for (int b = 0; b < NUM_LAMBDA; ++b) {
+                    float n_b   = dev_ior_at_lambda(mat_id, lambda_of_bin(b));
+                    float eta_b = entering ? (1.f / n_b) : n_b;
+                    float F_b   = dev_fresnel_dielectric(cos_i, eta_b);
+                    r.filter.value[b] = F_b * inv_F_hero;
+                }
+            }
+            // else: non-dispersive → F_b == F_hero for all bins,
+            //       ratio = 1.0, filter stays constant(1.0).  Correct.
+        } else {
+            // Refract — direction from hero wavelength IOR
+            float sin2_hero = eta_hero * eta_hero * (1.f - cos_i * cos_i);
+            float3 refracted = dir * eta_hero +
+                outward_n * (eta_hero * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_hero)));
+            r.new_dir = normalize(refracted);
+            r.new_pos = pos - outward_n * OPTIX_SCENE_EPSILON;
+
+            if (dev_has_dispersion(mat_id)) {
+                // Refraction filter: Tf[b] * (1 - F_b) / (1 - F_hero)
+                // Bins with TIR (F_b == 1) get zero weight.
+                float inv_one_minus_F = 1.f / fmaxf(1.f - F_hero, 1e-8f);
+                for (int b = 0; b < NUM_LAMBDA; ++b) {
+                    float n_b   = dev_ior_at_lambda(mat_id, lambda_of_bin(b));
+                    float eta_b = entering ? (1.f / n_b) : n_b;
+                    float F_b   = dev_fresnel_dielectric(cos_i, eta_b);
+                    if (F_b >= 1.f) {
+                        r.filter.value[b] = 0.f;  // TIR at this wavelength
+                    } else {
+                        r.filter.value[b] = Tf.value[b] * (1.f - F_b) * inv_one_minus_F;
+                    }
+                }
+            } else {
+                // Non-dispersive: (1-F)/(1-F) = 1 for all bins → filter = Tf
+                r.filter = Tf;
+            }
+        }
+    } else {
+        // Mirror: pure reflection
+        r.new_dir = dir - normal * (2.f * dot(dir, normal));
+        r.new_pos = pos + normal * OPTIX_SCENE_EPSILON;
+    }
+    return r;
+}
 
 // =====================================================================
 // DEBUG FIRST-HIT RENDERING
@@ -1248,18 +1428,23 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         return render_material_id_dev(mat_id);
     if (params.render_mode == RENDER_MODE_DEPTH)
         return render_depth_dev(hit.t, 5.0f);
-    if (params.render_mode == RENDER_MODE_COVERAGE) {
-        if (params.shadow_ray_cache_valid && params.shadow_ray_cell_count
-            && params.light_cache_cell_size > 0.f && params.coverage_max_value > 0.f) {
-            int cx = (int)floorf(hit.position.x / params.light_cache_cell_size);
-            int cy = (int)floorf(hit.position.y / params.light_cache_cell_size);
-            int cz = (int)floorf(hit.position.z / params.light_cache_cell_size);
-            uint32_t key = dev_hash_cell(cx, cy, cz, LIGHT_CACHE_TABLE_SIZE);
-            float v = (float)params.shadow_ray_cell_count[key] / params.coverage_max_value;
-            v = fminf(v, 1.f);
-            return Spectrum::constant(v);
-        }
-        return Spectrum::zero();
+
+    // Per-triangle photon irradiance heatmap (§ preview photon map)
+    if (params.show_photon_heatmap && params.tri_photon_irradiance
+        && hit.triangle_id < (uint32_t)params.num_triangles) {
+        float density = params.tri_photon_irradiance[hit.triangle_id];
+        // Log-scale heatmap: blue(cold) → green → red(hot)
+        float t = fminf(log2f(density * 1e4f + 1.f) / 15.f, 1.f);
+        // Simple 3-stop gradient: blue → green → red
+        float r = fminf(fmaxf(t * 2.f - 1.f, 0.f), 1.f);
+        float g = 1.f - fabsf(t * 2.f - 1.f);
+        float b = fminf(fmaxf(1.f - t * 2.f, 0.f), 1.f);
+        Spectrum s;
+        for (int i = 0; i < NUM_LAMBDA; ++i) s.value[i] = 0.f;
+        for (int i = 0; i < NUM_LAMBDA/3; ++i) s.value[i] = r;
+        for (int i = NUM_LAMBDA/3; i < 2*NUM_LAMBDA/3; ++i) s.value[i] = g;
+        for (int i = 2*NUM_LAMBDA/3; i < NUM_LAMBDA; ++i) s.value[i] = b;
+        return s;
     }
 
     // Emission
@@ -1275,42 +1460,14 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
     Spectrum throughput_s = Spectrum::constant(1.0f);
 
     for (int bounce = 0; bounce < DEFAULT_MAX_SPECULAR_CHAIN; ++bounce) {
-        if (!dev_is_specular(cur_mat)) break;
+        if (!dev_is_specular(cur_mat) && !dev_is_translucent(cur_mat)) break;
 
-        if (dev_is_glass(cur_mat)) {
-            // Glass: Fresnel reflect/refract (same logic as full_path_trace)
-            float eta = dev_get_ior(cur_mat);
-            bool entering = dot(cur_dir, cur_normal) < 0.f;
-            float3 outward_n = entering ? cur_normal : cur_normal * (-1.f);
-            float ni_nt = entering ? (1.f / eta) : eta;
-            float cos_i = fabsf(dot(cur_dir, outward_n));
-            float sin2_t = ni_nt * ni_nt * (1.f - cos_i * cos_i);
-            float fresnel = 1.f;
-            if (sin2_t < 1.f) {
-                float cos_t = sqrtf(1.f - sin2_t);
-                float rs = (ni_nt * cos_i - cos_t) / (ni_nt * cos_i + cos_t);
-                float rp = (cos_i - ni_nt * cos_t) / (cos_i + ni_nt * cos_t);
-                fresnel = 0.5f * (rs * rs + rp * rp);
-            }
-            // Apply transmittance filter (Tf × diffuse texture)
-            Spectrum Tf = dev_get_Tf(cur_mat, cur_uv);
-            for (int i = 0; i < NUM_LAMBDA; ++i)
-                throughput_s.value[i] *= Tf.value[i];
-
-            if (rng.next_float() < fresnel) {
-                cur_dir = cur_dir - outward_n * (2.f * dot(cur_dir, outward_n));
-                cur_pos = cur_pos + outward_n * OPTIX_SCENE_EPSILON;
-            } else {
-                float3 refracted = cur_dir * ni_nt +
-                    outward_n * (ni_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
-                cur_dir = normalize(refracted);
-                cur_pos = cur_pos - outward_n * OPTIX_SCENE_EPSILON;
-            }
-        } else {
-            // Mirror: pure reflection
-            cur_dir = cur_dir - cur_normal * (2.f * dot(cur_dir, cur_normal));
-            cur_pos = cur_pos + cur_normal * OPTIX_SCENE_EPSILON;
-        }
+        SpecularBounceResult sb = dev_specular_bounce(
+            cur_dir, cur_pos, cur_normal, cur_mat, cur_uv, rng);
+        for (int i = 0; i < NUM_LAMBDA; ++i)
+            throughput_s.value[i] *= sb.filter.value[i];
+        cur_dir = sb.new_dir;
+        cur_pos = sb.new_pos;
 
         TraceResult hit2 = trace_radiance(cur_pos, cur_dir);
         if (!hit2.hit) return Spectrum::zero();
@@ -1322,122 +1479,14 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
         cur_uv = hit2.uv;
     }
 
-    // Diffuse/glossy hit: direct lighting via next-event estimation
+    // Diffuse/glossy hit: fast single-sample unshadowed direct lighting.
+    // When params.debug_shadow_rays is on, __raygen__render routes to
+    // full_path_trace instead, so this path is always the fast preview.
     Spectrum L = Spectrum::zero();
 
-    if (params.debug_shadow_rays) {
-        // NEE PNG path: full dev_nee_direct with M shadow rays + BSDF eval
-        float3 wo_local = make_float3(0.f, 0.f, 1.f); // approximate wo in local frame
-        DevONB frame = DevONB::from_normal(cur_normal);
-        wo_local = frame.world_to_local(normalize(-cur_dir));
-        NeeResult nee = dev_nee_dispatch(cur_pos, cur_normal, wo_local, cur_mat, rng, 0, cur_uv);
-        L = nee.L;
-
-        // v2: also gather photon density for indirect lighting
-        if (params.render_mode != RENDER_MODE_DIRECT_ONLY) {
-            Spectrum L_photon = dev_estimate_photon_density(
-                    cur_pos, cur_normal, cur_normal, wo_local, cur_mat,
-                    params.gather_radius, cur_uv);
-            L += L_photon;
-        }
-
-        // Glossy BSDF continuation: trace reflections for glossy surfaces
-        if (dev_is_any_glossy(cur_mat)) {
-            Spectrum glossy_tp = Spectrum::constant(1.0f);
-            for (int gb = 0; gb < DEFAULT_MAX_GLOSSY_BOUNCES; ++gb) {
-                DevBSDFSample bs = dev_bsdf_sample(cur_mat, wo_local, cur_uv, rng);
-                if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
-
-                float cos_theta = bs.wi.z;
-                for (int i = 0; i < NUM_LAMBDA; ++i)
-                    glossy_tp.value[i] *= bs.f.value[i] * cos_theta / bs.pdf;
-
-                float max_tp = glossy_tp.max_component();
-                if (max_tp < 0.01f) break;
-
-                float3 wi_world = frame.local_to_world(bs.wi);
-                cur_pos = cur_pos + cur_normal * OPTIX_SCENE_EPSILON;
-                TraceResult hit_g = trace_radiance(cur_pos, wi_world);
-                if (!hit_g.hit) break;
-
-                cur_mat = hit_g.material_id;
-                cur_dir = wi_world;
-
-                if (dev_is_emissive(cur_mat)) {
-                    L += glossy_tp * dev_get_Le(cur_mat, hit_g.uv);
-                    break;
-                }
-
-                // Follow specular chain if we hit mirror/glass
-                if (dev_is_specular(cur_mat)) {
-                    for (int s = 0; s < DEFAULT_MAX_SPECULAR_CHAIN; ++s) {
-                        float3 n = hit_g.shading_normal;
-                        if (dev_is_glass(cur_mat)) {
-                            float eta = dev_get_ior(cur_mat);
-                            bool entering = dot(cur_dir, n) < 0.f;
-                            float3 outward_n = entering ? n : n * (-1.f);
-                            float ni_nt = entering ? (1.f / eta) : eta;
-                            float cos_i = fabsf(dot(cur_dir, outward_n));
-                            float sin2_t = ni_nt * ni_nt * (1.f - cos_i * cos_i);
-                            float fresnel = 1.f;
-                            if (sin2_t < 1.f) {
-                                float cos_t = sqrtf(1.f - sin2_t);
-                                float rs = (ni_nt * cos_i - cos_t) / (ni_nt * cos_i + cos_t);
-                                float rp = (cos_i - ni_nt * cos_t) / (cos_i + ni_nt * cos_t);
-                                fresnel = 0.5f * (rs * rs + rp * rp);
-                            }
-                            if (rng.next_float() < fresnel) {
-                                cur_dir = cur_dir - outward_n * (2.f * dot(cur_dir, outward_n));
-                                cur_pos = hit_g.position + outward_n * OPTIX_SCENE_EPSILON;
-                            } else {
-                                float3 refracted = cur_dir * ni_nt +
-                                    outward_n * (ni_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
-                                cur_dir = normalize(refracted);
-                                cur_pos = hit_g.position - outward_n * OPTIX_SCENE_EPSILON;
-                            }
-                        } else {
-                            cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
-                            cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
-                        }
-                        hit_g = trace_radiance(cur_pos, cur_dir);
-                        if (!hit_g.hit) goto debug_done;
-                        cur_mat = hit_g.material_id;
-                        if (dev_is_emissive(cur_mat)) {
-                            L += glossy_tp * dev_get_Le(cur_mat, hit_g.uv);
-                            goto debug_done;
-                        }
-                        if (!dev_is_specular(cur_mat)) break;
-                    }
-                }
-
-                cur_pos    = hit_g.position;
-                cur_normal = hit_g.shading_normal;
-                cur_uv     = hit_g.uv;
-
-                frame = DevONB::from_normal(cur_normal);
-                wo_local = frame.world_to_local(normalize(-cur_dir));
-                if (wo_local.z <= 0.f) break;
-
-                NeeResult nee_g = dev_nee_dispatch(cur_pos, cur_normal, wo_local, cur_mat, rng, gb + 1, cur_uv);
-                L += glossy_tp * nee_g.L;
-
-                if (params.render_mode != RENDER_MODE_DIRECT_ONLY) {
-                    Spectrum L_ph = dev_estimate_photon_density(
-                        cur_pos, cur_normal, cur_normal, wo_local, cur_mat,
-                        params.gather_radius, cur_uv);
-                    L += glossy_tp * L_ph;
-                }
-
-                if (!dev_is_any_glossy(cur_mat)) break;
-            }
-        }
-    } else {
+    {
         // Real-time debug: fast single-sample, no shadow ray
         // Supports both diffuse and glossy materials with reflection bounces
-
-        // Helper lambda-like: approximate unshadowed direct lighting at a
-        // surface point using a single emissive sample and full BSDF eval.
-        // We do this inline for each bounce to keep the code self-contained.
         Spectrum glossy_tp = Spectrum::constant(1.0f);
 
         for (int gb = 0; gb <= DEFAULT_MAX_GLOSSY_BOUNCES; ++gb) {
@@ -1512,7 +1561,12 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
             // Only for near-mirror surfaces (roughness < 0.1) where one ray
             // at the specular peak is a reasonable approximation of the lobe.
             if (!dev_is_any_glossy(cur_mat)) break;
-            if (dev_get_roughness(cur_mat) >= 0.1f) break;
+
+            // For clearcoat, use the coat roughness for continuation check
+            float cont_roughness = dev_is_clearcoat(cur_mat)
+                ? dev_get_clearcoat_roughness(cur_mat)
+                : dev_get_roughness(cur_mat);
+            if (cont_roughness >= 0.1f) break;
 
             // Mirror reflection direction (used as the half-vector = normal)
             float3 refl_dir = cur_dir - cur_normal * (2.f * dot(cur_dir, cur_normal));
@@ -1526,15 +1580,22 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
             // PDF).  This avoids the old D·G·F/(4cos²) blowout for smooth
             // surfaces where D(n) → ∞.
             float cos_view = fabsf(dot(normalize(-cur_dir), cur_normal));
-            float roughness_r = dev_get_roughness(cur_mat);
-            float alpha_r = fmaxf(roughness_r * roughness_r, 0.001f);
+            float alpha_r = fmaxf(cont_roughness * cont_roughness, 0.001f);
 
             // Smith G for both wo and wi (same angle for mirror direction)
             float G_val = dev_ggx_G1(wo_local, alpha_r);
             G_val *= G_val;  // G(wo,wi) ≈ G1(wo)·G1(wi), same angle
 
-            Spectrum Ks_r = dev_get_Ks(cur_mat);
-            if (dev_is_dielectric_glossy(cur_mat)) {
+            if (dev_is_clearcoat(cur_mat)) {
+                // Clearcoat: dielectric coat Fresnel, weight = coat_w × G × Fr
+                float coat_w = dev_get_clearcoat_weight(cur_mat);
+                float ior_r = dev_get_ior(cur_mat);
+                float F0_r = ((ior_r - 1.f) / (ior_r + 1.f)) * ((ior_r - 1.f) / (ior_r + 1.f));
+                float Fr_r = dev_fresnel_schlick(cos_view, F0_r);
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    glossy_tp.value[i] *= G_val * coat_w * Fr_r;
+            } else if (dev_is_dielectric_glossy(cur_mat)) {
+                Spectrum Ks_r = dev_get_Ks(cur_mat);
                 float ior_r = dev_get_ior(cur_mat);
                 float F0_r = ((ior_r - 1.f) / (ior_r + 1.f)) * ((ior_r - 1.f) / (ior_r + 1.f));
                 float Fr_r = dev_fresnel_schlick(cos_view, F0_r);
@@ -1542,6 +1603,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                     glossy_tp.value[i] *= G_val * Fr_r * Ks_r.value[i];
             } else {
                 // Metallic: per-channel Fresnel
+                Spectrum Ks_r = dev_get_Ks(cur_mat);
                 for (int i = 0; i < NUM_LAMBDA; ++i) {
                     float Fr_r = dev_fresnel_schlick(cos_view, Ks_r.value[i]);
                     glossy_tp.value[i] *= G_val * Fr_r;
@@ -1563,41 +1625,17 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                 break;
             }
 
-            // Follow specular chain if we hit mirror/glass
-            if (dev_is_specular(cur_mat)) {
+            // Follow specular chain if we hit mirror/glass/translucent
+            if (dev_is_specular(cur_mat) || dev_is_translucent(cur_mat)) {
                 for (int s = 0; s < DEFAULT_MAX_SPECULAR_CHAIN; ++s) {
-                    float3 n = hit_g.shading_normal;
-                    if (dev_is_glass(cur_mat)) {
-                        float eta = dev_get_ior(cur_mat);
-                        bool entering = dot(cur_dir, n) < 0.f;
-                        float3 outward_n = entering ? n : n * (-1.f);
-                        float ni_nt = entering ? (1.f / eta) : eta;
-                        float cos_i = fabsf(dot(cur_dir, outward_n));
-                        float sin2_t = ni_nt * ni_nt * (1.f - cos_i * cos_i);
-                        float fresnel = 1.f;
-                        if (sin2_t < 1.f) {
-                            float cos_t = sqrtf(1.f - sin2_t);
-                            float rs = (ni_nt * cos_i - cos_t) / (ni_nt * cos_i + cos_t);
-                            float rp = (cos_i - ni_nt * cos_t) / (cos_i + ni_nt * cos_t);
-                            fresnel = 0.5f * (rs * rs + rp * rp);
-                        }
-                        // Apply transmittance filter
-                        Spectrum Tf_gs = dev_get_Tf(cur_mat, hit_g.uv);
-                        for (int i = 0; i < NUM_LAMBDA; ++i)
-                            glossy_tp.value[i] *= Tf_gs.value[i];
-                        if (rng.next_float() < fresnel) {
-                            cur_dir = cur_dir - outward_n * (2.f * dot(cur_dir, outward_n));
-                            cur_pos = hit_g.position + outward_n * OPTIX_SCENE_EPSILON;
-                        } else {
-                            float3 refracted = cur_dir * ni_nt +
-                                outward_n * (ni_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
-                            cur_dir = normalize(refracted);
-                            cur_pos = hit_g.position - outward_n * OPTIX_SCENE_EPSILON;
-                        }
-                    } else {
-                        cur_dir = cur_dir - n * (2.f * dot(cur_dir, n));
-                        cur_pos = hit_g.position + n * OPTIX_SCENE_EPSILON;
-                    }
+                    SpecularBounceResult sb = dev_specular_bounce(
+                        cur_dir, hit_g.position, hit_g.shading_normal,
+                        cur_mat, hit_g.uv, rng);
+                    for (int i = 0; i < NUM_LAMBDA; ++i)
+                        glossy_tp.value[i] *= sb.filter.value[i];
+                    cur_dir = sb.new_dir;
+                    cur_pos = sb.new_pos;
+
                     hit_g = trace_radiance(cur_pos, cur_dir);
                     if (!hit_g.hit) goto debug_done;
                     cur_mat = hit_g.material_id;
@@ -1605,7 +1643,7 @@ Spectrum debug_first_hit(float3 origin, float3 direction, PCGRng& rng) {
                         L += glossy_tp * dev_get_Le(cur_mat, hit_g.uv);
                         goto debug_done;
                     }
-                    if (!dev_is_specular(cur_mat)) break;
+                    if (!dev_is_specular(cur_mat) && !dev_is_translucent(cur_mat)) break;
                 }
             }
 
@@ -1620,203 +1658,42 @@ debug_done:
 }
 
 // =====================================================================
-// GUIDED NEE (B2) — Bin-flux-weighted light selection
-//
-// Instead of sampling emissive triangles from the power-based CDF,
-// we re-weight each emissive triangle by how much photon flux arrives
-// from that direction.  This steers shadow rays toward lights that
-// actually contribute indirect illumination at this hitpoint.
-//
-// For each emissive triangle:
-//   weight_i = cdf_weight_i × (1 + ALPHA × bin_flux(direction_to_light))
-//
-// A temporary CDF is built on the stack (num_emissive entries, capped
-// at 128) and sampled.  The modified PDF is used in the estimator
-// for correct weighting (importance sampling with a different proposal).
-//
-// Falls back to dev_nee_direct when:
-//   - bins are not valid
-//   - num_emissive > 128 (stack budget)
-//   - no bin has flux
+// NEE DIRECT LIGHTING (with shadow ray)
+// M light samples per hitpoint, averaged.  Coverage-aware CDF selection.
 // =====================================================================
-constexpr int   NEE_GUIDED_MAX_EMISSIVE = 128;  // stack-budget for temp CDF
-constexpr float NEE_GUIDED_ALPHA        = 5.0f; // flux-boost strength
 
+// Helper: coverage-aware emitter selection + PDF
 __forceinline__ __device__
-NeeResult dev_nee_guided(float3 pos, float3 normal, float3 wo_local,
-                         uint32_t mat_id, PCGRng& rng, int bounce,
-                         const PhotonBin* bins, int N,
-                         const PhotonBinDirs& bin_dirs,
-                         float2 uv = make_float2(0.f, 0.f))
-{
-    NeeResult result;
-    result.L = Spectrum::zero();
-    result.visibility = 0.f;
-    if (params.num_emissive <= 0) return result;
-
-    // Fall back to standard NEE if too many emissive tris for stack CDF
-    if (params.num_emissive > NEE_GUIDED_MAX_EMISSIVE) {
-        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    }
-
-    // Compute total bin flux (for early-out if bins are empty)
-    float total_bin_flux = 0.0f;
-    for (int k = 0; k < N; ++k) total_bin_flux += bins[k].scalar_flux;
-    if (total_bin_flux <= 0.0f) {
-        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    }
-
-    // Build bin-flux-weighted CDF over emissive triangles
-    float guided_cdf[NEE_GUIDED_MAX_EMISSIVE];
-    float guided_total = 0.0f;
-
-    for (int i = 0; i < params.num_emissive; ++i) {
-        // Original CDF weight for this triangle
-        float p_orig;
-        if (i == 0)
-            p_orig = params.emissive_cdf[0];
-        else
-            p_orig = params.emissive_cdf[i] - params.emissive_cdf[i - 1];
-
-        // Direction from hitpoint to triangle centroid
-        uint32_t tri = params.emissive_tri_indices[i];
-        float3 v0 = params.vertices[tri * 3 + 0];
-        float3 v1 = params.vertices[tri * 3 + 1];
-        float3 v2 = params.vertices[tri * 3 + 2];
-        float3 centroid = (v0 + v1 + v2) * (1.0f / 3.0f);
-        float3 to_light = centroid - pos;
-        float d = length(to_light);
-
-        float bin_boost = 0.0f;
-        if (d > 1e-6f) {
-            float3 wi = to_light * (1.0f / d);
-            bin_boost = guided_nee_bin_boost(
-                wi, normal, bins, N, bin_dirs, total_bin_flux);
-        }
-
-        float w = guided_nee_weight(p_orig, bin_boost, NEE_GUIDED_ALPHA);
-        guided_total += w;
-        guided_cdf[i] = guided_total;
-    }
-
-    if (guided_total <= 0.0f) {
-        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    }
-
-    // Normalize CDF
-    float inv_total = 1.0f / guided_total;
-    for (int i = 0; i < params.num_emissive; ++i)
-        guided_cdf[i] *= inv_total;
-
-    // Sample count (same bounce-dependent logic as standard NEE)
-    const int M = nee_shadow_sample_count(
-        bounce, params.nee_light_samples, params.nee_deep_samples);
-    int visible_count = 0;
-
-    DevONB frame = DevONB::from_normal(normal);
-
-    for (int s = 0; s < M; ++s) {
-        // Sample from guided CDF
+int dev_nee_select_global(PCGRng& rng, float& p_tri_out) {
+    const float c = DEFAULT_NEE_COVERAGE_FRACTION;
+    int local_idx;
+    if (c > 0.f && rng.next_float() < c) {
+        local_idx = (int)(rng.next_float() * (float)params.num_emissive);
+        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+    } else {
         float xi = rng.next_float();
-        int local_idx = binary_search_cdf(guided_cdf, params.num_emissive, xi);
-
-        uint32_t light_tri = params.emissive_tri_indices[local_idx];
-
-        // Sample point on triangle
-        float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
-        float3 lv0 = params.vertices[light_tri * 3 + 0];
-        float3 lv1 = params.vertices[light_tri * 3 + 1];
-        float3 lv2 = params.vertices[light_tri * 3 + 2];
-        float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
-
-        float3 le1 = lv1 - lv0;
-        float3 le2 = lv2 - lv0;
-        float3 light_normal = normalize(cross(le1, le2));
-        float  light_area   = length(cross(le1, le2)) * 0.5f;
-
-        // Direction and cosines
-        float3 to_light = light_pos - pos;
-        float dist2 = dot(to_light, to_light);
-        float dist  = sqrtf(dist2);
-        float3 wi   = to_light * (1.f / dist);
-
-        float cos_x = dot(wi, normal);
-        float cos_y = -dot(wi, light_normal);
-        if (cos_x <= 0.f || cos_y <= 0.f) continue;
-
-        // Shadow ray
-        if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
-            continue;
-        visible_count++;
-
-        // PDF from guided distribution (NOT original CDF)
-        float p_guided;
-        if (local_idx == 0)
-            p_guided = guided_cdf[0];
-        else
-            p_guided = guided_cdf[local_idx] - guided_cdf[local_idx - 1];
-
-        uint32_t light_mat = params.material_ids[light_tri];
-        // Interpolate UV at sampled light point for emission texture
-        float2 luv0 = params.texcoords[light_tri * 3 + 0];
-        float2 luv1 = params.texcoords[light_tri * 3 + 1];
-        float2 luv2 = params.texcoords[light_tri * 3 + 2];
-        float2 light_uv = make_float2(
-            luv0.x * bary.x + luv1.x * bary.y + luv2.x * bary.z,
-            luv0.y * bary.x + luv1.y * bary.y + luv2.y * bary.z);
-        Spectrum Le = dev_get_Le(light_mat, light_uv);
-
-        float3 wi_local = frame.world_to_local(wi);
-        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
-
-        // PDF conversion: area → solid angle
-        float p_y_area = p_guided / light_area;
-        float p_wi     = p_y_area * dist2 / cos_y;
-
-        // MIS vs BSDF sampling (guided/cosine mixture)
-        float w_mis = 1.0f;
-        if (DEFAULT_USE_MIS) {
-            float p_guided_bsdf = fminf(fmaxf(DEFAULT_GUIDED_BSDF_MIX, 0.0f), 1.0f);
-            // BSDF PDF in local space (glossy-aware)
-            float pdf_cos = dev_bsdf_pdf(mat_id, wo_local, wi_local);
-            // Guided BSDF PDF in world space (only if bins are valid)
-            float pdf_guided = (p_guided_bsdf > 0.0f)
-                ? dev_guided_bounce_pdf(wi, bins, N, normal, bin_dirs)
-                : 0.0f;
-            float pdf_bsdf = p_guided_bsdf * pdf_guided + (1.0f - p_guided_bsdf) * pdf_cos;
-            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
-        }
-
-        // Accumulate MIS-weighted: f * Le * cos_x / p_wi
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
-                          * cos_x / fmaxf(p_wi, 1e-8f);
-        }
+        local_idx = binary_search_cdf(
+            params.emissive_cdf, params.num_emissive, xi);
+        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
     }
-
-    // Average over M samples
-    if (M > 1) {
-        float inv_M = 1.f / (float)M;
-        for (int i = 0; i < NUM_LAMBDA; ++i)
-            result.L.value[i] *= inv_M;
-    }
-
-    result.visibility = (float)visible_count / (float)M;
-    return result;
+    float p_power = (local_idx == 0)
+        ? params.emissive_cdf[0]
+        : params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+    float p_uniform = 1.0f / (float)params.num_emissive;
+    p_tri_out = (1.0f - c) * p_power + c * p_uniform;
+    return local_idx;
 }
 
-// =====================================================================
-// NEE DIRECT LIGHTING (with shadow ray)
-// M light samples per hitpoint, averaged.  Reuses the same CDF as
-// photon emission so we have ONE light distribution for the whole
-// renderer (per the spec).
-//
-// Returns both the direct lighting spectrum AND the fraction of
-// shadow-ray samples that were unoccluded (visibility_fraction).
-// The visibility fraction is used to attenuate the photon gather
-// contribution at the same hitpoint, preserving contact shadows
-// near thin occluders.
-// =====================================================================
+// Helper: global coverage-aware PDF for a given emissive index
+__forceinline__ __device__
+float dev_nee_global_pdf(int local_idx) {
+    const float c = DEFAULT_NEE_COVERAGE_FRACTION;
+    float p_power = (local_idx == 0)
+        ? params.emissive_cdf[0]
+        : params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+    float p_uniform = 1.0f / (float)params.num_emissive;
+    return (1.0f - c) * p_power + c * p_uniform;
+}
 
 __forceinline__ __device__
 NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
@@ -1828,428 +1705,99 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
     result.visibility = 0.f;
     if (params.num_emissive <= 0) return result;
 
-    // Bounce-dependent sample count: full samples at bounce 0,
-    // reduced at deeper bounces (throughput already attenuated)
-    const int M = nee_shadow_sample_count(
-        bounce, params.nee_light_samples, params.nee_deep_samples);
-    int visible_count = 0;   // count of unoccluded shadow samples
-
-    // Build shading frame once (reused for every sample)
-    DevONB frame = DevONB::from_normal(normal);
-
-    for (int s = 0; s < M; ++s) {
-        // Step A — Coverage-aware emitter selection (§7.2.1)
-        // Mixture of power-weighted CDF and uniform coverage sampling
-        const float c = DEFAULT_NEE_COVERAGE_FRACTION;
-        float xi = rng.next_float();
-        int local_idx;
-        if (c > 0.f && rng.next_float() < c) {
-            // Uniform selection (coverage component)
-            float u = rng.next_float();
-            local_idx = (int)(u * (float)params.num_emissive);
-            if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
-        } else {
-            // Power-weighted CDF selection
-            local_idx = binary_search_cdf(
-                params.emissive_cdf, params.num_emissive, xi);
-            if (local_idx >= params.num_emissive)
-                local_idx = params.num_emissive - 1;
-        }
-        uint32_t light_tri = params.emissive_tri_indices[local_idx];
-
-        // Step B — Sample uniform point on that triangle
-        float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
-        float3 lv0 = params.vertices[light_tri * 3 + 0];
-        float3 lv1 = params.vertices[light_tri * 3 + 1];
-        float3 lv2 = params.vertices[light_tri * 3 + 2];
-        float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
-
-        float3 le1 = lv1 - lv0;
-        float3 le2 = lv2 - lv0;
-        float3 light_normal = normalize(cross(le1, le2));
-        float  light_area   = length(cross(le1, le2)) * 0.5f;
-
-        // Step C — Direction, distance, cosines
-        float3 to_light = light_pos - pos;
-        float dist2 = dot(to_light, to_light);
-        float dist  = sqrtf(dist2);
-        float3 wi   = to_light * (1.f / dist);
-
-        float cos_x = dot(wi, normal);          // cosine at shading point
-        float cos_y = -dot(wi, light_normal);   // cosine at light surface
-
-        if (cos_x <= 0.f || cos_y <= 0.f) continue; // backfacing
-
-        // Step D — Shadow ray visibility test
-        if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
-            continue;
-
-        visible_count++;
-
-        // Step E — Evaluate emission and BSDF
-        // Mixture PDF: (1-c)*p_power + c*p_uniform  (§7.2.1)
-        float p_power;
-        if (local_idx == 0)
-            p_power = params.emissive_cdf[0];
-        else
-            p_power = params.emissive_cdf[local_idx]
-                    - params.emissive_cdf[local_idx - 1];
-        float p_uniform = 1.0f / (float)params.num_emissive;
-        float p_tri = (1.0f - c) * p_power + c * p_uniform;
-
-        uint32_t light_mat = params.material_ids[light_tri];
-        // Interpolate UV at sampled light point for emission texture
-        float2 luv0_b = params.texcoords[light_tri * 3 + 0];
-        float2 luv1_b = params.texcoords[light_tri * 3 + 1];
-        float2 luv2_b = params.texcoords[light_tri * 3 + 2];
-        float2 light_uv_b = make_float2(
-            luv0_b.x * bary.x + luv1_b.x * bary.y + luv2_b.x * bary.z,
-            luv0_b.y * bary.x + luv1_b.y * bary.y + luv2_b.y * bary.z);
-        Spectrum Le = dev_get_Le(light_mat, light_uv_b);
-
-        float3 wi_local = frame.world_to_local(wi);
-        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
-
-        // Step F — PDF conversion: area → solid angle
-        // p_y_area  = p_tri * (1 / A_tri)
-        // p_wi      = p_y_area * (dist2 / cos_y)
-        float p_y_area = p_tri / light_area;
-        float p_wi     = p_y_area * dist2 / cos_y;
-
-        // MIS vs BSDF sampling (glossy-aware PDF)
-        float w_mis = 1.0f;
-        if (DEFAULT_USE_MIS) {
-            float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
-            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
-        }
-
-        // Step G — Accumulate MIS-weighted: f * Le * cos_x / p_wi
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
-                          * cos_x / fmaxf(p_wi, 1e-8f);
-        }
-    }
-
-    // Average over M samples
-    if (M > 1) {
-        float inv_M = 1.f / (float)M;
-		for (int i = 0; i < NUM_LAMBDA; ++i)
-			result.L.value[i] *= inv_M;
-	}
-
-    result.visibility = (float)visible_count / (float)M;
-    return result;
-	}
-
-// =====================================================================
-// NEE WITH LIGHT IMPORTANCE CACHE (§7.2.2)
-//
-// Instead of sampling ALL emissive triangles via the power-weighted CDF,
-// we use the precomputed per-cell light importance cache to steer shadow
-// rays toward lights that actually contribute at this location.
-//
-// Strategy:
-//   With probability (1 - epsilon): sample from cell cache (top-K lights)
-//   With probability epsilon:       sample from global power CDF (fallback)
-//
-// The mixture PDF is computed exactly for correct MIS weighting:
-//   p_mix(i) = (1-eps) × p_cache(i) + eps × p_global(i)
-//
-// Falls back to dev_nee_direct when the cache is empty for a cell.
-// =====================================================================
-
-__forceinline__ __device__
-NeeResult dev_nee_cached(float3 pos, float3 normal, float3 wo_local,
-                         uint32_t mat_id, PCGRng& rng, int bounce,
-                         float2 uv = make_float2(0.f, 0.f))
-{
-    // ── Look up light cache for this cell ────────────────────────────
-    int cx = (int)floorf(pos.x / params.light_cache_cell_size);
-    int cy = (int)floorf(pos.y / params.light_cache_cell_size);
-    int cz = (int)floorf(pos.z / params.light_cache_cell_size);
-    uint32_t cache_key = dev_hash_cell(cx, cy, cz, LIGHT_CACHE_TABLE_SIZE);
-
-    int cache_count = params.light_cache_count[cache_key];
-
-    // Fall back to standard NEE if cache is empty for this cell
-    if (cache_count <= 0) {
-        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    }
-
-    float cache_total = params.light_cache_total_importance[cache_key];
-    if (cache_total <= 0.f) {
-        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    }
-
-    const CellLightEntry* cache_entries =
-        &params.light_cache_entries[cache_key * NEE_CELL_TOP_K];
-
-    // ── Shadow ray sampling loop ─────────────────────────────────────
-    NeeResult result;
-    result.L = Spectrum::zero();
-    result.visibility = 0.f;
-    if (params.num_emissive <= 0) return result;
-
     const int M = nee_shadow_sample_count(
         bounce, params.nee_light_samples, params.nee_deep_samples);
     int visible_count = 0;
-
     DevONB frame = DevONB::from_normal(normal);
-    const float eps = NEE_CACHE_FALLBACK_PROB;
-    const float c   = DEFAULT_NEE_COVERAGE_FRACTION;
 
     for (int s = 0; s < M; ++s) {
-        // Strategy selection: cache vs global fallback
-        bool use_cache = (rng.next_float() >= eps);
-        int local_idx;
+        float p_tri;
+        int local_idx = dev_nee_select_global(rng, p_tri);
 
-        if (use_cache) {
-            // Sample from per-cell cache: importance-weighted
-            float xi = rng.next_float() * cache_total;
-            float cum = 0.f;
-            int chosen = cache_count - 1;
-            for (int j = 0; j < cache_count; ++j) {
-                cum += cache_entries[j].importance;
-                if (xi <= cum) { chosen = j; break; }
-            }
-            local_idx = (int)cache_entries[chosen].emissive_idx;
-        } else {
-            // Global fallback: coverage-aware mixture (same as dev_nee_direct)
-            float xi = rng.next_float();
-            if (c > 0.f && rng.next_float() < c) {
-                local_idx = (int)(rng.next_float() * (float)params.num_emissive);
-                if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
-            } else {
-                local_idx = binary_search_cdf(
-                    params.emissive_cdf, params.num_emissive, xi);
-                if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
-            }
-        }
-
-        uint32_t light_tri = params.emissive_tri_indices[local_idx];
-
-        // Sample point on triangle
-        float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
-        float3 lv0 = params.vertices[light_tri * 3 + 0];
-        float3 lv1 = params.vertices[light_tri * 3 + 1];
-        float3 lv2 = params.vertices[light_tri * 3 + 2];
-        float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
-
-        float3 le1 = lv1 - lv0;
-        float3 le2 = lv2 - lv0;
-        float3 light_normal = normalize(cross(le1, le2));
-        float  light_area   = length(cross(le1, le2)) * 0.5f;
-
-        // Direction, distance, cosines
-        float3 to_light = light_pos - pos;
-        float dist2 = dot(to_light, to_light);
-        float dist  = sqrtf(dist2);
-        float3 wi   = to_light * (1.f / dist);
-
-        float cos_x = dot(wi, normal);
-        float cos_y = -dot(wi, light_normal);
-        if (cos_x <= 0.f || cos_y <= 0.f) continue;
-
-        // Shadow ray
-        if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
-            continue;
-        visible_count++;
-
-        // ── Compute mixture PDF ──────────────────────────────────────
-        // p_cache: probability of selecting this light from the cache
-        float p_cache = 0.f;
-        for (int j = 0; j < cache_count; ++j) {
-            if (cache_entries[j].emissive_idx == (uint16_t)local_idx) {
-                p_cache = cache_entries[j].importance / cache_total;
-                break;
-            }
-        }
-
-        // p_global: coverage-aware mixture (power + uniform)
-        float p_power;
-        if (local_idx == 0) p_power = params.emissive_cdf[0];
-        else p_power = params.emissive_cdf[local_idx]
-                     - params.emissive_cdf[local_idx - 1];
-        float p_uniform = 1.f / (float)params.num_emissive;
-        float p_global = (1.f - c) * p_power + c * p_uniform;
-
-        // Combined mixture: (1-eps)*cache + eps*global
-        float p_tri = (1.f - eps) * p_cache + eps * p_global;
-        if (p_tri <= 0.f) continue;  // shouldn't happen, but guard
-
-        // Emission and BSDF
-        uint32_t light_mat = params.material_ids[light_tri];
-        // Interpolate UV at sampled light point for emission texture
-        float2 luv0_c = params.texcoords[light_tri * 3 + 0];
-        float2 luv1_c = params.texcoords[light_tri * 3 + 1];
-        float2 luv2_c = params.texcoords[light_tri * 3 + 2];
-        float2 light_uv_c = make_float2(
-            luv0_c.x * bary.x + luv1_c.x * bary.y + luv2_c.x * bary.z,
-            luv0_c.y * bary.x + luv1_c.y * bary.y + luv2_c.y * bary.z);
-        Spectrum Le = dev_get_Le(light_mat, light_uv_c);
-
-        float3 wi_local = frame.world_to_local(wi);
-        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
-
-        // PDF conversion: area → solid angle
-        float p_y_area = p_tri / light_area;
-        float p_wi     = p_y_area * dist2 / cos_y;
-
-        // MIS vs BSDF sampling
-        float w_mis = 1.0f;
-        if (DEFAULT_USE_MIS) {
-            float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
-            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
-        }
-
-        // Accumulate MIS-weighted: f * Le * cos_x / p_wi
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
-                          * cos_x / fmaxf(p_wi, 1e-8f);
-        }
+        NeeSampleResult sr = dev_nee_evaluate_sample(
+            local_idx, p_tri, pos, normal, wo_local, mat_id, frame, uv, rng);
+        if (sr.visible) visible_count++;
+        result.L += sr.L;
     }
 
-    // Average over M samples
     if (M > 1) {
         float inv_M = 1.f / (float)M;
         for (int i = 0; i < NUM_LAMBDA; ++i)
             result.L.value[i] *= inv_M;
     }
-
     result.visibility = (float)visible_count / (float)M;
     return result;
 }
 
 // =====================================================================
-// dev_nee_coverage -- Coverage-based NEE using precomputed shadow ray
-// targets.  For each cell, a variable number of shadow ray targets
-// provide optimal angular coverage of the hemisphere.
-// Each target is a fixed precomputed point on an emitter surface.
-// All targets are tested (no random selection), giving deterministic
-// and complete coverage.
+// Golden-Ratio Stratified CDF NEE (§7.2.2)
 //
-// Falls back to dev_nee_cached when coverage data is unavailable.
+// Low-discrepancy shadow ray placement using the golden ratio
+// φ = (√5−1)/2 ≈ 0.618.  A random base offset (from RNG) provides
+// spatial decorrelation, while successive samples s = 0..M−1 are
+// spaced by φ across the power-weighted emissive CDF, guaranteeing
+// each shadow ray targets a different region of the distribution.
+// Cost: O(M log N_e) per shading point — no precomputation needed.
 // =====================================================================
+
+static constexpr float GOLDEN_RATIO_CONJ = 0.6180339887498949f; // (√5−1)/2
+
 __forceinline__ __device__
-NeeResult dev_nee_coverage(float3 pos, float3 normal, float3 wo_local,
-                           uint32_t mat_id, PCGRng& rng, int bounce,
-                           float2 uv = make_float2(0.f, 0.f))
+NeeResult dev_nee_golden_stratified(float3 pos, float3 normal, float3 wo_local,
+                                    uint32_t mat_id, PCGRng& rng, int bounce,
+                                    float2 uv = make_float2(0.f, 0.f))
 {
-    // ── Look up coverage targets for this cell ───────────────────────
-    int cx = (int)floorf(pos.x / params.light_cache_cell_size);
-    int cy = (int)floorf(pos.y / params.light_cache_cell_size);
-    int cz = (int)floorf(pos.z / params.light_cache_cell_size);
-    uint32_t cache_key = dev_hash_cell(cx, cy, cz, LIGHT_CACHE_TABLE_SIZE);
-
-    int n_targets = params.shadow_ray_cell_count[cache_key];
-    if (n_targets <= 0) {
-        // No coverage data for this cell — fall back to legacy cached NEE
-        return dev_nee_cached(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    }
-
-    int offset = params.shadow_ray_cell_offset[cache_key];
-
     NeeResult result;
     result.L = Spectrum::zero();
     result.visibility = 0.f;
     if (params.num_emissive <= 0) return result;
 
+    const int M = nee_shadow_sample_count(
+        bounce, params.nee_light_samples, params.nee_deep_samples);
     int visible_count = 0;
     DevONB frame = DevONB::from_normal(normal);
-    const float inv_N = 1.f / (float)n_targets;
 
-    for (int s = 0; s < n_targets; ++s) {
-        const ShadowRayTarget& target = params.shadow_ray_targets[offset + s];
+    // Random base offset — Cranley-Patterson rotation for decorrelation
+    float base = rng.next_float();
 
-        float3 light_pos = target.position;
-        float3 light_normal = target.normal;
-        uint32_t light_tri = target.global_tri_idx;
+    for (int s = 0; s < M; ++s) {
+        // Golden-ratio stratified CDF sample
+        float xi = base + s * GOLDEN_RATIO_CONJ;
+        xi = xi - floorf(xi);  // fract — wrap to [0,1)
 
-        // Direction, distance, cosines
-        float3 to_light = light_pos - pos;
-        float dist2 = dot(to_light, to_light);
-        float dist  = sqrtf(dist2);
-        float3 wi   = to_light * (1.f / dist);
+        int local_idx = binary_search_cdf(
+            params.emissive_cdf, params.num_emissive, xi);
+        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
 
-        float cos_x = dot(wi, normal);
-        float cos_y = -dot(wi, light_normal);
-        if (cos_x <= 0.f || cos_y <= 0.f) continue;
+        // PDF for this emitter under the power-weighted CDF
+        float p_tri = (local_idx == 0)
+            ? params.emissive_cdf[0]
+            : params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
 
-        // Shadow ray via OptiX BVH
-        if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
-            continue;
-        visible_count++;
-
-        // Compute light triangle area
-        float3 lv0 = params.vertices[light_tri * 3 + 0];
-        float3 lv1 = params.vertices[light_tri * 3 + 1];
-        float3 lv2 = params.vertices[light_tri * 3 + 2];
-        float3 le1 = lv1 - lv0;
-        float3 le2 = lv2 - lv0;
-        float  light_area = length(cross(le1, le2)) * 0.5f;
-
-        // Emission — use triangle centroid UV for the fixed target point
-        // (the exact UV at the precomputed point is not stored, but for
-        // typical uniform-emission lights this is fine)
-        uint32_t light_mat = params.material_ids[light_tri];
-        // Approximate UV: compute barycentric coords of target on triangle
-        // For efficiency, use centroid UV (most emissive textures are uniform)
-        float2 luv0 = params.texcoords[light_tri * 3 + 0];
-        float2 luv1 = params.texcoords[light_tri * 3 + 1];
-        float2 luv2 = params.texcoords[light_tri * 3 + 2];
-        float2 light_uv = make_float2(
-            (luv0.x + luv1.x + luv2.x) / 3.0f,
-            (luv0.y + luv1.y + luv2.y) / 3.0f);
-        Spectrum Le = dev_get_Le(light_mat, light_uv);
-
-        float3 wi_local = frame.world_to_local(wi);
-        Spectrum f = dev_bsdf_evaluate(mat_id, wo_local, wi_local, uv);
-
-        // PDF for uniform coverage sampling:
-        // Each of N targets is selected with probability 1/N.
-        // Area-to-solid-angle Jacobian: p_y_area = (1/N) / light_area
-        // p_wi = p_y_area * dist² / cos_y
-        float p_y_area = inv_N / fmaxf(light_area, 1e-8f);
-        float p_wi     = p_y_area * dist2 / fmaxf(cos_y, 1e-8f);
-
-        // MIS vs BSDF sampling
-        float w_mis = 1.0f;
-        if (DEFAULT_USE_MIS) {
-            float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
-            w_mis = mis_weight_2_dev(p_wi, pdf_bsdf);
-        }
-
-        // Accumulate: f * Le * cos_x / p_wi
-        for (int i = 0; i < NUM_LAMBDA; ++i) {
-            result.L.value[i] += w_mis * f.value[i] * Le.value[i]
-                          * cos_x / fmaxf(p_wi, 1e-8f);
-        }
+        NeeSampleResult sr = dev_nee_evaluate_sample(
+            local_idx, p_tri, pos, normal, wo_local, mat_id, frame, uv, rng);
+        if (sr.visible) visible_count++;
+        result.L += sr.L;
     }
 
-    // Average over N targets (each had equal selection probability)
-    if (n_targets > 1) {
+    if (M > 1) {
+        float inv_M = 1.f / (float)M;
         for (int i = 0; i < NUM_LAMBDA; ++i)
-            result.L.value[i] *= inv_N;
+            result.L.value[i] *= inv_M;
     }
-
-    result.visibility = (float)visible_count / (float)n_targets;
+    result.visibility = (float)visible_count / (float)M;
     return result;
 }
 
 // =====================================================================
-// dev_nee_dispatch -- route to coverage, cached, or direct NEE
+// dev_nee_dispatch -- route to golden-ratio stratified NEE
 // =====================================================================
 __forceinline__ __device__
 NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
                            uint32_t mat_id, PCGRng& rng, int bounce,
                            float2 uv)
 {
-    // Prefer coverage-based NEE when available
-    if (params.use_light_cache && params.shadow_ray_cache_valid)
-        return dev_nee_coverage(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    if (params.use_light_cache && params.light_cache_valid)
-        return dev_nee_cached(pos, normal, wo_local, mat_id, rng, bounce, uv);
-    return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+    return dev_nee_golden_stratified(pos, normal, wo_local, mat_id, rng, bounce, uv);
 }
 
 // =====================================================================
@@ -2317,50 +1865,28 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
 
         // Specular bounce: follow the chain
         if (dev_is_specular(mat_id)) {
-            // Glass (Fresnel dielectric): reflect or refract via Fresnel
-            if (dev_is_glass(mat_id)) {
-                float eta = dev_get_ior(mat_id);
-                float3 n = hit.shading_normal;
-                bool entering = dot(direction, n) < 0.f;
-                float3 outward_normal = entering ? n : n * (-1.f);
-                float ni_over_nt = entering ? (1.f / eta) : eta;
-
-                float cos_i = fabsf(dot(direction, outward_normal));
-                float sin2_t = ni_over_nt * ni_over_nt * (1.f - cos_i * cos_i);
-                float fresnel = 1.f;
-                if (sin2_t < 1.f) {
-                    float cos_t = sqrtf(1.f - sin2_t);
-                    float rs = (ni_over_nt * cos_i - cos_t) / (ni_over_nt * cos_i + cos_t);
-                    float rp = (cos_i - ni_over_nt * cos_t) / (cos_i + ni_over_nt * cos_t);
-                    fresnel = 0.5f * (rs * rs + rp * rp);
-                }
-
-                Spectrum Tf = dev_get_Tf(mat_id, hit.uv);
-                for (int i = 0; i < NUM_LAMBDA; ++i)
-                    throughput.value[i] *= Tf.value[i];
-
-                if (rng.next_float() < fresnel) {
-                    direction = direction - outward_normal * (2.f * dot(direction, outward_normal));
-                    origin = hit.position + outward_normal * OPTIX_SCENE_EPSILON;
-                } else {
-                    float3 refracted = direction * ni_over_nt +
-                        outward_normal * (ni_over_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
-                    direction = normalize(refracted);
-                    origin = hit.position - outward_normal * OPTIX_SCENE_EPSILON;
-                }
-            } else {
-                // Mirror: pure reflection
-                float3 n = hit.shading_normal;
-                direction = direction - n * (2.f * dot(direction, n));
-                origin = hit.position + n * OPTIX_SCENE_EPSILON;
-            }
+            SpecularBounceResult sb = dev_specular_bounce(
+                direction, hit.position, hit.shading_normal,
+                mat_id, hit.uv, rng);
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                throughput.value[i] *= sb.filter.value[i];
+            direction = sb.new_dir;
+            origin    = sb.new_pos;
             continue;
         }
 
-        // ── Non-specular hit: NEE + photon gather ────────────────────
-        // For glossy materials, continue bouncing via BSDF sampling
-        // to capture scene reflections (polished tables, metals, etc.).
-        // Pure diffuse surfaces terminate after this gather.
+        // Translucent: Fresnel boundary bounce, then continue.
+        // Unlike glass, translucent is eligible for NEE and photon gather.
+        if (dev_is_translucent(mat_id)) {
+            SpecularBounceResult sb = dev_specular_bounce(
+                direction, hit.position, hit.shading_normal,
+                mat_id, hit.uv, rng);
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                throughput.value[i] *= sb.filter.value[i];
+            direction = sb.new_dir;
+            origin    = sb.new_pos;
+            continue;
+        }
         DevONB frame = DevONB::from_normal(hit.shading_normal);
         float3 wo_local = frame.world_to_local(direction * (-1.f));
         if (wo_local.z <= 0.f) break;
@@ -2462,43 +1988,18 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
                 break;
             }
 
-            // If we hit a specular surface, follow it through the
-            // remaining specular chain budget, then gather at diffuse
-            if (dev_is_specular(mat_id)) {
+            // If we hit a specular or translucent surface, follow it
+            if (dev_is_specular(mat_id) || dev_is_translucent(mat_id)) {
                 int spec_remain = max_spec - bounce;
                 for (int s = 0; s < spec_remain; ++s) {
-                    if (dev_is_glass(mat_id)) {
-                        float eta = dev_get_ior(mat_id);
-                        float3 n = hit.shading_normal;
-                        bool entering = dot(direction, n) < 0.f;
-                        float3 outward_n = entering ? n : n * (-1.f);
-                        float ni_nt = entering ? (1.f / eta) : eta;
-                        float cos_in = fabsf(dot(direction, outward_n));
-                        float sin2_t = ni_nt * ni_nt * (1.f - cos_in * cos_in);
-                        float fresnel = 1.f;
-                        if (sin2_t < 1.f) {
-                            float cos_t = sqrtf(1.f - sin2_t);
-                            float rs = (ni_nt * cos_in - cos_t) / (ni_nt * cos_in + cos_t);
-                            float rp = (cos_in - ni_nt * cos_t) / (cos_in + ni_nt * cos_t);
-                            fresnel = 0.5f * (rs * rs + rp * rp);
-                        }
-                        Spectrum Tf_g = dev_get_Tf(mat_id, hit.uv);
-                        for (int i = 0; i < NUM_LAMBDA; ++i)
-                            throughput.value[i] *= Tf_g.value[i];
-                        if (rng.next_float() < fresnel) {
-                            direction = direction - outward_n * (2.f * dot(direction, outward_n));
-                            origin = hit.position + outward_n * OPTIX_SCENE_EPSILON;
-                        } else {
-                            float3 refr = direction * ni_nt +
-                                outward_n * (ni_nt * cos_in - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
-                            direction = normalize(refr);
-                            origin = hit.position - outward_n * OPTIX_SCENE_EPSILON;
-                        }
-                    } else {
-                        float3 n = hit.shading_normal;
-                        direction = direction - n * (2.f * dot(direction, n));
-                        origin = hit.position + n * OPTIX_SCENE_EPSILON;
-                    }
+                    SpecularBounceResult sb = dev_specular_bounce(
+                        direction, hit.position, hit.shading_normal,
+                        mat_id, hit.uv, rng);
+                    for (int i = 0; i < NUM_LAMBDA; ++i)
+                        throughput.value[i] *= sb.filter.value[i];
+                    direction = sb.new_dir;
+                    origin    = sb.new_pos;
+
                     long long t_rt2 = clock64();
                     hit = trace_radiance(origin, direction);
                     result.clk_ray_trace += clock64() - t_rt2;
@@ -2509,7 +2010,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
                         result.nee_direct += throughput * dev_get_Le(mat_id, hit.uv);
                         goto done;
                     }
-                    if (!dev_is_specular(mat_id)) break;  // fell through to diffuse/glossy
+                    if (!dev_is_specular(mat_id) && !dev_is_translucent(mat_id)) break;
                 }
             }
 
@@ -2560,6 +2061,70 @@ static __forceinline__ __device__ void sppm_camera_pass(
 static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixel_idx);
 
 // =====================================================================
+// Camera ray helper — shared between SPPM camera dispatch and normal
+// render loop.  Includes sub-pixel jitter, optional stratification,
+// focus-range jitter, and thin-lens DOF (Shirley concentric disk).
+//
+// sample_index < 0 → simple random jitter (SPPM / debug).
+// sample_index >= 0 → stratified sub-pixel when is_final_render.
+// =====================================================================
+__forceinline__ __device__
+void dev_generate_camera_ray(int px, int py, PCGRng& rng,
+                             float3& origin, float3& direction,
+                             int sample_index = -1)
+{
+    // Sub-pixel jitter (optionally stratified)
+    float jx, jy;
+    if (sample_index >= 0 && params.is_final_render
+        && STRATA_X > 1 && STRATA_Y > 1) {
+        int stratum_x = sample_index % STRATA_X;
+        int stratum_y = (sample_index / STRATA_X) % STRATA_Y;
+        jx = ((float)stratum_x + rng.next_float()) / (float)STRATA_X;
+        jy = ((float)stratum_y + rng.next_float()) / (float)STRATA_Y;
+    } else {
+        jx = rng.next_float();
+        jy = rng.next_float();
+    }
+
+    float u = ((float)px + jx) / (float)params.width;
+    float v = ((float)py + jy) / (float)params.height;
+
+    float3 focus_target = params.cam_lower_left
+                          + params.cam_horizontal * u
+                          + params.cam_vertical * v;
+
+    // Focus-range jitter
+    if (params.cam_focus_range > 0.f && params.cam_focus_dist > 0.f) {
+        float range_jitter = (rng.next_float() - 0.5f) * params.cam_focus_range;
+        float jittered_dist = fmaxf(params.cam_focus_dist + range_jitter, 1e-4f);
+        float scale = jittered_dist / params.cam_focus_dist;
+        focus_target = params.cam_pos
+                     + (focus_target - params.cam_pos) * scale;
+    }
+
+    // Thin-lens DOF (Shirley concentric disk)
+    if (params.cam_lens_radius > 0.f) {
+        float lu1 = rng.next_float();
+        float lu2 = rng.next_float();
+        float a = 2.f * lu1 - 1.f;
+        float b = 2.f * lu2 - 1.f;
+        float dr, dphi;
+        if (a == 0.f && b == 0.f) { dr = 0.f; dphi = 0.f; }
+        else if (a * a > b * b) { dr = a; dphi = (PI / 4.f) * (b / a); }
+        else                    { dr = b; dphi = (PI / 2.f) - (PI / 4.f) * (a / b); }
+        float dx = dr * cosf(dphi);
+        float dy = dr * sinf(dphi);
+        float3 lens_offset = (params.cam_u * dx + params.cam_v * dy)
+                             * params.cam_lens_radius;
+        origin    = params.cam_pos + lens_offset;
+        direction = normalize(focus_target - origin);
+    } else {
+        origin    = params.cam_pos;
+        direction = normalize(focus_target - params.cam_pos);
+    }
+}
+
+// =====================================================================
 // __raygen__render
 // =====================================================================
 extern "C" __global__ void __raygen__render() {
@@ -2576,29 +2141,8 @@ extern "C" __global__ void __raygen__render() {
                 + (uint64_t)params.sppm_iteration * 100000,
             (uint64_t)pixel_idx + 1);
 
-        float jx = rng.next_float();
-        float jy = rng.next_float();
-        float u = ((float)px + jx) / (float)params.width;
-        float v = ((float)py + jy) / (float)params.height;
-        float3 focus_target = params.cam_lower_left
-                              + params.cam_horizontal * u
-                              + params.cam_vertical * v;
-        float3 origin    = params.cam_pos;
-        float3 direction = normalize(focus_target - params.cam_pos);
-
-        if (params.cam_lens_radius > 0.f) {
-            float lu1 = rng.next_float();
-            float lu2 = rng.next_float();
-            float a = 2.f * lu1 - 1.f, b = 2.f * lu2 - 1.f;
-            float dr, dphi;
-            if (a == 0.f && b == 0.f) { dr = 0.f; dphi = 0.f; }
-            else if (a * a > b * b)   { dr = a; dphi = (PI / 4.f) * (b / a); }
-            else                      { dr = b; dphi = (PI / 2.f) - (PI / 4.f) * (a / b); }
-            float3 lens_offset = (params.cam_u * dr * cosf(dphi) + params.cam_v * dr * sinf(dphi))
-                                 * params.cam_lens_radius;
-            origin    = params.cam_pos + lens_offset;
-            direction = normalize(focus_target - origin);
-        }
+        float3 origin, direction;
+        dev_generate_camera_ray(px, py, rng, origin, direction);
 
         // Reset valid flag before camera pass
         params.sppm_vp_valid[pixel_idx] = 0;
@@ -2635,66 +2179,12 @@ extern "C" __global__ void __raygen__render() {
             (uint64_t)pixel_idx + 1);
 
         // Stratified sub-pixel sampling (when SPP = STRATA_X * STRATA_Y)
-        float jx, jy;
         int sample_index = params.frame_number * params.samples_per_pixel + s;
-        if (params.is_final_render && STRATA_X > 1 && STRATA_Y > 1) {
-            int stratum_x = sample_index % STRATA_X;
-            int stratum_y = (sample_index / STRATA_X) % STRATA_Y;
-            jx = ((float)stratum_x + rng.next_float()) / (float)STRATA_X;
-            jy = ((float)stratum_y + rng.next_float()) / (float)STRATA_Y;
-        } else {
-            jx = rng.next_float();
-            jy = rng.next_float();
-        }
 
-        float u = ((float)px + jx) / (float)params.width;
-        float v = ((float)py + jy) / (float)params.height;
+        float3 origin, direction;
+        dev_generate_camera_ray(px, py, rng, origin, direction, sample_index);
 
-        // Focus-plane target for this pixel sample
-        float3 focus_target =
-            params.cam_lower_left
-            + params.cam_horizontal * u
-            + params.cam_vertical * v;
-
-        // Focus-range jitter: widen the razor-thin focus plane into a slab.
-        // Per-sample we shift the focus target along the pinhole ray by a
-        // random offset within [-range/2, +range/2], so objects inside the
-        // slab stay acceptably sharp while distant objects still blur.
-        if (params.cam_focus_range > 0.f && params.cam_focus_dist > 0.f) {
-            float range_jitter = (rng.next_float() - 0.5f) * params.cam_focus_range;
-            float jittered_dist = fmaxf(params.cam_focus_dist + range_jitter, 1e-4f);
-            float scale = jittered_dist / params.cam_focus_dist;
-            // Rescale the offset from camera to keep the target on the
-            // jittered focus plane along the same viewing direction.
-            focus_target = params.cam_pos
-                         + (focus_target - params.cam_pos) * scale;
-        }
-
-        float3 origin;
-        float3 direction;
-        if (params.cam_lens_radius > 0.f) {
-            // Thin-lens DOF: sample circular aperture
-            float lu1 = rng.next_float();
-            float lu2 = rng.next_float();
-            float a = 2.f * lu1 - 1.f;
-            float b = 2.f * lu2 - 1.f;
-            float dr, dphi;
-            if (a == 0.f && b == 0.f) { dr = 0.f; dphi = 0.f; }
-            else if (a * a > b * b) { dr = a; dphi = (PI / 4.f) * (b / a); }
-            else                    { dr = b; dphi = (PI / 2.f) - (PI / 4.f) * (a / b); }
-            float dx = dr * cosf(dphi);
-            float dy = dr * sinf(dphi);
-            float3 lens_offset = (params.cam_u * dx + params.cam_v * dy)
-                                 * params.cam_lens_radius;
-            origin    = params.cam_pos + lens_offset;
-            direction = normalize(focus_target - origin);
-        } else {
-            // Pinhole
-            origin    = params.cam_pos;
-            direction = normalize(focus_target - params.cam_pos);
-        }
-
-        if (params.is_final_render) {
+        if (params.is_final_render || params.debug_shadow_rays) {
             PathTraceResult ptr = full_path_trace(origin, direction, rng, pixel_idx, s, params.samples_per_pixel);
             L_accum        += ptr.combined;
             L_nee_accum    += ptr.nee_direct;
@@ -2718,25 +2208,11 @@ extern "C" __global__ void __raygen__render() {
 
     // Adaptive sampling: accumulate luminance moments (if enabled)
     if (params.lum_sum && params.lum_sum2) {
-        // Choose which radiance component to measure variance on.
-        // ADAPTIVE_NOISE_USE_DIRECT_ONLY=true  → L_nee_accum (explicit shadow rays,
-        //   orders-of-magnitude lower per-sample variance; converges quickly).
-        // ADAPTIVE_NOISE_USE_DIRECT_ONLY=false → L_accum (full multi-bounce path;
-        //   variance is enormous and the noise metric may never converge).
-        const Spectrum& lum_proxy = ADAPTIVE_NOISE_USE_DIRECT_ONLY
-            ? L_nee_accum : L_accum;
-
-        float Y = 0.f, Y_integral = 0.f;
+        float Y = 0.f;
         for (int i = 0; i < NUM_LAMBDA; ++i) {
-            float lam = LAMBDA_MIN + (i + 0.5f) * LAMBDA_STEP;
-            float y1  = (lam - 568.8f) * ((lam < 568.8f) ? 0.0213f : 0.0247f);
-            float y2  = (lam - 530.9f) * ((lam < 530.9f) ? 0.0613f : 0.0322f);
-            float ybar = 0.821f * expf(-0.5f * y1 * y1)
-                       + 0.286f * expf(-0.5f * y2 * y2);
-            Y          += lum_proxy.value[i] * ybar;
-            Y_integral += ybar;
+            Y += L_accum.value[i] * CIE_YBAR[i];
         }
-        if (Y_integral > 0.f) Y /= Y_integral;
+        Y *= CIE_YBAR_SUM_INV;
         Y = fmaxf(Y, 0.f);
         params.lum_sum[pixel_idx]  += Y;
         params.lum_sum2[pixel_idx] += Y * Y;
@@ -2906,7 +2382,11 @@ extern "C" __global__ void __raygen__photon_trace() {
     // 7. Trace through scene
     float3 origin    = pos + geo_n * OPTIX_SCENE_EPSILON;
     float3 direction = world_dir;
-    bool on_caustic_path = true;  // stays true through specular bounces only
+    // Caustic tracking (matches CPU emitter.h convention):
+    // Starts false; set true on first specular/translucent hit; reset
+    // to false on diffuse/glossy.  Only L→S→D (or L→D→S→D) paths
+    // are tagged as caustic.
+    bool on_caustic_path = false;
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
@@ -2968,7 +2448,14 @@ extern "C" __global__ void __raygen__photon_trace() {
         if (dev_is_emissive(hit_mat)) break;
 
         // Store photon at diffuse surfaces (skip bounce 0 = direct lighting)
-        if (!dev_is_specular(hit_mat) && bounce > 0) {
+        if (!dev_is_specular(hit_mat) && !dev_is_translucent(hit_mat) && bounce > 0) {
+            // In caustic-only mode, skip non-caustic photons
+            if (params.caustic_only_store && !on_caustic_path) {
+                // Don't store — but still bounce (diffuse/glossy may produce
+                // future caustic-path photons after further specular bounces?
+                // No — once on_caustic_path is false it stays false,
+                // so we can skip the store and continue bouncing normally.)
+            } else {
             uint32_t slot = atomicAdd(params.out_photon_count, 1u);
             if (slot < (uint32_t)params.max_stored_photons) {
                 params.out_photon_pos_x[slot]   = hit.position.x;
@@ -2989,50 +2476,24 @@ extern "C" __global__ void __raygen__photon_trace() {
                 params.out_photon_source_emissive[slot] = (uint16_t)local_idx;
                 if (params.out_photon_is_caustic)
                     params.out_photon_is_caustic[slot] = on_caustic_path ? (uint8_t)1 : (uint8_t)0;
+                if (params.out_photon_tri_id)
+                    params.out_photon_tri_id[slot] = hit.triangle_id;
+            }
             }
         }
 
         // Bounce — track per-hero-channel throughput
         float rr_albedo = 1.0f;
-        if (dev_is_specular(hit_mat)) {
-            if (dev_is_glass(hit_mat)) {
-                float eta = dev_get_ior(hit_mat);
-                float3 n = hit.shading_normal;
-                bool entering = dot(direction, n) < 0.f;
-                float3 outward_normal = entering ? n : n * (-1.f);
-                float ni_over_nt = entering ? (1.f / eta) : eta;
-
-                float cos_i = fabsf(dot(direction, outward_normal));
-                float sin2_t = ni_over_nt * ni_over_nt * (1.f - cos_i * cos_i);
-                float fresnel = 1.f;
-                if (sin2_t < 1.f) {
-                    float cos_t = sqrtf(1.f - sin2_t);
-                    float rs = (ni_over_nt * cos_i - cos_t) / (ni_over_nt * cos_i + cos_t);
-                    float rp = (cos_i - ni_over_nt * cos_t) / (cos_i + ni_over_nt * cos_t);
-                    fresnel = 0.5f * (rs * rs + rp * rp);
-                }
-
-                // Apply transmittance filter to hero channels
-                Spectrum Tf_ph = dev_get_Tf(hit_mat, hit.uv);
-                for (int h = 0; h < HERO_WAVELENGTHS; ++h)
-                    hero_flux[h] *= Tf_ph.value[hero_bins[h]];
-
-                if (rng.next_float() < fresnel) {
-                    direction = direction - outward_normal * (2.f * dot(direction, outward_normal));
-                    origin = hit.position + outward_normal * OPTIX_SCENE_EPSILON;
-                } else {
-                    float3 refracted = direction * ni_over_nt +
-                        outward_normal * (ni_over_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
-                    direction = normalize(refracted);
-                    origin = hit.position - outward_normal * OPTIX_SCENE_EPSILON;
-                }
-                // Glass: geometric routing done; Tf applied above
-            } else {
-                // Mirror reflection: throughput unchanged
-                float3 n = hit.shading_normal;
-                direction = direction - n * (2.f * dot(direction, n));
-                origin = hit.position + n * OPTIX_SCENE_EPSILON;
-            }
+        if (dev_is_specular(hit_mat) || dev_is_translucent(hit_mat)) {
+            on_caustic_path = true;  // specular → mark caustic (matches CPU emitter.h)
+            SpecularBounceResult sb = dev_specular_bounce(
+                direction, hit.position, hit.shading_normal,
+                hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS);
+            // Apply transmittance filter to hero channels
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+                hero_flux[h] *= sb.filter.value[hero_bins[h]];
+            direction = sb.new_dir;
+            origin    = sb.new_pos;
         } else if (dev_is_any_glossy(hit_mat)) {
             DevONB bounce_frame = DevONB::from_normal(hit.shading_normal);
             float3 wo_local = bounce_frame.world_to_local(-direction);
@@ -3074,8 +2535,272 @@ extern "C" __global__ void __raygen__photon_trace() {
 
         // Russian roulette — skip for specular (glass/mirror) bounces so
         // that caustic photons survive the full glass path unattenuated.
-        if (bounce >= DEFAULT_MIN_BOUNCES_RR && !dev_is_specular(hit_mat)) {
+        if (bounce >= DEFAULT_MIN_BOUNCES_RR && !dev_is_specular(hit_mat) && !dev_is_translucent(hit_mat)) {
             float p_rr = fminf(DEFAULT_RR_THRESHOLD, rr_albedo);
+            if (rng.next_float() >= p_rr) break;
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+                hero_flux[h] /= p_rr;
+        }
+    }
+}
+
+// =====================================================================
+// __raygen__targeted_photon_trace  -  Targeted caustic emission (GPU)
+//   Jensen §9.2: importance-sample emission toward specular geometry.
+//   1. Pick emitter (power CDF + uniform mix)
+//   2. Pick specular triangle (area-weighted alias table)
+//   3. Sample point on specular triangle
+//   4. Compute direction from light → target, visibility check (shadow ray)
+//   5. Compute hero-wavelength flux with PDF correction
+//   6. Trace through scene (identical bounce loop to standard photon trace)
+// =====================================================================
+extern "C" __global__ void __raygen__targeted_photon_trace() {
+    const uint3 idx = optixGetLaunchIndex();
+    int photon_idx = idx.x;
+    if (photon_idx >= params.num_photons) return;
+    if (params.num_emissive <= 0) return;
+    if (params.num_targeted_spec_tris <= 0) return;
+
+    // Decorrelated RNG (different constant from standard trace)
+    PCGRng rng = PCGRng::seed(
+        (uint64_t)photon_idx * 13 + 0xCA051CULL + (uint64_t)params.photon_map_seed * 0x100000007ULL,
+        (uint64_t)photon_idx + 7);
+
+    // ── 1. Pick emitter triangle (same power CDF + uniform mixture) ──
+    const float mix_uniform = fminf(fmaxf(DEFAULT_PHOTON_EMITTER_UNIFORM_MIX, 0.0f), 1.0f);
+
+    int local_idx = 0;
+    if (mix_uniform > 0.0f && rng.next_float() < mix_uniform) {
+        float u = rng.next_float();
+        local_idx = (int)(u * (float)params.num_emissive);
+        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+    } else {
+        float xi = rng.next_float();
+        local_idx = binary_search_cdf(params.emissive_cdf, params.num_emissive, xi);
+        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+    }
+    uint32_t emit_tri = params.emissive_tri_indices[local_idx];
+
+    float pdf_power;
+    if (local_idx == 0) pdf_power = params.emissive_cdf[0];
+    else pdf_power = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+    float pdf_uniform = 1.0f / (float)params.num_emissive;
+    float pdf_emitter = (1.0f - mix_uniform) * pdf_power + mix_uniform * pdf_uniform;
+
+    // Get emitter triangle geometry
+    float3 ev0 = params.vertices[emit_tri * 3 + 0];
+    float3 ev1 = params.vertices[emit_tri * 3 + 1];
+    float3 ev2 = params.vertices[emit_tri * 3 + 2];
+    uint32_t emit_mat = params.material_ids[emit_tri];
+
+    // Sample point on emitter
+    float3 ebary = sample_triangle_dev(rng.next_float(), rng.next_float());
+    float3 light_pos = ev0 * ebary.x + ev1 * ebary.y + ev2 * ebary.z;
+    float3 ee1 = ev1 - ev0;
+    float3 ee2 = ev2 - ev0;
+    float3 light_normal = normalize(cross(ee1, ee2));
+    float  light_area   = length(cross(ee1, ee2)) * 0.5f;
+
+    // Get Le
+    float2 euv0 = params.texcoords[emit_tri * 3 + 0];
+    float2 euv1 = params.texcoords[emit_tri * 3 + 1];
+    float2 euv2 = params.texcoords[emit_tri * 3 + 2];
+    float2 emit_uv = make_float2(
+        euv0.x * ebary.x + euv1.x * ebary.y + euv2.x * ebary.z,
+        euv0.y * ebary.x + euv1.y * ebary.y + euv2.y * ebary.z);
+    Spectrum Le = dev_get_Le(emit_mat, emit_uv);
+    float Le_sum = 0.f;
+    for (int i = 0; i < NUM_LAMBDA; ++i) Le_sum += Le.value[i];
+    if (Le_sum <= 0.f) return;
+
+    // ── 2. Pick specular triangle (area-weighted alias table) ────────
+    float s1 = rng.next_float();
+    float s2 = rng.next_float();
+    int spec_n = params.num_targeted_spec_tris;
+    int spec_local = (int)(s1 * spec_n);
+    if (spec_local >= spec_n) spec_local = spec_n - 1;
+    if (s2 >= params.targeted_spec_alias_prob[spec_local])
+        spec_local = (int)params.targeted_spec_alias_idx[spec_local];
+    float pdf_spec_tri = params.targeted_spec_pdf[spec_local];
+    float spec_area    = params.targeted_spec_areas[spec_local];
+    uint32_t spec_global = params.targeted_spec_tri_indices[spec_local];
+
+    // ── 3. Sample point on specular triangle ─────────────────────────
+    float3 sv0 = params.vertices[spec_global * 3 + 0];
+    float3 sv1 = params.vertices[spec_global * 3 + 1];
+    float3 sv2 = params.vertices[spec_global * 3 + 2];
+    float3 sbary = sample_triangle_dev(rng.next_float(), rng.next_float());
+    float3 target_pos = sv0 * sbary.x + sv1 * sbary.y + sv2 * sbary.z;
+    float3 se1 = sv1 - sv0;
+    float3 se2 = sv2 - sv0;
+    float3 spec_normal = normalize(cross(se1, se2));
+    float  pdf_on_tri  = 1.0f / fmaxf(spec_area, 1e-20f);
+
+    // ── 4. Direction from light → target + visibility ────────────────
+    float3 to_target = target_pos - light_pos;
+    float  dist_sq   = dot(to_target, to_target);
+    float  dist      = sqrtf(dist_sq);
+    if (dist < OPTIX_SCENE_EPSILON) return;
+    float3 dir = to_target / dist;
+
+    // Light-side cosine: photon must leave from the front
+    float cos_light = dot(dir, light_normal);
+    if (cos_light <= 0.f) return;
+
+    // Visibility: shadow ray from light → specular target
+    float3 shadow_origin = light_pos + light_normal * OPTIX_SCENE_EPSILON;
+    if (!trace_shadow(shadow_origin, dir, dist)) return;  // occluded
+
+    // Target-side cosine (for area→solid angle Jacobian)
+    float cos_target = fabsf(dot(dir * (-1.f), spec_normal));
+    if (cos_target < 1e-6f) return;
+
+    // ── 5. Hero wavelength setup + flux with PDF correction ──────────
+    // Sample primary hero wavelength from Le CDF
+    float xi_lambda = rng.next_float() * Le_sum;
+    int hero_bin = NUM_LAMBDA - 1;
+    float cum = 0.f;
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        cum += Le.value[i];
+        if (xi_lambda <= cum) { hero_bin = i; break; }
+    }
+
+    int   hero_bins[HERO_WAVELENGTHS];
+    float hero_flux[HERO_WAVELENGTHS];
+    int   num_hero = HERO_WAVELENGTHS;
+
+    hero_bins[0] = hero_bin;
+    for (int h = 1; h < HERO_WAVELENGTHS; ++h) {
+        int offset = (h * NUM_LAMBDA) / HERO_WAVELENGTHS;
+        hero_bins[h] = (hero_bin + offset) % NUM_LAMBDA;
+    }
+
+    // PDF of target direction in solid angle (from the light):
+    //   pdf_target_sa = pdf_spec_tri * pdf_on_tri * dist² / |cos_target|
+    float pdf_target_sa = pdf_spec_tri * pdf_on_tri * dist_sq / cos_target;
+    if (pdf_target_sa <= 0.f) return;
+
+    // Flux: Φ(λ_h) = Le(λ_h) * cos_light * light_area / (pdf_emitter * pdf_target_sa * pdf_lambda_h)
+    //   The light_area accounts for pdf_pos_on_emitter = 1/light_area (uniform
+    //   point sampling on the chosen emitter triangle).  Must match the CPU
+    //   formula in specular_target.h: scale = cos_light * A / (pdf_emitter * pdf_target_sa).
+    //   HERO_WAVELENGTHS normalisation (PBRT v4 §14.3)
+    float denom_common = pdf_emitter * pdf_target_sa;
+    float inv_hero = 1.0f / (float)HERO_WAVELENGTHS;
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+        int bin = hero_bins[h];
+        float Le_h = Le.value[bin];
+        float pdf_lambda_h = Le_h / Le_sum;
+        hero_flux[h] = (denom_common * pdf_lambda_h > 0.f)
+                     ? (Le_h * cos_light * light_area) / (denom_common * pdf_lambda_h) * inv_hero
+                     : 0.f;
+    }
+
+    // Clamp to prevent fireflies from near-miss geometry
+    for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+        hero_flux[h] = fminf(hero_flux[h], 1e6f);
+
+    // ── 6. Trace through scene (identical bounce loop) ───────────────
+    float3 origin    = shadow_origin;
+    float3 direction = dir;
+    bool on_caustic_path = false;  // becomes true after first specular hit
+
+    for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
+        TraceResult hit = trace_radiance(origin, direction);
+        if (!hit.hit) break;
+
+        // RNG spatial decorrelation
+        {
+            uint32_t cell_key = dev_hash_cell(
+                (int)floorf(hit.position.x / params.grid_cell_size),
+                (int)floorf(hit.position.y / params.grid_cell_size),
+                (int)floorf(hit.position.z / params.grid_cell_size),
+                0x7FFFFFFFu);
+            rng.advance(cell_key * 0x9E3779B9u);
+        }
+
+        uint32_t hit_mat = hit.material_id;
+
+        // Skip emissive surfaces
+        if (dev_is_emissive(hit_mat)) break;
+
+        // Store photon at diffuse surfaces (only if on caustic path)
+        if (!dev_is_specular(hit_mat) && !dev_is_translucent(hit_mat) && bounce > 0) {
+            if (on_caustic_path) {
+                uint32_t slot = atomicAdd(params.out_photon_count, 1u);
+                if (slot < (uint32_t)params.max_stored_photons) {
+                    params.out_photon_pos_x[slot]   = hit.position.x;
+                    params.out_photon_pos_y[slot]   = hit.position.y;
+                    params.out_photon_pos_z[slot]   = hit.position.z;
+                    params.out_photon_wi_x[slot]    = -direction.x;
+                    params.out_photon_wi_y[slot]    = -direction.y;
+                    params.out_photon_wi_z[slot]    = -direction.z;
+                    params.out_photon_norm_x[slot]  = hit.geo_normal.x;
+                    params.out_photon_norm_y[slot]  = hit.geo_normal.y;
+                    params.out_photon_norm_z[slot]  = hit.geo_normal.z;
+                    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                        params.out_photon_lambda[slot * HERO_WAVELENGTHS + h] = (uint16_t)hero_bins[h];
+                        params.out_photon_flux[slot * HERO_WAVELENGTHS + h]   = hero_flux[h];
+                    }
+                    params.out_photon_num_hero[slot] = (uint8_t)num_hero;
+                    params.out_photon_source_emissive[slot] = (uint16_t)local_idx;
+                    if (params.out_photon_is_caustic)
+                        params.out_photon_is_caustic[slot] = (uint8_t)1;
+                    if (params.out_photon_tri_id)
+                        params.out_photon_tri_id[slot] = hit.triangle_id;
+                }
+            }
+            // Caustic path ends at diffuse surface — done
+            break;
+        }
+
+        // Specular/translucent hit: mark caustic path and bounce
+        if (dev_is_specular(hit_mat) || dev_is_translucent(hit_mat)) {
+            on_caustic_path = true;
+            SpecularBounceResult sb = dev_specular_bounce(
+                direction, hit.position, hit.shading_normal,
+                hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS);
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+                hero_flux[h] *= sb.filter.value[hero_bins[h]];
+            direction = sb.new_dir;
+            origin    = sb.new_pos;
+            continue;  // skip RR for specular bounces
+        }
+
+        // Glossy bounce (non-caustic after first diffuse interaction)
+        if (dev_is_any_glossy(hit_mat)) {
+            DevONB bounce_frame = DevONB::from_normal(hit.shading_normal);
+            float3 wo_local = bounce_frame.world_to_local(-direction);
+            if (wo_local.z <= 0.f) break;
+            DevBSDFSample bs = dev_bsdf_sample(hit_mat, wo_local, hit.uv, rng);
+            if (bs.pdf <= 0.f || bs.wi.z <= 0.f) break;
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+                hero_flux[h] *= bs.f.value[hero_bins[h]] * bs.wi.z / bs.pdf;
+            direction = bounce_frame.local_to_world(bs.wi);
+            origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
+            on_caustic_path = false;
+        } else {
+            // Diffuse bounce
+            DevONB bounce_frame = DevONB::from_normal(hit.shading_normal);
+            float3 wi_local = sample_cosine_hemisphere_dev(rng);
+            Spectrum Kd = dev_get_Kd(hit_mat, hit.uv);
+            float rr_albedo = 0.f;
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                float albedo_h = Kd.value[hero_bins[h]];
+                hero_flux[h] *= albedo_h;
+                rr_albedo = fmaxf(rr_albedo, albedo_h);
+            }
+            direction = bounce_frame.local_to_world(wi_local);
+            origin = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
+            on_caustic_path = false;
+        }
+
+        // Russian roulette (skip for specular, already handled via continue)
+        if (bounce >= DEFAULT_MIN_BOUNCES_RR) {
+            float max_flux = 0.f;
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h)
+                max_flux = fmaxf(max_flux, hero_flux[h]);
+            float p_rr = fminf(DEFAULT_RR_THRESHOLD, fminf(max_flux, 1.0f));
             if (rng.next_float() >= p_rr) break;
             for (int h = 0; h < HERO_WAVELENGTHS; ++h)
                 hero_flux[h] /= p_rr;
@@ -3107,46 +2832,15 @@ static __forceinline__ __device__ void sppm_camera_pass(
             L_direct += throughput * Le;
         }
 
-        // Glass (Fresnel dielectric): bounce through via Fresnel routing
-        if (dev_is_glass(mat_id)) {
-            float eta = dev_get_ior(mat_id);
-            float3 n = hit.shading_normal;
-            bool entering = dot(direction, n) < 0.f;
-            float3 outward_normal = entering ? n : n * (-1.f);
-            float ni_over_nt = entering ? (1.f / eta) : eta;
-
-            float cos_i = fabsf(dot(direction, outward_normal));
-            float sin2_t = ni_over_nt * ni_over_nt * (1.f - cos_i * cos_i);
-            float fresnel = 1.f;
-            if (sin2_t < 1.f) {
-                float cos_t = sqrtf(1.f - sin2_t);
-                float rs = (ni_over_nt * cos_i - cos_t) / (ni_over_nt * cos_i + cos_t);
-                float rp = (cos_i - ni_over_nt * cos_t) / (cos_i + ni_over_nt * cos_t);
-                fresnel = 0.5f * (rs * rs + rp * rp);
-            }
-
-            // Apply transmittance filter
-            Spectrum Tf_sp = dev_get_Tf(mat_id, hit.uv);
+        // Specular (glass/mirror/translucent): bounce through
+        if (dev_is_specular(mat_id) || dev_is_translucent(mat_id)) {
+            SpecularBounceResult sb = dev_specular_bounce(
+                direction, hit.position, hit.shading_normal,
+                mat_id, hit.uv, rng);
             for (int i = 0; i < NUM_LAMBDA; ++i)
-                throughput.value[i] *= Tf_sp.value[i];
-
-            if (rng.next_float() < fresnel) {
-                direction = direction - outward_normal * (2.f * dot(direction, outward_normal));
-                origin = hit.position + outward_normal * OPTIX_SCENE_EPSILON;
-            } else {
-                float3 refracted = direction * ni_over_nt +
-                    outward_normal * (ni_over_nt * cos_i - sqrtf(fmaxf(0.f, 1.f - sin2_t)));
-                direction = normalize(refracted);
-                origin = hit.position - outward_normal * OPTIX_SCENE_EPSILON;
-            }
-            continue;
-        }
-
-        // Mirror: pure reflection
-        if (dev_is_mirror(mat_id)) {
-            float3 n = hit.shading_normal;
-            direction = direction - n * (2.f * dot(direction, n));
-            origin = hit.position + n * OPTIX_SCENE_EPSILON;
+                throughput.value[i] *= sb.filter.value[i];
+            direction = sb.new_dir;
+            origin    = sb.new_pos;
             continue;
         }
 
@@ -3172,72 +2866,11 @@ static __forceinline__ __device__ void sppm_camera_pass(
             params.sppm_vp_throughput[pixel_idx * NUM_LAMBDA + i] = throughput.value[i];
         params.sppm_vp_valid[pixel_idx] = 1;
 
-        // ── NEE at visible point ────────────────────────────────
-        // Simple NEE: one shadow ray to a light
-        int n_nee = (bounce == 0) ? params.nee_light_samples : params.nee_deep_samples;
-        for (int ns = 0; ns < n_nee; ++ns) {
-            float xi = rng.next_float();
-            int emissive_idx = binary_search_cdf(
-                params.emissive_cdf, params.num_emissive, xi);
-            if (emissive_idx >= params.num_emissive)
-                emissive_idx = params.num_emissive - 1;
-
-            uint32_t tri_id = params.emissive_tri_indices[emissive_idx];
-            float u1 = rng.next_float();
-            float u2 = rng.next_float();
-            float su = sqrtf(u1);
-            float bary_a = 1.f - su;
-            float bary_b = u2 * su;
-            float bary_c = 1.f - bary_a - bary_b;
-
-            float3 lv0 = params.vertices[tri_id * 3 + 0];
-            float3 lv1 = params.vertices[tri_id * 3 + 1];
-            float3 lv2 = params.vertices[tri_id * 3 + 2];
-            float3 light_pos = lv0 * bary_a + lv1 * bary_b + lv2 * bary_c;
-            float3 light_normal = normalize(cross(lv1 - lv0, lv2 - lv0));
-
-            float3 to_light = light_pos - hit.position;
-            float dist2 = dot(to_light, to_light);
-            float dist = sqrtf(dist2);
-            float3 wi = to_light * (1.f / dist);
-
-            float cos_recv = dot(wi, hit.shading_normal);
-            if (cos_recv <= 0.f) continue;
-
-            float cos_emit = -dot(wi, light_normal);
-            if (cos_emit <= 0.f) continue;
-
-            // Shadow test
-            if (!trace_shadow(hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON,
-                              wi, dist - 2.f * OPTIX_SCENE_EPSILON))
-                continue;
-
-            // Triangle area
-            float3 e1 = lv1 - lv0, e2 = lv2 - lv0;
-            float area = 0.5f * length(cross(e1, e2));
-            if (area <= 0.f) continue;
-
-            float pdf_light = dist2 / (cos_emit * area * params.num_emissive);
-            if (pdf_light <= 0.f) continue;
-
-            // Interpolate UV at sampled light point for emission texture
-            float2 sppm_luv0 = params.texcoords[tri_id * 3 + 0];
-            float2 sppm_luv1 = params.texcoords[tri_id * 3 + 1];
-            float2 sppm_luv2 = params.texcoords[tri_id * 3 + 2];
-            float2 sppm_light_uv = make_float2(
-                sppm_luv0.x * bary_a + sppm_luv1.x * bary_b + sppm_luv2.x * bary_c,
-                sppm_luv0.y * bary_a + sppm_luv1.y * bary_b + sppm_luv2.y * bary_c);
-            Spectrum Le = dev_get_Le(params.material_ids[tri_id], sppm_light_uv);
-            float3 wi_local = frame.world_to_local(wi);
-            Spectrum f_bsdf = dev_bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
-
-            for (int i = 0; i < NUM_LAMBDA; ++i) {
-                float contrib = throughput.value[i] * Le.value[i] *
-                                f_bsdf.value[i] * cos_recv /
-                                (pdf_light * (float)n_nee);
-                L_direct.value[i] += contrib;
-            }
-        }
+        // ── NEE at visible point (via shared dev_nee_dispatch) ────
+        NeeResult sppm_nee = dev_nee_dispatch(
+            hit.position, hit.shading_normal, wo_local,
+            mat_id, rng, bounce, hit.uv);
+        L_direct += throughput * sppm_nee.L;
 
         break;  // stop at first diffuse hit
     }

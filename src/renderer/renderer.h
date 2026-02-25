@@ -69,6 +69,10 @@ struct RenderConfig {
     // NEE coverage fraction (§7.2.1)
     float  nee_coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION;
 
+    // Targeted caustic emission (§9.2)
+    bool   targeted_caustic_emission_enabled = true;
+    float  targeted_caustic_mix = DEFAULT_TARGETED_CAUSTIC_MIX;
+
     // Participating medium (volumetric scattering)
     bool   volume_enabled     = DEFAULT_VOLUME_ENABLED;
     float  volume_density     = DEFAULT_VOLUME_DENSITY;

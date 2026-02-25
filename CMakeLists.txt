@@ -179,7 +179,6 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/config.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/medium.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/phase_function.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/photon_bins.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/random.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectrum.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/types.h"
@@ -238,11 +237,12 @@ if(PPT_BUILD_TESTS)
         tests/test_ground_truth.cpp
         tests/test_ground_truth_validation.cpp
         tests/test_medium.cpp
+        tests/test_beam_estimator.cpp
         tests/test_per_ray_validation.cpp
         tests/test_pixel_comparison.cpp
-        tests/test_dense_grid_diagnostics.cpp
-        tests/test_light_cache.cpp
         tests/test_speed_tweaks.cpp
+        tests/test_caustics.cpp
+        tests/test_tri_photon_irradiance.cpp
         src/scene/obj_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp

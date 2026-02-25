@@ -87,6 +87,13 @@ struct LaunchParams {
     int*      diffuse_tex;        // [num_materials]  texture ID or -1
     int*      emission_tex;       // [num_materials]  texture ID or -1 (map_Ke)
     float*    opacity;            // [num_materials]  0..1 (from MTL 'd')
+    float*    clearcoat_weight;   // [num_materials]  clearcoat layer weight
+    float*    clearcoat_roughness;// [num_materials]  clearcoat roughness
+    float*    sheen;              // [num_materials]  sheen weight
+    float*    sheen_tint;         // [num_materials]  sheen tint factor
+    uint8_t*  mat_dispersion;     // [num_materials]  1 = Cauchy dispersion enabled
+    float*    cauchy_A;           // [num_materials]  Cauchy A coefficient
+    float*    cauchy_B;           // [num_materials]  Cauchy B coefficient
 
     // Texture atlas (flat RGBA float buffer, all textures concatenated)
     float*      tex_atlas;        // [total_texels * 4]
@@ -118,14 +125,36 @@ struct LaunchParams {
     float     grid_cell_size;
     uint32_t  grid_table_size;
 
+    // Per-triangle photon irradiance heatmap (precomputed on CPU, for preview)
+    float*    tri_photon_irradiance;  // [num_triangles] accumulated scalar irradiance
+    int       num_triangles;          // total scene triangles
+    int       show_photon_heatmap;    // 0 = off, 1 = show heatmap overlay
+
     // Photon gather radius
     float gather_radius;
+
+    // ── Dual-budget caustic system (Jensen 1996 two-budget) ─────────
+    uint8_t*  photon_is_caustic_pass; // [num_photons] 3-value tag (0/1/2)
+    int       num_caustic_emitted;    // N_caustic for normalisation
+    float     caustic_gather_radius;  // gather radius for caustic budget
+    int       caustic_only_store;     // 1 = only store caustic photons
 
     // Emitter data (for GPU photon tracing)
     uint32_t* emissive_tri_indices;  // [num_emissive]
     float*    emissive_cdf;          // [num_emissive] cumulative distribution
     int       num_emissive;
     float     total_emissive_power;
+
+    // ── Targeted caustic emission (Jensen §9.2) ─────────────────────
+    // Specular triangle set for importance-sampled caustic photon emission.
+    // The alias table enables O(1) area-weighted specular triangle sampling.
+    uint32_t* targeted_spec_tri_indices;  // [num_targeted_spec_tris] global triangle indices
+    float*    targeted_spec_alias_prob;   // [num_targeted_spec_tris] alias table probabilities
+    uint32_t* targeted_spec_alias_idx;    // [num_targeted_spec_tris] alias table redirect indices
+    float*    targeted_spec_pdf;          // [num_targeted_spec_tris] normalized PDF values
+    float*    targeted_spec_areas;        // [num_targeted_spec_tris] per-triangle areas
+    int       num_targeted_spec_tris;     // number of specular triangles
+    int       targeted_mode;              // 1 = this launch is targeted emission
 
     // Photon output buffers (for __raygen__photon_trace)
     float*    out_photon_pos_x;
@@ -142,6 +171,7 @@ struct LaunchParams {
     uint8_t*  out_photon_num_hero; // [max_stored] valid hero count per photon
     uint16_t* out_photon_source_emissive; // [max_stored] source emissive local index
     uint8_t*  out_photon_is_caustic;     // [max_stored] 1 = caustic path, 0 = global
+    uint32_t* out_photon_tri_id;         // [max_stored] scene triangle index at deposit
     unsigned int* out_photon_count;  // atomic counter (device)
     int       max_stored_photons;
 

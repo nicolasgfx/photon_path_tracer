@@ -71,6 +71,105 @@
 
 namespace fs = std::filesystem;
 
+// -- Saved camera persistence -----------------------------------------
+// Derives the scene folder from a scene profile's obj_path
+// (e.g. "cornell_box/cornellbox.obj" -> "scenes/cornell_box")
+static std::string scene_folder_from_profile(const char* obj_path) {
+    std::string p(obj_path);
+    auto slash = p.find('/');
+    if (slash == std::string::npos) slash = p.find('\\');
+    std::string folder = (slash != std::string::npos) ? p.substr(0, slash) : ".";
+    return std::string(SCENES_DIR) + "/" + folder;
+}
+
+static constexpr const char* SAVED_CAMERA_FILENAME = "saved_camera.json";
+
+static bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
+                                const std::string& scene_folder) {
+    std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        std::fprintf(stderr, "[Camera] Cannot write: %s\n", path.c_str());
+        return false;
+    }
+    f << std::fixed << std::setprecision(6);
+    f << "{\n";
+    f << "  \"position\": [" << cam.position.x << ", " << cam.position.y << ", " << cam.position.z << "],\n";
+    f << "  \"look_at\":  [" << cam.look_at.x  << ", " << cam.look_at.y  << ", " << cam.look_at.z  << "],\n";
+    f << "  \"fov_deg\":  " << cam.fov_deg << ",\n";
+    f << "  \"yaw\":      " << yaw   << ",\n";
+    f << "  \"pitch\":    " << pitch << "\n";
+    f << "}\n";
+    f.close();
+    std::printf("[Camera] Saved to %s\n", path.c_str());
+    return true;
+}
+
+static bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
+                                  const std::string& scene_folder) {
+    std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
+    std::ifstream f(path);
+    if (!f.is_open()) return false;
+
+    // Minimal JSON parser – same style as runtime_config.h
+    auto trim_ws = [](const std::string& s) -> std::string {
+        size_t l = 0, r = s.size();
+        while (l < r && std::isspace((unsigned char)s[l])) ++l;
+        while (r > l && std::isspace((unsigned char)s[r - 1])) --r;
+        return s.substr(l, r - l);
+    };
+
+    bool got_pos = false, got_lookat = false;
+    std::string line;
+    while (std::getline(f, line)) {
+        // Strip comments
+        auto cpos = line.find("//");
+        if (cpos != std::string::npos) line = line.substr(0, cpos);
+        line = trim_ws(line);
+        if (line.empty() || line[0] == '{' || line[0] == '}') continue;
+
+        // Find "key": value
+        auto q1 = line.find('"');
+        if (q1 == std::string::npos) continue;
+        auto q2 = line.find('"', q1 + 1);
+        if (q2 == std::string::npos) continue;
+        std::string key = line.substr(q1 + 1, q2 - q1 - 1);
+
+        auto colon = line.find(':', q2 + 1);
+        if (colon == std::string::npos) continue;
+        std::string val = trim_ws(line.substr(colon + 1));
+        // Remove trailing comma
+        if (!val.empty() && val.back() == ',') val.pop_back();
+        val = trim_ws(val);
+
+        // Parse array [x, y, z]
+        auto parse_float3 = [&](const std::string& s, float3& out) -> bool {
+            auto lb = s.find('[');
+            auto rb = s.find(']');
+            if (lb == std::string::npos || rb == std::string::npos) return false;
+            std::string inner = s.substr(lb + 1, rb - lb - 1);
+            float xyz[3];
+            int n = std::sscanf(inner.c_str(), "%f , %f , %f", &xyz[0], &xyz[1], &xyz[2]);
+            if (n != 3) return false;
+            out = make_f3(xyz[0], xyz[1], xyz[2]);
+            return true;
+        };
+
+        if (key == "position")  { got_pos    = parse_float3(val, cam.position); }
+        else if (key == "look_at")  { got_lookat = parse_float3(val, cam.look_at); }
+        else if (key == "fov_deg")  { cam.fov_deg = (float)std::atof(val.c_str()); }
+        else if (key == "yaw")      { yaw         = (float)std::atof(val.c_str()); }
+        else if (key == "pitch")    { pitch       = (float)std::atof(val.c_str()); }
+    }
+
+    if (got_pos && got_lookat) {
+        cam.update();
+        std::printf("[Camera] Loaded saved position from %s\n", path.c_str());
+        return true;
+    }
+    return false;
+}
+
 // -- Image output -----------------------------------------------------
 
 static bool write_png(const std::string& filename, const FrameBuffer& fb) {
@@ -310,7 +409,7 @@ static void render_help_overlay(int win_w, int win_h,
     // Semi-transparent background box
     float pad   = 10.f;
     float box_w = 280.f;
-    float box_h = 560.f;
+    float box_h = 575.f;
     float bx    = pad;
     float by    = pad;
 
@@ -370,7 +469,7 @@ static void render_help_overlay(int win_w, int win_h,
         {"F1", "Photon points",    debug.show_photon_points},
         {"F2", "Global map",       debug.show_global_map},
         {"F3", "Caustic map",      debug.show_caustic_map},
-        {"F4", "Hash grid",        debug.show_hash_grid},
+        {"F4", "Hash grid",       debug.show_hash_grid},
         {"F5", "Photon dirs",      debug.show_photon_dirs},
         {"F6", "PDFs",             debug.show_pdfs},
         {"F7", "Radius sphere",    debug.show_radius_sphere},
@@ -455,6 +554,10 @@ static void render_help_overlay(int win_w, int win_h,
         draw_overlay_text(0, ly, "MMB  Auto-focus (cursor)", 0.8f, 0.8f, 0.8f, 1.f);
         ly += line_h * 0.7f;
     }
+
+    ly += line_h * 0.3f;
+    draw_overlay_text(0, ly, "F10  Save camera position", 0.8f, 0.8f, 0.8f, 1.f);
+    ly += line_h * 0.7f;
 
     ly += line_h * 0.3f;
     draw_overlay_text(0, ly, "H  Toggle this overlay", 0.6f, 0.6f, 0.6f, 1.f);
@@ -896,6 +999,23 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
+    // F10 -> save current camera position to scene folder
+    if (key == GLFW_KEY_F10 && g_active_camera) {
+        int idx = g_app.active_scene_index;
+        if (idx >= 0 && idx < NUM_SCENE_PROFILES) {
+            std::string folder = scene_folder_from_profile(SCENE_PROFILES[idx].obj_path);
+            save_camera_to_file(*g_active_camera, g_app.yaw, g_app.pitch, folder);
+        } else {
+            // Derive folder from the active options scene_file
+            if (g_active_options) {
+                fs::path p(g_active_options->scene_file);
+                std::string folder = p.parent_path().string();
+                save_camera_to_file(*g_active_camera, g_app.yaw, g_app.pitch, folder);
+            }
+        }
+        return;
+    }
+
     // Any debug toggle should return to the interactive debug view.
     g_app.showing_final = false;
     handle_debug_key(key, g_app.debug);
@@ -1028,6 +1148,7 @@ static void run_interactive(
     std::cout << "  1-9 = switch scene\n";
     std::cout << "  +/- = adjust light brightness (re-traces photons)\n";
     std::cout << "  V = toggle volume scattering | O = toggle DOF | [/] = blur | ,/. = focus dist\n";
+    std::cout << "  F10 = save camera position to scene folder\n";
 
     FrameBuffer display_fb;
     display_fb.resize(win_w, win_h);
@@ -1095,10 +1216,20 @@ static void run_interactive(
                 camera.height   = win_h;
                 camera.update();
 
-                // Sync yaw/pitch from new camera direction
-                float3 fwd = normalize(camera.look_at - camera.position);
-                g_app.yaw   = atan2f(fwd.x, -fwd.z);
-                g_app.pitch = asinf(fmaxf(-1.f, fminf(1.f, fwd.y)));
+                // Override with saved camera position (if any)
+                {
+                    std::string folder = scene_folder_from_profile(prof.obj_path);
+                    float saved_yaw = 0.f, saved_pitch = 0.f;
+                    if (load_camera_from_file(camera, saved_yaw, saved_pitch, folder)) {
+                        g_app.yaw   = saved_yaw;
+                        g_app.pitch = saved_pitch;
+                    } else {
+                        // Sync yaw/pitch from new camera direction
+                        float3 fwd = normalize(camera.look_at - camera.position);
+                        g_app.yaw   = atan2f(fwd.x, -fwd.z);
+                        g_app.pitch = asinf(fmaxf(-1.f, fminf(1.f, fwd.y)));
+                    }
+                }
 
                 g_app.active_cam_speed    = prof.cam_speed;
                 g_app.active_scene_index  = idx;
@@ -1339,28 +1470,6 @@ static void run_interactive(
             std::cout << "  Output:     " << opt.output_file << "\n";
             std::cout << "========================================\n";
 
-            // ── 1st-hit NEE debug PNG (quick preview) ───────────────
-            {
-                auto t_nee_start = std::chrono::high_resolution_clock::now();
-                optix_renderer.render_debug_frame(
-                    g_app.render_cam, 0, RenderMode::Full, 1,
-                    true /* shadow_rays for NEE debug PNG */);
-                FrameBuffer nee_fb;
-                optix_renderer.download_framebuffer(nee_fb);
-                write_png("output/out_debug_nee.png", nee_fb);
-                auto t_nee_end = std::chrono::high_resolution_clock::now();
-                double ms = std::chrono::duration<double, std::milli>(
-                    t_nee_end - t_nee_start).count();
-                std::printf("[Timing] NEE debug PNG:     %8.1f ms\n", ms);
-                std::cout << "[Debug NEE] Saved: output/out_debug_nee.png\n";
-                // Clear buffers so the progressive render starts clean
-                std::cout << "[Init] Clearing buffers before photon debug pass...\n";
-                std::cout.flush();
-                optix_renderer.clear_buffers();
-                std::cout << "[Init] Buffers cleared.\n";
-                std::cout.flush();
-            }
-
             // ── Photon-indirect + caustic debug PNGs (early output) ──
             // Gated by DEBUG_PHOTON_INDIRECT_PNG in config.h.
             if constexpr (DEBUG_PHOTON_INDIRECT_PNG) {
@@ -1510,6 +1619,65 @@ static void run_interactive(
                             elapsed, eta);
                 std::fflush(stdout);
 
+                // ── Progress snapshots at power-of-2 SPP ────────────
+                if constexpr (PROGRESS_SNAPSHOT_ENABLED) {
+                    int spp = g_app.render_spp_done;
+                    // Check if spp is a power of 2 (1,2,4,8,...)
+                    bool is_pow2 = (spp > 0) && ((spp & (spp - 1)) == 0);
+                    if (is_pow2) {
+                        static bool progress_dir_created = false;
+                        if (!progress_dir_created) {
+                            fs::create_directories("output/progress");
+                            progress_dir_created = true;
+                        }
+                        char snap_prefix[128];
+                        std::snprintf(snap_prefix, sizeof(snap_prefix),
+                                      "output/progress/spp_%04d", spp);
+
+                        // Combined
+                        write_png(std::string(snap_prefix) + "_combined.png", display_fb);
+
+                        // Component buffers (NEE direct, photon indirect)
+                        std::vector<float> snap_nee, snap_photon, snap_samp;
+                        optix_renderer.download_component_buffers(
+                            snap_nee, snap_photon, snap_samp);
+
+                        int cw = display_fb.width;
+                        int ch = display_fb.height;
+                        auto snap_spectral_to_fb = [&](const std::vector<float>& spec_buf,
+                                                       FrameBuffer& fb) {
+                            fb.resize(cw, ch);
+                            for (int y = 0; y < ch; ++y) {
+                                for (int x = 0; x < cw; ++x) {
+                                    int px = y * cw + x;
+                                    float n = snap_samp[px];
+                                    Spectrum avg = Spectrum::zero();
+                                    if (n > 0.f)
+                                        for (int k = 0; k < NUM_LAMBDA; ++k)
+                                            avg.value[k] = spec_buf[px * NUM_LAMBDA + k] / n;
+                                    float3 rgb = spectrum_to_srgb(avg);
+                                    rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
+                                    rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
+                                    rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
+                                    fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
+                                    fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
+                                    fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
+                                    fb.srgb[px * 4 + 3] = 255;
+                                }
+                            }
+                        };
+
+                        FrameBuffer snap_nee_fb, snap_photon_fb;
+                        snap_spectral_to_fb(snap_nee, snap_nee_fb);
+                        write_png(std::string(snap_prefix) + "_nee_direct.png", snap_nee_fb);
+
+                        snap_spectral_to_fb(snap_photon, snap_photon_fb);
+                        write_png(std::string(snap_prefix) + "_photon_indirect.png", snap_photon_fb);
+
+                        std::printf("\n  [Snapshot] %d spp → %s_*.png\n", spp, snap_prefix);
+                    }
+                }
+
                 // Check if done
                 if (g_app.render_spp_done >= g_app.render_spp_total) {
                 std::cout << "\n[Render] Done!\n";
@@ -1612,16 +1780,6 @@ static void run_interactive(
                     }
                 }
 
-                // Render shadow-ray coverage debug PNG
-                std::string coverage_path;
-                if constexpr (DEBUG_COVERAGE_PNG) {
-                    coverage_path = prefix + "_coverage.png";
-                    FrameBuffer coverage_fb;
-                    optix_renderer.render_coverage_debug_png(camera, coverage_fb);
-                    if (coverage_fb.width > 0)
-                        write_png(coverage_path, coverage_fb);
-                }
-
                 // Restore mouse capture state
                 if (g_app.mouse_was_captured) {
                     g_app.mouse_captured = true;
@@ -1637,8 +1795,6 @@ static void run_interactive(
                 std::cout << "  NEE:   " << nee_path << "\n";
                 std::cout << "  Phot:  " << photon_path << "\n";
                 std::cout << "  Caus:  " << caustic_path << "\n";
-                if constexpr (DEBUG_COVERAGE_PNG)
-                    std::cout << "  Cov:   " << coverage_path << "\n";
                 std::cout << "========================================\n\n";
                 }
             }
@@ -1803,6 +1959,16 @@ int main(int argc, char* argv[]) {
     camera.sensor_height  = DEFAULT_DOF_SENSOR_HEIGHT;
 
     camera.update();
+
+    // -- Load saved camera position (if any) --------------------------
+    {
+        std::string folder = scene_folder_from_profile(SCENE_OBJ_PATH);
+        float yaw_init = 0.f, pitch_init = 0.f;
+        if (load_camera_from_file(camera, yaw_init, pitch_init, folder)) {
+            g_app.yaw   = yaw_init;
+            g_app.pitch = pitch_init;
+        }
+    }
 
     // -- OptiX pipeline -----------------------------------------------
     OptixRenderer optix_renderer;

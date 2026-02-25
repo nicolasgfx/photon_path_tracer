@@ -28,6 +28,7 @@
 #include <iostream>
 #include <chrono>
 #include <unordered_set>
+#include <unordered_map>
 
 // ── Configuration ───────────────────────────────────────────────────
 

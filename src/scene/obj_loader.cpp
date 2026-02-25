@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────
 #include "scene/obj_loader.h"
 #include "core/spectrum.h"
+#include "core/medium.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -15,6 +16,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 
 namespace fs = std::filesystem;
 
@@ -237,6 +239,155 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             // Kept for future AO-like darkening if desired.
             resolve_tex_path(ss, base_dir);
         }
+        // ── Photon-Beam material extensions (pb_*) ──────────────────
+        else if (keyword == "pb_brdf") {
+            std::string tag;
+            ss >> tag;
+            auto& m = scene.materials[current_idx];
+            if      (tag == "lambert")    m.pb_brdf = PbBrdf::Lambert;
+            else if (tag == "dielectric") m.pb_brdf = PbBrdf::Dielectric;
+            else if (tag == "conductor")  m.pb_brdf = PbBrdf::Conductor;
+            else if (tag == "clearcoat")  m.pb_brdf = PbBrdf::Clearcoat;
+            else if (tag == "emissive")   m.pb_brdf = PbBrdf::Emissive;
+            else if (tag == "fabric")     m.pb_brdf = PbBrdf::Fabric;
+        }
+        else if (keyword == "pb_semantic") {
+            std::string tag;
+            ss >> tag;
+            auto& m = scene.materials[current_idx];
+            if      (tag == "subsurface")    m.pb_semantic = PbSemantic::Subsurface;
+            else if (tag == "glass")         m.pb_semantic = PbSemantic::Glass;
+            else if (tag == "metal")         m.pb_semantic = PbSemantic::Metal;
+            else if (tag == "fabric")        m.pb_semantic = PbSemantic::Fabric;
+            else if (tag == "leather")       m.pb_semantic = PbSemantic::Leather;
+            else if (tag == "wood_natural")  m.pb_semantic = PbSemantic::WoodNatural;
+            else if (tag == "wood_painted")  m.pb_semantic = PbSemantic::WoodPainted;
+            else if (tag == "wallpaper")     m.pb_semantic = PbSemantic::Wallpaper;
+            else if (tag == "stone")         m.pb_semantic = PbSemantic::Stone;
+            else if (tag == "plastic")       m.pb_semantic = PbSemantic::Plastic;
+        }
+        else if (keyword == "pb_roughness") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_roughness;
+            m.pb_roughness = fmaxf(0.001f, fminf(1.0f, m.pb_roughness));
+            m.pb_roughness_set = true;
+        }
+        else if (keyword == "pb_anisotropy") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_anisotropy;
+            m.pb_anisotropy = fmaxf(0.f, fminf(1.0f, m.pb_anisotropy));
+            m.pb_anisotropy_set = true;
+        }
+        else if (keyword == "pb_roughness_x") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_roughness_x;
+            m.pb_roughness_x = fmaxf(0.001f, fminf(1.0f, m.pb_roughness_x));
+            m.pb_roughness_xy_set = true;
+        }
+        else if (keyword == "pb_roughness_y") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_roughness_y;
+            m.pb_roughness_y = fmaxf(0.001f, fminf(1.0f, m.pb_roughness_y));
+            m.pb_roughness_xy_set = true;
+        }
+        else if (keyword == "pb_eta") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_eta;
+            m.pb_eta_set = true;
+        }
+        else if (keyword == "pb_conductor_eta") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_conductor_eta_rgb[0] >> m.pb_conductor_eta_rgb[1] >> m.pb_conductor_eta_rgb[2];
+            m.pb_conductor_set = true;
+        }
+        else if (keyword == "pb_conductor_k") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_conductor_k_rgb[0] >> m.pb_conductor_k_rgb[1] >> m.pb_conductor_k_rgb[2];
+            m.pb_conductor_set = true;
+        }
+        else if (keyword == "pb_transmission") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_transmission;
+            m.pb_transmission = fmaxf(0.f, fminf(1.0f, m.pb_transmission));
+            m.pb_transmission_set = true;
+        }
+        else if (keyword == "pb_thin") {
+            int v; ss >> v;
+            scene.materials[current_idx].pb_thin = (v != 0);
+        }
+        else if (keyword == "pb_thickness") {
+            ss >> scene.materials[current_idx].pb_thickness;
+        }
+        else if (keyword == "pb_clearcoat") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_clearcoat;
+            m.pb_clearcoat = fmaxf(0.f, fminf(1.0f, m.pb_clearcoat));
+            m.pb_clearcoat_set = true;
+        }
+        else if (keyword == "pb_clearcoat_roughness") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_clearcoat_roughness;
+            m.pb_clearcoat_roughness = fmaxf(0.001f, fminf(1.0f, m.pb_clearcoat_roughness));
+            m.pb_clearcoat_set = true;
+        }
+        else if (keyword == "pb_base_brdf") {
+            std::string tag;
+            ss >> tag;
+            auto& m = scene.materials[current_idx];
+            if      (tag == "lambert")    m.pb_base_brdf = PbBrdf::Lambert;
+            else if (tag == "dielectric") m.pb_base_brdf = PbBrdf::Dielectric;
+            else if (tag == "conductor")  m.pb_base_brdf = PbBrdf::Conductor;
+        }
+        else if (keyword == "pb_base_roughness") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_base_roughness;
+            m.pb_base_roughness = fmaxf(0.001f, fminf(1.0f, m.pb_base_roughness));
+        }
+        else if (keyword == "pb_sheen") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_sheen;
+            m.pb_sheen = fmaxf(0.f, fminf(1.0f, m.pb_sheen));
+            m.pb_sheen_set = true;
+        }
+        else if (keyword == "pb_sheen_tint") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_sheen_tint;
+            m.pb_sheen_tint = fmaxf(0.f, fminf(1.0f, m.pb_sheen_tint));
+        }
+        else if (keyword == "pb_medium") {
+            std::string tag;
+            ss >> tag;
+            if (tag == "homogeneous")
+                scene.materials[current_idx].pb_medium_enabled = true;
+        }
+        else if (keyword == "pb_density") {
+            ss >> scene.materials[current_idx].pb_density;
+        }
+        else if (keyword == "pb_sigma_a") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_sigma_a_rgb[0] >> m.pb_sigma_a_rgb[1] >> m.pb_sigma_a_rgb[2];
+            m.pb_sigma_a_set = true;
+        }
+        else if (keyword == "pb_sigma_s") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_sigma_s_rgb[0] >> m.pb_sigma_s_rgb[1] >> m.pb_sigma_s_rgb[2];
+            m.pb_sigma_s_set = true;
+        }
+        else if (keyword == "pb_g") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_g;
+            m.pb_g = fmaxf(-1.0f, fminf(1.0f, m.pb_g));
+        }
+        else if (keyword == "pb_dispersion") {
+            auto& m = scene.materials[current_idx];
+            ss >> m.pb_dispersion_B;
+            if (m.pb_dispersion_B >= 0.f)
+                m.pb_dispersion_set = true;
+        }
+        else if (keyword == "pb_meters_per_unit") {
+            ss >> scene.materials[current_idx].pb_meters_per_unit;
+        }
+        // Ignore any unknown pb_* key (backward compatible)
     }
 
     // ── Post-processing: apply illum → MaterialType now that all
@@ -272,6 +423,185 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
 
     std::cout << "[MTL] Loaded " << scene.materials.size() << " materials\n";
     return true;
+}
+
+// ── Apply pb_* overrides to all materials ───────────────────────────
+// Called once after all MTL files are loaded.  Resolves pb_brdf → 
+// MaterialType, applies pb_roughness/pb_eta overrides, creates
+// HomogeneousMedium entries for pb_medium, etc.
+static void finalize_pb_materials(Scene& scene) {
+    int pb_count = 0;
+    int media_created = 0;
+
+    for (auto& mat : scene.materials) {
+        // ── Skip materials that have no pb_* extensions ─────────────
+        bool has_any_pb = (mat.pb_brdf != PbBrdf::None)
+                       || mat.pb_roughness_set
+                       || mat.pb_eta_set
+                       || mat.pb_conductor_set
+                       || mat.pb_transmission_set
+                       || mat.pb_clearcoat_set
+                       || mat.pb_sheen_set
+                       || mat.pb_medium_enabled
+                       || mat.pb_dispersion_set;
+        if (!has_any_pb) continue;
+        ++pb_count;
+
+        // ── 1. Roughness override ───────────────────────────────────
+        // pb_roughness is GGX alpha directly
+        if (mat.pb_roughness_set) {
+            mat.roughness = mat.pb_roughness;
+        }
+
+        // ── 2. IOR override ─────────────────────────────────────────
+        if (mat.pb_eta_set) {
+            mat.ior = mat.pb_eta;
+        }
+
+        // ── 2b. Chromatic dispersion from pb_dispersion ────────────
+        // pb_dispersion <B> enables Cauchy dispersion with that B.
+        // A is derived so that n(589nm) == mat.ior (sodium D-line anchor).
+        if (mat.pb_dispersion_set) {
+            constexpr float lambda_d = 589.0f; // sodium D-line, nm
+            mat.cauchy_B   = mat.pb_dispersion_B;
+            mat.cauchy_A   = mat.ior - mat.cauchy_B / (lambda_d * lambda_d);
+            mat.dispersion = true;
+        }
+
+        // ── 3. Conductor complex IOR → spectral ────────────────────
+        if (mat.pb_conductor_set) {
+            mat.pb_conductor_eta_spec = rgb_to_spectrum_reflectance(
+                mat.pb_conductor_eta_rgb[0],
+                mat.pb_conductor_eta_rgb[1],
+                mat.pb_conductor_eta_rgb[2]);
+            mat.pb_conductor_k_spec = rgb_to_spectrum_reflectance(
+                mat.pb_conductor_k_rgb[0],
+                mat.pb_conductor_k_rgb[1],
+                mat.pb_conductor_k_rgb[2]);
+        }
+
+        // ── 4. Transmission override ────────────────────────────────
+        if (mat.pb_transmission_set) {
+            mat.opacity = 1.0f - mat.pb_transmission;
+        }
+
+        // ── 5. Map pb_brdf → MaterialType ───────────────────────────
+        // pb_brdf takes precedence over illum-derived type.
+        switch (mat.pb_brdf) {
+            case PbBrdf::Lambert:
+                mat.type = MaterialType::Lambertian;
+                break;
+
+            case PbBrdf::Emissive:
+                mat.type = MaterialType::Emissive;
+                break;
+
+            case PbBrdf::Dielectric: {
+                // Glass-like vs plastic-like heuristic
+                bool is_glass = mat.pb_transmission_set
+                                ? (mat.pb_transmission > 0.5f)
+                                : (mat.Kd.max_component() < 0.05f);
+                if (is_glass) {
+                    // If medium is also needed → Translucent, else Glass
+                    if (mat.pb_medium_enabled && !mat.pb_thin)
+                        mat.type = MaterialType::Translucent;
+                    else
+                        mat.type = MaterialType::Glass;
+                } else {
+                    mat.type = MaterialType::GlossyDielectric;
+                }
+                break;
+            }
+
+            case PbBrdf::Conductor:
+                mat.type = MaterialType::GlossyMetal;
+                // If complex IOR is provided, store F0 approximation in Ks
+                // for the existing GlossyMetal BSDF path.
+                if (mat.pb_conductor_set) {
+                    // Normal-incidence reflectance from complex IOR:
+                    // F0 = ((n-1)² + k²) / ((n+1)² + k²)
+                    for (int b = 0; b < NUM_LAMBDA; ++b) {
+                        float n = mat.pb_conductor_eta_spec.value[b];
+                        float k = mat.pb_conductor_k_spec.value[b];
+                        float num = (n - 1.f) * (n - 1.f) + k * k;
+                        float den = (n + 1.f) * (n + 1.f) + k * k;
+                        mat.Ks.value[b] = (den > 0.f) ? num / den : 0.5f;
+                    }
+                    // Conductors have no diffuse
+                    mat.Kd = Spectrum::zero();
+                }
+                break;
+
+            case PbBrdf::Clearcoat:
+                mat.type = MaterialType::Clearcoat;
+                // Resolve clearcoat roughness default
+                if (mat.pb_clearcoat_roughness < 0.f)
+                    mat.pb_clearcoat_roughness = mat.roughness;
+                // Resolve base roughness default
+                if (mat.pb_base_roughness < 0.f)
+                    mat.pb_base_roughness = 1.0f; // diffuse base
+                break;
+
+            case PbBrdf::Fabric:
+                mat.type = MaterialType::Fabric;
+                // Ensure sheen has a value
+                if (!mat.pb_sheen_set)
+                    mat.pb_sheen = 0.5f;
+                break;
+
+            case PbBrdf::None:
+                // No explicit pb_brdf — leave type from illum processing
+                break;
+        }
+
+        // ── 6. Create HomogeneousMedium from pb_medium ──────────────
+        if (mat.pb_medium_enabled && !mat.pb_thin) {
+            float scale = mat.pb_density / mat.pb_meters_per_unit;
+
+            HomogeneousMedium med;
+            Spectrum sa = rgb_to_spectrum_reflectance(
+                mat.pb_sigma_a_rgb[0], mat.pb_sigma_a_rgb[1], mat.pb_sigma_a_rgb[2]);
+            Spectrum ss_coeff = rgb_to_spectrum_reflectance(
+                mat.pb_sigma_s_rgb[0], mat.pb_sigma_s_rgb[1], mat.pb_sigma_s_rgb[2]);
+
+            for (int b = 0; b < NUM_LAMBDA; ++b) {
+                med.sigma_a.value[b] = sa.value[b] * scale;
+                med.sigma_s.value[b] = ss_coeff.value[b] * scale;
+                med.sigma_t.value[b] = med.sigma_a.value[b] + med.sigma_s.value[b];
+            }
+
+            med.g = mat.pb_g;
+
+            mat.medium_id = (int)scene.media.size();
+            scene.media.push_back(med);
+            ++media_created;
+
+            // Ensure material type supports media
+            if (mat.type != MaterialType::Translucent
+                && mat.type != MaterialType::Glass) {
+                mat.type = MaterialType::Translucent;
+            }
+        }
+
+        // ── 7. Anisotropic roughness: store as base roughness ──────
+        // The current BSDF uses isotropic GGX; we store the geometric
+        // mean of pb_roughness_x/y so the average surface look is
+        // preserved.  When anisotropic GGX is added later, the full
+        // x/y values are already in the Material.
+        if (mat.pb_roughness_xy_set) {
+            float rx = (mat.pb_roughness_x > 0.f) ? mat.pb_roughness_x : mat.roughness;
+            float ry = (mat.pb_roughness_y > 0.f) ? mat.pb_roughness_y : mat.roughness;
+            mat.roughness = sqrtf(rx * ry);
+        }
+    }
+
+    if (pb_count > 0) {
+        std::cout << "[MTL] Applied pb_* extensions to " << pb_count
+                  << " material(s)";
+        if (media_created > 0)
+            std::cout << ", created " << media_created << " medium(s)";
+        std::cout << "\n";
+    }
 }
 
 // ── Load OBJ ────────────────────────────────────────────────────────
@@ -496,6 +826,9 @@ bool load_obj(const std::string& filepath, Scene& scene) {
     if (has_vertex_colors) {
         std::cout << "[OBJ] Per-vertex colors detected (radiosity data)\n";
     }
+
+    // ── Apply pb_* material extensions ──────────────────────────────
+    finalize_pb_materials(scene);
 
     return true;
 }

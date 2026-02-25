@@ -37,6 +37,9 @@ struct Photon {
     // emitted/caused this photon.  0xFFFF = unknown/unset.
     uint16_t source_emissive_idx = 0xFFFFu;
 
+    // ── Hit triangle ─────────────────────────────────────────────────────
+    uint32_t triangle_id = 0xFFFFFFFFu; // scene triangle index at deposit
+
     // ── Path metadata ────────────────────────────────────────────────────
     uint8_t  path_flags   = 0;     // PHOTON_FLAG_* bit field
     uint8_t  bounce_count = 0;     // total bounces at deposit
@@ -74,17 +77,20 @@ struct PhotonSoA {
     std::vector<float>    flux;         // [N * HERO_WAVELENGTHS] per-hero flux
     std::vector<uint8_t>  num_hero;     // [N] valid hero count per photon
 
-    // Precomputed directional bin index (Fibonacci sphere nearest bin)
-    // Computed on CPU after photon trace, used on device for O(1) bin lookup.
-    std::vector<uint8_t> bin_idx;
-
     // Source emissive triangle index (for NEE light importance cache)
     // 0xFFFF = unknown/unset.
     std::vector<uint16_t> source_emissive_idx;
 
+    // Hit triangle index (scene tri ID at photon deposit site).
+    // 0xFFFFFFFF = unknown/unset.
+    std::vector<uint32_t> tri_id;
+
     // Path metadata
     std::vector<uint8_t>  path_flags;      // PHOTON_FLAG_* bit field
     std::vector<uint8_t>  bounce_count;     // total bounces at deposit
+
+    // Directional bin index (for cell-bin grid)
+    std::vector<uint8_t>  bin_idx;          // precomputed directional bin
 
     size_t size() const { return pos_x.size(); }
 
@@ -116,10 +122,34 @@ struct PhotonSoA {
         lambda_bin.reserve(n * HERO_WAVELENGTHS);
         flux.reserve(n * HERO_WAVELENGTHS);
         num_hero.reserve(n);
-        bin_idx.reserve(n);
         source_emissive_idx.reserve(n);
+        tri_id.reserve(n);
         path_flags.reserve(n);
         bounce_count.reserve(n);
+        bin_idx.reserve(n);
+    }
+
+    // Append all photons from another PhotonSoA into this one.
+    void append(const PhotonSoA& other) {
+        if (other.size() == 0) return;
+        pos_x.insert(pos_x.end(), other.pos_x.begin(), other.pos_x.end());
+        pos_y.insert(pos_y.end(), other.pos_y.begin(), other.pos_y.end());
+        pos_z.insert(pos_z.end(), other.pos_z.begin(), other.pos_z.end());
+        wi_x.insert(wi_x.end(), other.wi_x.begin(), other.wi_x.end());
+        wi_y.insert(wi_y.end(), other.wi_y.begin(), other.wi_y.end());
+        wi_z.insert(wi_z.end(), other.wi_z.begin(), other.wi_z.end());
+        norm_x.insert(norm_x.end(), other.norm_x.begin(), other.norm_x.end());
+        norm_y.insert(norm_y.end(), other.norm_y.begin(), other.norm_y.end());
+        norm_z.insert(norm_z.end(), other.norm_z.begin(), other.norm_z.end());
+        spectral_flux.insert(spectral_flux.end(), other.spectral_flux.begin(), other.spectral_flux.end());
+        lambda_bin.insert(lambda_bin.end(), other.lambda_bin.begin(), other.lambda_bin.end());
+        flux.insert(flux.end(), other.flux.begin(), other.flux.end());
+        num_hero.insert(num_hero.end(), other.num_hero.begin(), other.num_hero.end());
+        source_emissive_idx.insert(source_emissive_idx.end(), other.source_emissive_idx.begin(), other.source_emissive_idx.end());
+        tri_id.insert(tri_id.end(), other.tri_id.begin(), other.tri_id.end());
+        path_flags.insert(path_flags.end(), other.path_flags.begin(), other.path_flags.end());
+        bounce_count.insert(bounce_count.end(), other.bounce_count.begin(), other.bounce_count.end());
+        bin_idx.insert(bin_idx.end(), other.bin_idx.begin(), other.bin_idx.end());
     }
 
     void resize(size_t n) {
@@ -130,10 +160,11 @@ struct PhotonSoA {
         lambda_bin.resize(n * HERO_WAVELENGTHS);
         flux.resize(n * HERO_WAVELENGTHS);
         num_hero.resize(n, 1);
-        bin_idx.resize(n);
         source_emissive_idx.resize(n, 0xFFFFu);
+        tri_id.resize(n, 0xFFFFFFFFu);
         path_flags.resize(n, 0);
         bounce_count.resize(n, 0);
+        bin_idx.resize(n, 0);
     }
 
     void push_back(const Photon& p) {
@@ -154,8 +185,10 @@ struct PhotonSoA {
         }
         num_hero.push_back((uint8_t)p.num_hero);
         source_emissive_idx.push_back(p.source_emissive_idx);
+        tri_id.push_back(p.triangle_id);
         path_flags.push_back(p.path_flags);
         bounce_count.push_back(p.bounce_count);
+        bin_idx.push_back(0);  // default bin; caller can overwrite
     }
 
     Photon get(size_t i) const {
@@ -172,6 +205,7 @@ struct PhotonSoA {
         }
         p.source_emissive_idx = (source_emissive_idx.size() > i)
                               ? source_emissive_idx[i] : (uint16_t)0xFFFFu;
+        p.triangle_id  = (tri_id.size() > i)        ? tri_id[i]        : 0xFFFFFFFFu;
         p.path_flags   = (path_flags.size() > i)   ? path_flags[i]   : (uint8_t)0;
         p.bounce_count = (bounce_count.size() > i) ? bounce_count[i] : (uint8_t)0;
         return p;
@@ -185,10 +219,11 @@ struct PhotonSoA {
         lambda_bin.clear();
         flux.clear();
         num_hero.clear();
-        bin_idx.clear();
         source_emissive_idx.clear();
+        tri_id.clear();
         path_flags.clear();
         bounce_count.clear();
+        bin_idx.clear();
     }
 };
 

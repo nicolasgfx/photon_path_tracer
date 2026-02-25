@@ -13,6 +13,7 @@
 //   F7  – Show radius sphere
 //   F8  – Show MIS weights
 //   F9  – Spectral coloring
+//   F11 – Photon heatmap (per-triangle irradiance)
 //   TAB – Cycle render modes
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
@@ -37,6 +38,7 @@ struct DebugState {
     bool show_radius_sphere   = false;  // F7
     bool show_mis_weights     = false;  // F8
     bool spectral_coloring    = false;  // F9
+    bool show_photon_heatmap  = false;  // F11
 
     bool show_help_overlay    = false;  // H to toggle
 
@@ -55,6 +57,7 @@ struct DebugState {
     void toggle_radius_sphere()  { show_radius_sphere  = !show_radius_sphere; }
     void toggle_mis_weights()    { show_mis_weights    = !show_mis_weights; }
     void toggle_spectral()       { spectral_coloring   = !spectral_coloring; }
+    void toggle_photon_heatmap() { show_photon_heatmap = !show_photon_heatmap; }
     void toggle_help_overlay()   { show_help_overlay   = !show_help_overlay; }
 
     void cycle_render_mode() {
@@ -191,6 +194,7 @@ inline bool handle_debug_key(int key, DebugState& state) {
     constexpr int KEY_F7  = 296;
     constexpr int KEY_F8  = 297;
     constexpr int KEY_F9  = 298;
+    constexpr int KEY_F11 = 300;
     constexpr int KEY_TAB = 258;
     constexpr int KEY_H   = 72;
 
@@ -233,6 +237,10 @@ inline bool handle_debug_key(int key, DebugState& state) {
         case KEY_F9:
             state.toggle_spectral();
             std::cout << "[Debug] F9  Spectral coloring: " << on_off(state.spectral_coloring) << "  (planned)\n";
+            return true;
+        case KEY_F11:
+            state.toggle_photon_heatmap();
+            std::cout << "[Debug] F11 Photon heatmap: " << on_off(state.show_photon_heatmap) << "\n";
             return true;
         case KEY_TAB:
             state.cycle_render_mode();

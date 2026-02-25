@@ -15,6 +15,7 @@ struct HomogeneousMedium {
     Spectrum sigma_s;   // scattering coefficient (per wavelength)
     Spectrum sigma_a;   // absorption coefficient (per wavelength)
     Spectrum sigma_t;   // extinction = sigma_s + sigma_a (per wavelength)
+    float    g = 0.0f;  // Henyey-Greenstein asymmetry parameter
 };
 
 // ── Build a Rayleigh-like medium from user knobs ────────────────────

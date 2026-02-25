@@ -146,16 +146,27 @@ inline HD BSDFSample mirror_sample(const Spectrum& Ks, float3 wo) {
 
 // ── Dielectric glass (with spectral Tf and chromatic dispersion) ────
 
-inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng) {
+inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng,
+                                  int hero_bin = -1) {
     BSDFSample s;
 
     bool entering = wo.z > 0.f;
     float cos_i = fabsf(wo.z);
 
-    // Hero wavelength (bin 0) determines the refraction direction when
-    // dispersion is enabled; all other bins get per-wavelength Fresnel
-    // weights but share the same ray direction (spectral MIS à la PBRT v4).
-    float hero_ior = mat.dispersion ? mat.ior_at_lambda(lambda_of_bin(0))
+    // Hero wavelength determines the refraction direction when dispersion is
+    // enabled; all other bins get per-wavelength Fresnel weights but share
+    // the same ray direction (spectral MIS à la PBRT v4).
+    //
+    // hero_bin < 0 → use D-line bin (~589 nm, nominal IOR). This is the
+    //   correct default for camera paths: the refraction direction should
+    //   match the material's stated IOR (pb_eta).
+    // hero_bin >= 0 → use that specific bin. Photon tracers pass the
+    //   photon's primary hero bin so each photon refracts at its own
+    //   wavelength, producing physically correct chromatic dispersion.
+    constexpr int DLINE_BIN = (int)((589.0f - LAMBDA_MIN) / LAMBDA_STEP);
+    int effective_hero = (hero_bin >= 0 && hero_bin < NUM_LAMBDA)
+                             ? hero_bin : DLINE_BIN;
+    float hero_ior = mat.dispersion ? mat.ior_at_lambda(lambda_of_bin(effective_hero))
                                     : mat.ior;
     float eta = entering ? (1.f / hero_ior) : hero_ior;
 
@@ -405,6 +416,114 @@ inline HD BSDFSample glossy_dielectric_sample(const Spectrum& Kd, const Spectrum
     return s;
 }
 
+// ── Clearcoat (layered: dielectric coat over base BRDF) ─────────────
+// Coat: GGX microfacet dielectric lobe with its own roughness.
+// Base: Lambert by default (or GlossyDielectric if pb_base_brdf).
+// Energy: coat reflection is removed from base energy (1 - Fr_coat).
+
+inline HD BSDFSample clearcoat_sample(const Material& mat, float3 wo, PCGRng& rng) {
+    BSDFSample s;
+
+    float coat_weight = mat.pb_clearcoat;
+    float coat_alpha  = fmaxf(mat.pb_clearcoat_roughness * mat.pb_clearcoat_roughness, 0.001f);
+
+    // Coat IOR → F0
+    float coat_f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
+    float coat_F0  = coat_f0t * coat_f0t;
+
+    // Decide: sample coat vs base
+    // Rough estimate of coat contribution at normal incidence
+    float p_coat = coat_weight * coat_F0;
+    p_coat = fmaxf(p_coat, 0.05f);
+    p_coat = fminf(p_coat, 0.95f);
+
+    if (rng.next_float() < p_coat) {
+        // Sample coat GGX
+        float3 h = ggx_sample_halfvector(wo, coat_alpha, rng.next_float(), rng.next_float());
+        s.wi = make_f3(2.f * dot(wo, h) * h.x - wo.x,
+                        2.f * dot(wo, h) * h.y - wo.y,
+                        2.f * dot(wo, h) * h.z - wo.z);
+        if (s.wi.z <= 0.f) {
+            s.pdf = 0.f; s.f = Spectrum::zero(); s.is_specular = false;
+            return s;
+        }
+        float VdotH = fabsf(dot(wo, h));
+        float Fr = fresnel_schlick(VdotH, coat_F0);
+        float ndf_c = ggx_D(h, coat_alpha);
+        float geo_c = ggx_G(wo, s.wi, coat_alpha);
+        float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float diff_pdf = cosine_hemisphere_pdf(s.wi.z);
+        s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
+
+        float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
+        float coat_spec = coat_weight * (ndf_c * geo_c * Fr) / denom;
+        // Base = diffuse weighted by (1 - coat Fresnel)
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            s.f.value[i] = coat_spec + (1.f - coat_weight * Fr) * mat.Kd.value[i] * INV_PI;
+        }
+    } else {
+        // Sample base (Lambert) 
+        s.wi = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+        if (s.wi.z <= 0.f) {
+            s.pdf = 0.f; s.f = Spectrum::zero(); s.is_specular = false;
+            return s;
+        }
+        float diff_pdf = cosine_hemisphere_pdf(s.wi.z);
+        // Compute coat specular pdf for this direction
+        float3 h = normalize(wo + s.wi);
+        float ndf_c = ggx_D(h, coat_alpha);
+        float VdotH = fabsf(dot(wo, h));
+        float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
+
+        float Fr = fresnel_schlick(VdotH, coat_F0);
+        float geo_c = ggx_G(wo, s.wi, coat_alpha);
+        float denom = 4.f * fabsf(wo.z) * fabsf(s.wi.z) + EPSILON;
+        float coat_spec = coat_weight * (ndf_c * geo_c * Fr) / denom;
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            s.f.value[i] = coat_spec + (1.f - coat_weight * Fr) * mat.Kd.value[i] * INV_PI;
+        }
+    }
+    s.is_specular = false;
+    return s;
+}
+
+// ── Fabric (diffuse + sheen lobe) ───────────────────────────────────
+// Sheen: Fresnel-like grazing highlight for cloth.
+// f_sheen = sheen_weight * (1 - cos_theta_h)^5 / (4 * pi)
+// Optionally tinted toward material colour via sheen_tint.
+
+inline HD BSDFSample fabric_sample(const Material& mat, float3 wo, PCGRng& rng) {
+    BSDFSample s;
+
+    // Always sample cosine hemisphere (both lobes are diffuse-like)
+    s.wi = sample_cosine_hemisphere(rng.next_float(), rng.next_float());
+    if (s.wi.z <= 0.f) {
+        s.pdf = 0.f; s.f = Spectrum::zero(); s.is_specular = false;
+        return s;
+    }
+    s.pdf = cosine_hemisphere_pdf(s.wi.z);
+
+    float3 h = normalize(wo + s.wi);
+    float cos_theta_h = fabsf(dot(wo, h));
+    float t = 1.f - cos_theta_h;
+    float t5 = t * t * t * t * t;  // (1 - cos_h)^5
+
+    float sheen_w = mat.pb_sheen;
+    float tint    = mat.pb_sheen_tint;
+
+    // Diffuse base + sheen
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        float base = mat.Kd.value[i] * INV_PI;
+        // Sheen colour: blend between white and Kd-tinted
+        float sheen_col = (1.f - tint) * 1.0f + tint * mat.Kd.value[i];
+        float sheen = sheen_w * sheen_col * t5 * INV_PI;
+        s.f.value[i] = base + sheen;
+    }
+    s.is_specular = false;
+    return s;
+}
+
 // ── Evaluate diffuse-only BSDF (for photon density estimation) ──────
 // Standard photon mapping practice: gather uses only the diffuse
 // component.  The peaked specular lobe creates unbounded variance in
@@ -415,7 +534,21 @@ inline HD Spectrum evaluate_diffuse(const Material& mat, float3 wo, float3 wi) {
     switch (mat.type) {
         case MaterialType::Mirror:
         case MaterialType::Glass:
+        case MaterialType::Translucent:
             return Spectrum::zero();   // delta distributions
+        case MaterialType::Clearcoat: {
+            // Diffuse portion attenuated by coat energy loss
+            float coat_f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
+            float coat_F0  = coat_f0t * coat_f0t;
+            float cos_o = fabsf(wo.z);
+            float Fr = fresnel_schlick(cos_o, coat_F0);
+            Spectrum f;
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                f.value[i] = (1.f - mat.pb_clearcoat * Fr) * mat.Kd.value[i] * INV_PI;
+            return f;
+        }
+        case MaterialType::Fabric:
+            return lambertian_f(mat.Kd);  // diffuse base only
         default:
             return lambertian_f(mat.Kd);
     }
@@ -465,11 +598,42 @@ inline HD Spectrum evaluate(const Material& mat, float3 wo, float3 wi) {
 
         case MaterialType::Mirror:
         case MaterialType::Glass:
+        case MaterialType::Translucent:
             // Delta distributions: f is zero for non-delta directions
             return Spectrum::zero();
 
         case MaterialType::Emissive:
             return lambertian_f(mat.Kd);
+
+        case MaterialType::Clearcoat: {
+            float coat_alpha = fmaxf(mat.pb_clearcoat_roughness * mat.pb_clearcoat_roughness, 0.001f);
+            float coat_f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
+            float coat_F0  = coat_f0t * coat_f0t;
+            float3 h = normalize(wo + wi);
+            float ndf_c = ggx_D(h, coat_alpha);
+            float geo_c = ggx_G(wo, wi, coat_alpha);
+            float VdotH = fabsf(dot(wo, h));
+            float Fr = fresnel_schlick(VdotH, coat_F0);
+            float denom = 4.f * fabsf(wo.z) * fabsf(wi.z) + EPSILON;
+            float coat_spec = mat.pb_clearcoat * (ndf_c * geo_c * Fr) / denom;
+            Spectrum f;
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                f.value[i] = coat_spec + (1.f - mat.pb_clearcoat * Fr) * mat.Kd.value[i] * INV_PI;
+            return f;
+        }
+
+        case MaterialType::Fabric: {
+            float3 h = normalize(wo + wi);
+            float cos_theta_h = fabsf(dot(wo, h));
+            float t = 1.f - cos_theta_h;
+            float t5 = t * t * t * t * t;
+            Spectrum f;
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                float sheen_col = (1.f - mat.pb_sheen_tint) + mat.pb_sheen_tint * mat.Kd.value[i];
+                f.value[i] = mat.Kd.value[i] * INV_PI + mat.pb_sheen * sheen_col * t5 * INV_PI;
+            }
+            return f;
+        }
 
         default:
             return Spectrum::zero();
@@ -523,7 +687,24 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
 
         case MaterialType::Mirror:
         case MaterialType::Glass:
+        case MaterialType::Translucent:
             return 0.f; // Delta distribution
+
+        case MaterialType::Clearcoat: {
+            float coat_alpha = fmaxf(mat.pb_clearcoat_roughness * mat.pb_clearcoat_roughness, 0.001f);
+            float coat_f0t = (mat.ior - 1.f) / (mat.ior + 1.f);
+            float coat_F0  = coat_f0t * coat_f0t;
+            float p_coat = fmaxf(fminf(mat.pb_clearcoat * coat_F0, 0.95f), 0.05f);
+            float diff_pdf = cosine_hemisphere_pdf(wi.z);
+            float3 h = normalize(wo + wi);
+            float ndf_c = ggx_D(h, coat_alpha);
+            float VdotH = fabsf(dot(wo, h));
+            float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            return p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
+        }
+
+        case MaterialType::Fabric:
+            return cosine_hemisphere_pdf(wi.z);
 
         default:
             return 0.f;
@@ -531,8 +712,12 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
 }
 
 // ── Sample a direction from the BSDF ───────────────────────────────
+// hero_bin: optional hero wavelength bin for glass dispersion.
+//   hero_bin < 0 → D-line default  (camera path / non-dispersive)
+//   hero_bin >= 0 → use that bin   (photon tracer with spectral hero)
 
-inline HD BSDFSample sample(const Material& mat, float3 wo, PCGRng& rng) {
+inline HD BSDFSample sample(const Material& mat, float3 wo, PCGRng& rng,
+                            int hero_bin = -1) {
     switch (mat.type) {
         case MaterialType::Lambertian:
         case MaterialType::Emissive:
@@ -542,13 +727,20 @@ inline HD BSDFSample sample(const Material& mat, float3 wo, PCGRng& rng) {
             return mirror_sample(mat.Ks, wo);
 
         case MaterialType::Glass:
-            return glass_sample(wo, mat, rng);
+        case MaterialType::Translucent:
+            return glass_sample(wo, mat, rng, hero_bin);
 
         case MaterialType::GlossyMetal:
             return glossy_sample(mat.Kd, mat.Ks, mat.roughness, wo, rng);
 
         case MaterialType::GlossyDielectric:
             return glossy_dielectric_sample(mat.Kd, mat.Ks, mat.roughness, mat.ior, wo, rng);
+
+        case MaterialType::Clearcoat:
+            return clearcoat_sample(mat, wo, rng);
+
+        case MaterialType::Fabric:
+            return fabric_sample(mat, wo, rng);
 
         default:
             return lambertian_sample(mat.Kd, wo, rng);

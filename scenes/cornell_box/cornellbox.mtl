@@ -1,30 +1,61 @@
 # Cornell Box materials (generated from subdivision mesh)
 # 13056 triangles, 6 materials
+#
+# --- Photon-beam MTL extensions (pb_*) ---
+# These tokens extend classic Wavefront .mtl in a backward-compatible way.
+# Unknown keys should be ignored by legacy loaders.
+#
+# Surface model selection:
+#   pb_brdf <lambert|dielectric|conductor|clearcoat|emissive>
+#   pb_roughness <0..1>                  # microfacet roughness (GGX recommended)
+#   pb_eta <float>                       # IOR for dielectrics (alias of Ni if present)
+#   pb_conductor_eta r g b               # conductor real IOR (approx, RGB)
+#   pb_conductor_k   r g b               # conductor imaginary IOR (approx, RGB)
+#
+# Clearcoat layering (optional; used when pb_brdf = clearcoat):
+#   pb_base_brdf <lambert|dielectric|conductor>
+#   pb_base_roughness <0..1>
+#
+# Volumetric / translucency (for photon beams through participating media):
+#   pb_medium homogeneous                # enables homogeneous medium inside closed mesh
+#   pb_density <float>                   # scales sigma_a/sigma_s (1 = as-authored)
+#   pb_sigma_a r g b                     # absorption coefficient (1 / scene_length_unit)
+#   pb_sigma_s r g b                     # scattering coefficient (1 / scene_length_unit)
+#   pb_g <float>                         # Henyey-Greenstein anisotropy [-1..1]
+#
+# Optional scene scale hints (in OBJ coordinate units):
+#   pb_meters_per_unit <float>            # e.g. 1.0 if OBJ units are meters; 0.01 if centimeters
+#   pb_scene_bbox_min x y z               # optional: scene AABB min, in OBJ units
+#   pb_scene_bbox_max x y z               # optional: scene AABB max, in OBJ units
 
 newmtl White
 Kd 0.73 0.73 0.73
 Ka 0.0000 0.0000 0.0000
 Ks 0.0000 0.0000 0.0000
 illum 1
+pb_brdf lambert
 
 newmtl Red
 Kd 0.63 0.065 0.05
 Ka 0.0000 0.0000 0.0000
 Ks 0.0000 0.0000 0.0000
 illum 1
+pb_brdf lambert
 
 newmtl Green
 Kd 0.15 0.45 0.09
 Ka 0.0000 0.0000 0.0000
 Ks 0.0000 0.0000 0.0000
 illum 1
+pb_brdf lambert
 
 newmtl Light
 Kd 0.78 0.78 0.78
 Ka 0.0000 0.0000 0.0000
 Ks 0.0000 0.0000 0.0000
-Ke 18.4 15.6 8
+Ke 23.92 20.28 10.4
 illum 1
+pb_brdf emissive
 
 # Glass block: refractive dielectric, IOR 1.5, fully transparent
 newmtl ShortBox
@@ -34,11 +65,21 @@ Ks 1.0 1.0 1.0
 Ns 10000
 Ni 1.5
 d 0.05
-illum 4
+illum 6
+pb_brdf dielectric
+pb_eta 1.5
+pb_roughness 0.01
+pb_dispersion 50000
+pb_medium homogeneous
+pb_density 0.0
+pb_sigma_s 0 0 0
+pb_sigma_a 0 0 0
+pb_g 0.0
 
 newmtl TallBox
 Kd 0.73 0.73 0.73
 Ka 0.0000 0.0000 0.0000
 Ks 0.0000 0.0000 0.0000
 illum 1
+pb_brdf lambert
 
