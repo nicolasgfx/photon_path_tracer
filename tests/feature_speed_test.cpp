@@ -70,10 +70,11 @@ TEST(NEE, ShadowSampleCountPolicy) {
 // ---------------------------------------------------------------------
 
 TEST(PhotonBins, StructSizeMatchesComment) {
-    // Important for speed expectations; comment in core/photon_bins.h claims 164 bytes.
     // Per-wavelength flux[NUM_LAMBDA] + scalar_flux + direction + weight + count + avg normal.
-    static_assert(sizeof(PhotonBin) == 164, "PhotonBin layout changed; update memory-footprint assumptions");
-    EXPECT_EQ(sizeof(PhotonBin), 164u);
+    // (NUM_LAMBDA + 8) * 4 + 4 bytes.
+    constexpr size_t expected_size = (NUM_LAMBDA + 8) * 4 + 4;
+    static_assert(sizeof(PhotonBin) == expected_size, "PhotonBin layout changed; update memory-footprint assumptions");
+    EXPECT_EQ(sizeof(PhotonBin), expected_size);
 }
 
 TEST(PhotonBins, DirsInitAndNearest) {

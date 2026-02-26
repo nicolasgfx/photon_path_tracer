@@ -64,7 +64,7 @@ constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 // =====================================================================
 
 constexpr int DEFAULT_IMAGE_WIDTH  = 512;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 512;            // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
 
 
 // =====================================================================
@@ -77,12 +77,12 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 512;            // [R]
 // Anti-aliasing + noise averaging.  This is the single biggest
 // quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
-constexpr int DEFAULT_SPP = 4;                       // [R]
+constexpr int DEFAULT_SPP = 16;                       // [R]
 
 // Sub-pixel stratified jitter grid.
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP.
-constexpr int STRATA_X = 2;                           // 4 × 4 = 16 = DEFAULT_SPP
-constexpr int STRATA_Y = 2;
+constexpr int STRATA_X = 4;                           // 4 × 4 = 16 = DEFAULT_SPP
+constexpr int STRATA_Y = 4;
 
 // ── Photon budgets ──────────────────────────────────────────────────
 // Total photons emitted per pass.  The photon map carries ALL indirect
@@ -98,8 +98,8 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diff
 // These caps prevent pathologically large searches in sparse regions.
 // Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
-constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;      // 0.05[R]  global (diffuse) map
-constexpr float DEFAULT_CAUSTIC_RADIUS = 0.005f;    // 0.025[R]  caustic map (tighter for sharp caustics)
+constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
+constexpr float DEFAULT_CAUSTIC_RADIUS = 0.01f;     // 0.025[R]  caustic map (tighter for sharp caustics)
 
 // ── NEE shadow rays ─────────────────────────────────────────────────
 // Shadow rays per shading point (bounce 0).  The bin/cache system
@@ -202,6 +202,10 @@ constexpr float LIGHT_SCALE_MAX     = 100.0f;
 
 // Progress snapshot PNGs at power-of-2 SPP intervals (near-zero overhead).
 constexpr bool PROGRESS_SNAPSHOT_ENABLED = true;
+constexpr int  PROGRESS_SNAPSHOT_INTERVAL = 0;        // 0 = power-of-2 only
+
+// Write per-component debug PNGs (NEE direct, photon indirect, caustic).
+constexpr bool DEBUG_COMPONENT_PNGS = false;
 
 
 // =====================================================================
@@ -222,14 +226,6 @@ constexpr float PLANE_TAU_EPSILON_FACTOR   = 10.0f;   // robust τ floor = facto
 // CPU: KD-tree.  GPU: grid shell expansion (capped by MAX_GATHER_RADIUS).
 constexpr int   DEFAULT_KNN_K                = 100;
 constexpr float DEFAULT_GPU_MAX_GATHER_RADIUS = 0.5f;  // upper bound for GPU shell expansion
-
-// Tag-1 (global-pass caustic) gather gate.  When false, photons whose
-// on_caustic_path flag was set during the *global* photon pass (tag 1)
-// are excluded from the density estimate.  Tag-0 (non-caustic) and
-// tag-2 (dedicated targeted-caustic) are always gathered.
-//   true  = gather tag-1 normally into L_global  (default)
-//   false = skip tag-1 in gather (useful for A/B comparison)
-constexpr bool  DEFAULT_GATHER_TAG1_ENABLED  = true;
 
 // ── Cell cache (per-cell photon statistics) ─────────────────────────
 // Adaptive gather radius, empty-region skip, caustic hotspot detection.

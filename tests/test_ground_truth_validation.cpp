@@ -2232,8 +2232,8 @@ TEST(MultiHero, PhotonSoA_MultiplePhotons) {
 
 // -- Hero bins cover distinct spectral bands -------------------------
 TEST(MultiHero, HeroBinsCoverSpectrum) {
-    // With HERO_WAVELENGTHS=4 and NUM_LAMBDA=32, each hero should
-    // cover a different quarter of the spectrum (stride=8).
+    // With HERO_WAVELENGTHS=4 and NUM_LAMBDA=4, each hero covers
+    // exactly one spectral bin (stride=1).
     const int stride = NUM_LAMBDA / HERO_WAVELENGTHS;
 
     // Pick hero_bin = 0: companions should be {0, 8, 16, 24}

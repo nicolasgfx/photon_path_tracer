@@ -14,8 +14,8 @@
 // Per-wavelength flux preserves spectral fidelity.  Each hero wavelength's
 // Epanechnikov-weighted flux is deposited into its own spectral bin during
 // the CPU build, matching the hash-grid path's per-wavelength accumulation.
-// Size: (NUM_LAMBDA + 8) * 4 + 4 = 164 bytes per bin (NUM_LAMBDA=32).
-// Memory: 1000 cells × 32 bins × 164 B ≈ 5.1 MB.
+// Size: (NUM_LAMBDA + 8) * 4 + 4 = 52 bytes per bin (NUM_LAMBDA=4).
+// Memory: 1000 cells × 32 bins × 52 B ≈ 1.6 MB.
 struct PhotonBin {
     float flux[NUM_LAMBDA]; // per-wavelength Epanechnikov-weighted flux
     float scalar_flux;// sum of flux[] — used by guided bounce/NEE as importance weight

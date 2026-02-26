@@ -85,6 +85,7 @@ static std::string scene_folder_from_profile(const char* obj_path) {
 static constexpr const char* SAVED_CAMERA_FILENAME = "saved_camera.json";
 
 static bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
+                                float light_scale,
                                 const std::string& scene_folder) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ofstream f(path);
@@ -94,11 +95,12 @@ static bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
     }
     f << std::fixed << std::setprecision(6);
     f << "{\n";
-    f << "  \"position\": [" << cam.position.x << ", " << cam.position.y << ", " << cam.position.z << "],\n";
-    f << "  \"look_at\":  [" << cam.look_at.x  << ", " << cam.look_at.y  << ", " << cam.look_at.z  << "],\n";
-    f << "  \"fov_deg\":  " << cam.fov_deg << ",\n";
-    f << "  \"yaw\":      " << yaw   << ",\n";
-    f << "  \"pitch\":    " << pitch << "\n";
+    f << "  \"position\":      [" << cam.position.x << ", " << cam.position.y << ", " << cam.position.z << "],\n";
+    f << "  \"look_at\":       [" << cam.look_at.x  << ", " << cam.look_at.y  << ", " << cam.look_at.z  << "],\n";
+    f << "  \"fov_deg\":       " << cam.fov_deg << ",\n";
+    f << "  \"yaw\":           " << yaw   << ",\n";
+    f << "  \"pitch\":         " << pitch << ",\n";
+    f << "  \"light_scale\":   " << light_scale << "\n";
     f << "}\n";
     f.close();
     std::printf("[Camera] Saved to %s\n", path.c_str());
@@ -106,6 +108,7 @@ static bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
 }
 
 static bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
+                                  float& light_scale,
                                   const std::string& scene_folder) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ifstream f(path);
@@ -155,11 +158,12 @@ static bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
             return true;
         };
 
-        if (key == "position")  { got_pos    = parse_float3(val, cam.position); }
-        else if (key == "look_at")  { got_lookat = parse_float3(val, cam.look_at); }
-        else if (key == "fov_deg")  { cam.fov_deg = (float)std::atof(val.c_str()); }
-        else if (key == "yaw")      { yaw         = (float)std::atof(val.c_str()); }
-        else if (key == "pitch")    { pitch       = (float)std::atof(val.c_str()); }
+        if (key == "position")     { got_pos    = parse_float3(val, cam.position); }
+        else if (key == "look_at")      { got_lookat = parse_float3(val, cam.look_at); }
+        else if (key == "fov_deg")      { cam.fov_deg    = (float)std::atof(val.c_str()); }
+        else if (key == "yaw")          { yaw            = (float)std::atof(val.c_str()); }
+        else if (key == "pitch")        { pitch          = (float)std::atof(val.c_str()); }
+        else if (key == "light_scale")  { light_scale    = (float)std::atof(val.c_str()); }
     }
 
     if (got_pos && got_lookat) {
@@ -1004,13 +1008,15 @@ static void key_callback(GLFWwindow* window, int key,
         int idx = g_app.active_scene_index;
         if (idx >= 0 && idx < NUM_SCENE_PROFILES) {
             std::string folder = scene_folder_from_profile(SCENE_PROFILES[idx].obj_path);
-            save_camera_to_file(*g_active_camera, g_app.yaw, g_app.pitch, folder);
+            save_camera_to_file(*g_active_camera, g_app.yaw, g_app.pitch,
+                                g_app.light_scale, folder);
         } else {
             // Derive folder from the active options scene_file
             if (g_active_options) {
                 fs::path p(g_active_options->scene_file);
                 std::string folder = p.parent_path().string();
-                save_camera_to_file(*g_active_camera, g_app.yaw, g_app.pitch, folder);
+                save_camera_to_file(*g_active_camera, g_app.yaw, g_app.pitch,
+                                    g_app.light_scale, folder);
             }
         }
         return;
@@ -1220,14 +1226,19 @@ static void run_interactive(
                 {
                     std::string folder = scene_folder_from_profile(prof.obj_path);
                     float saved_yaw = 0.f, saved_pitch = 0.f;
-                    if (load_camera_from_file(camera, saved_yaw, saved_pitch, folder)) {
+                    float saved_light = DEFAULT_LIGHT_SCALE;
+                    if (load_camera_from_file(camera, saved_yaw, saved_pitch,
+                                              saved_light, folder)) {
                         g_app.yaw   = saved_yaw;
                         g_app.pitch = saved_pitch;
+                        g_app.light_scale         = saved_light;
+                        g_app.light_scale_changed = true;
                     } else {
                         // Sync yaw/pitch from new camera direction
                         float3 fwd = normalize(camera.look_at - camera.position);
                         g_app.yaw   = atan2f(fwd.x, -fwd.z);
                         g_app.pitch = asinf(fmaxf(-1.f, fminf(1.f, fwd.y)));
+                        g_app.light_scale = DEFAULT_LIGHT_SCALE;
                     }
                 }
 
@@ -1235,7 +1246,6 @@ static void run_interactive(
                 g_app.active_scene_index  = idx;
                 g_app.camera_moved        = true;
                 g_app.showing_final       = false;
-                g_app.light_scale         = DEFAULT_LIGHT_SCALE;  // reset brightness
                 opt.scene_file            = obj_path;
 
                 // Re-capture original emission for brightness scaling
@@ -1483,8 +1493,8 @@ static void run_interactive(
             std::cout << "========================================\n";
 
             // ── Photon-indirect + caustic debug PNGs (early output) ──
-            // Gated by DEBUG_PHOTON_INDIRECT_PNG in config.h.
-            if constexpr (DEBUG_PHOTON_INDIRECT_PNG) {
+            // Gated by DEBUG_COMPONENT_PNGS in config.h.
+            if constexpr (DEBUG_COMPONENT_PNGS) {
                 auto t_pi_start = std::chrono::high_resolution_clock::now();
                 constexpr int EARLY_DEBUG_SPP = 8;
 
@@ -1546,8 +1556,8 @@ static void run_interactive(
                 std::cout << "[Init] Buffers cleared.\n";
                 std::cout.flush();
 
-                // Caustic-only pass (gated by DEBUG_CAUSTIC_PNG)
-                if constexpr (DEBUG_CAUSTIC_PNG) {
+                // Caustic-only pass
+                {
                     std::cout << "[Debug] Starting caustic debug pass...\n";
                     std::cout.flush();
                     std::vector<float> caustic_spec, caustic_samp;
@@ -1612,6 +1622,20 @@ static void run_interactive(
                           << g_app.render_spp_done << "/"
                           << g_app.render_spp_total << " spp\n";
             } else {
+                // §1.2 Multi-map: re-trace photons every MULTI_MAP_SPP_GROUP
+                // samples with a different RNG seed to decorrelate the photon map.
+                if constexpr (MULTI_MAP_SPP_GROUP > 0) {
+                    if ((g_app.render_spp_done % MULTI_MAP_SPP_GROUP) == 0) {
+                        int map_seed = g_app.render_spp_done / MULTI_MAP_SPP_GROUP;
+                        std::printf("  [Render] Re-tracing photon map (seed=%d) ...\n", map_seed);
+                        optix_renderer.trace_photons(scene, opt.config,
+                                                     /*grid_radius_override=*/0.f,
+                                                     /*photon_map_seed=*/map_seed);
+                    }
+                }
+
+                auto t_spp_start = std::chrono::high_resolution_clock::now();
+
                 optix_renderer.render_one_spp(
                     g_app.render_cam, g_app.render_spp_done,
                     opt.config.max_bounces);
@@ -1620,23 +1644,29 @@ static void run_interactive(
                 // Download and display the progressive result
                 optix_renderer.download_framebuffer(display_fb);
 
-                // Console progress
+                // Console progress: 1-liner per SPP with step timing
                 auto t_now = std::chrono::high_resolution_clock::now();
+                double step_ms = std::chrono::duration<double, std::milli>(t_now - t_spp_start).count();
                 double elapsed = std::chrono::duration<double>(t_now - g_app.render_start).count();
                 double eta = (g_app.render_spp_done < g_app.render_spp_total)
                     ? elapsed * (g_app.render_spp_total - g_app.render_spp_done) / g_app.render_spp_done
                     : 0.0;
-                std::printf("\r  [Render] %d/%d spp  %.1fs  ETA %.1fs   ",
+                double spp_per_sec = (elapsed > 0.0) ? g_app.render_spp_done / elapsed : 0.0;
+                std::printf("  [Render] spp %3d/%d  %6.0f ms  |  %.1fs elapsed  %.1f spp/s  ETA %.1fs\n",
                             g_app.render_spp_done, g_app.render_spp_total,
-                            elapsed, eta);
+                            step_ms, elapsed, spp_per_sec, eta);
                 std::fflush(stdout);
 
-                // ── Progress snapshots at power-of-2 SPP ────────────
+                // ── Progress snapshots ───────────────────────────────
                 if constexpr (PROGRESS_SNAPSHOT_ENABLED) {
                     int spp = g_app.render_spp_done;
-                    // Check if spp is a power of 2 (1,2,4,8,...)
+                    // Snapshot when interval divides spp, or at power-of-2
+                    // (interval=0 reverts to legacy power-of-2 only mode).
                     bool is_pow2 = (spp > 0) && ((spp & (spp - 1)) == 0);
-                    if (is_pow2) {
+                    bool do_snap = (PROGRESS_SNAPSHOT_INTERVAL > 0)
+                                       ? (spp % PROGRESS_SNAPSHOT_INTERVAL == 0)
+                                       : is_pow2;
+                    if (do_snap) {
                         static bool progress_dir_created = false;
                         if (!progress_dir_created) {
                             fs::create_directories("output/progress");
@@ -1649,7 +1679,9 @@ static void run_interactive(
                         // Combined
                         write_png(std::string(snap_prefix) + "_combined.png", display_fb);
 
-                        // Component buffers (NEE direct, photon indirect)
+                        // Component buffers (NEE direct, photon indirect, caustic)
+                        // Gated by DEBUG_COMPONENT_PNGS — these are heavy downloads.
+                        if constexpr (DEBUG_COMPONENT_PNGS) {
                         std::vector<float> snap_nee, snap_photon, snap_samp;
                         optix_renderer.download_component_buffers(
                             snap_nee, snap_photon, snap_samp);
@@ -1687,7 +1719,7 @@ static void run_interactive(
                         write_png(std::string(snap_prefix) + "_photon_indirect.png", snap_photon_fb);
 
                         // Caustic-indirect via non-destructive snapshot pass
-                        if constexpr (DEBUG_CAUSTIC_PNG) {
+                        {
                             std::vector<float> caus_spec, caus_samp;
                             optix_renderer.render_caustic_snapshot(
                                 g_app.render_cam, opt.config, caus_spec, caus_samp);
@@ -1715,14 +1747,15 @@ static void run_interactive(
                                 write_png(std::string(snap_prefix) + "_caustic_indirect.png", snap_caus_fb);
                             }
                         }
+                        } // end DEBUG_COMPONENT_PNGS
 
-                        std::printf("\n  [Snapshot] %d spp → %s_*.png\n", spp, snap_prefix);
+                        std::printf("  [Snapshot] %d spp -> %s_*.png\n", spp, snap_prefix);
                     }
                 }
 
                 // Check if done
                 if (g_app.render_spp_done >= g_app.render_spp_total) {
-                std::cout << "\n[Render] Done!\n";
+                std::cout << "[Render] Done!\n";
 
                 // Print GPU kernel profiling summary
                 optix_renderer.print_kernel_profiling();
@@ -1951,9 +1984,12 @@ int main(int argc, char* argv[]) {
     {
         std::string folder = scene_folder_from_profile(SCENE_OBJ_PATH);
         float yaw_init = 0.f, pitch_init = 0.f;
-        if (load_camera_from_file(camera, yaw_init, pitch_init, folder)) {
-            g_app.yaw   = yaw_init;
-            g_app.pitch = pitch_init;
+        float light_init = DEFAULT_LIGHT_SCALE;
+        if (load_camera_from_file(camera, yaw_init, pitch_init, light_init, folder)) {
+            g_app.yaw         = yaw_init;
+            g_app.pitch       = pitch_init;
+            g_app.light_scale = light_init;
+            g_app.light_scale_changed = true;
         }
     }
 

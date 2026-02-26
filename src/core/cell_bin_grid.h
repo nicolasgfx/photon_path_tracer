@@ -43,7 +43,7 @@
 //   Normalization: same inv_area = 2/(π r²) and 1/N_emitted as hash grid.
 //
 // Memory:  cells × PHOTON_BIN_COUNT × sizeof(PhotonBin)
-//          for r = 0.05, scene 1.0³: 1000 × 32 × 164 ≈ 5.1 MB
+//          for r = 0.05, scene 1.0³: 1000 × 32 × 52 ≈ 1.6 MB
 // ─────────────────────────────────────────────────────────────────────
 
 #include "core/types.h"

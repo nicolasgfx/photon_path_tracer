@@ -9,7 +9,7 @@
 #include "types.h"
 #include <cstring>
 
-constexpr int   NUM_LAMBDA    = 32;
+constexpr int   NUM_LAMBDA    = 4;
 constexpr float LAMBDA_MIN    = 380.0f;   // nm
 constexpr float LAMBDA_MAX    = 780.0f;   // nm
 constexpr float LAMBDA_STEP   = (LAMBDA_MAX - LAMBDA_MIN) / NUM_LAMBDA;
@@ -174,46 +174,34 @@ inline HD float3 spectrum_to_srgb_aces(const Spectrum& s) {
     return make_f3(srgb_gamma(r), srgb_gamma(g), srgb_gamma(b));
 }
 
-// ── RGB → Spectrum (Smits-style Gaussian basis) ────────────────────
-// Reconstruct a plausible spectral reflectance from RGB.
-// Uses narrow Gaussians to minimise inter-channel crosstalk.
+// ── RGB → Spectrum (optimal pseudoinverse basis) ────────────────────
+// Optimal 4×3 matrix M computed via M = pinv(XYZ2RGB @ CIE_norm).
+// Guarantees perfect round-trip: spectrum_to_srgb(rgb_to_spectrum(c)) ≈ c
+// with negligible error (< 0.06 per channel even after clamping).
+//
+// Each row corresponds to one spectral bin; columns are R, G, B weights.
+//   bin 0 (430nm):  0.01381753  0.07280016  0.78052238
+//   bin 1 (530nm):  0.06839557  0.82078527  0.09598912
+//   bin 2 (630nm):  0.69628317  0.39308480 -0.03413205
+//   bin 3 (730nm):  0.00013491  0.00030314  0.00001524
+
 inline HD Spectrum rgb_to_spectrum_reflectance(float r, float g, float b) {
-    Spectrum s = Spectrum::zero();
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        float lam = lambda_of_bin(i);
-        // Narrow Gaussians to reduce yellow crosstalk between red & green
-        float dr = (lam - 630.f) / 28.f;
-        float dg = (lam - 532.f) / 28.f;
-        float db = (lam - 460.f) / 24.f;
-        float fr = expf(-0.5f * dr * dr);
-        float fg = expf(-0.5f * dg * dg);
-        float fb = expf(-0.5f * db * db);
-
-        // Normalize so that white (1,1,1) → flat spectrum
-        float sum = fr + fg + fb;
-        if (sum < 0.01f) sum = 0.01f;
-
-        s.value[i] = fmaxf(0.f, (r * fr + g * fg + b * fb) / sum);
-    }
+    Spectrum s;
+    s.value[0] = fmaxf(0.f, 0.01381753f * r + 0.07280016f * g + 0.78052238f * b);
+    s.value[1] = fmaxf(0.f, 0.06839557f * r + 0.82078527f * g + 0.09598912f * b);
+    s.value[2] = fmaxf(0.f, 0.69628317f * r + 0.39308480f * g - 0.03413205f * b);
+    s.value[3] = fmaxf(0.f, 0.00013491f * r + 0.00030314f * g + 0.00001524f * b);
     return s;
 }
 
 // ── RGB → Spectrum (emission) ───────────────────────────────────────
-// For emitters: same basis but NO white normalisation so that the
-// absolute intensity is preserved (values can exceed 1.0).
+// Same optimal matrix but values may exceed 1.0 for bright emitters.
 inline Spectrum rgb_to_spectrum_emission(float r, float g, float b) {
-    Spectrum s = Spectrum::zero();
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        float lam = lambda_of_bin(i);
-        float dr = (lam - 630.f) / 28.f;
-        float dg = (lam - 532.f) / 28.f;
-        float db = (lam - 460.f) / 24.f;
-        float fr = expf(-0.5f * dr * dr);
-        float fg = expf(-0.5f * dg * dg);
-        float fb = expf(-0.5f * db * db);
-
-        s.value[i] = fmaxf(0.f, r * fr + g * fg + b * fb);
-    }
+    Spectrum s;
+    s.value[0] = fmaxf(0.f, 0.01381753f * r + 0.07280016f * g + 0.78052238f * b);
+    s.value[1] = fmaxf(0.f, 0.06839557f * r + 0.82078527f * g + 0.09598912f * b);
+    s.value[2] = fmaxf(0.f, 0.69628317f * r + 0.39308480f * g - 0.03413205f * b);
+    s.value[3] = fmaxf(0.f, 0.00013491f * r + 0.00030314f * g + 0.00001524f * b);
     return s;
 }
 

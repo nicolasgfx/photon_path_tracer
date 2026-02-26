@@ -303,9 +303,10 @@ TEST(Spectrum, SumAndMax) {
     EXPECT_NEAR(s.sum(), (float)NUM_LAMBDA, kTol);
     EXPECT_NEAR(s.max_component(), 1.f, kTol);
 
-    s.value[5] = 10.f;
+    const int test_bin = NUM_LAMBDA - 1;
+    s.value[test_bin] = 10.f;
     EXPECT_NEAR(s.max_component(), 10.f, kTol);
-    EXPECT_EQ(s.dominant_bin(), 5);
+    EXPECT_EQ(s.dominant_bin(), test_bin);
 }
 
 TEST(Spectrum, LambdaOfBin) {
@@ -2320,7 +2321,7 @@ TEST(DensityEstimator, NormalizationFactor) {
     const float radius = 0.5f;
     const float flux = 1.0f;
     const int N_total = 100;
-    const int bin = 5;
+    const int bin = NUM_LAMBDA - 1;
 
     PhotonSoA photons;
     for (int i = 0; i < K; ++i) {
@@ -3584,9 +3585,9 @@ TEST(PhotonBins, BinSolidAngle) {
 }
 
 TEST(PhotonBins, PhotonBinSize) {
-    // 36 bytes: flux(4) + dir_xyz(12) + avg_nxyz(12) + weight(4) + count(2) + pad(2)
-    // (was 24 bytes before the surface-normal visibility term avg_nx/y/z was added)
-    EXPECT_EQ(sizeof(PhotonBin), 36u);
+    // (NUM_LAMBDA + 8) * 4 + 4 = 52 bytes with NUM_LAMBDA=4
+    // flux[4](16) + scalar_flux(4) + dir_xyz(12) + weight(4) + count(4) + avg_nxyz(12)
+    EXPECT_EQ(sizeof(PhotonBin), (NUM_LAMBDA + 8) * 4 + 4);
 }
 
 TEST(PhotonBins, MaxBinCountRespected) {
@@ -3951,8 +3952,9 @@ TEST(DensityEstimator, NormalVisibility_ThinWallBothSidesCorrect) {
 
     // Cross-contamination: roughly equal flux so values should be close
     // (not one being drastically larger due to the other side bleeding through)
-    if (L_front[4] > 0.f && L_back[4] > 0.f) {
-        float ratio = L_front[4] / L_back[4];
+    const int check_bin = NUM_LAMBDA / 2;
+    if (L_front[check_bin] > 0.f && L_back[check_bin] > 0.f) {
+        float ratio = L_front[check_bin] / L_back[check_bin];
         EXPECT_NEAR(ratio, 1.0f, 0.1f)
             << "Both sides should see equal irradiance (same flux, symmetric setup)";
     }

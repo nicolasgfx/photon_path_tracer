@@ -243,7 +243,7 @@ public:
     void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
     bool is_use_dense_grid() const  { return use_dense_grid_; }
 
-    /// Render coverage debug PNG (stub — no-op when DEBUG_COVERAGE_PNG is false).
+    /// Render coverage debug PNG (stub — no-op when DEBUG_COMPONENT_PNGS is false).
     template<typename CamT, typename FbT>
     void render_coverage_debug_png(const CamT&, const FbT&) {}
 
