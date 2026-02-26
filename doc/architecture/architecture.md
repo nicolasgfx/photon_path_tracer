@@ -1,9 +1,9 @@
-# Architecture — Spectral Photon-Centric Renderer (v2.4)
+# Architecture — Spectral Photon-Centric Renderer (v2.5)
 
 This document describes the complete rendering pipeline, its design
 rationale, mathematical foundations, and implementation details.
 
-**Architecture version:** v2.4 (photon-centric, adaptive kNN gather, IOR stack, geometric normals)
+**Architecture version:** v2.5 (+ pb_tf_spectrum, GPU allocation amortization, emissive inverse-index, photon map pool)
 
 ---
 
@@ -178,6 +178,39 @@ Supported material types:
 **Translucent** = Glass-like Fresnel bounce + optional interior
 participating medium (subsurface scattering via Beer–Lambert). Created
 when `pb_brdf = dielectric` with `pb_medium_enabled = true`.
+
+**`pb_tf_spectrum` — direct spectral transmittance override (§4.1.1):**
+For glass materials requiring spectrally-narrow colour filters that
+cannot be represented via RGB → spectrum conversion, the MTL keyword
+`pb_tf_spectrum b0 b1 … bN` writes per-bin transmittance directly into
+`Material::Tf`, bypassing the lossy pseudoinverse matrix entirely.
+
+### 4.1.1 `pb_tf_spectrum` — Direct Spectral Transmittance Override
+
+The standard RGB→spectrum path uses a pseudoinverse matrix
+(`rgb_to_spectrum_reflectance`) to convert `Tf` RGB values into `NUM_LAMBDA`
+spectral bins. Because the matrix must be non-negative and cover a wide
+gamut, spectrally narrow colours (e.g. deep green glass with near-zero
+transmission at 430 and 730 nm) are impossible to represent accurately.
+
+The `pb_tf_spectrum` MTL keyword bypasses this conversion entirely:
+
+```
+pb_tf_spectrum 0.04 0.92 0.04 0.01
+```
+
+Each value maps directly to a wavelength bin (430, 530, 630, 730 nm for
+`NUM_LAMBDA = 4`). The parser reads exactly `NUM_LAMBDA` floats into
+`Material::pb_tf_spectrum`. During material finalization, if
+`pb_tf_spectrum_set` is true, `mat.Tf = mat.pb_tf_spectrum` overrides
+whatever the RGB conversion produced.
+
+**Limitations:**
+- Coupled to `NUM_LAMBDA` — the MTL file must provide exactly as many
+  values as there are spectral bins.
+- Not artist-friendly — requires knowledge of the bin layout.
+- No round-trip guarantee — the override is one-way.
+- Still coarse for 4-bin configurations.
 
 **Opacity fix:** Glass and Translucent materials always have
 `opacity = 1.0`. Their transmission is handled by the specular bounce
@@ -1462,6 +1495,8 @@ All tunable constants in `src/core/config.h`:
 | `DEFAULT_GPU_MAX_GATHER_RADIUS` | 0.5 | Max gather radius for GPU grid k-NN |
 | `DEFAULT_KNN_K` | 100 | k-NN neighbour count |
 | `DEFAULT_TARGETED_CAUSTIC_MIX` | 1.0 | Fraction of caustic budget targeted |
+| `MULTI_MAP_SPP_GROUP` | 4 | Re-seed photon map every N camera samples |
+| `PHOTON_MAP_POOL_SIZE` | 4 | Pre-build this many maps at render start |
 
 ### NEE
 
@@ -1658,7 +1693,88 @@ tests/
 
 ---
 
-## 21. Strengths
+## 21. GPU Performance Optimizations
+
+### 21.1 DeviceBuffer Allocation Amortization (`ensure_alloc`)
+
+The original code called `DeviceBuffer::alloc()` (→ `cudaFree` + `cudaMalloc`)
+on every SPP for `LaunchParams` and auxiliary buffers. For a 64-SPP render
+this produced ~450 unnecessary CUDA API round-trips.
+
+`DeviceBuffer::ensure_alloc(size_t n)` replaces `alloc()` at all hot sites:
+
+```cpp
+void ensure_alloc(size_t n) {
+    if (bytes >= n) return;   // already large enough
+    alloc(n);
+}
+```
+
+After the first SPP the buffer is already the correct size, so every
+subsequent call is a no-op pointer comparison. Seven allocation sites in
+`optix_renderer.cpp` were converted (`d_launch_params_`, framebuffer arrays,
+accumulation buffers, active mask, and luminance statistics).
+
+### 21.2 Emissive Inverse-Index Table
+
+`dev_light_pdf()` originally performed an $O(N)$ linear scan over
+`emissive_tri_indices[]` to map an arbitrary `tri_id` to its position in
+the emissive CDF. With 400+ emissive triangles and ~4 shadow rays per
+pixel, this dominated instruction count.
+
+A precomputed inverse-index array `emissive_local_idx[num_triangles]` is
+now uploaded alongside the emitter CDF in `upload_emitter_data()`:
+
+```cpp
+std::vector<int> local_idx(scene.triangles.size(), -1);
+for (size_t i = 0; i < n; ++i)
+    local_idx[scene.emissive_tri_indices[i]] = (int)i;
+d_emissive_local_idx_.upload(local_idx);
+```
+
+`dev_light_pdf()` uses `params.emissive_local_idx[tri_id]` for $O(1)$
+lookup with a linear-scan fallback when the pointer is `nullptr`.
+
+Memory overhead: 4 bytes per triangle (negligible).
+
+### 21.3 Photon Map Pool (Amortization)
+
+Multi-map decorrelation (`MULTI_MAP_SPP_GROUP`) previously re-traced the
+full photon pass at every SPP group boundary (every 4 camera samples).
+For a 64-SPP render this meant 16 full photon traces — the dominant cost.
+
+The **photon map pool** pre-builds several complete photon maps at the start
+of `render_final()` and cycles through them during accumulation:
+
+```
+┌─────────────────── render_final() ───────────────────┐
+│  Pre-build PHOTON_MAP_POOL_SIZE maps (different seeds)│
+│  for s in 0..total_spp:                               │
+│      if (s % MULTI_MAP_SPP_GROUP == 0):               │
+│          activate map[s/group % pool_size]  ← O(1)    │
+│      render_one_spp()                                  │
+│  Release pool buffers                                  │
+└───────────────────────────────────────────────────────┘
+```
+
+`PhotonMapSlot` holds a complete snapshot of the device-side photon SoA,
+hash grid, and associated scalars. `swap_photon_map()` exchanges all 17+
+device buffers and 4 scalar fields between the main members and a slot
+via `std::swap` — no GPU copies, just pointer rotation.
+
+| Configuration | Re-traces (64 SPP) | VRAM per map |
+|---------------|---------------------|--------------|
+| Legacy (pool=1) | 16 | 1× |
+| Pool=4 | 4 (upfront) | 4× |
+
+Trade-off: 4× VRAM for photon data, but ~4× faster wall-clock due to
+eliminated redundant photon tracing during accumulation.
+
+Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
+
+---
+
+## 22. Strengths
 
 1. **Full spectral transport.** 32 wavelength bins; dispersion, metamerism,
    and spectral emission naturally captured without RGB approximations.
@@ -1719,9 +1835,16 @@ tests/
 18. **Three-valued tag system.** Dual-budget photon gather with correct
     per-budget normalization. No photons are discarded.
 
+19. **Direct spectral transmittance override.** `pb_tf_spectrum` MTL keyword
+    bypasses the lossy RGB→spectrum matrix for precise glass colour control.
+
+20. **GPU allocation amortization.** `ensure_alloc` avoids cudaFree/cudaMalloc
+    churn; emissive inverse-index replaces O(N) scan in `dev_light_pdf()`;
+    photon map pool eliminates redundant re-tracing during SPP accumulation.
+
 ---
 
-## 22. Weaknesses and Limitations
+## 23. Weaknesses and Limitations
 
 1. **No diffuse camera continuation.** All indirect lighting comes from the
    photon map. Photon map quality directly determines GI quality.
@@ -1746,7 +1869,7 @@ tests/
 
 ---
 
-## 23. Common Bugs to Avoid
+## 24. Common Bugs to Avoid
 
 - Forgetting area→solid-angle Jacobian (`dist² / cos_y`) in NEE
 - Using wrong cosine in Jacobian (must be emitter-side `cos_y`)
@@ -1773,7 +1896,7 @@ tests/
 
 ---
 
-## 24. Architectural Differences from v1
+## 25. Architectural Differences from v1
 
 | Aspect | v1 (Previous) | v2.4 (Current) |
 |--------|---------------|----------------|
@@ -1798,10 +1921,14 @@ tests/
 | CPU reference | Partial | Full, physically identical to GPU |
 | Integration tests | None (unit only) | CPU↔GPU comparison suite |
 | Cell-bin grid | Used for guided camera bouncing | Deleted (~800 lines) |
+| GPU buffer allocation | alloc() every SPP | ensure_alloc() — no-op when size unchanged (§21.1) |
+| Light PDF lookup | O(N) linear scan | O(1) inverse-index table (§21.2) |
+| Photon map re-tracing | Re-trace at every SPP group | Pre-built pool of maps, pointer-swap cycling (§21.3) |
+| Glass spectral Tf | RGB→spectrum only | + pb_tf_spectrum direct per-bin override (§4.1.1) |
 
 ---
 
-## 25. Removed / Deprecated Functionality
+## 26. Removed / Deprecated Functionality
 
 | Feature | Reason |
 |---------|--------|

@@ -63,8 +63,8 @@ constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 512;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 1024;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 1024;           // [R]
 
 
 // =====================================================================
@@ -77,19 +77,19 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
 // Anti-aliasing + noise averaging.  This is the single biggest
 // quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
-constexpr int DEFAULT_SPP = 16;                       // [R]
+constexpr int DEFAULT_SPP = 32;                       // [R]
 
 // Sub-pixel stratified jitter grid.
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP.
-constexpr int STRATA_X = 4;                           // 4 × 4 = 16 = DEFAULT_SPP
+constexpr int STRATA_X = 8;                           // 4 × 4 = 16 = DEFAULT_SPP
 constexpr int STRATA_Y = 4;
 
 // ── Photon budgets ──────────────────────────────────────────────────
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 2000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 5000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -98,8 +98,8 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diff
 // These caps prevent pathologically large searches in sparse regions.
 // Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
-constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
-constexpr float DEFAULT_CAUSTIC_RADIUS = 0.01f;     // 0.025[R]  caustic map (tighter for sharp caustics)
+constexpr float DEFAULT_GATHER_RADIUS  = 0.10f;      // 0.05[R]  global (diffuse) map
+constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
 
 // ── NEE shadow rays ─────────────────────────────────────────────────
 // Shadow rays per shading point (bounce 0).  The bin/cache system
@@ -158,6 +158,12 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 // RNG seed every N camera samples to decorrelate photon/camera noise.
 //   0 = single map  |  4 = balanced  |  8 = quality
 constexpr int MULTI_MAP_SPP_GROUP = 4;
+
+// Photon map pool: pre-build this many maps at the start of render_final()
+// and cycle through them, avoiding re-tracing during SPP accumulation.
+//   1 = no pool (re-trace each group, legacy behaviour)
+//   4 = 4 maps pre-built, cycled every MULTI_MAP_SPP_GROUP samples
+constexpr int PHOTON_MAP_POOL_SIZE = 4;
 
 
 // =====================================================================

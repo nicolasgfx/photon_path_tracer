@@ -135,6 +135,11 @@ struct Material {
     bool          pb_sigma_a_set    = false;
     bool          pb_sigma_s_set    = false;
 
+    // Direct spectral transmittance override (bypasses RGB→spectrum conversion)
+    // pb_tf_spectrum b0 b1 b2 b3  (one value per spectral bin: 430, 530, 630, 730 nm)
+    Spectrum      pb_tf_spectrum    = Spectrum::constant(1.0f);
+    bool          pb_tf_spectrum_set = false;
+
     // Chromatic dispersion (Cauchy B coefficient, nm²)
     // pb_dispersion <cauchy_b> enables dispersion and sets cauchy_B.
     // cauchy_A is auto-derived so that n(589nm) == ior.

@@ -143,6 +143,7 @@ struct LaunchParams {
     // Emitter data (for GPU photon tracing)
     uint32_t* emissive_tri_indices;  // [num_emissive]
     float*    emissive_cdf;          // [num_emissive] cumulative distribution
+    int*      emissive_local_idx;    // [num_triangles] tri_id → local emissive index (-1 = not emissive)
     int       num_emissive;
     float     total_emissive_power;
 

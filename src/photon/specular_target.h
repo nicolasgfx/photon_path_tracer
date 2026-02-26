@@ -119,7 +119,6 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
 
         float3 origin = ept.position;
         float3 dir    = normalize(target_pt - origin);
-        float  dist   = length(target_pt - origin);
 
         // Check that direction faces outward from emitter
         if (dot(dir, ept.normal) <= 0.f) return tcp;
@@ -127,15 +126,26 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
         // Backface culling: reject if photon hits target from behind
         if (dot(dir, spec_normal) >= 0.f) return tcp;
 
-        // Visibility check (shadow ray)
-        Ray shadow_ray;
-        shadow_ray.origin    = origin + ept.normal * EPSILON;
-        shadow_ray.direction = dir;
-        shadow_ray.tmin      = EPSILON;
-        shadow_ray.tmax      = dist - EPSILON;
-
-        HitRecord shadow_hit = scene.intersect(shadow_ray);
-        if (shadow_hit.hit) return tcp;  // occluded
+        // Visibility: trace toward the target.  If the first hit is a
+        // specular/translucent surface (wave-peak or front of a glass
+        // sphere), accept — the bounce loop enters there.  Only reject
+        // for truly opaque blockers.
+        {
+            float dist = length(target_pt - origin);
+            Ray vis_ray;
+            vis_ray.origin    = origin + ept.normal * EPSILON;
+            vis_ray.direction = dir;
+            vis_ray.tmin      = EPSILON;
+            vis_ray.tmax      = dist - EPSILON;
+            HitRecord vis_hit = scene.intersect(vis_ray);
+            if (vis_hit.hit) {
+                uint32_t bmat = vis_hit.material_id;
+                if (bmat < scene.materials.size()) {
+                    const Material& blocker = scene.materials[bmat];
+                    if (!blocker.is_specular()) return tcp;  // opaque blocker
+                }
+            }
+        }
 
         // Compute spectral flux
         uint32_t emitter_tri_idx = ept.global_tri_idx;
@@ -180,21 +190,29 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
         float3 enrm = etri.geometric_normal();
 
         float3 dir  = normalize(target_pt - origin);
-        float  dist = length(target_pt - origin);
 
         if (dot(dir, enrm) <= 0.f) return tcp;
 
         // Backface culling: reject if photon hits target from behind
         if (dot(dir, spec_normal) >= 0.f) return tcp;
 
-        Ray shadow_ray;
-        shadow_ray.origin    = origin + enrm * EPSILON;
-        shadow_ray.direction = dir;
-        shadow_ray.tmin      = EPSILON;
-        shadow_ray.tmax      = dist - EPSILON;
-
-        HitRecord shadow_hit = scene.intersect(shadow_ray);
-        if (shadow_hit.hit) return tcp;
+        // Visibility: same transparent-passthrough logic as above.
+        {
+            float dist = length(target_pt - origin);
+            Ray vis_ray;
+            vis_ray.origin    = origin + enrm * EPSILON;
+            vis_ray.direction = dir;
+            vis_ray.tmin      = EPSILON;
+            vis_ray.tmax      = dist - EPSILON;
+            HitRecord vis_hit = scene.intersect(vis_ray);
+            if (vis_hit.hit) {
+                uint32_t bmat = vis_hit.material_id;
+                if (bmat < scene.materials.size()) {
+                    const Material& blocker = scene.materials[bmat];
+                    if (!blocker.is_specular()) return tcp;  // opaque blocker
+                }
+            }
+        }
 
         float cos_theta = dot(dir, enrm);
         float emitter_area = etri.area();

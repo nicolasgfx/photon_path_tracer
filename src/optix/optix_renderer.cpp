@@ -374,6 +374,8 @@ void OptixRenderer::fill_clearcoat_fabric_params(LaunchParams& lp) const {
     lp.clearcoat_roughness = d_clearcoat_roughness_.d_ptr ? const_cast<float*>(d_clearcoat_roughness_.as<float>()) : nullptr;
     lp.sheen               = d_sheen_.d_ptr               ? const_cast<float*>(d_sheen_.as<float>())               : nullptr;
     lp.sheen_tint          = d_sheen_tint_.d_ptr          ? const_cast<float*>(d_sheen_tint_.as<float>())          : nullptr;
+    // Emissive inverse-index (O(1) light PDF lookup)
+    lp.emissive_local_idx  = d_emissive_local_idx_.d_ptr  ? const_cast<int*>(d_emissive_local_idx_.as<int>())      : nullptr;
 }
 
 // =====================================================================
@@ -459,6 +461,12 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
     cdf[n-1] = 1.0f; // ensure exact 1.0
 
     d_emissive_cdf_.upload(cdf);
+
+    // Build inverse-index: global tri_id → local emissive index (-1 = not emissive)
+    std::vector<int> local_idx(scene.triangles.size(), -1);
+    for (size_t i = 0; i < n; ++i)
+        local_idx[scene.emissive_tri_indices[i]] = (int)i;
+    d_emissive_local_idx_.upload(local_idx);
 
     std::printf("[OptiX] Emitter data: %zu tris  total_power=%.4f  max_w=%.4f  min_w=%.4f\n",
                 n, total,
@@ -746,6 +754,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     // Emitter data
     lp.emissive_tri_indices = d_emissive_indices_.as<uint32_t>();
     lp.emissive_cdf         = d_emissive_cdf_.as<float>();
+    lp.emissive_local_idx   = d_emissive_local_idx_.d_ptr
+        ? d_emissive_local_idx_.as<int>() : nullptr;
     lp.num_emissive         = num_emissive_;
     lp.total_emissive_power = scene.total_emissive_power;
 
@@ -794,7 +804,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.photon_map_seed = photon_map_seed;
 
     // Upload params
-    d_launch_params_.alloc(sizeof(LaunchParams));
+    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                            sizeof(LaunchParams), cudaMemcpyHostToDevice));
 
@@ -1514,6 +1524,7 @@ static void fill_common_params(
     // Emitter data (for NEE in render and photon trace)
     p.emissive_tri_indices = const_cast<uint32_t*>(emissive_idx.as<uint32_t>());
     p.emissive_cdf         = const_cast<float*>(emissive_cdf.as<float>());
+    p.emissive_local_idx   = nullptr;  // set by callers that have the inverse-index buffer
     p.num_emissive         = num_emissive;
     p.total_emissive_power = total_emissive_power;
 
@@ -1590,7 +1601,7 @@ void OptixRenderer::render_debug_frame(
     last_launch_params_host_ = lp;
 
     // Upload launch params
-    d_launch_params_.alloc(sizeof(LaunchParams));
+    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                            sizeof(LaunchParams), cudaMemcpyHostToDevice));
 
@@ -1659,7 +1670,7 @@ void OptixRenderer::render_one_spp(
 
     last_launch_params_host_ = lp;
 
-    d_launch_params_.alloc(sizeof(LaunchParams));
+    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
     CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                            sizeof(LaunchParams), cudaMemcpyHostToDevice));
 
@@ -1829,7 +1840,7 @@ void OptixRenderer::render_caustic_debug_pass(
         lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
         lp.exposure           = exposure_;
 
-        d_launch_params_.alloc(sizeof(LaunchParams));
+        d_launch_params_.ensure_alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                                sizeof(LaunchParams), cudaMemcpyHostToDevice));
 
@@ -1969,6 +1980,33 @@ void OptixRenderer::render_caustic_snapshot(
 }
 
 // =====================================================================
+// swap_photon_map() -- swap device photon/grid data with a pool slot
+// =====================================================================
+void OptixRenderer::swap_photon_map(PhotonMapSlot& slot) {
+    std::swap(d_photon_pos_x_,  slot.photon_pos_x);
+    std::swap(d_photon_pos_y_,  slot.photon_pos_y);
+    std::swap(d_photon_pos_z_,  slot.photon_pos_z);
+    std::swap(d_photon_wi_x_,   slot.photon_wi_x);
+    std::swap(d_photon_wi_y_,   slot.photon_wi_y);
+    std::swap(d_photon_wi_z_,   slot.photon_wi_z);
+    std::swap(d_photon_norm_x_, slot.photon_norm_x);
+    std::swap(d_photon_norm_y_, slot.photon_norm_y);
+    std::swap(d_photon_norm_z_, slot.photon_norm_z);
+    std::swap(d_photon_lambda_, slot.photon_lambda);
+    std::swap(d_photon_flux_,   slot.photon_flux);
+    std::swap(d_photon_num_hero_,         slot.photon_num_hero);
+    std::swap(d_photon_is_caustic_pass_,  slot.photon_is_caustic_pass);
+    std::swap(d_grid_sorted_indices_,     slot.grid_sorted_indices);
+    std::swap(d_grid_cell_start_,         slot.grid_cell_start);
+    std::swap(d_grid_cell_end_,           slot.grid_cell_end);
+    std::swap(d_tri_photon_irradiance_,   slot.tri_photon_irradiance);
+    std::swap(num_photons_emitted_,       slot.num_photons_emitted);
+    std::swap(num_caustic_emitted_,       slot.num_caustic_emitted);
+    std::swap(gather_radius_,             slot.gather_radius);
+    std::swap(caustic_radius_,            slot.caustic_radius);
+}
+
+// =====================================================================
 // render_final() -- full path tracing (is_final_render = 1)
 // =====================================================================
 void OptixRenderer::render_final(
@@ -2051,7 +2089,7 @@ void OptixRenderer::render_final(
         // Per-pixel lobe balance (Bresenham accumulator, persists across frames)
         lp.lobe_balance = reinterpret_cast<float*>(d_lobe_balance_.d_ptr);
 
-        d_launch_params_.alloc(sizeof(LaunchParams));
+        d_launch_params_.ensure_alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                                sizeof(LaunchParams), cudaMemcpyHostToDevice));
         last_launch_params_host_ = lp;
@@ -2093,17 +2131,48 @@ void OptixRenderer::render_final(
         std::cout << line << std::flush;
     };
 
+    // ── Pre-build photon map pool (amortized multi-map) ─────────────
+    // Build PHOTON_MAP_POOL_SIZE maps with different RNG seeds at the
+    // start instead of re-tracing during the SPP loop.  Cycling through
+    // pool slots via pointer-swap is essentially free compared to a
+    // full photon trace + grid build.
+    const int actual_max_spp = adaptive ? max_spp : total_spp;
+    const int num_maps_needed = (MULTI_MAP_SPP_GROUP > 0)
+        ? (actual_max_spp + MULTI_MAP_SPP_GROUP - 1) / MULTI_MAP_SPP_GROUP
+        : 1;
+    const int pool_size = (MULTI_MAP_SPP_GROUP > 0 && PHOTON_MAP_POOL_SIZE > 1)
+        ? (std::min)(PHOTON_MAP_POOL_SIZE, (std::max)(1, num_maps_needed))
+        : 1;
+
+    photon_map_pool_.clear();
+    photon_map_pool_.resize(pool_size);
+
+    for (int m = 0; m < pool_size; ++m) {
+        std::printf("\n[Render] Pre-building photon map %d/%d ...\n", m + 1, pool_size);
+        trace_photons(scene, config, /*grid_radius_override=*/0.f,
+                      /*photon_map_seed=*/m);
+        swap_photon_map(photon_map_pool_[m]);  // drain main → pool[m]
+    }
+
+    // Activate the first map
+    swap_photon_map(photon_map_pool_[0]);
+    active_pool_idx_ = 0;
+
+    // Helper: switch to the correct map slot for sample s
+    auto activate_map_for_sample = [&](int s) {
+        if (pool_size <= 1 || MULTI_MAP_SPP_GROUP <= 0) return;
+        if ((s % MULTI_MAP_SPP_GROUP) != 0) return;  // only switch at group boundaries
+        int map_idx = (s / MULTI_MAP_SPP_GROUP) % pool_size;
+        if (map_idx == active_pool_idx_) return;      // already active
+        swap_photon_map(photon_map_pool_[active_pool_idx_]);  // return current
+        swap_photon_map(photon_map_pool_[map_idx]);           // activate new
+        active_pool_idx_ = map_idx;
+    };
+
     if (!adaptive) {
         // ── Non-adaptive path ────────────────────────────────────────
-        // §1.2 Multi-map: re-trace photons every MULTI_MAP_SPP_GROUP
-        // samples with a different RNG seed to decorrelate the photon map.
         for (int s = 0; s < total_spp; ++s) {
-            if (MULTI_MAP_SPP_GROUP > 0 && (s % MULTI_MAP_SPP_GROUP) == 0) {
-                int map_seed = s / MULTI_MAP_SPP_GROUP;
-                std::printf("\n[Render] Re-tracing photon map (seed=%d) ...\n", map_seed);
-                trace_photons(scene, config, /*grid_radius_override=*/0.f,
-                              /*photon_map_seed=*/map_seed);
-            }
+            activate_map_for_sample(s);
             launch_pass(s, /*use_mask=*/false);
             print_progress(s + 1, total_spp, /*active=*/-1);
         }
@@ -2111,12 +2180,7 @@ void OptixRenderer::render_final(
         // ── Adaptive path ─────────────────────────────────────────────
         // Phase 1: warmup — render min_spp passes uniformly
         for (int s = 0; s < min_spp; ++s) {
-            if (MULTI_MAP_SPP_GROUP > 0 && (s % MULTI_MAP_SPP_GROUP) == 0) {
-                int map_seed = s / MULTI_MAP_SPP_GROUP;
-                std::printf("\n[Render] Re-tracing photon map (seed=%d) ...\n", map_seed);
-                trace_photons(scene, config, /*grid_radius_override=*/0.f,
-                              /*photon_map_seed=*/map_seed);
-            }
+            activate_map_for_sample(s);
             launch_pass(s, /*use_mask=*/false);
             print_progress(s + 1, max_spp, /*active=*/(int)total_pixels);
         }
@@ -2127,13 +2191,7 @@ void OptixRenderer::render_final(
         const int update_interval = config.adaptive_update_interval;
 
         for (int s = min_spp; s < max_spp; ++s) {
-            // §1.2 Multi-map: re-trace every MULTI_MAP_SPP_GROUP samples
-            if (MULTI_MAP_SPP_GROUP > 0 && (s % MULTI_MAP_SPP_GROUP) == 0) {
-                int map_seed = s / MULTI_MAP_SPP_GROUP;
-                std::printf("\n[Render] Re-tracing photon map (seed=%d) ...\n", map_seed);
-                trace_photons(scene, config, /*grid_radius_override=*/0.f,
-                              /*photon_map_seed=*/map_seed);
-            }
+            activate_map_for_sample(s);
             // Recompute mask at start of adaptive phase and every N passes
             if ((s - min_spp) % update_interval == 0) {
                 AdaptiveParams ap;
@@ -2156,6 +2214,13 @@ void OptixRenderer::render_final(
             print_progress(s + 1, max_spp, active_pixels);
         }
     }
+
+    // ── Release photon map pool ──────────────────────────────────────
+    // Return the active map to its pool slot, then free all slots.
+    if (active_pool_idx_ >= 0 && active_pool_idx_ < (int)photon_map_pool_.size())
+        swap_photon_map(photon_map_pool_[active_pool_idx_]);
+    photon_map_pool_.clear();
+    active_pool_idx_ = -1;
 
     // ── Post-process tonemap (single pass after all SPP) ─────────────
     // The per-SPP inline tonemap was skipped (skip_tonemap=1).
@@ -2291,7 +2356,7 @@ void OptixRenderer::render_sppm(
             lp.sppm_tau           = d_sppm_tau_.as<float>();
             lp.sppm_L_direct      = d_sppm_L_direct_.as<float>();
 
-            d_launch_params_.alloc(sizeof(LaunchParams));
+            d_launch_params_.ensure_alloc(sizeof(LaunchParams));
             CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                                    sizeof(LaunchParams), cudaMemcpyHostToDevice));
             last_launch_params_host_ = lp;
@@ -2374,7 +2439,7 @@ void OptixRenderer::render_sppm(
             lp.sppm_tau           = d_sppm_tau_.as<float>();
             lp.sppm_L_direct      = d_sppm_L_direct_.as<float>();
 
-            d_launch_params_.alloc(sizeof(LaunchParams));
+            d_launch_params_.ensure_alloc(sizeof(LaunchParams));
             CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
                                    sizeof(LaunchParams), cudaMemcpyHostToDevice));
             last_launch_params_host_ = lp;

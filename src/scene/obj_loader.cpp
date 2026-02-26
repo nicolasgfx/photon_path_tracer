@@ -378,6 +378,12 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
             ss >> m.pb_g;
             m.pb_g = fmaxf(-1.0f, fminf(1.0f, m.pb_g));
         }
+        else if (keyword == "pb_tf_spectrum") {
+            auto& m = scene.materials[current_idx];
+            for (int b = 0; b < NUM_LAMBDA; ++b)
+                ss >> m.pb_tf_spectrum.value[b];
+            m.pb_tf_spectrum_set = true;
+        }
         else if (keyword == "pb_dispersion") {
             auto& m = scene.materials[current_idx];
             ss >> m.pb_dispersion_B;
@@ -451,7 +457,8 @@ static void finalize_pb_materials(Scene& scene) {
                        || mat.pb_clearcoat_set
                        || mat.pb_sheen_set
                        || mat.pb_medium_enabled
-                       || mat.pb_dispersion_set;
+                       || mat.pb_dispersion_set
+                       || mat.pb_tf_spectrum_set;
         if (!has_any_pb) continue;
         ++pb_count;
 
@@ -486,6 +493,13 @@ static void finalize_pb_materials(Scene& scene) {
                 mat.pb_conductor_k_rgb[0],
                 mat.pb_conductor_k_rgb[1],
                 mat.pb_conductor_k_rgb[2]);
+        }
+
+        // ── 3b. Direct spectral transmittance override ──────────────
+        // pb_tf_spectrum bypasses the RGB→spectrum conversion for Tf,
+        // allowing spectrally-narrow colour filters (e.g. deep green glass).
+        if (mat.pb_tf_spectrum_set) {
+            mat.Tf = mat.pb_tf_spectrum;
         }
 
         // ── 4. Transmission override ────────────────────────────────

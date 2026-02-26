@@ -62,6 +62,14 @@ struct DeviceBuffer {
         CUDA_CHECK(cudaMalloc(&d_ptr, bytes));
     }
 
+    /// Like alloc(), but only (re)allocates if the current buffer is
+    /// too small.  Avoids cudaFree+cudaMalloc round-trips when the
+    /// size hasn't changed (the common case for LaunchParams).
+    void ensure_alloc(size_t n) {
+        if (bytes >= n) return;   // already large enough
+        alloc(n);
+    }
+
     void alloc_zero(size_t n) {
         alloc(n);
         CUDA_CHECK(cudaMemset(d_ptr, 0, bytes));
@@ -106,6 +114,29 @@ struct DeviceBuffer {
 
     template <typename T> T* as() { return reinterpret_cast<T*>(d_ptr); }
     template <typename T> const T* as() const { return reinterpret_cast<const T*>(d_ptr); }
+};
+
+// ── Photon map pool slot ────────────────────────────────────────────
+// Holds a complete snapshot of the device-side photon SoA, hash grid,
+// and associated scalars produced by trace_photons().  Used for
+// photon map amortization: pre-build N maps, cycle during rendering.
+struct PhotonMapSlot {
+    // Photon SoA (device)
+    DeviceBuffer photon_pos_x, photon_pos_y, photon_pos_z;
+    DeviceBuffer photon_wi_x,  photon_wi_y,  photon_wi_z;
+    DeviceBuffer photon_norm_x, photon_norm_y, photon_norm_z;
+    DeviceBuffer photon_lambda, photon_flux;
+    DeviceBuffer photon_num_hero;
+    DeviceBuffer photon_is_caustic_pass;
+    // Hash grid (device)
+    DeviceBuffer grid_sorted_indices, grid_cell_start, grid_cell_end;
+    // Per-tri irradiance heatmap
+    DeviceBuffer tri_photon_irradiance;
+    // Scalars
+    int   num_photons_emitted = 0;
+    int   num_caustic_emitted = 0;
+    float gather_radius       = 0.f;
+    float caustic_radius      = 0.f;
 };
 
 // -- OptiX debug render mode (matches RenderMode enum) ----------------
@@ -373,6 +404,7 @@ private:
     // Emitter data (device -- for GPU photon tracing)
     DeviceBuffer d_emissive_indices_;
     DeviceBuffer d_emissive_cdf_;
+    DeviceBuffer d_emissive_local_idx_;  // int [num_tris] inverse lookup
 
     // Targeted caustic specular triangle data (device)
     DeviceBuffer d_targeted_spec_tri_indices_;   // uint32_t [N]
@@ -453,6 +485,15 @@ private:
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
     float caustic_radius_ = DEFAULT_CAUSTIC_RADIUS;   // tighter radius for caustic gather
     float exposure_      = DEFAULT_EXPOSURE;          // runtime exposure (set_exposure / R key)
+
+    // ── Photon map pool (amortization) ───────────────────────────────
+    // Pre-built photon maps for render_final(); cycled every SPP group.
+    std::vector<PhotonMapSlot> photon_map_pool_;
+    int active_pool_idx_ = -1;  // -1 = no pool active (main buffers live)
+
+    /// Swap photon SoA + grid device buffers between main members and a pool slot.
+    /// After swap, the slot holds what was in main and vice-versa.
+    void swap_photon_map(PhotonMapSlot& slot);
 };
 
 // ---------------------------------------------------------------------

@@ -917,13 +917,21 @@ __forceinline__ __device__
 float dev_light_pdf(uint32_t tri_id, float3 geo_normal, float3 wi, float t) {
     if (params.num_emissive == 0) return 0.f;
 
-    // Find this triangle in the emissive list
+    // O(1) lookup via inverse-index table (tri_id → local emissive index)
     float pdf_tri = 0.f;
-    for (int i = 0; i < params.num_emissive; ++i) {
-        if (params.emissive_tri_indices[i] == tri_id) {
-            if (i == 0) pdf_tri = params.emissive_cdf[0];
-            else pdf_tri = params.emissive_cdf[i] - params.emissive_cdf[i - 1];
-            break;
+    if (params.emissive_local_idx) {
+        int i = params.emissive_local_idx[tri_id];
+        if (i < 0) return 0.f;  // not an emissive triangle
+        pdf_tri = (i == 0) ? params.emissive_cdf[0]
+                           : params.emissive_cdf[i] - params.emissive_cdf[i - 1];
+    } else {
+        // Fallback: linear scan (shouldn't happen with current upload code)
+        for (int i = 0; i < params.num_emissive; ++i) {
+            if (params.emissive_tri_indices[i] == tri_id) {
+                if (i == 0) pdf_tri = params.emissive_cdf[0];
+                else pdf_tri = params.emissive_cdf[i] - params.emissive_cdf[i - 1];
+                break;
+            }
         }
     }
     if (pdf_tri <= 0.f) return 0.f;
@@ -2741,12 +2749,23 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
     float cos_light = dot(dir, light_normal);
     if (cos_light <= 0.f) return;
 
-    // Visibility: shadow ray from light → specular target
+    // Visibility: trace a radiance ray instead of a binary shadow test.
+    // If the first hit is specular/translucent (e.g. a wave-peak on the
+    // water mesh, or the front hemisphere of a glass sphere when targeting
+    // the back), the photon is NOT rejected — the bounce loop will enter
+    // the specular geometry at that hit point.  Only truly opaque
+    // blockers cause rejection.
     float3 shadow_origin = light_pos + light_normal * OPTIX_SCENE_EPSILON;
-    if (!trace_shadow(shadow_origin, dir, dist)) return;  // occluded
+    TraceResult vis_hit = trace_radiance(shadow_origin, dir);
+    if (!vis_hit.hit) return;                                       // missed everything
+    uint32_t vis_mat = vis_hit.material_id;
+    if (dev_is_emissive(vis_mat)) return;                            // hit a light source
+    if (!dev_is_specular(vis_mat) && !dev_is_translucent(vis_mat))   // opaque blocker
+        return;
 
-    // Target-side cosine (for area→solid angle Jacobian)
-    // No fabsf — reject back-facing targets (backface culling)
+    // Target-side cosine (for area→solid angle Jacobian).
+    // Reject back-facing sampled targets: the PDF is only valid when the
+    // photon approaches the target triangle from the front.
     float cos_target = dot(dir * (-1.f), spec_normal);
     if (cos_target < 1e-6f) return;
 
