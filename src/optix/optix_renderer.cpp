@@ -7,6 +7,7 @@
 #include "photon/specular_target.h"   // SpecularTargetSet (for GPU upload)
 #include "photon/tri_photon_irradiance.h"  // per-triangle irradiance heatmap
 #include "photon/emitter.h"                // CPU photon tracing (USE_CPU_PHOTON_TRACE)
+#include "photon/hash_grid.h"              // gpu_build_hash_grid, launch_tonemap_kernel
 
 #include <cuda_runtime.h>
 #include <fstream>
@@ -690,6 +691,25 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_out_vol_photon_flux_.alloc(max_vol_stored * sizeof(float));
     d_out_vol_photon_count_.alloc_zero(sizeof(unsigned int));
 
+    // ── Pre-allocate photon accumulation buffers for GPU-side grid build ──
+    // These will hold the merged photon SoA from all passes (global +
+    // caustic/targeted).  D→D copies populate them directly, eliminating
+    // the costly H→D re-upload.
+    const size_t max_total = (size_t)max_stored * 2;  // global + caustic/targeted
+    d_photon_pos_x_.alloc(max_total * sizeof(float));
+    d_photon_pos_y_.alloc(max_total * sizeof(float));
+    d_photon_pos_z_.alloc(max_total * sizeof(float));
+    d_photon_wi_x_.alloc(max_total * sizeof(float));
+    d_photon_wi_y_.alloc(max_total * sizeof(float));
+    d_photon_wi_z_.alloc(max_total * sizeof(float));
+    d_photon_norm_x_.alloc(max_total * sizeof(float));
+    d_photon_norm_y_.alloc(max_total * sizeof(float));
+    d_photon_norm_z_.alloc(max_total * sizeof(float));
+    d_photon_lambda_.alloc(max_total * HERO_WAVELENGTHS * sizeof(uint16_t));
+    d_photon_flux_.alloc(max_total * HERO_WAVELENGTHS * sizeof(float));
+    d_photon_num_hero_.alloc(max_total * sizeof(uint8_t));
+    d_photon_is_caustic_pass_.alloc(max_total * sizeof(uint8_t));
+
     // Build launch params for photon trace
     LaunchParams lp = {};
     lp.traversable      = gas_handle_;
@@ -820,7 +840,24 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
 
     if (stored_count == 0) return;
 
-    // Download photon data
+    // ── GPU-side: D→D copy global photons into accumulation buffers ──
+    // The photon SoA is already on the GPU in d_out_photon_* buffers.
+    // Copy directly to d_photon_* (offset 0) to avoid D→H + H→D round-trip.
+    CUDA_CHECK(cudaMemcpy(d_photon_pos_x_.d_ptr,  d_out_photon_pos_x_.d_ptr,  stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_pos_y_.d_ptr,  d_out_photon_pos_y_.d_ptr,  stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_pos_z_.d_ptr,  d_out_photon_pos_z_.d_ptr,  stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_wi_x_.d_ptr,   d_out_photon_wi_x_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_wi_y_.d_ptr,   d_out_photon_wi_y_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_wi_z_.d_ptr,   d_out_photon_wi_z_.d_ptr,   stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_norm_x_.d_ptr, d_out_photon_norm_x_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_norm_y_.d_ptr, d_out_photon_norm_y_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_norm_z_.d_ptr, d_out_photon_norm_z_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_lambda_.d_ptr,     d_out_photon_lambda_.d_ptr, stored_count*HERO_WAVELENGTHS*sizeof(uint16_t), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_flux_.d_ptr,       d_out_photon_flux_.d_ptr,   stored_count*HERO_WAVELENGTHS*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_num_hero_.d_ptr,   d_out_photon_num_hero_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToDevice));
+
+    // Download photon data to CPU (still needed for diagnostics, irradiance
+    // heatmap, and k-NN adaptive radius).
     stored_photons_.resize(stored_count);
     CUDA_CHECK(cudaMemcpy(stored_photons_.pos_x.data(),  d_out_photon_pos_x_.d_ptr,  stored_count*sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(stored_photons_.pos_y.data(),  d_out_photon_pos_y_.d_ptr,  stored_count*sizeof(float), cudaMemcpyDeviceToHost));
@@ -838,8 +875,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     if (d_out_photon_tri_id_.d_ptr)
         CUDA_CHECK(cudaMemcpy(stored_photons_.tri_id.data(), d_out_photon_tri_id_.d_ptr, stored_count*sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
-    // Download per-photon caustic flags (only when caustic debug is enabled)
-    // Always download caustic flags (needed for progress snapshot caustic PNG)
+    // Download per-photon caustic flags (needed for progress snapshot caustic PNG)
     if (d_out_photon_is_caustic_.d_ptr) {
         caustic_flags_.resize(stored_count);
         CUDA_CHECK(cudaMemcpy(caustic_flags_.data(), d_out_photon_is_caustic_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToHost));
@@ -932,6 +968,25 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
             CUDA_CHECK(cudaMemcpy(stored_photons_.source_emissive_idx.data() + off, d_out_photon_source_emissive_.d_ptr, caustic_stored*sizeof(uint16_t), cudaMemcpyDeviceToHost));
             if (d_out_photon_tri_id_.d_ptr)
                 CUDA_CHECK(cudaMemcpy(stored_photons_.tri_id.data() + off, d_out_photon_tri_id_.d_ptr, caustic_stored*sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
+            // D→D copy caustic photons into accumulation buffers at offset
+            {
+                size_t boff  = global_count;
+                size_t hoff  = global_count * HERO_WAVELENGTHS;
+                auto   d2d   = cudaMemcpyDeviceToDevice;
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_x_.d_ptr  + boff, d_out_photon_pos_x_.d_ptr,  caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_y_.d_ptr  + boff, d_out_photon_pos_y_.d_ptr,  caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_z_.d_ptr  + boff, d_out_photon_pos_z_.d_ptr,  caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_wi_x_.d_ptr   + boff, d_out_photon_wi_x_.d_ptr,   caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_wi_y_.d_ptr   + boff, d_out_photon_wi_y_.d_ptr,   caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_wi_z_.d_ptr   + boff, d_out_photon_wi_z_.d_ptr,   caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_x_.d_ptr + boff, d_out_photon_norm_x_.d_ptr, caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_y_.d_ptr + boff, d_out_photon_norm_y_.d_ptr, caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_z_.d_ptr + boff, d_out_photon_norm_z_.d_ptr, caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((uint16_t*)d_photon_lambda_.d_ptr + hoff, d_out_photon_lambda_.d_ptr, caustic_stored*HERO_WAVELENGTHS*sizeof(uint16_t), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_flux_.d_ptr      + hoff, d_out_photon_flux_.d_ptr,   caustic_stored*HERO_WAVELENGTHS*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((uint8_t*)d_photon_num_hero_.d_ptr + boff, d_out_photon_num_hero_.d_ptr, caustic_stored*sizeof(uint8_t), d2d));
+            }
 
             // Update stored_count to include caustic photons
             stored_count = (unsigned int)total;
@@ -1067,6 +1122,25 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
                     if (d_out_photon_tri_id_.d_ptr)
                         CUDA_CHECK(cudaMemcpy(stored_photons_.tri_id.data() + off, d_out_photon_tri_id_.d_ptr, targeted_stored*sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
+                    // D→D copy targeted photons into accumulation buffers at offset
+                    {
+                        size_t boff = stored_count;
+                        size_t hoff = stored_count * HERO_WAVELENGTHS;
+                        auto   d2d  = cudaMemcpyDeviceToDevice;
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_x_.d_ptr  + boff, d_out_photon_pos_x_.d_ptr,  targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_y_.d_ptr  + boff, d_out_photon_pos_y_.d_ptr,  targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_z_.d_ptr  + boff, d_out_photon_pos_z_.d_ptr,  targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_wi_x_.d_ptr   + boff, d_out_photon_wi_x_.d_ptr,   targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_wi_y_.d_ptr   + boff, d_out_photon_wi_y_.d_ptr,   targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_wi_z_.d_ptr   + boff, d_out_photon_wi_z_.d_ptr,   targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_x_.d_ptr + boff, d_out_photon_norm_x_.d_ptr, targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_y_.d_ptr + boff, d_out_photon_norm_y_.d_ptr, targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_z_.d_ptr + boff, d_out_photon_norm_z_.d_ptr, targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((uint16_t*)d_photon_lambda_.d_ptr + hoff, d_out_photon_lambda_.d_ptr, targeted_stored*HERO_WAVELENGTHS*sizeof(uint16_t), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_flux_.d_ptr      + hoff, d_out_photon_flux_.d_ptr,   targeted_stored*HERO_WAVELENGTHS*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((uint8_t*)d_photon_num_hero_.d_ptr + boff, d_out_photon_num_hero_.d_ptr, targeted_stored*sizeof(uint8_t), d2d));
+                    }
+
                     stored_count = (unsigned int)total;
                 }
 
@@ -1083,13 +1157,14 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         }
     }
 
-    // Build per-photon caustic tags (3-valued):
-    //   0 = global-pass, non-caustic  → accumulate to L_global   (1/N_global)
-    //   1 = global-pass, caustic path → accumulate to L_global   (1/N_global)
-    //   2 = caustic-targeted pass     → accumulate to L_caustic  (1/N_caustic)
-    // Global caustic photons (tag=1) contribute to L_global with their
-    // correct 1/N_global normalisation.  Targeted caustic photons (tag=2)
-    // use the dedicated 1/N_caustic weight for sharper caustics.
+    // ── GPU-side caustic tag computation ──────────────────────────────
+    // Build 3-valued tags directly on GPU, avoiding CPU loop + upload.
+    // Uses d_out_photon_is_caustic_ from the global pass (already on GPU
+    // in the first global_count entries of d_photon_* accumulation buffers).
+    // NOTE: The d_out_photon_is_caustic_ buffer was written by the global
+    // pass and may have been overwritten by caustic/targeted passes, but
+    // we already saved a copy to d_photon_* offset 0 via D→D copy.
+    // We still build CPU tags for diagnostics.
     caustic_pass_flags_.resize(stored_count, 0);
     for (size_t i = 0; i < global_count; ++i) {
         bool is_caustic_path = (i < caustic_flags_.size() && caustic_flags_[i]);
@@ -1097,6 +1172,12 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     }
     if (stored_count > global_count)
         std::fill(caustic_pass_flags_.begin() + global_count, caustic_pass_flags_.end(), (uint8_t)2);
+
+    // Upload tags to the pre-allocated GPU buffer
+    CUDA_CHECK(cudaMemcpy(d_photon_is_caustic_pass_.d_ptr,
+                           caustic_pass_flags_.data(),
+                           stored_count * sizeof(uint8_t),
+                           cudaMemcpyHostToDevice));
 
     // ── Diagnostic: tag distribution ─────────────────────────────────
     {
@@ -1131,54 +1212,78 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         }
     }
 
-    // Build hash grid on CPU (merged global + caustic photons)
-    stored_grid_.build(stored_photons_, gather_radius_);
-
+    // ── GPU-side hash grid build (CUB radix sort) ────────────────────
+    // Build the spatial hash grid entirely on the GPU.  The photon SoA
+    // is already in d_photon_* accumulation buffers from the D→D copies.
+    // This replaces the CPU par_unseq sort + H→D re-upload.
     {
-        // Compute hash grid quality metrics
+        const int    n          = (int)stored_count;
+        const float  cell_size  = gather_radius_ * 2.0f;
+        const uint32_t tbl_size = (uint32_t)(std::max)((int)stored_count, 1024);
+
+        // Allocate grid output + scratch buffers
+        d_grid_sorted_indices_.alloc(n * sizeof(uint32_t));
+        d_grid_cell_start_.alloc(tbl_size * sizeof(uint32_t));
+        d_grid_cell_end_.alloc(tbl_size * sizeof(uint32_t));
+        d_grid_keys_in_.alloc(n * sizeof(uint32_t));
+        d_grid_keys_out_.alloc(n * sizeof(uint32_t));
+        d_grid_indices_in_.alloc(n * sizeof(uint32_t));
+
+        // Query CUB temp storage size
+        size_t cub_temp_bytes = 0;
+        gpu_build_hash_grid(
+            (const float*)d_photon_pos_x_.d_ptr,
+            (const float*)d_photon_pos_y_.d_ptr,
+            (const float*)d_photon_pos_z_.d_ptr,
+            n, cell_size, tbl_size,
+            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
+            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
+            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
+            nullptr, cub_temp_bytes);
+
+        // Allocate CUB temp and run the full build
+        d_grid_cub_temp_.alloc(cub_temp_bytes);
+        gpu_build_hash_grid(
+            (const float*)d_photon_pos_x_.d_ptr,
+            (const float*)d_photon_pos_y_.d_ptr,
+            (const float*)d_photon_pos_z_.d_ptr,
+            n, cell_size, tbl_size,
+            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
+            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
+            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
+            d_grid_cub_temp_.d_ptr, cub_temp_bytes);
+
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Print GPU grid build timing + quality metrics (download cell arrays for logging)
+        std::vector<uint32_t> h_cell_start(tbl_size), h_cell_end(tbl_size);
+        CUDA_CHECK(cudaMemcpy(h_cell_start.data(), d_grid_cell_start_.d_ptr, tbl_size*sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_cell_end.data(),   d_grid_cell_end_.d_ptr,   tbl_size*sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
         int occupied_cells = 0;
         uint32_t chain_max = 0;
         uint64_t chain_sum = 0;
-        for (uint32_t ci = 0; ci < stored_grid_.table_size; ++ci) {
-            uint32_t len = stored_grid_.cell_end[ci] - stored_grid_.cell_start[ci];
+        for (uint32_t ci = 0; ci < tbl_size; ++ci) {
+            if (h_cell_start[ci] == 0xFFFFFFFFu) continue;
+            uint32_t len = h_cell_end[ci] - h_cell_start[ci];
             if (len > 0) {
                 ++occupied_cells;
                 chain_sum += len;
                 if (len > chain_max) chain_max = len;
             }
         }
-        float load_factor  = (float)occupied_cells / (float)stored_grid_.table_size;
+        float load_factor  = (float)occupied_cells / (float)tbl_size;
         float mean_chain   = occupied_cells > 0 ? (float)chain_sum / (float)occupied_cells : 0.f;
-        size_t grid_mem_kb = (stored_grid_.sorted_indices.size() * sizeof(uint32_t)
-                             + stored_grid_.cell_start.size()    * sizeof(uint32_t)
-                             + stored_grid_.cell_end.size()      * sizeof(uint32_t)) / 1024;
+        size_t grid_mem_kb = ((size_t)n * sizeof(uint32_t)
+                             + (size_t)tbl_size * sizeof(uint32_t) * 2) / 1024;
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
-        std::printf("[Timing] Hash grid build:   %8.1f ms  "
+        std::printf("[Timing] GPU grid build:    %8.1f ms  "
                     "buckets=%u  occupied=%d  load=%.2f  mean_chain=%.1f  max_chain=%u  mem=%zu KB\n",
-                    ms, stored_grid_.table_size, occupied_cells, load_factor,
+                    ms, tbl_size, occupied_cells, load_factor,
                     mean_chain, chain_max, grid_mem_kb);
         t_lap = t_now;
     }
-
-    // Upload photons + grid back to device
-    d_photon_pos_x_.upload(stored_photons_.pos_x);
-    d_photon_pos_y_.upload(stored_photons_.pos_y);
-    d_photon_pos_z_.upload(stored_photons_.pos_z);
-    d_photon_wi_x_.upload(stored_photons_.wi_x);
-    d_photon_wi_y_.upload(stored_photons_.wi_y);
-    d_photon_wi_z_.upload(stored_photons_.wi_z);
-    d_photon_norm_x_.upload(stored_photons_.norm_x);
-    d_photon_norm_y_.upload(stored_photons_.norm_y);
-    d_photon_norm_z_.upload(stored_photons_.norm_z);
-    d_photon_lambda_.upload(stored_photons_.lambda_bin);
-    d_photon_flux_.upload(stored_photons_.flux);
-    d_photon_num_hero_.upload(stored_photons_.num_hero);
-    d_grid_sorted_indices_.upload(stored_grid_.sorted_indices);
-    d_grid_cell_start_.upload(stored_grid_.cell_start);
-    d_grid_cell_end_.upload(stored_grid_.cell_end);
-    // Upload per-photon caustic-pass tags (for dual-budget gather)
-    d_photon_is_caustic_pass_.upload(caustic_pass_flags_);
 
     // Build and upload per-triangle photon irradiance heatmap (for preview)
     {
@@ -1189,12 +1294,12 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
             d_tri_photon_irradiance_.free();
     }
 
-    std::cout << "[OptiX] Photon data uploaded to device\n";
+    std::cout << "[OptiX] GPU grid + photon data ready on device\n";
 
     {
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
-        std::printf("[Timing] Photon upload:     %8.1f ms\n", ms);
+        std::printf("[Timing] Irradiance build:  %8.1f ms\n", ms);
         t_lap = t_now;
     }
 
@@ -1234,7 +1339,11 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     // gather radius by running knn_shell_expansion() on a random sample
     // of stored photon positions and taking the median k-th distance.
     // This replaces the fixed gather_radius_ for subsequent renders.
+    // NOTE: The grid was built on GPU, so we build a CPU grid here
+    // specifically for the kNN queries (typically off-by-default path).
     if (config.use_knn_adaptive && stored_photons_.size() > 0) {
+        stored_grid_.build(stored_photons_, gather_radius_);  // CPU grid for kNN
+
         const int   k           = config.knn_k;
         const float tau         = DEFAULT_SURFACE_TAU;
         const float max_radius  = DEFAULT_GPU_MAX_GATHER_RADIUS;
@@ -1760,9 +1869,39 @@ void OptixRenderer::render_caustic_debug_pass(
     d_photon_flux_.upload(stored_photons_.flux);
     if (!stored_photons_.num_hero.empty())
         d_photon_num_hero_.upload(stored_photons_.num_hero);
-    d_grid_sorted_indices_.upload(stored_grid_.sorted_indices);
-    d_grid_cell_start_.upload(stored_grid_.cell_start);
-    d_grid_cell_end_.upload(stored_grid_.cell_end);
+    d_photon_is_caustic_pass_.upload(caustic_pass_flags_);
+
+    // Re-build GPU hash grid for the restored full photon set
+    {
+        const int    n         = (int)stored_photons_.size();
+        const float  cell_size = gather_radius_ * 2.0f;
+        const uint32_t tbl_sz  = (uint32_t)(std::max)(n, 1024);
+
+        d_grid_sorted_indices_.alloc(n * sizeof(uint32_t));
+        d_grid_cell_start_.alloc(tbl_sz * sizeof(uint32_t));
+        d_grid_cell_end_.alloc(tbl_sz * sizeof(uint32_t));
+        d_grid_keys_in_.alloc(n * sizeof(uint32_t));
+        d_grid_keys_out_.alloc(n * sizeof(uint32_t));
+        d_grid_indices_in_.alloc(n * sizeof(uint32_t));
+
+        size_t cub_tmp = 0;
+        gpu_build_hash_grid(
+            d_photon_pos_x_.as<float>(), d_photon_pos_y_.as<float>(), d_photon_pos_z_.as<float>(),
+            n, cell_size, tbl_sz,
+            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
+            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
+            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
+            nullptr, cub_tmp);
+        d_grid_cub_temp_.alloc(cub_tmp);
+        gpu_build_hash_grid(
+            d_photon_pos_x_.as<float>(), d_photon_pos_y_.as<float>(), d_photon_pos_z_.as<float>(),
+            n, cell_size, tbl_sz,
+            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
+            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
+            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
+            d_grid_cub_temp_.d_ptr, cub_tmp);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
 
     auto t_end = std::chrono::high_resolution_clock::now();
     double ms_total = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -1899,6 +2038,7 @@ void OptixRenderer::render_final(
         lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
         lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
         lp.exposure           = exposure_;
+        lp.skip_tonemap       = 1;  // defer tonemap to post-process kernel
 
         // Adaptive buffers
         lp.lum_sum    = adaptive
@@ -2016,6 +2156,17 @@ void OptixRenderer::render_final(
             print_progress(s + 1, max_spp, active_pixels);
         }
     }
+
+    // ── Post-process tonemap (single pass after all SPP) ─────────────
+    // The per-SPP inline tonemap was skipped (skip_tonemap=1).
+    // Run the tonemap kernel once to convert the accumulated spectral
+    // buffer to sRGB.
+    launch_tonemap_kernel(
+        (const float*)d_spectrum_buffer_.d_ptr,
+        (const float*)d_sample_counts_.d_ptr,
+        (uint8_t*)d_srgb_buffer_.d_ptr,
+        width_, height_, exposure_);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     auto t_end = std::chrono::high_resolution_clock::now();
     double total_s = std::chrono::duration<double>(t_end - t_start).count();

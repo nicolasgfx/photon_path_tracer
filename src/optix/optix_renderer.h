@@ -365,6 +365,11 @@ private:
     DeviceBuffer d_photon_is_caustic_pass_;  // uint8_t [num_photons] 0=global, 1=caustic-targeted
     DeviceBuffer d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_;
 
+    // GPU hash grid build scratch buffers (CUB radix sort)
+    DeviceBuffer d_grid_keys_in_, d_grid_keys_out_;
+    DeviceBuffer d_grid_indices_in_;
+    DeviceBuffer d_grid_cub_temp_;
+
     // Emitter data (device -- for GPU photon tracing)
     DeviceBuffer d_emissive_indices_;
     DeviceBuffer d_emissive_cdf_;

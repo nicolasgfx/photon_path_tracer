@@ -69,6 +69,7 @@ struct LaunchParams {
     int    nee_light_samples;    // M: shadow-ray samples at bounce 0
     int    nee_deep_samples;     // shadow-ray samples at bounce >= 1
     float  exposure;             // linear exposure multiplier (applied before tone mapping)
+    int    skip_tonemap;         // 1 = skip inline tonemap in __raygen__render (use post-process kernel)
 
     // Scene geometry (device pointers)
     float3*   vertices;          // [num_tris * 3]

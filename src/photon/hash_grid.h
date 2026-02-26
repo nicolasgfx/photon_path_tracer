@@ -364,3 +364,46 @@ struct HashGrid {
         return cell_end[key] - cell_start[key];
     }
 };
+
+// ─────────────────────────────────────────────────────────────────────
+// GPU-side hash grid construction (hash_grid.cu)
+// ─────────────────────────────────────────────────────────────────────
+// Builds the spatial hash grid entirely on the GPU using CUB radix sort.
+// Call once with d_temp_storage==nullptr to query temp_storage_bytes,
+// then allocate and call again.
+
+void gpu_build_hash_grid(
+    const float* d_pos_x, const float* d_pos_y, const float* d_pos_z,
+    int n, float cell_size, uint32_t table_size,
+    uint32_t* d_keys_in, uint32_t* d_keys_out,
+    uint32_t* d_indices_in, uint32_t* d_sorted_indices,
+    uint32_t* d_cell_start, uint32_t* d_cell_end,
+    void* d_temp_storage, size_t& temp_storage_bytes);
+
+// Optional: reorder photon SoA into sorted order for CPU download
+void gpu_scatter_photon_soa(
+    const float* d_src_pos_x, const float* d_src_pos_y, const float* d_src_pos_z,
+    const float* d_src_wi_x,  const float* d_src_wi_y,  const float* d_src_wi_z,
+    const float* d_src_norm_x, const float* d_src_norm_y, const float* d_src_norm_z,
+    const uint16_t* d_src_lambda, const float* d_src_flux,
+    const uint8_t* d_src_num_hero,
+    const uint32_t* d_sorted_indices,
+    float* d_dst_pos_x, float* d_dst_pos_y, float* d_dst_pos_z,
+    float* d_dst_wi_x,  float* d_dst_wi_y,  float* d_dst_wi_z,
+    float* d_dst_norm_x, float* d_dst_norm_y, float* d_dst_norm_z,
+    uint16_t* d_dst_lambda, float* d_dst_flux,
+    uint8_t* d_dst_num_hero,
+    int n);
+
+// Build 3-valued caustic pass tags on GPU
+void gpu_build_caustic_tags(
+    const uint8_t* d_is_caustic, uint8_t* d_tags_out,
+    int global_count, int total_count);
+
+// Tonemap post-process kernel (Optimization #5)
+void launch_tonemap_kernel(
+    const float* d_spectrum_buffer,
+    const float* d_sample_counts,
+    uint8_t* d_srgb_buffer,
+    int width, int height,
+    float exposure);

@@ -2355,24 +2355,26 @@ extern "C" __global__ void __raygen__render() {
         params.prof_bsdf[pixel_idx]          += prof_bsdf;
     }
 
-    // Tonemap to sRGB
-    float n_samples = params.sample_counts[pixel_idx];
-    Spectrum avg;
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        avg.value[i] = (n_samples > 0.f)
-            ? params.spectrum_buffer[pixel_idx * NUM_LAMBDA + i] / n_samples
-            : 0.f;
+    // Tonemap to sRGB (skipped when skip_tonemap is set — post-process kernel will handle it)
+    if (!params.skip_tonemap) {
+        float n_samples = params.sample_counts[pixel_idx];
+        Spectrum avg;
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            avg.value[i] = (n_samples > 0.f)
+                ? params.spectrum_buffer[pixel_idx * NUM_LAMBDA + i] / n_samples
+                : 0.f;
+        }
+
+        float3 rgb = dev_spectrum_to_srgb(avg);
+        rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
+        rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
+        rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
+
+        params.srgb_buffer[pixel_idx * 4 + 0] = (uint8_t)(rgb.x * 255.f);
+        params.srgb_buffer[pixel_idx * 4 + 1] = (uint8_t)(rgb.y * 255.f);
+        params.srgb_buffer[pixel_idx * 4 + 2] = (uint8_t)(rgb.z * 255.f);
+        params.srgb_buffer[pixel_idx * 4 + 3] = 255;
     }
-
-    float3 rgb = dev_spectrum_to_srgb(avg);
-    rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
-    rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
-    rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
-
-    params.srgb_buffer[pixel_idx * 4 + 0] = (uint8_t)(rgb.x * 255.f);
-    params.srgb_buffer[pixel_idx * 4 + 1] = (uint8_t)(rgb.y * 255.f);
-    params.srgb_buffer[pixel_idx * 4 + 2] = (uint8_t)(rgb.z * 255.f);
-    params.srgb_buffer[pixel_idx * 4 + 3] = 255;
 }
 
 // =====================================================================
