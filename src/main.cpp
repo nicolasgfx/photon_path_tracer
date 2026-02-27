@@ -1775,6 +1775,15 @@ static void run_interactive(
                 optix_renderer.download_framebuffer(final_fb);
                 write_png(final_path, final_fb);
 
+                // Save raw (un-denoised) version when denoiser was active
+                std::string raw_path;
+                if (opt.config.denoiser_enabled) {
+                    raw_path = prefix + "_raw.png";
+                    FrameBuffer raw_fb;
+                    optix_renderer.download_raw_framebuffer(raw_fb);
+                    write_png(raw_path, raw_fb);
+                }
+
                 // Restore mouse capture state
                 if (g_app.mouse_was_captured) {
                     g_app.mouse_captured = true;
@@ -1793,6 +1802,8 @@ static void run_interactive(
 
                 std::cout << "========================================\n";
                 std::cout << "  Saved: " << final_path << "\n";
+                if (!raw_path.empty())
+                    std::cout << "  Saved: " << raw_path << " (raw, before denoiser)\n";
                 std::cout << "========================================\n\n";
                 }
             }

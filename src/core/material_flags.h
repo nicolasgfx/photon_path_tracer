@@ -43,7 +43,7 @@ inline HD MaterialFlags classify_for_photons_by_type(uint8_t mat_type_val) {
     MaterialFlags f{};
     f.is_emissive   = (mat_type_val == 4);
     f.is_delta      = (mat_type_val == 1 || mat_type_val == 2 || mat_type_val == 6);
-    f.caustic_caster = (mat_type_val == 2 || mat_type_val == 6);
+    f.caustic_caster = (mat_type_val == 1 || mat_type_val == 2 || mat_type_val == 6);  // Mirror, Glass, Translucent
     return f;
 }
 

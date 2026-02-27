@@ -132,6 +132,12 @@ inline bool load_runtime_config(
         else if (key == "dof_f_number")       { float v = as_float(); if (v != cam.dof_f_number)    { cam.dof_f_number   = v; flags.dof_changed = true; } }
         else if (key == "dof_sensor_height")  { float v = as_float(); if (v != cam.sensor_height)   { cam.sensor_height  = v; flags.dof_changed = true; } }
         else if (key == "dof_focus_range")    { float v = as_float(); if (v != cam.dof_focus_range) { cam.dof_focus_range = v; flags.dof_changed = true; } }
+
+        // §7 – Denoiser
+        else if (key == "denoiser_enabled")       { cfg.denoiser_enabled       = as_bool();  }
+        else if (key == "denoiser_guide_albedo")  { cfg.denoiser_guide_albedo  = as_bool();  }
+        else if (key == "denoiser_guide_normal")  { cfg.denoiser_guide_normal  = as_bool();  }
+        else if (key == "denoiser_blend")         { cfg.denoiser_blend         = as_float(); }
         // All other keys fall through silently.
     };
 

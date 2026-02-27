@@ -192,12 +192,7 @@ struct CellInfoCache {
                     uint8_t flags = photons.path_flags[i];
                     if (flags & PHOTON_FLAG_TRAVERSED_GLASS)
                         ws.glass_count++;
-                    if (flags & PHOTON_FLAG_CAUSTIC_GLASS) {
-                        ws.caustic_photon_count++;
-                        ws.caustic_flux_sum += scalar_flux;
-
-                        // Welford for caustic flux
-                        ws.c_n++;
+                if (flags & (PHOTON_FLAG_CAUSTIC_GLASS | PHOTON_FLAG_CAUSTIC_SPECULAR)) {
                         double cd = (double)scalar_flux - ws.c_mean;
                         ws.c_mean += cd / (double)ws.c_n;
                         double cd2 = (double)scalar_flux - ws.c_mean;

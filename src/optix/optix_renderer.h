@@ -180,11 +180,7 @@ public:
     /// Upload emitter data to device (for GPU photon tracing)
     void upload_emitter_data(const Scene& scene);
 
-    /// CPU photon tracing fallback: uses emitter.h trace_photons() +
-    /// targeted caustic emission on the CPU, then merges, builds hash
-    /// grid, and uploads to GPU for the OptiX gather.  Enabled when
-    /// USE_CPU_PHOTON_TRACE is 1 in config.h.
-    void cpu_trace_photons(const Scene& scene, const RenderConfig& config);
+
 
     /// Trace photons entirely on the GPU. Downloads results, builds
     /// the hash grid on CPU, uploads the grid + photon data back.
@@ -237,8 +233,11 @@ public:
                                 std::vector<float>& caustic_spec,
                                 std::vector<float>& caustic_samp);
 
-    /// Read back the sRGB buffer from the device
+    /// Read back the sRGB buffer from the device (denoised when enabled)
     void download_framebuffer(FrameBuffer& fb) const;
+
+    /// Read back the raw (un-denoised) sRGB buffer; valid only after render_final with denoiser
+    void download_raw_framebuffer(FrameBuffer& fb) const;
 
     /// Download component spectral buffers to CPU (for debug PNGs)
     /// Returns raw spectral data [width*height*NUM_LAMBDA] floats.
@@ -269,6 +268,10 @@ public:
     /// Toggle per-triangle photon irradiance heatmap in preview mode.
     void set_photon_heatmap(bool v) { show_photon_heatmap_ = v; }
     bool is_photon_heatmap() const  { return show_photon_heatmap_; }
+
+    /// Toggle OptiX AI denoiser for final render.
+    void set_denoiser_enabled(bool v) { denoiser_enabled_ = v; }
+    bool is_denoiser_enabled() const  { return denoiser_enabled_; }
 
     /// Toggle dense cell-bin grid path vs hash-grid walk.
     void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
@@ -309,10 +312,24 @@ private:
     void create_pipeline();
     void build_sbt(const Scene& scene);
 
+    // Denoiser
+    void setup_denoiser(int w, int h, bool guide_albedo, bool guide_normal);
+    void run_denoiser(float blend_factor);
+    void cleanup_denoiser();
+
     // OptiX handles
     OptixDeviceContext       context_      = nullptr;
     OptixModule              module_       = nullptr;
     OptixPipeline            pipeline_     = nullptr;
+
+    // Denoiser handles
+    OptixDenoiser            denoiser_     = nullptr;
+    DeviceBuffer             d_denoiser_state_;
+    DeviceBuffer             d_denoiser_scratch_;
+    int                      denoiser_width_  = 0;
+    int                      denoiser_height_ = 0;
+    bool                     denoiser_guide_albedo_ = false;
+    bool                     denoiser_guide_normal_ = false;
 
     // Program groups
     OptixProgramGroup        raygen_pg_          = nullptr;
@@ -333,7 +350,16 @@ private:
     // Device buffers
     DeviceBuffer d_spectrum_buffer_;   // float [W*H*NUM_LAMBDA]
     DeviceBuffer d_sample_counts_;     // float [W*H]
-    DeviceBuffer d_srgb_buffer_;       // uint8 [W*H*4]
+    DeviceBuffer d_srgb_buffer_;       // uint8 [W*H*4]  (final — denoised when enabled)
+    DeviceBuffer d_srgb_raw_buffer_;   // uint8 [W*H*4]  (raw tonemap, before denoiser)
+
+    // AOV buffers for denoiser guide layers
+    DeviceBuffer d_albedo_buffer_;     // float [W*H*4] linear diffuse albedo
+    DeviceBuffer d_normal_buffer_;     // float [W*H*4] world-space shading normal
+
+    // HDR intermediate buffer (denoiser input/output)
+    DeviceBuffer d_hdr_buffer_;        // float [W*H*4] linear HDR RGB
+    DeviceBuffer d_hdr_denoised_;      // float [W*H*4] denoised output
 
     // Component output buffers (for debug PNGs)
     DeviceBuffer d_nee_direct_buffer_;       // float [W*H*NUM_LAMBDA]
@@ -482,6 +508,7 @@ private:
     bool runtime_volume_enabled_ = DEFAULT_VOLUME_ENABLED;  // toggled via V key
     bool show_photon_heatmap_    = false;                    // toggled via F-key
     bool use_dense_grid_         = false;                    // dense cell-bin grid path
+    bool denoiser_enabled_       = DEFAULT_DENOISER_ENABLED; // OptiX AI denoiser
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
     float caustic_radius_ = DEFAULT_CAUSTIC_RADIUS;   // tighter radius for caustic gather
     float exposure_      = DEFAULT_EXPOSURE;          // runtime exposure (set_exposure / R key)
@@ -513,6 +540,13 @@ inline void OptixRenderer::resize(int w, int h) {
     d_spectrum_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
     d_sample_counts_.alloc(pixels * sizeof(float));
     d_srgb_buffer_.alloc(pixels * 4 * sizeof(uint8_t));
+    d_srgb_raw_buffer_.alloc(pixels * 4 * sizeof(uint8_t));
+
+    // AOV + HDR buffers for denoiser
+    d_albedo_buffer_.alloc(pixels * 4 * sizeof(float));
+    d_normal_buffer_.alloc(pixels * 4 * sizeof(float));
+    d_hdr_buffer_.alloc(pixels * 4 * sizeof(float));
+    d_hdr_denoised_.alloc(pixels * 4 * sizeof(float));
 
     // Per-pixel lobe balance
     d_lobe_balance_.alloc(pixels * sizeof(float));
@@ -537,6 +571,11 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_spectrum_buffer_.d_ptr, 0, d_spectrum_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
     CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr,     0, d_srgb_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_srgb_raw_buffer_.d_ptr, 0, d_srgb_raw_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_albedo_buffer_.d_ptr,   0, d_albedo_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_normal_buffer_.d_ptr,   0, d_normal_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_hdr_buffer_.d_ptr,      0, d_hdr_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_hdr_denoised_.d_ptr,    0, d_hdr_denoised_.bytes));
     CUDA_CHECK(cudaMemset(d_lobe_balance_.d_ptr,     0, d_lobe_balance_.bytes));
     CUDA_CHECK(cudaMemset(d_lum_sum_.d_ptr,          0, d_lum_sum_.bytes));
     CUDA_CHECK(cudaMemset(d_lum_sum2_.d_ptr,         0, d_lum_sum2_.bytes));
@@ -560,6 +599,12 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr, 0, d_sample_counts_.bytes));
     if (d_srgb_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_srgb_buffer_.d_ptr, 0, d_srgb_buffer_.bytes));
+    if (d_srgb_raw_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_srgb_raw_buffer_.d_ptr, 0, d_srgb_raw_buffer_.bytes));
+    if (d_albedo_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_albedo_buffer_.d_ptr, 0, d_albedo_buffer_.bytes));
+    if (d_normal_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_normal_buffer_.d_ptr, 0, d_normal_buffer_.bytes));
     if (d_lum_sum_.d_ptr)
         CUDA_CHECK(cudaMemset(d_lum_sum_.d_ptr, 0, d_lum_sum_.bytes));
     if (d_lum_sum2_.d_ptr)
@@ -588,6 +633,12 @@ inline void OptixRenderer::download_framebuffer(FrameBuffer& fb) const {
                           fb.srgb.size(), cudaMemcpyDeviceToHost));
 }
 
+inline void OptixRenderer::download_raw_framebuffer(FrameBuffer& fb) const {
+    fb.resize(width_, height_);
+    CUDA_CHECK(cudaMemcpy(fb.srgb.data(), d_srgb_raw_buffer_.d_ptr,
+                          fb.srgb.size(), cudaMemcpyDeviceToHost));
+}
+
 inline void OptixRenderer::download_component_buffers(
     std::vector<float>& nee_direct,
     std::vector<float>& photon_indirect,
@@ -612,6 +663,7 @@ inline void OptixRenderer::download_component_buffers(
 }
 
 inline void OptixRenderer::cleanup() {
+    if (denoiser_)             { optixDenoiserDestroy(denoiser_);               denoiser_ = nullptr; }
     if (pipeline_)             { optixPipelineDestroy(pipeline_);              pipeline_ = nullptr; }
     if (raygen_pg_)            { optixProgramGroupDestroy(raygen_pg_);         raygen_pg_ = nullptr; }
     if (raygen_photon_pg_)     { optixProgramGroupDestroy(raygen_photon_pg_);  raygen_photon_pg_ = nullptr; }

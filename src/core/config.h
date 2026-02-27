@@ -38,17 +38,7 @@
 //#define SCENE_SALLE_DE_BAIN
 //#define SCENE_MORI_KNOB
 
-// ── Photon tracing backend ──────────────────────────────────────────
-// Set to 1 to use the CPU photon tracer (emitter.h) instead of the GPU
-// OptiX kernels.  Useful for A/B comparison; GPU rendering (camera rays,
-// gather, etc.) still runs on the GPU — only photon emission is on CPU.
-#define USE_CPU_PHOTON_TRACE 0
-
 // ── v2.2 Consistency Reset Flags ────────────────────────────────────
-// GPU photon tracing: disabled by default (CPU is ground truth until
-// a fully equivalent OptiX photon tracer exists).
-constexpr bool DEFAULT_USE_GPU_PHOTON_TRACING = false;
-
 // Bresenham per-pixel lobe balance (GPU BSDF heuristic):
 // disabled by default for CPU↔GPU consistency.  Enable only after
 // CPU has the same mechanism and equivalence tests pass.
@@ -63,8 +53,8 @@ constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 1024;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 1024;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 512;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
 
 
 // =====================================================================
@@ -77,29 +67,12 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 1024;           // [R]
 // Anti-aliasing + noise averaging.  This is the single biggest
 // quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
-constexpr int DEFAULT_SPP = 32;                       // [R]
+constexpr int DEFAULT_SPP = 16;                       // [R]
 
 // Sub-pixel stratified jitter grid.
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP.
-constexpr int STRATA_X = 8;                           // 4 × 4 = 16 = DEFAULT_SPP
+constexpr int STRATA_X = 4;                           // 4 × 4 = 16 = DEFAULT_SPP
 constexpr int STRATA_Y = 4;
-
-// ── Photon budgets ──────────────────────────────────────────────────
-// Total photons emitted per pass.  The photon map carries ALL indirect
-// transport in the v2 architecture.
-//   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 5000000;   // [R]  specular→diffuse caustics
-
-// ── Gather radii (max kNN search radius) ────────────────────────────
-// These set the MAXIMUM search radius for k-NN photon gathering.
-// The actual gather radius per hitpoint is adaptive: the tangential
-// distance to the K-th nearest photon (see DEFAULT_KNN_K).
-// These caps prevent pathologically large searches in sparse regions.
-// Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
-//   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
-constexpr float DEFAULT_GATHER_RADIUS  = 0.10f;      // 0.05[R]  global (diffuse) map
-constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
 
 // ── NEE shadow rays ─────────────────────────────────────────────────
 // Shadow rays per shading point (bounce 0).  The bin/cache system
@@ -108,6 +81,23 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (t
 // bounces ≥ 1.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
 constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
+
+// ── Photon budgets ──────────────────────────────────────────────────
+// Total photons emitted per pass.  The photon map carries ALL indirect
+// transport in the v2 architecture.
+//   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diffuse caustics
+
+// ── Gather radii (max kNN search radius) ────────────────────────────
+// These set the MAXIMUM search radius for k-NN photon gathering.
+// The actual gather radius per hitpoint is adaptive: the tangential
+// distance to the K-th nearest photon (see DEFAULT_KNN_K).
+// These caps prevent pathologically large searches in sparse regions.
+// Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
+//   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
+constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
+constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
 
 
 // =====================================================================
@@ -121,7 +111,7 @@ constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
 // enter+exit) plus subsequent diffuse bounces.  4 glass layers = 8
 // transmission bounces before reaching a diffuse surface.
 //   Fast: 4–6  |  Balanced: 10  |  Quality: 12–16
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 12;        // [R]
+constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 10;        // [R]
 
 // ── Russian roulette ────────────────────────────────────────────────
 // After MIN_BOUNCES_RR guaranteed bounces, each continuation is
@@ -131,7 +121,7 @@ constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 12;        // [R]
 // should not kill photons mid-transmission through nested dielectrics.
 //   MIN_BOUNCES_RR — Fast: 3–4  |  Balanced: 8  |  Quality: 10
 //   RR_THRESHOLD   — 0.80 (aggressive) .. 0.95 (conservative)
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 10;    // [R]
+constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 8;    // [R]
 constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.90f;// [R]
 
 // ── Spectral transport (PBRT v4 §14.3) ─────────────────────────────
@@ -157,13 +147,13 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 // Multi-map photon re-tracing: re-trace the photon map with a new
 // RNG seed every N camera samples to decorrelate photon/camera noise.
 //   0 = single map  |  4 = balanced  |  8 = quality
-constexpr int MULTI_MAP_SPP_GROUP = 4;
+constexpr int MULTI_MAP_SPP_GROUP = 0; // NICO 4
 
 // Photon map pool: pre-build this many maps at the start of render_final()
 // and cycle through them, avoiding re-tracing during SPP accumulation.
 //   1 = no pool (re-trace each group, legacy behaviour)
 //   4 = 4 maps pre-built, cycled every MULTI_MAP_SPP_GROUP samples
-constexpr int PHOTON_MAP_POOL_SIZE = 4;
+constexpr int PHOTON_MAP_POOL_SIZE = 1; // NICO4
 
 
 // =====================================================================
@@ -205,6 +195,18 @@ constexpr float DEFAULT_LIGHT_SCALE = 1.0f;           // [K]
 constexpr float LIGHT_SCALE_STEP    = 1.25f;          //      multiplicative step per key press
 constexpr float LIGHT_SCALE_MIN     = 0.01f;
 constexpr float LIGHT_SCALE_MAX     = 100.0f;
+
+// ── OptiX AI Denoiser ────────────────────────────────────────────────
+// When enabled, the final render applies the OptiX HDR denoiser after
+// accumulation and before tone mapping.  Requires albedo + normal AOVs
+// written during the camera pass.  Guide layers (albedo, normal) improve
+// edge preservation and detail retention.
+//   true  = denoise final render (adds ~20–50 ms overhead)
+//   false = raw Monte Carlo output (legacy behaviour)
+constexpr bool DEFAULT_DENOISER_ENABLED        = true;   // [R]
+constexpr bool DEFAULT_DENOISER_GUIDE_ALBEDO   = true;   //     use albedo guide layer
+constexpr bool DEFAULT_DENOISER_GUIDE_NORMAL   = true;   //     use normal guide layer
+constexpr float DEFAULT_DENOISER_BLEND         = 0.0f;   //     0 = fully denoised, 1 = original
 
 // Progress snapshot PNGs at power-of-2 SPP intervals (near-zero overhead).
 constexpr bool PROGRESS_SNAPSHOT_ENABLED = true;

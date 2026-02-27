@@ -100,6 +100,12 @@ struct RenderConfig {
     // Tone mapping
     float exposure           = DEFAULT_EXPOSURE;  ///< linear multiplier before tone mapping (§Q8)
 
+    // OptiX AI Denoiser (§5 config.h)
+    bool  denoiser_enabled       = DEFAULT_DENOISER_ENABLED;
+    bool  denoiser_guide_albedo  = DEFAULT_DENOISER_GUIDE_ALBEDO;
+    bool  denoiser_guide_normal  = DEFAULT_DENOISER_GUIDE_NORMAL;
+    float denoiser_blend         = DEFAULT_DENOISER_BLEND;
+
     // Debug
     RenderMode mode          = RenderMode::Combined;
 };

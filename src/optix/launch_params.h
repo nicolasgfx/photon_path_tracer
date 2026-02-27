@@ -42,6 +42,11 @@ struct LaunchParams {
     float*    nee_direct_buffer;       // [width * height * NUM_LAMBDA]
     float*    photon_indirect_buffer;  // [width * height * NUM_LAMBDA]
 
+    // AOV buffers for OptiX denoiser guide layers (§5 config.h)
+    // Written at the first non-specular hit during full_path_trace.
+    float*    albedo_buffer;           // [width * height * 4] RGBA linear diffuse albedo
+    float*    normal_buffer;           // [width * height * 4] world-space shading normal
+
     // Image dimensions
     int width;
     int height;

@@ -349,6 +349,13 @@ $p_{continue} = \min(\max_\lambda(T(\lambda)),\, \text{RR\_THRESHOLD})$
 **Russian roulette is skipped for specular/translucent bounces** — these
 are deterministic events that must continue to enable caustic formation.
 
+**Caustic caster materials:** Mirror (1), Glass (2), and Translucent (6)
+are all classified as `caustic_caster` in `classify_for_photons_by_type()`.
+When a photon hits a caustic caster, `on_caustic_path` is set to true.
+Mirror surfaces produce purely reflective caustics (no refraction, no
+chromatic dispersion, no IOR stack modification). Glass and Translucent
+surfaces may additionally trigger IOR stack push/pop and dispersion.
+
 #### 5.2.3 Photon Deposition Rule (No Double Counting)
 
 Deposit when:
@@ -401,10 +408,13 @@ optimisations (CellInfoCache, adaptive caustic shooting).
 | `PHOTON_FLAG_CAUSTIC_GLASS` | 0x02 | Path is a glass caustic (specular chain → diffuse) |
 | `PHOTON_FLAG_VOLUME_SEGMENT` | 0x04 | Deposited inside a participating medium |
 | `PHOTON_FLAG_DISPERSION` | 0x08 | Path went through a dispersive glass material |
+| `PHOTON_FLAG_CAUSTIC_SPECULAR` | 0x10 | Path is a mirror/reflective caustic (L→Mirror→D) |
 
 Flags are accumulated along the path: glass detection sets `TRAVERSED_GLASS`;
 if the photon later deposits on a diffuse surface, `CAUSTIC_GLASS` is set.
-Materials with `dispersion == true` trigger `DISPERSION`.
+Materials with `dispersion == true` trigger `DISPERSION`. Mirror bounces set
+`CAUSTIC_SPECULAR` — these are purely reflective caustics with no IOR stack
+changes and no chromatic dispersion.
 
 ### 5.2.6 IOR Stack (Nested Dielectrics)
 

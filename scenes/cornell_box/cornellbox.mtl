@@ -77,16 +77,12 @@ pb_brdf lambert
 
 newmtl water
     illum 7
-    Tf 0.85 0.95 0.98
-    Ni 1.33
+    Tf 0.98 0.98 0.98
+    Ni 2.5
     pb_brdf dielectric
     pb_semantic glass
+    pb_eta 2.5
     pb_transmission 1.0
     pb_roughness 0.001
-    pb_eta 1.33
-    pb_dispersion 3200.0
-    pb_medium homogeneous
-    pb_sigma_a 0.25 0.06 0.01
-    pb_sigma_s 0.0 0.0 0.0
-    pb_g 0.0
+    pb_dispersion 10000.0
 

@@ -1919,6 +1919,9 @@ struct PathTraceResult {
     Spectrum combined;
     Spectrum nee_direct;
     Spectrum photon_indirect;
+    // AOV for denoiser guide layers
+    float3 first_hit_albedo;   // linear diffuse albedo at first non-specular hit
+    float3 first_hit_normal;   // world-space shading normal at first non-specular hit
     // Kernel profiling clocks (accumulated across bounces)
     long long clk_ray_trace;
     long long clk_nee;
@@ -1934,6 +1937,8 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
     result.combined        = Spectrum::zero();
     result.nee_direct      = Spectrum::zero();
     result.photon_indirect = Spectrum::zero();
+    result.first_hit_albedo = make_f3(0.f, 0.f, 0.f);
+    result.first_hit_normal = make_f3(0.f, 0.f, 1.f);
     result.clk_ray_trace     = 0;
     result.clk_nee           = 0;
     result.clk_photon_gather = 0;
@@ -1941,6 +1946,7 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
 
     Spectrum throughput = Spectrum::constant(1.0f);
     IORStack ior_stack;  // track nested dielectrics across camera bounces
+    bool aov_written = false;  // AOV captured at first non-specular hit
 
     const int max_spec = DEFAULT_MAX_SPECULAR_CHAIN;
 
@@ -1990,6 +1996,25 @@ PathTraceResult full_path_trace(float3 origin, float3 direction, PCGRng& rng,
         DevONB frame = DevONB::from_normal(hit.shading_normal);
         float3 wo_local = frame.world_to_local(direction * (-1.f));
         if (wo_local.z <= 0.f) break;
+
+        // AOV: capture albedo + normal at first non-specular hit (for denoiser)
+        if (!aov_written) {
+            // Diffuse albedo in linear RGB
+            Spectrum Kd_aov = dev_get_Kd(mat_id, hit.uv);
+            float X = 0.f, Y = 0.f, Z = 0.f;
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                X += Kd_aov.value[i] * CIE_XBAR[i];
+                Y += Kd_aov.value[i] * CIE_YBAR[i];
+                Z += Kd_aov.value[i] * CIE_ZBAR[i];
+            }
+            X *= CIE_YBAR_SUM_INV; Y *= CIE_YBAR_SUM_INV; Z *= CIE_YBAR_SUM_INV;
+            result.first_hit_albedo = make_f3(
+                fmaxf( 3.2406f*X - 1.5372f*Y - 0.4986f*Z, 0.f),
+                fmaxf(-0.9689f*X + 1.8758f*Y + 0.0415f*Z, 0.f),
+                fmaxf( 0.0557f*X - 0.2040f*Y + 1.0570f*Z, 0.f));
+            result.first_hit_normal = hit.shading_normal;
+            aov_written = true;
+        }
 
         // 1. NEE: direct lighting via shadow ray
         if (params.render_mode != RENDER_MODE_INDIRECT_ONLY) {
@@ -2293,6 +2318,24 @@ extern "C" __global__ void __raygen__render() {
             prof_nee  += ptr.clk_nee;
             prof_pg   += ptr.clk_photon_gather;
             prof_bsdf += ptr.clk_bsdf;
+
+            // AOV: write denoiser guide layers on first sample of first frame
+            if (s == 0 && params.frame_number == 0) {
+                if (params.albedo_buffer) {
+                    params.albedo_buffer[pixel_idx * 4 + 0] = ptr.first_hit_albedo.x;
+                    params.albedo_buffer[pixel_idx * 4 + 1] = ptr.first_hit_albedo.y;
+                    params.albedo_buffer[pixel_idx * 4 + 2] = ptr.first_hit_albedo.z;
+                    params.albedo_buffer[pixel_idx * 4 + 3] = 1.0f;
+                }
+                if (params.normal_buffer) {
+                    // World-space shading normal (OPTIX_DENOISER_MODEL_KIND_AOV expects world space)
+                    float3 n = ptr.first_hit_normal;
+                    params.normal_buffer[pixel_idx * 4 + 0] = n.x;
+                    params.normal_buffer[pixel_idx * 4 + 1] = n.y;
+                    params.normal_buffer[pixel_idx * 4 + 2] = n.z;
+                    params.normal_buffer[pixel_idx * 4 + 3] = 0.0f;
+                }
+            }
         } else {
             Spectrum L = debug_first_hit(origin, direction, rng);
             L_accum += L;

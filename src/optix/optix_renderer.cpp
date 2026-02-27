@@ -6,7 +6,7 @@
 #include "optix/adaptive_sampling.h"
 #include "photon/specular_target.h"   // SpecularTargetSet (for GPU upload)
 #include "photon/tri_photon_irradiance.h"  // per-triangle irradiance heatmap
-#include "photon/emitter.h"                // CPU photon tracing (USE_CPU_PHOTON_TRACE)
+#include "photon/emitter.h"                // CPU photon tracing
 #include "photon/hash_grid.h"              // gpu_build_hash_grid, launch_tonemap_kernel
 
 #include <cuda_runtime.h>
@@ -472,165 +472,6 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
                 n, total,
                 *std::max_element(weights.begin(), weights.end()),
                 *std::min_element(weights.begin(), weights.end()));
-}
-
-// =====================================================================
-// cpu_trace_photons() -- CPU photon tracing fallback (A/B comparison)
-//   Uses emitter.h trace_photons() + targeted caustic emission on CPU,
-//   then merges global + caustic maps, builds hash grid, and uploads
-//   everything to the GPU for OptiX gather.
-// =====================================================================
-void OptixRenderer::cpu_trace_photons(const Scene& scene, const RenderConfig& config) {
-    if (scene.emissive_tri_indices.empty()) {
-        std::cout << "[CPU-Photon] Skipping (no emissive triangles)\n";
-        return;
-    }
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    gather_radius_ = config.gather_radius;
-    caustic_radius_ = config.caustic_radius;
-
-    // ── 1. CPU photon tracing (global + caustic) ─────────────────────
-    EmitterConfig ecfg;
-    ecfg.num_photons    = config.num_photons;
-    ecfg.max_bounces    = config.max_bounces;
-    ecfg.rr_threshold   = config.rr_threshold;
-    ecfg.min_bounces_rr = config.min_bounces_rr;
-    ecfg.volume_enabled = false;
-
-    PhotonSoA global_map, caustic_map;
-    ::trace_photons(scene, ecfg, global_map, caustic_map);
-
-    num_photons_emitted_ = config.num_photons;
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double ms1 = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    std::printf("[CPU-Photon] Traced %d photons in %.1f ms  global=%zu  caustic=%zu\n",
-                config.num_photons, ms1, global_map.size(), caustic_map.size());
-
-    // ── 2. Targeted caustic emission (separate map) ────────────────
-    //   Shoot photons directionally toward specular/translucent geometry.
-    //   Results go into a FRESH map (not caustic_map which duplicates
-    //   global_map entries) to avoid double-counting at gather.
-    PhotonSoA targeted_caustic_map;
-    int targeted_budget = 0;
-    if (config.targeted_caustic_emission_enabled) {
-        SpecularTargetSet target_set = SpecularTargetSet::build(scene);
-        if (target_set.valid) {
-            EmitterConfig tcfg = ecfg;
-            tcfg.num_photons = config.caustic_photon_budget;
-            targeted_budget = (int)(config.caustic_photon_budget * config.targeted_caustic_mix);
-            trace_targeted_caustic_emission(
-                scene, tcfg, target_set, targeted_caustic_map,
-                config.targeted_caustic_mix);
-        }
-    }
-
-    auto t2 = std::chrono::high_resolution_clock::now();
-
-    // ── 3. Merge global + targeted caustic into stored_photons_ ──────
-    //  Tag 0 = global (non-caustic diffuse indirect)  → L_global  (1/N_global)
-    //  Tag 1 = global-pass caustic path (L→S+→D)     → L_global  (1/N_global)
-    //  Tag 2 = dedicated caustic-targeted pass        → L_caustic (1/N_caustic)
-    //
-    //  Global caustic photons (tag=1) are gathered into L_global with
-    //  correct 1/N_global weight.  Targeted caustic photons (tag=2) use
-    //  the dedicated 1/N_caustic weight for sharper caustics.
-    size_t n_global           = global_map.size();
-    size_t n_targeted_caustic = targeted_caustic_map.size();
-    size_t total              = n_global + n_targeted_caustic;
-
-    stored_photons_.clear();
-    stored_photons_.reserve(total);
-    stored_photons_.append(global_map);
-    stored_photons_.append(targeted_caustic_map);
-
-    // Build caustic pass flags ────────────────────────────────────────
-    caustic_pass_flags_.assign(total, 0);
-
-    // Mark global-pass caustic photons as tag 1 (gathered in L_global,
-    // NOT skipped — tag 1 now routes to L_global with 1/N_global weight).
-    // caustic_map from trace_photons contains exact duplicates of
-    // caustic-path entries in global_map (bit-exact positions).
-    if (caustic_map.size() > 0 && n_targeted_caustic > 0) {
-        std::unordered_set<uint64_t> caustic_pos_hashes;
-        caustic_pos_hashes.reserve(caustic_map.size());
-        for (size_t ci = 0; ci < caustic_map.size(); ++ci) {
-            uint32_t hx, hy, hz;
-            std::memcpy(&hx, &caustic_map.pos_x[ci], 4);
-            std::memcpy(&hy, &caustic_map.pos_y[ci], 4);
-            std::memcpy(&hz, &caustic_map.pos_z[ci], 4);
-            uint64_t key = (uint64_t)hx ^ ((uint64_t)hy << 21) ^ ((uint64_t)hz << 42);
-            caustic_pos_hashes.insert(key);
-        }
-        size_t n_tag1 = 0;
-        for (size_t gi = 0; gi < n_global; ++gi) {
-            uint32_t hx, hy, hz;
-            std::memcpy(&hx, &global_map.pos_x[gi], 4);
-            std::memcpy(&hy, &global_map.pos_y[gi], 4);
-            std::memcpy(&hz, &global_map.pos_z[gi], 4);
-            uint64_t key = (uint64_t)hx ^ ((uint64_t)hy << 21) ^ ((uint64_t)hz << 42);
-            if (caustic_pos_hashes.count(key)) {
-                caustic_pass_flags_[gi] = 1;  // global-caustic (gathered in L_global)
-                ++n_tag1;
-            }
-        }
-        std::printf("[CPU-Photon] Tagged %zu global photons as tag-1 (global-caustic)\n", n_tag1);
-    }
-
-    // Tag targeted caustics as 2
-    if (n_targeted_caustic > 0) {
-        std::fill(caustic_pass_flags_.begin() + n_global,
-                  caustic_pass_flags_.end(), (uint8_t)2);
-    }
-
-    // N_caustic for dual-budget gather (matches GPU: only targeted budget)
-    num_caustic_emitted_ = (n_targeted_caustic > 0) ? targeted_budget : 0;
-
-    std::printf("[CPU-Photon] Merged: %zu global + %zu targeted-caustic = %zu total  "
-                "N_emit=%d  N_caustic_emit=%d\n",
-                n_global, n_targeted_caustic, total,
-                num_photons_emitted_, num_caustic_emitted_);
-
-    // ── 4. Build hash grid on CPU ────────────────────────────────────
-    stored_grid_.build(stored_photons_, gather_radius_);
-
-    auto t3 = std::chrono::high_resolution_clock::now();
-    double ms_grid = std::chrono::duration<double, std::milli>(t3 - t2).count();
-    std::printf("[CPU-Photon] Hash grid built in %.1f ms  buckets=%u\n",
-                ms_grid, stored_grid_.table_size);
-
-    // ── 5. Upload to GPU ─────────────────────────────────────────────
-    d_photon_pos_x_.upload(stored_photons_.pos_x);
-    d_photon_pos_y_.upload(stored_photons_.pos_y);
-    d_photon_pos_z_.upload(stored_photons_.pos_z);
-    d_photon_wi_x_.upload(stored_photons_.wi_x);
-    d_photon_wi_y_.upload(stored_photons_.wi_y);
-    d_photon_wi_z_.upload(stored_photons_.wi_z);
-    d_photon_norm_x_.upload(stored_photons_.norm_x);
-    d_photon_norm_y_.upload(stored_photons_.norm_y);
-    d_photon_norm_z_.upload(stored_photons_.norm_z);
-    d_photon_lambda_.upload(stored_photons_.lambda_bin);
-    d_photon_flux_.upload(stored_photons_.flux);
-    d_photon_num_hero_.upload(stored_photons_.num_hero);
-    d_grid_sorted_indices_.upload(stored_grid_.sorted_indices);
-    d_grid_cell_start_.upload(stored_grid_.cell_start);
-    d_grid_cell_end_.upload(stored_grid_.cell_end);
-    d_photon_is_caustic_pass_.upload(caustic_pass_flags_);
-
-    // Heatmap
-    {
-        auto irr = build_tri_photon_irradiance(stored_photons_, num_tris_);
-        if (!irr.empty())
-            d_tri_photon_irradiance_.upload(irr);
-        else
-            d_tri_photon_irradiance_.free();
-    }
-
-    auto t4 = std::chrono::high_resolution_clock::now();
-    double total_ms = std::chrono::duration<double, std::milli>(t4 - t0).count();
-    std::printf("[CPU-Photon] Total: %.1f ms  (uploaded to GPU)\n", total_ms);
 }
 
 // =====================================================================
@@ -2078,6 +1919,12 @@ void OptixRenderer::render_final(
         lp.exposure           = exposure_;
         lp.skip_tonemap       = 1;  // defer tonemap to post-process kernel
 
+        // Denoiser AOV buffers (written on first sample of first frame)
+        lp.albedo_buffer = d_albedo_buffer_.d_ptr
+            ? reinterpret_cast<float*>(d_albedo_buffer_.d_ptr) : nullptr;
+        lp.normal_buffer = d_normal_buffer_.d_ptr
+            ? reinterpret_cast<float*>(d_normal_buffer_.d_ptr) : nullptr;
+
         // Adaptive buffers
         lp.lum_sum    = adaptive
             ? reinterpret_cast<float*>(d_lum_sum_.d_ptr)   : nullptr;
@@ -2222,16 +2069,51 @@ void OptixRenderer::render_final(
     photon_map_pool_.clear();
     active_pool_idx_ = -1;
 
-    // ── Post-process tonemap (single pass after all SPP) ─────────────
+    // ── Post-process: optionally denoise, then tonemap ───────────────
     // The per-SPP inline tonemap was skipped (skip_tonemap=1).
-    // Run the tonemap kernel once to convert the accumulated spectral
-    // buffer to sRGB.
-    launch_tonemap_kernel(
-        (const float*)d_spectrum_buffer_.d_ptr,
-        (const float*)d_sample_counts_.d_ptr,
-        (uint8_t*)d_srgb_buffer_.d_ptr,
-        width_, height_, exposure_);
-    CUDA_CHECK(cudaDeviceSynchronize());
+    if (config.denoiser_enabled) {
+        // 1. Convert spectral accumulator → linear HDR float4
+        launch_spectrum_to_hdr_kernel(
+            (const float*)d_spectrum_buffer_.d_ptr,
+            (const float*)d_sample_counts_.d_ptr,
+            (float*)d_hdr_buffer_.d_ptr,
+            width_, height_, exposure_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // 2. Tone-map the raw (un-denoised) HDR → sRGB for side-by-side comparison
+        launch_tonemap_hdr_kernel(
+            (const float*)d_hdr_buffer_.d_ptr,
+            (uint8_t*)d_srgb_raw_buffer_.d_ptr,
+            width_, height_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // 3. Set up and run the OptiX AI denoiser
+        setup_denoiser(width_, height_,
+                       config.denoiser_guide_albedo,
+                       config.denoiser_guide_normal);
+        run_denoiser(config.denoiser_blend);
+
+        // 4. Tone map the denoised HDR → sRGB
+        launch_tonemap_hdr_kernel(
+            (const float*)d_hdr_denoised_.d_ptr,
+            (uint8_t*)d_srgb_buffer_.d_ptr,
+            width_, height_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        cleanup_denoiser();
+        std::cout << "\n[Denoiser] OptiX AI denoiser applied"
+                  << (config.denoiser_guide_albedo ? " +albedo" : "")
+                  << (config.denoiser_guide_normal ? " +normal" : "")
+                  << " (blend=" << config.denoiser_blend << ")";
+    } else {
+        // Legacy path: direct spectral → sRGB (no denoising)
+        launch_tonemap_kernel(
+            (const float*)d_spectrum_buffer_.d_ptr,
+            (const float*)d_sample_counts_.d_ptr,
+            (uint8_t*)d_srgb_buffer_.d_ptr,
+            width_, height_, exposure_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
 
     auto t_end = std::chrono::high_resolution_clock::now();
     double total_s = std::chrono::duration<double>(t_end - t_start).count();
@@ -2239,6 +2121,134 @@ void OptixRenderer::render_final(
     std::cout << "\n[Render] Done in " << std::fixed
               << std::setprecision(1) << total_s << "s"
               << "  (~" << (int)mrays << " Mray-bounces/s)\n";
+}
+
+// =====================================================================
+// OptiX AI Denoiser — setup, invoke, cleanup
+// =====================================================================
+void OptixRenderer::setup_denoiser(int w, int h,
+                                    bool guide_albedo, bool guide_normal)
+{
+    // Destroy previous denoiser if dimensions or guide config changed
+    if (denoiser_ && (denoiser_width_ != w || denoiser_height_ != h ||
+                      denoiser_guide_albedo_ != guide_albedo ||
+                      denoiser_guide_normal_ != guide_normal)) {
+        cleanup_denoiser();
+    }
+
+    if (denoiser_) return;  // already set up with matching dimensions
+
+    denoiser_width_  = w;
+    denoiser_height_ = h;
+    denoiser_guide_albedo_ = guide_albedo;
+    denoiser_guide_normal_ = guide_normal;
+
+    OptixDenoiserOptions options = {};
+    options.guideAlbedo = guide_albedo ? 1u : 0u;
+    options.guideNormal = guide_normal ? 1u : 0u;
+
+    OPTIX_CHECK(optixDenoiserCreate(
+        context_,
+        OPTIX_DENOISER_MODEL_KIND_AOV,
+        &options,
+        &denoiser_));
+
+    // Query memory requirements
+    OptixDenoiserSizes sizes = {};
+    OPTIX_CHECK(optixDenoiserComputeMemoryResources(
+        denoiser_, (unsigned int)w, (unsigned int)h, &sizes));
+
+    d_denoiser_state_.alloc(sizes.stateSizeInBytes);
+    // Use recommendedScratchSizeInBytes (larger = better quality)
+    size_t scratch_size = sizes.withoutOverlapScratchSizeInBytes;
+    if (sizes.withOverlapScratchSizeInBytes > scratch_size)
+        scratch_size = sizes.withOverlapScratchSizeInBytes;
+    d_denoiser_scratch_.alloc(scratch_size);
+
+    OPTIX_CHECK(optixDenoiserSetup(
+        denoiser_,
+        nullptr,  // CUDA stream
+        (unsigned int)w, (unsigned int)h,
+        reinterpret_cast<CUdeviceptr>(d_denoiser_state_.d_ptr),
+        d_denoiser_state_.bytes,
+        reinterpret_cast<CUdeviceptr>(d_denoiser_scratch_.d_ptr),
+        d_denoiser_scratch_.bytes));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void OptixRenderer::run_denoiser(float blend_factor)
+{
+    if (!denoiser_) return;
+
+    const unsigned int row_stride = (unsigned int)(denoiser_width_ * 4 * sizeof(float));
+
+    // Guide layer: albedo + normal
+    OptixDenoiserGuideLayer guide = {};
+    if (denoiser_guide_albedo_ && d_albedo_buffer_.d_ptr) {
+        guide.albedo.data               = reinterpret_cast<CUdeviceptr>(d_albedo_buffer_.d_ptr);
+        guide.albedo.width              = (unsigned int)denoiser_width_;
+        guide.albedo.height             = (unsigned int)denoiser_height_;
+        guide.albedo.rowStrideInBytes   = row_stride;
+        guide.albedo.pixelStrideInBytes = 4 * sizeof(float);
+        guide.albedo.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
+    }
+    if (denoiser_guide_normal_ && d_normal_buffer_.d_ptr) {
+        guide.normal.data               = reinterpret_cast<CUdeviceptr>(d_normal_buffer_.d_ptr);
+        guide.normal.width              = (unsigned int)denoiser_width_;
+        guide.normal.height             = (unsigned int)denoiser_height_;
+        guide.normal.rowStrideInBytes   = row_stride;
+        guide.normal.pixelStrideInBytes = 4 * sizeof(float);
+        guide.normal.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
+    }
+
+    // Input layer: linear HDR color
+    OptixDenoiserLayer layer = {};
+    layer.input.data               = reinterpret_cast<CUdeviceptr>(d_hdr_buffer_.d_ptr);
+    layer.input.width              = (unsigned int)denoiser_width_;
+    layer.input.height             = (unsigned int)denoiser_height_;
+    layer.input.rowStrideInBytes   = row_stride;
+    layer.input.pixelStrideInBytes = 4 * sizeof(float);
+    layer.input.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
+
+    // Output layer: denoised HDR color
+    layer.output.data               = reinterpret_cast<CUdeviceptr>(d_hdr_denoised_.d_ptr);
+    layer.output.width              = (unsigned int)denoiser_width_;
+    layer.output.height             = (unsigned int)denoiser_height_;
+    layer.output.rowStrideInBytes   = row_stride;
+    layer.output.pixelStrideInBytes = 4 * sizeof(float);
+    layer.output.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
+
+    // Denoiser parameters
+    OptixDenoiserParams params = {};
+    params.blendFactor  = blend_factor;  // 0 = fully denoised, 1 = original
+
+    OPTIX_CHECK(optixDenoiserInvoke(
+        denoiser_,
+        nullptr,  // CUDA stream
+        &params,
+        reinterpret_cast<CUdeviceptr>(d_denoiser_state_.d_ptr),
+        d_denoiser_state_.bytes,
+        &guide,
+        &layer,
+        1,         // numLayers
+        0, 0,      // inputOffsetX, inputOffsetY
+        reinterpret_cast<CUdeviceptr>(d_denoiser_scratch_.d_ptr),
+        d_denoiser_scratch_.bytes));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void OptixRenderer::cleanup_denoiser()
+{
+    if (denoiser_) {
+        optixDenoiserDestroy(denoiser_);
+        denoiser_ = nullptr;
+    }
+    d_denoiser_state_.free();
+    d_denoiser_scratch_.free();
+    denoiser_width_  = 0;
+    denoiser_height_ = 0;
 }
 
 // =====================================================================

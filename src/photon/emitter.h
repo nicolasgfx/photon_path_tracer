@@ -633,9 +633,13 @@ inline void trace_photons(const Scene& scene,
                 on_caustic_path = false;
             } else {
                 // Delta/specular bounce: track caustic eligibility
-                // Only set caustic flag if this material is a caustic caster
+                // Set caustic flag for any caustic caster (Mirror, Glass, Translucent)
                 if (mat_flags.caustic_caster) {
                     on_caustic_path = true;
+                }
+                if (mat.type == MaterialType::Mirror) {
+                    // Mirror caustic: purely reflective, no IOR/dispersion
+                    path_flags |= PHOTON_FLAG_CAUSTIC_SPECULAR;
                 }
                 if (mat.type == MaterialType::Glass ||
                     mat.type == MaterialType::Translucent) {
@@ -940,9 +944,12 @@ inline void trace_targeted_caustic_emission(
                 // this photon (we only care about caustic deposits).
                 break;
             } else {
-                // Delta bounce: track caustic eligibility
+                // Delta bounce: track caustic eligibility (Mirror, Glass, Translucent)
                 if (mat_flags.caustic_caster) {
                     on_caustic_path = true;
+                }
+                if (mat.type == MaterialType::Mirror) {
+                    path_flags |= PHOTON_FLAG_CAUSTIC_SPECULAR;
                 }
                 if (mat.type == MaterialType::Glass ||
                     mat.type == MaterialType::Translucent) {
