@@ -291,15 +291,16 @@ static void render_help_overlay(int win_w, int win_h,
 
     struct Toggle { const char* key; const char* label; bool on; };
     Toggle toggles[] = {
-        {"F1", "Photon points",    debug.show_photon_points},
-        {"F2", "Global map",       debug.show_global_map},
-        {"F3", "Caustic map",      debug.show_caustic_map},
+        {"F1", "All photons",     debug.show_photon_points},
+        {"F2", "Photon filter",    debug.photon_filter != PhotonFilterMode::Off},
+        {"F3", "(reserved)",       false},
         {"F4", "Hash grid",       debug.show_hash_grid},
         {"F5", "Photon dirs",      debug.show_photon_dirs},
         {"F6", "PDFs",             debug.show_pdfs},
         {"F7", "Radius sphere",    debug.show_radius_sphere},
         {"F8", "MIS weights",      debug.show_mis_weights},
         {"F9", "Spectral color",   debug.spectral_coloring},
+        {"F11","Photon heatmap",   debug.show_photon_heatmap},
     };
     for (auto& t : toggles) {
         snprintf(buf, sizeof(buf), "%s  %s [%s]", t.key, t.label, on_off(t.on));
@@ -307,6 +308,11 @@ static void render_help_overlay(int win_w, int win_h,
         float cg = t.on ? 1.0f : 0.5f;
         float cb = t.on ? 0.3f : 0.5f;
         draw_overlay_text(0, ly, buf, cr, cg, cb, 1.f);
+        ly += line_h * 0.7f;
+    }
+    if (debug.photon_filter != PhotonFilterMode::Off) {
+        snprintf(buf, sizeof(buf), "      Filter: %s", photon_filter_name(debug.photon_filter));
+        draw_overlay_text(0, ly, buf, 0.2f, 0.8f, 1.0f, 1.f);
         ly += line_h * 0.7f;
     }
 
@@ -406,7 +412,7 @@ static void render_hover_cell_overlay(
     bool mouse_captured)
 {
     if (mouse_captured) return;
-    if (!debug.show_global_map && !debug.show_caustic_map) return;
+    if (!debug.photon_overlay_active()) return;
     if (debug.hover_x < 0 || debug.hover_x >= win_w ||
         debug.hover_y < 0 || debug.hover_y >= win_h) return;
 
@@ -423,8 +429,7 @@ static void render_hover_cell_overlay(
     HitRecord hit = optix_renderer.trace_single_ray(camera.position, ray_dir);
     if (!hit.hit) return;
 
-    PhotonMapType map_type = debug.show_caustic_map
-        ? PhotonMapType::Caustic : PhotonMapType::Global;
+    PhotonMapType map_type = PhotonMapType::Global;
 
     CellInfo info = query_cell_info(hit.position, photons, grid, map_type);
 
@@ -731,6 +736,10 @@ static void key_callback(GLFWwindow* window, int key,
     // Any debug toggle should return to the interactive debug view.
     s_app.showing_final = false;
     handle_debug_key(key, s_app.debug);
+
+    // Sync GPU-side debug state that lives on the renderer
+    if (g_active_optix_renderer)
+        g_active_optix_renderer->set_photon_heatmap(s_app.debug.show_photon_heatmap);
 }
 
 static void mouse_button_callback(GLFWwindow* window, int button,
@@ -1503,24 +1512,31 @@ void run_interactive(
             }
         } else {
             if (!s_app.showing_final) {
-                // Normal debug preview (first-hit, 1 spp per iteration)
-                optix_renderer.render_debug_frame(
-                    camera, frame, s_app.debug.current_mode, 1);
-                optix_renderer.download_framebuffer(display_fb);
+                // Photon overlay mode: GL_POINTS only, no ray tracing
+                if (s_app.debug.photon_overlay_active()) {
+                    // Clear to black background
+                    memset(display_fb.srgb.data(), 0,
+                           display_fb.srgb.size() * sizeof(display_fb.srgb[0]));
+                    // Set alpha to 255
+                    for (int p = 0; p < display_fb.width * display_fb.height; ++p)
+                        display_fb.srgb[p * 4 + 3] = 255;
 
-                // Optional photon overlay in interactive debug mode.
-                // Note: caustic map separation is not implemented yet, so
-                // only photon points/global map use the current photon set.
-                if (s_app.debug.show_photon_points || s_app.debug.show_global_map) {
                     const PhotonSoA& photons = optix_renderer.photons();
                     if (photons.size() > 0) {
+                        uint8_t flag = photon_filter_flag(s_app.debug.photon_filter);
                         overlay_photon_points(
                             display_fb,
                             camera,
                             photons,
                             s_app.debug.spectral_coloring,
+                            flag,
                             2.0f);
                     }
+                } else {
+                    // Normal debug preview (first-hit, 1 spp per iteration)
+                    optix_renderer.render_debug_frame(
+                        camera, frame, s_app.debug.current_mode, 1);
+                    optix_renderer.download_framebuffer(display_fb);
                 }
 
                 frame++;

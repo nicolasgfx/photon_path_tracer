@@ -4,9 +4,10 @@
 // debug.h – Debug visualization overlay system (Section 10)
 // ─────────────────────────────────────────────────────────────────────
 // Key bindings:
-//   F1  – Toggle photon points
-//   F2  – Toggle global map
-//   F3  – Toggle caustic map
+//   F1  – Show ALL photons as GL_POINTS (no ray tracing)
+//   F2  – Cycle photon type filter (all → glass → caustic_glass →
+//          volume → dispersion → mirror_caustic → off)
+//   F3  – (reserved)
 //   F4  – Toggle hash grid
 //   F5  – Toggle photon directions
 //   F6  – Show PDFs
@@ -26,12 +27,48 @@
 #include <vector>
 #include <iostream>
 
+// ── Photon filter modes (F2 cycles through these) ──────────────────
+
+enum class PhotonFilterMode : int {
+    Off             = 0,  // No filter active
+    All             = 1,  // All photons (same as F1)
+    TraversedGlass  = 2,  // PHOTON_FLAG_TRAVERSED_GLASS
+    CausticGlass    = 3,  // PHOTON_FLAG_CAUSTIC_GLASS
+    Volume          = 4,  // PHOTON_FLAG_VOLUME_SEGMENT
+    Dispersion      = 5,  // PHOTON_FLAG_DISPERSION
+    CausticSpecular = 6,  // PHOTON_FLAG_CAUSTIC_SPECULAR
+    Count_          = 7
+};
+
+inline const char* photon_filter_name(PhotonFilterMode m) {
+    switch (m) {
+        case PhotonFilterMode::Off:             return "Off";
+        case PhotonFilterMode::All:             return "All";
+        case PhotonFilterMode::TraversedGlass:  return "Traversed glass";
+        case PhotonFilterMode::CausticGlass:    return "Caustic (glass)";
+        case PhotonFilterMode::Volume:          return "Volume segment";
+        case PhotonFilterMode::Dispersion:      return "Dispersion";
+        case PhotonFilterMode::CausticSpecular: return "Caustic (mirror)";
+        default:                                return "?";
+    }
+}
+
+inline uint8_t photon_filter_flag(PhotonFilterMode m) {
+    switch (m) {
+        case PhotonFilterMode::TraversedGlass:  return PHOTON_FLAG_TRAVERSED_GLASS;
+        case PhotonFilterMode::CausticGlass:    return PHOTON_FLAG_CAUSTIC_GLASS;
+        case PhotonFilterMode::Volume:          return PHOTON_FLAG_VOLUME_SEGMENT;
+        case PhotonFilterMode::Dispersion:      return PHOTON_FLAG_DISPERSION;
+        case PhotonFilterMode::CausticSpecular: return PHOTON_FLAG_CAUSTIC_SPECULAR;
+        default:                                return 0;  // All / Off → no bit filter
+    }
+}
+
 // ── Debug overlay state ─────────────────────────────────────────────
 
 struct DebugState {
-    bool show_photon_points   = false;  // F1
-    bool show_global_map      = false;  // F2
-    bool show_caustic_map     = false;  // F3
+    bool show_photon_points   = false;  // F1: show ALL photons
+    PhotonFilterMode photon_filter = PhotonFilterMode::Off;  // F2: cycle filter
     bool show_hash_grid       = false;  // F4
     bool show_photon_dirs     = false;  // F5
     bool show_pdfs            = false;  // F6
@@ -48,9 +85,19 @@ struct DebugState {
     int   hover_x = -1;
     int   hover_y = -1;
 
-    void toggle_photon_points()  { show_photon_points  = !show_photon_points; }
-    void toggle_global_map()     { show_global_map     = !show_global_map; }
-    void toggle_caustic_map()    { show_caustic_map    = !show_caustic_map; }
+    // Returns true if any photon overlay is active (F1 or F2 with filter)
+    bool photon_overlay_active() const {
+        return show_photon_points || photon_filter != PhotonFilterMode::Off;
+    }
+
+    void toggle_photon_points()  { show_photon_points  = !show_photon_points;
+                                   if (show_photon_points) photon_filter = PhotonFilterMode::Off; }
+    void cycle_photon_filter()   {
+        int m = (int)photon_filter + 1;
+        if (m >= (int)PhotonFilterMode::Count_) m = 0;
+        photon_filter = (PhotonFilterMode)m;
+        if (photon_filter != PhotonFilterMode::Off) show_photon_points = false;
+    }
     void toggle_hash_grid()      { show_hash_grid      = !show_hash_grid; }
     void toggle_photon_dirs()    { show_photon_dirs    = !show_photon_dirs; }
     void toggle_pdfs()           { show_pdfs           = !show_pdfs; }
@@ -128,14 +175,21 @@ inline CellInfo query_cell_info(
 // ── Photon visualization overlay ────────────────────────────────────
 
 // Draw photon points into the framebuffer (projected via camera)
+// filter_flag: if non-zero, only photons with that flag bit set are drawn.
 inline void overlay_photon_points(
     FrameBuffer& fb,
     const Camera& camera,
     const PhotonSoA& photons,
     bool spectral_color,
+    uint8_t filter_flag = 0,
     float point_brightness = 2.0f)
 {
     for (size_t i = 0; i < photons.size(); ++i) {
+        // Flag filter: skip photons that don't match
+        if (filter_flag != 0) {
+            if (photons.path_flags.size() <= i) continue;
+            if ((photons.path_flags[i] & filter_flag) == 0) continue;
+        }
         float3 pos = make_f3(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
 
         // Project to screen: compute the pixel coordinates
@@ -203,16 +257,14 @@ inline bool handle_debug_key(int key, DebugState& state) {
     switch (key) {
         case KEY_F1:
             state.toggle_photon_points();
-            std::cout << "[Debug] F1  Photon points: " << on_off(state.show_photon_points) << "\n";
+            std::cout << "[Debug] F1  All photons: " << on_off(state.show_photon_points) << "\n";
             return true;
         case KEY_F2:
-            state.toggle_global_map();
-            std::cout << "[Debug] F2  Global map: " << on_off(state.show_global_map) << "\n";
+            state.cycle_photon_filter();
+            std::cout << "[Debug] F2  Photon filter: " << photon_filter_name(state.photon_filter) << "\n";
             return true;
         case KEY_F3:
-            state.toggle_caustic_map();
-            std::cout << "[Debug] F3  Caustic map: " << on_off(state.show_caustic_map)
-                      << "  (unavailable: no separate caustic map yet)\n";
+            std::cout << "[Debug] F3  (reserved)\n";
             return true;
         case KEY_F4:
             state.toggle_hash_grid();
@@ -236,7 +288,7 @@ inline bool handle_debug_key(int key, DebugState& state) {
             return true;
         case KEY_F9:
             state.toggle_spectral();
-            std::cout << "[Debug] F9  Spectral coloring: " << on_off(state.spectral_coloring) << "  (planned)\n";
+            std::cout << "[Debug] F9  Spectral coloring: " << on_off(state.spectral_coloring) << "\n";
             return true;
         case KEY_F11:
             state.toggle_photon_heatmap();
