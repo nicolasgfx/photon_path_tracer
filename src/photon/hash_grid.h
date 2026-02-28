@@ -11,6 +11,7 @@
 //     shell layers (§6.5) — no recursion, no priority queues.
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
+#include "core/hash.h"
 #include "photon/photon.h"
 #include "photon/surface_filter.h"
 
@@ -34,11 +35,7 @@ struct HashGrid {
 
     // ── Spatial hash function ───────────────────────────────────────
     static HD uint32_t hash_cell(int3 cell, uint32_t table_size) {
-        // Large primes for spatial hashing (Teschner et al.)
-        uint32_t h = (uint32_t)(cell.x * 73856093u)
-                   ^ (uint32_t)(cell.y * 19349663u)
-                   ^ (uint32_t)(cell.z * 83492791u);
-        return h % table_size;
+        return teschner_hash(cell, table_size);
     }
 
     HD int3 cell_coord(float3 pos) const {
@@ -400,25 +397,4 @@ void gpu_build_caustic_tags(
     const uint8_t* d_is_caustic, uint8_t* d_tags_out,
     int global_count, int total_count);
 
-// Tonemap post-process kernel (Optimization #5)
-void launch_tonemap_kernel(
-    const float* d_spectrum_buffer,
-    const float* d_sample_counts,
-    uint8_t* d_srgb_buffer,
-    int width, int height,
-    float exposure);
-
-// Spectrum → linear HDR float4 conversion kernel (for denoiser input)
-// Converts the accumulated spectral buffer to linear HDR RGB (no tone mapping).
-void launch_spectrum_to_hdr_kernel(
-    const float* d_spectrum_buffer,
-    const float* d_sample_counts,
-    float*       d_hdr_buffer,      // [W*H*4] float4 output
-    int width, int height,
-    float exposure);
-
-// Tone map from linear HDR float4 → sRGB uint8 (after denoiser)
-void launch_tonemap_hdr_kernel(
-    const float* d_hdr_buffer,      // [W*H*4] float4 input
-    uint8_t*     d_srgb_buffer,     // [W*H*4] uint8 output
-    int width, int height);
+// Tonemap kernels have been moved to renderer/tonemap.h (§1.6).

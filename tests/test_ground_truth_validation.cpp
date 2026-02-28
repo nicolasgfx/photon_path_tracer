@@ -2404,6 +2404,7 @@ TEST(MultiHero, PhotonSoA_Clear) {
 }
 
 // -- MULTI_MAP_SPP_GROUP config sanity check -------------------------
+constexpr int MULTI_MAP_SPP_GROUP = 4;
 TEST(MultiHero, MultiMapConfigValid) {
     EXPECT_GT(MULTI_MAP_SPP_GROUP, 0)
         << "MULTI_MAP_SPP_GROUP must be positive";

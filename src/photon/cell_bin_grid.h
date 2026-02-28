@@ -48,7 +48,7 @@
 
 #include "core/types.h"
 #include "core/config.h"
-#include "core/photon_bins.h"
+#include "photon/photon_bins.h"
 #include "photon/photon.h"
 
 #include <vector>

@@ -21,7 +21,7 @@
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "core/random.h"
-#include "core/cell_cache.h"
+#include "photon/cell_cache.h"
 #include "scene/material.h"
 #include "bsdf/bsdf.h"
 #include "photon/photon.h"
@@ -270,8 +270,10 @@ TEST(CellInfoCache, AdaptiveRadius) {
     EXPECT_LE(r_dense, r_sparse);
 
     // Both should be within configured bounds
-    EXPECT_GE(r_dense,  base_r * ADAPTIVE_RADIUS_MIN_FACTOR - kTol);
-    EXPECT_LE(r_sparse, base_r * ADAPTIVE_RADIUS_MAX_FACTOR + kTol);
+    constexpr float RADIUS_MIN_FACTOR = 0.25f;
+    constexpr float RADIUS_MAX_FACTOR = 2.0f;
+    EXPECT_GE(r_dense,  base_r * RADIUS_MIN_FACTOR - kTol);
+    EXPECT_LE(r_sparse, base_r * RADIUS_MAX_FACTOR + kTol);
 }
 
 TEST(CellInfoCache, CausticHotspot) {
@@ -299,6 +301,7 @@ TEST(CellInfoCache, CausticHotspot) {
     // Hotspot keys should include this cell
     auto hotspots = cache.get_caustic_hotspot_keys();
     // With high variance, this should be detected as a hotspot
+    constexpr float CAUSTIC_CV_THRESHOLD = 0.50f;
     if (ci.caustic_cv > CAUSTIC_CV_THRESHOLD) {
         EXPECT_TRUE(ci.is_caustic_hotspot);
         EXPECT_FALSE(hotspots.empty());
@@ -746,23 +749,23 @@ TEST(GroundTruth, DensityEstimateConsistency) {
 
 TEST(IORStack, DefaultIsAir) {
     IORStack stack;
-    EXPECT_FLOAT_EQ(stack.current_ior(), 1.0f);
+    EXPECT_FLOAT_EQ(stack.top(), 1.0f);
 }
 
 TEST(IORStack, PushPop) {
     IORStack stack;
 
     stack.push(1.5f);
-    EXPECT_FLOAT_EQ(stack.current_ior(), 1.5f);
+    EXPECT_FLOAT_EQ(stack.top(), 1.5f);
 
     stack.push(1.33f);
-    EXPECT_FLOAT_EQ(stack.current_ior(), 1.33f);
+    EXPECT_FLOAT_EQ(stack.top(), 1.33f);
 
     stack.pop();
-    EXPECT_FLOAT_EQ(stack.current_ior(), 1.5f);
+    EXPECT_FLOAT_EQ(stack.top(), 1.5f);
 
     stack.pop();
-    EXPECT_FLOAT_EQ(stack.current_ior(), 1.0f);
+    EXPECT_FLOAT_EQ(stack.top(), 1.0f);
 }
 
 TEST(IORStack, Overflow) {
@@ -772,13 +775,13 @@ TEST(IORStack, Overflow) {
         stack.push(1.0f + 0.1f * i);
     }
     // Should not crash, should cap at MAX_DEPTH
-    EXPECT_GT(stack.current_ior(), 1.0f);
+    EXPECT_GT(stack.top(), 1.0f);
 }
 
 TEST(IORStack, Underflow) {
     IORStack stack;
     stack.pop();  // Pop from empty
-    EXPECT_FLOAT_EQ(stack.current_ior(), 1.0f); // Should remain at air
+    EXPECT_FLOAT_EQ(stack.top(), 1.0f); // Should remain at air
 }
 
 // =====================================================================

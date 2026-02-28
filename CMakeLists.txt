@@ -74,17 +74,19 @@ endif()
 # -- Source files ------------------------------------------------------
 set(CORE_SOURCES
     src/main.cpp
+    src/app/viewer.cpp
     src/scene/obj_loader.cpp
     src/renderer/renderer.cpp
     src/optix/optix_renderer.cpp
+    src/optix/optix_setup.cpp
+    src/optix/optix_upload.cpp
+    src/optix/optix_denoiser.cpp
 )
 
 set(CUDA_SOURCES
     src/photon/hash_grid.cu
-    src/photon/emitter.cu
-    # src/renderer/path_tracer.cu  -- removed (v1 stub, superseded by OptiX)
-    src/renderer/direct_light.cu
     src/optix/adaptive_sampling.cu
+    src/renderer/tonemap.cu
 )
 
 # -- Shared CUDA static library (shared by photon_tracer and ppt_tests) --------
@@ -119,6 +121,7 @@ endif()
 
 target_include_directories(photon_tracer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${stb_SOURCE_DIR}
     ${OptiX_INCLUDE_DIR}
 )
@@ -188,11 +191,11 @@ add_custom_command(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/optix_device.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/launch_params.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/config.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/medium.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/phase_function.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/volume/medium.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/random.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectrum.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/types.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/renderer/nee_shared.h"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Compiling OptiX device programs (optix_device.cu -> PTX)"
     VERBATIM
@@ -257,6 +260,9 @@ if(PPT_BUILD_TESTS)
         src/scene/obj_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp
+        src/optix/optix_setup.cpp
+        src/optix/optix_upload.cpp
+        src/optix/optix_denoiser.cpp
     )
 
     add_executable(ppt_tests
@@ -268,6 +274,7 @@ if(PPT_BUILD_TESTS)
     )
     target_include_directories(ppt_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${stb_SOURCE_DIR}
         ${OptiX_INCLUDE_DIR}
     )

@@ -2,7 +2,7 @@
 // test_light_cache.cpp – Unit tests for per-cell light importance cache
 // ─────────────────────────────────────────────────────────────────────
 #include <gtest/gtest.h>
-#include "core/light_cache.h"
+#include "renderer/light_cache.h"
 #include "photon/photon.h"
 #include "core/config.h"
 

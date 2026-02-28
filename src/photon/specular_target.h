@@ -9,7 +9,7 @@
 #include "core/spectrum.h"
 #include "core/random.h"
 #include "core/config.h"
-#include "core/nee_sampling.h"
+#include "renderer/nee_shared.h"
 #include <vector>
 #include <cstdint>
 #include <cmath>
@@ -110,71 +110,15 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
     float3 spec_normal = spec_tri.geometric_normal();
 
     // 3. Pick an emitter and create a photon aimed at the specular point
-    //    Use the emitter point set if available, otherwise pick from CDF
-    if (!scene.emitter_points.points.empty()) {
-        int ept_idx = (int)(rng.next_float() * (float)scene.emitter_points.points.size());
-        if (ept_idx >= (int)scene.emitter_points.points.size())
-            ept_idx = (int)scene.emitter_points.points.size() - 1;
-        const auto& ept = scene.emitter_points.points[ept_idx];
+    {
+        // Power-weighted emitter selection via alias table (matches GPU).
+        int emissive_idx = scene.emissive_alias_table.sample(
+            rng.next_float(), rng.next_float());
+        if (emissive_idx < 0 || emissive_idx >= (int)scene.emissive_tri_indices.size())
+            emissive_idx = 0;
+        float pdf_emitter = scene.emissive_alias_table.pdf(emissive_idx);
+        if (pdf_emitter <= 0.f) return tcp;
 
-        float3 origin = ept.position;
-        float3 dir    = normalize(target_pt - origin);
-
-        // Check that direction faces outward from emitter
-        if (dot(dir, ept.normal) <= 0.f) return tcp;
-
-        // Backface culling: reject if photon hits target from behind
-        if (dot(dir, spec_normal) >= 0.f) return tcp;
-
-        // Visibility: trace toward the target.  If the first hit is a
-        // specular/translucent surface (wave-peak or front of a glass
-        // sphere), accept — the bounce loop enters there.  Only reject
-        // for truly opaque blockers.
-        {
-            float dist = length(target_pt - origin);
-            Ray vis_ray;
-            vis_ray.origin    = origin + ept.normal * EPSILON;
-            vis_ray.direction = dir;
-            vis_ray.tmin      = EPSILON;
-            vis_ray.tmax      = dist - EPSILON;
-            HitRecord vis_hit = scene.intersect(vis_ray);
-            if (vis_hit.hit) {
-                uint32_t bmat = vis_hit.material_id;
-                if (bmat < scene.materials.size()) {
-                    const Material& blocker = scene.materials[bmat];
-                    if (!blocker.is_specular()) return tcp;  // opaque blocker
-                }
-            }
-        }
-
-        // Compute spectral flux
-        uint32_t emitter_tri_idx = ept.global_tri_idx;
-        const Triangle& emitter_tri = scene.triangles[emitter_tri_idx];
-        const Material& emitter_mat = scene.materials[emitter_tri.material_id];
-
-        float cos_theta = dot(dir, ept.normal);
-        float emitter_area = emitter_tri.area();
-
-        // flux = Le × area × cos(θ) / pdf_targeted
-        //      approximate: scale Le by geometric factors
-        float geom = cos_theta * emitter_area;
-        for (int b = 0; b < NUM_LAMBDA; ++b)
-            tcp.spectral_flux.value[b] = emitter_mat.Le.value[b] * geom;
-
-        tcp.ray.origin    = origin + ept.normal * EPSILON;
-        tcp.ray.direction = dir;
-        tcp.ray.tmin      = EPSILON;
-        tcp.ray.tmax      = 1e20f;
-        tcp.source_emissive_idx = ept.emissive_local_idx;
-        tcp.valid = true;
-    } else {
-        // Fallback: pick an emissive triangle from the CDF
-        int emissive_idx = 0;
-        for (int i = 0; i < (int)scene.emissive_tri_indices.size(); ++i) {
-            // Simple linear search (could use binary search on CDF)
-            emissive_idx = i;
-            break;
-        }
         uint32_t eidx = scene.emissive_tri_indices[emissive_idx];
         const Triangle& etri = scene.triangles[eidx];
         const Material& emat = scene.materials[etri.material_id];
@@ -196,7 +140,7 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
         // Backface culling: reject if photon hits target from behind
         if (dot(dir, spec_normal) >= 0.f) return tcp;
 
-        // Visibility: same transparent-passthrough logic as above.
+        // Visibility: transparent-passthrough logic.
         {
             float dist = length(target_pt - origin);
             Ray vis_ray;
@@ -216,9 +160,24 @@ inline TargetedCausticPhoton sample_targeted_caustic_photon(
 
         float cos_theta = dot(dir, enrm);
         float emitter_area = etri.area();
-        float geom = cos_theta * emitter_area;
+
+        // Area-to-solid-angle PDF for the target direction (§3.4):
+        //   p_ω = p_spec · (1/A_spec) · d² / cos_target
+        float spec_pdf  = target_set.area_alias_table.pdf(spec_local);
+        float spec_area = target_set.tri_areas[spec_local];
+        float dist      = length(target_pt - origin);
+        float dist_sq   = dist * dist;
+        float cos_target = -dot(dir, spec_normal);  // photon approaches from front
+        float pdf_target_sa = nee_pdf_area_to_solid_angle(
+            spec_pdf, 1.f / fmaxf(spec_area, 1e-20f), dist_sq, cos_target);
+        if (pdf_target_sa <= 0.f) return tcp;
+
+        // Φ(λ) = Le(λ) · cos_light · A_light / (p_emitter · p_ω)
+        float denom = pdf_emitter * pdf_target_sa;
         for (int b = 0; b < NUM_LAMBDA; ++b)
-            tcp.spectral_flux.value[b] = emat.Le.value[b] * geom;
+            tcp.spectral_flux.value[b] = fminf(
+                emat.Le.value[b] * cos_theta * emitter_area / denom,
+                1e6f);  // firefly clamp (matches GPU TC-11)
 
         tcp.ray.origin    = origin + enrm * EPSILON;
         tcp.ray.direction = dir;

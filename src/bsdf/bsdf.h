@@ -25,89 +25,8 @@ struct BSDFSample {
     bool     is_specular; // true for delta distributions (mirror/glass)
 };
 
-// ── Fresnel ─────────────────────────────────────────────────────────
-
-// Schlick approximation
-inline HD float fresnel_schlick(float cos_theta, float f0) {
-    float t = 1.f - cos_theta;
-    float t2 = t * t;
-    return f0 + (1.f - f0) * t2 * t2 * t;
-}
-
-// Exact dielectric Fresnel
-inline HD float fresnel_dielectric(float cos_i, float eta) {
-    float sin2_t = eta * eta * (1.f - cos_i * cos_i);
-    if (sin2_t >= 1.f) return 1.f; // Total internal reflection
-
-    float cos_t = sqrtf(fmaxf(0.f, 1.f - sin2_t));
-    cos_i = fabsf(cos_i);
-
-    float rs = (eta * cos_i - cos_t) / (eta * cos_i + cos_t);
-    float rp = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
-    return 0.5f * (rs * rs + rp * rp);
-}
-
-// ── GGX microfacet distribution ─────────────────────────────────────
-
-inline HD float ggx_D(float3 h, float alpha) {
-    float NdotH = h.z; // In local frame, N = (0,0,1)
-    if (NdotH <= 0.f) return 0.f;
-    float a2 = alpha * alpha;
-    float d  = NdotH * NdotH * (a2 - 1.f) + 1.f;
-    return a2 / (PI * d * d);
-}
-
-inline HD float ggx_G1(float3 v, float alpha) {
-    float NdotV = fabsf(v.z);
-    float a2 = alpha * alpha;
-    return 2.f * NdotV / (NdotV + sqrtf(a2 + (1.f - a2) * NdotV * NdotV));
-}
-
-inline HD float ggx_G(float3 wo, float3 wi, float alpha) {
-    return ggx_G1(wo, alpha) * ggx_G1(wi, alpha);
-}
-
-// Sample GGX visible normal (VNDF)
-inline HD float3 ggx_sample_halfvector(float3 wo, float alpha, float u1, float u2) {
-    // Stretch
-    float3 wh = normalize(make_f3(alpha * wo.x, alpha * wo.y, wo.z));
-
-    // Orthonormal basis
-    float3 t1 = (wh.z < 0.9999f) ? normalize(cross(make_f3(0,0,1), wh))
-                                   : make_f3(1,0,0);
-    float3 t2 = cross(wh, t1);
-
-    // Uniform disk sample
-    float r   = sqrtf(u1);
-    float phi = TWO_PI * u2;
-    float p1  = r * cosf(phi);
-    float p2  = r * sinf(phi);
-    float s   = 0.5f * (1.f + wh.z);
-    p2 = (1.f - s) * sqrtf(fmaxf(0.f, 1.f - p1*p1)) + s * p2;
-
-    // Project onto hemisphere
-    float3 nh = t1 * p1 + t2 * p2 + wh * sqrtf(fmaxf(0.f, 1.f - p1*p1 - p2*p2));
-
-    // Unstretch
-    return normalize(make_f3(alpha * nh.x, alpha * nh.y, fmaxf(0.f, nh.z)));
-}
-
-// ── Reflect / Refract ───────────────────────────────────────────────
-
-inline HD float3 reflect_local(float3 wo) {
-    return make_f3(-wo.x, -wo.y, wo.z);
-}
-
-inline HD bool refract_local(float3 wo, float eta, float3& wt) {
-    float cos_i = wo.z;
-    float sin2_i = fmaxf(0.f, 1.f - cos_i * cos_i);
-    float sin2_t = eta * eta * sin2_i;
-    if (sin2_t >= 1.f) return false;
-
-    float cos_t = sqrtf(1.f - sin2_t);
-    wt = make_f3(-eta * wo.x, -eta * wo.y, -cos_t);
-    return true;
-}
+// Fresnel, GGX, VNDF sampling, reflect/refract, MIS weight now live
+// in bsdf_shared.h as inline HD functions shared with the GPU.
 
 // ── BSDF evaluation functions ───────────────────────────────────────
 
@@ -148,7 +67,8 @@ inline HD BSDFSample mirror_sample(const Spectrum& Ks, float3 wo) {
 // ── Dielectric glass (with spectral Tf and chromatic dispersion) ────
 
 inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng,
-                                  int hero_bin = -1) {
+                                  int hero_bin = -1,
+                                  TransportMode mode = TransportMode::Radiance) {
     BSDFSample s;
 
     bool entering = wo.z > 0.f;
@@ -223,6 +143,22 @@ inline HD BSDFSample glass_sample(float3 wo, const Material& mat, PCGRng& rng,
             } else {
                 float base_factor = (1.f - F) / (fabsf(s.wi.z) + EPSILON);
                 s.f = mat.Tf * base_factor;
+            }
+            // §2.2 Adjoint η² correction for importance (photon) transport.
+            // Compensates for the solid-angle change at the refractive
+            // interface.  Factor = (η_i/η_t)² = eta² (PBRT v4 §5.6.2).
+            if (mode == TransportMode::Importance) {
+                if (mat.dispersion) {
+                    for (int b = 0; b < NUM_LAMBDA; ++b) {
+                        float n_b  = mat.ior_at_lambda(lambda_of_bin(b));
+                        float eta_b = entering ? (1.f / n_b) : n_b;
+                        s.f.value[b] *= eta_b * eta_b;
+                    }
+                } else {
+                    float eta_sq = eta * eta;
+                    for (int b = 0; b < NUM_LAMBDA; ++b)
+                        s.f.value[b] *= eta_sq;
+                }
             }
             s.is_specular = true;
         } else {
@@ -718,7 +654,8 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
 //   hero_bin >= 0 → use that bin   (photon tracer with spectral hero)
 
 inline HD BSDFSample sample(const Material& mat, float3 wo, PCGRng& rng,
-                            int hero_bin = -1) {
+                            int hero_bin = -1,
+                            TransportMode mode = TransportMode::Radiance) {
     switch (mat.type) {
         case MaterialType::Lambertian:
         case MaterialType::Emissive:
@@ -729,7 +666,7 @@ inline HD BSDFSample sample(const Material& mat, float3 wo, PCGRng& rng,
 
         case MaterialType::Glass:
         case MaterialType::Translucent:
-            return glass_sample(wo, mat, rng, hero_bin);
+            return glass_sample(wo, mat, rng, hero_bin, mode);
 
         case MaterialType::GlossyMetal:
             return glossy_sample(mat.Kd, mat.Ks, mat.roughness, wo, rng);

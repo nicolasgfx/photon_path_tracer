@@ -15,6 +15,7 @@
 //         = 65 536 × 56 ≈ 3.6 MB (independent of photon count)
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
+#include "core/hash.h"
 #include "core/config.h"
 #include "core/spectrum.h"
 #include "photon/photon.h"
@@ -71,10 +72,7 @@ struct CellInfoCache {
 
     // ── Spatial hash (same algorithm as HashGrid / LightCache) ──────
     static HD uint32_t cell_hash(int3 cell) {
-        uint32_t h = (uint32_t)(cell.x * 73856093u)
-                   ^ (uint32_t)(cell.y * 19349663u)
-                   ^ (uint32_t)(cell.z * 83492791u);
-        return h % CELL_CACHE_TABLE_SIZE;
+        return teschner_hash(cell, CELL_CACHE_TABLE_SIZE);
     }
 
     HD int3 cell_coord(float3 pos) const {
@@ -193,6 +191,9 @@ struct CellInfoCache {
                     if (flags & PHOTON_FLAG_TRAVERSED_GLASS)
                         ws.glass_count++;
                 if (flags & (PHOTON_FLAG_CAUSTIC_GLASS | PHOTON_FLAG_CAUSTIC_SPECULAR)) {
+                        ws.caustic_photon_count++;
+                        ws.caustic_flux_sum += scalar_flux;
+                        ws.c_n++;
                         double cd = (double)scalar_flux - ws.c_mean;
                         ws.c_mean += cd / (double)ws.c_n;
                         double cd2 = (double)scalar_flux - ws.c_mean;
@@ -260,6 +261,8 @@ struct CellInfoCache {
             ci.caustic_flux  = ws.caustic_flux_sum;
 
             // Caustic CV (coefficient of variation)
+            constexpr int   CAUSTIC_MIN_FOR_ANALYSIS = 10;
+            constexpr float CAUSTIC_CV_THRESHOLD     = 0.50f;
             if (ws.c_n >= CAUSTIC_MIN_FOR_ANALYSIS && ws.c_mean > 1e-12) {
                 double c_var = (ws.c_n >= 2)
                     ? ws.c_M2 / (double)(ws.c_n - 1)
@@ -271,17 +274,20 @@ struct CellInfoCache {
 
             // ── Adaptive gather radius ──────────────────────────────
             // Scale radius so that the expected number of photons in
-            // the gather disk ≈ ADAPTIVE_RADIUS_TARGET_K.
+            // the gather disk ≈ TARGET_K.
             //
             // Expected photons in disk = density × π × r²
             // → r_opt = sqrt(K / (π × density))
             //
             // Clamped to [MIN_FACTOR × base, MAX_FACTOR × base].
+            constexpr float RADIUS_MIN_FACTOR = 0.25f;
+            constexpr float RADIUS_MAX_FACTOR = 2.0f;
+            constexpr float RADIUS_TARGET_K   = 100.f;
             if (ci.density > 0.f) {
-                float r_opt = sqrtf(ADAPTIVE_RADIUS_TARGET_K /
+                float r_opt = sqrtf(RADIUS_TARGET_K /
                                     (PI * ci.density));
-                float r_min = base_radius * ADAPTIVE_RADIUS_MIN_FACTOR;
-                float r_max = base_radius * ADAPTIVE_RADIUS_MAX_FACTOR;
+                float r_min = base_radius * RADIUS_MIN_FACTOR;
+                float r_max = base_radius * RADIUS_MAX_FACTOR;
                 ci.adaptive_radius = fminf(fmaxf(r_opt, r_min), r_max);
             } else {
                 ci.adaptive_radius = base_radius;

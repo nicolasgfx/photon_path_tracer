@@ -12,7 +12,7 @@
 #include "core/types.h"
 #include "core/spectrum.h"
 #include "core/config.h"
-#include "core/cell_cache.h"
+#include "photon/cell_cache.h"
 #include "renderer/camera.h"
 #include "renderer/pixel_lighting.h"
 #include "scene/scene.h"
@@ -20,24 +20,13 @@
 #include "photon/hash_grid.h"
 #include "photon/kd_tree.h"
 #include "photon/density_estimator.h"
-#include "core/sppm.h"
+#include "renderer/sppm.h"
 
 #include <vector>
 #include <string>
 
 // ── Render configuration ────────────────────────────────────────────
-
-enum class RenderMode {
-    Combined,            // Direct (NEE) + Indirect (photon map)  [default]
-    Full = Combined,     // Legacy alias for Combined
-    DirectOnly,          // NEE direct lighting only (no photon gather)
-    IndirectOnly,        // Photon map indirect only (no NEE)
-    PhotonMap,           // Visualize photon density (heatmap)
-    Normals,             // Debug: surface normals
-    MaterialID,          // Debug: material colors
-    Depth,               // Debug: depth buffer
-    Coverage             // Debug: shadow-ray coverage per cell
-};
+// RenderMode enum class is now defined in core/types.h.
 
 struct RenderConfig {
     int    image_width       = DEFAULT_IMAGE_WIDTH;

@@ -21,9 +21,8 @@
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "core/random.h"
-#include "core/medium.h"
-#include "core/phase_function.h"
-#include "core/test_data_io.h"
+#include "volume/medium.h"
+#include "tests/test_data_io.h"
 #include "scene/scene.h"
 #include "scene/obj_loader.h"
 #include "renderer/renderer.h"
@@ -34,7 +33,6 @@
 #include "photon/emitter.h"
 #include "bsdf/bsdf.h"
 #include "photon/density_estimator.h"
-#include "renderer/mis.h"
 
 #include <vector>
 #include <cmath>
@@ -754,7 +752,7 @@ TEST(VolumePhoton, DisabledProducesNoPhotons) {
 //  VOLUME CELL-BIN GRID TESTS
 // =====================================================================
 
-#include "core/cell_bin_grid.h"
+#include "photon/cell_bin_grid.h"
 
 TEST(VolumeCellGrid, BuildsFromVolumePhotons) {
     auto& ds = get_medium_dataset();

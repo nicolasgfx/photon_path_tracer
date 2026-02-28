@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------
-// optix_renderer.cpp -- OptiX host-side pipeline implementation
+// optix_renderer.cpp -- OptiX host-side rendering & photon tracing
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
 #include "core/config.h"
@@ -7,38 +7,28 @@
 #include "photon/specular_target.h"   // SpecularTargetSet (for GPU upload)
 #include "photon/tri_photon_irradiance.h"  // per-triangle irradiance heatmap
 #include "photon/emitter.h"                // CPU photon tracing
-#include "photon/hash_grid.h"              // gpu_build_hash_grid, launch_tonemap_kernel
+#include "photon/hash_grid.h"              // gpu_build_hash_grid
+#include "renderer/tonemap.h"              // launch_tonemap_kernel etc.
 
 #include <cuda_runtime.h>
-#include <fstream>
-#include <sstream>
 #include <vector>
 #include <cstring>
 #include <numeric>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <iostream>
 #include <iomanip>
 #include <functional>
 #include <unordered_set>
 
 #include <optix.h>
 #include <optix_stubs.h>
-#include <optix_function_table_definition.h>
 
 // ---------------------------------------------------------------------
 // Module-local implementation constants
-// (kept out of core/config.h to avoid clutter)
 // ---------------------------------------------------------------------
 namespace {
-    // Must match the payload layout documented in optix_device.cu.
-    constexpr int OPTIX_NUM_PAYLOAD_VALUES   = 15;
-    constexpr int OPTIX_NUM_ATTRIBUTE_VALUES = 2;     // barycentrics
-    constexpr int OPTIX_MAX_TRACE_DEPTH      = 2;     // radiance + shadow
-
-    // Conservative stack size: increased for per-ray local arrays.
-    constexpr int OPTIX_STACK_SIZE           = 16384;
-
     // Ray epsilon to avoid self-intersections.
     constexpr float OPTIX_SCENE_EPSILON      = 1e-4f;
 
@@ -47,431 +37,6 @@ namespace {
 
     // HashGrid::build() uses cell_size = radius * 2.0f.
     constexpr float HASHGRID_CELL_FACTOR     = 2.0f;
-}
-
-// -- Helper: read PTX from file ---------------------------------------
-static std::string read_ptx_file(const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot open PTX file: " + filename);
-    }
-    std::stringstream ss;
-    ss << file.rdbuf();
-    return ss.str();
-}
-
-// -- OptiX log callback -----------------------------------------------
-static void optix_log_callback(unsigned int level, const char* tag,
-                                const char* message, void* /*cbdata*/) {
-    std::cerr << "[OptiX][" << level << "][" << tag << "] " << message << "\n";
-}
-
-// -- SBT record helpers -----------------------------------------------
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4324) // structure was padded due to alignment
-#endif
-template <typename T>
-struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) SbtRecord {
-    char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-    T    data;
-};
-
-using RayGenRecord   = SbtRecord<RayGenSbtRecord>;
-using MissRecord     = SbtRecord<MissSbtRecord>;
-using HitGroupRecord = SbtRecord<HitGroupSbtRecord>;
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-
-// =====================================================================
-// init()
-// =====================================================================
-void OptixRenderer::init() {
-    if (initialised_) return;
-
-    // Initialise CUDA
-    CUDA_CHECK(cudaFree(nullptr)); // forces context creation
-
-    // Initialise OptiX
-    OPTIX_CHECK(optixInit());
-
-    create_context();
-    // Module, programs, pipeline are created after build_accel
-
-    resize(width_, height_);
-    initialised_ = true;
-    std::cout << "[OptiX] Renderer initialised\n";
-}
-
-// =====================================================================
-// build_accel() -- Build GAS from triangle soup
-// =====================================================================
-void OptixRenderer::build_accel(const Scene& scene) {
-    if (!context_) throw std::runtime_error("OptiX context not created");
-
-    // Keep a host-side copy for debug hover ray queries.
-    host_triangles_ = scene.triangles;
-    num_tris_ = (int)scene.triangles.size();
-
-    // Flatten triangle vertices into a contiguous float3 array
-    size_t num_tris = scene.triangles.size();
-    std::vector<float3> vertices(num_tris * 3);
-    for (size_t i = 0; i < num_tris; ++i) {
-        vertices[i * 3 + 0] = scene.triangles[i].v0;
-        vertices[i * 3 + 1] = scene.triangles[i].v1;
-        vertices[i * 3 + 2] = scene.triangles[i].v2;
-    }
-
-    // Upload vertices
-    d_vertices_.upload(vertices);
-
-    // Build input
-    OptixBuildInput build_input = {};
-    build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-
-    auto& tri_input = build_input.triangleArray;
-    CUdeviceptr vertex_ptr = reinterpret_cast<CUdeviceptr>(d_vertices_.d_ptr);
-    tri_input.vertexBuffers       = &vertex_ptr;
-    tri_input.numVertices         = (unsigned int)(num_tris * 3);
-    tri_input.vertexFormat         = OPTIX_VERTEX_FORMAT_FLOAT3;
-    tri_input.vertexStrideInBytes  = sizeof(float3);
-
-    // All triangles share one SBT record (single material group)
-    unsigned int flags = OPTIX_GEOMETRY_FLAG_NONE;
-    tri_input.flags                = &flags;
-    tri_input.numSbtRecords        = 1;
-
-    // Compute memory requirements
-    OptixAccelBuildOptions accel_options = {};
-    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION |
-                               OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-    accel_options.operation  = OPTIX_BUILD_OPERATION_BUILD;
-
-    OptixAccelBufferSizes buf_sizes;
-    OPTIX_CHECK(optixAccelComputeMemoryUsage(
-        context_, &accel_options, &build_input, 1, &buf_sizes));
-
-    // Allocate temp + output
-    DeviceBuffer temp_buffer;
-    temp_buffer.alloc(buf_sizes.tempSizeInBytes);
-
-    DeviceBuffer output_buffer;
-    output_buffer.alloc(buf_sizes.outputSizeInBytes);
-
-    // Build (with compaction property)
-    DeviceBuffer compacted_size_buf;
-    compacted_size_buf.alloc(sizeof(size_t));
-
-    OptixAccelEmitDesc emit_desc;
-    emit_desc.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    emit_desc.result = reinterpret_cast<CUdeviceptr>(compacted_size_buf.d_ptr);
-
-    auto t_gas0 = std::chrono::high_resolution_clock::now();
-    OPTIX_CHECK(optixAccelBuild(
-        context_, nullptr,
-        &accel_options,
-        &build_input, 1,
-        reinterpret_cast<CUdeviceptr>(temp_buffer.d_ptr), temp_buffer.bytes,
-        reinterpret_cast<CUdeviceptr>(output_buffer.d_ptr), output_buffer.bytes,
-        &gas_handle_,
-        &emit_desc, 1));
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-    auto t_gas1 = std::chrono::high_resolution_clock::now();
-
-    size_t compacted_size;
-    CUDA_CHECK(cudaMemcpy(&compacted_size, compacted_size_buf.d_ptr,
-                           sizeof(size_t), cudaMemcpyDeviceToHost));
-
-    gas_buffer_.alloc(compacted_size);
-    OPTIX_CHECK(optixAccelCompact(
-        context_, nullptr,
-        gas_handle_,
-        reinterpret_cast<CUdeviceptr>(gas_buffer_.d_ptr), compacted_size,
-        &gas_handle_));
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-    auto t_gas2 = std::chrono::high_resolution_clock::now();
-
-    double ms_build   = std::chrono::duration<double, std::milli>(t_gas1 - t_gas0).count();
-    double ms_compact = std::chrono::duration<double, std::milli>(t_gas2 - t_gas1).count();
-    std::printf("[OptiX] GAS built: %zu tris  uncompressed=%.1f KB  compacted=%.1f KB  "
-                "build=%.1f ms  compact=%.1f ms\n",
-                num_tris,
-                (double)output_buffer.bytes / 1024.0,
-                (double)compacted_size / 1024.0,
-                ms_build, ms_compact);
-
-    // Now create module, programs, pipeline, SBT
-    // Module/programs/pipeline are shader-dependent, not scene-dependent.
-    // Only create them on the first call so build_accel is safe to re-invoke
-    // when hot-swapping scenes at runtime (keys 1-5).
-    if (!module_) {
-        create_module();
-        create_programs();
-        create_pipeline();
-    }
-    build_sbt(scene);
-}
-
-// =====================================================================
-// upload_scene_data() -- Materials, normals, texcoords to device
-// =====================================================================
-void OptixRenderer::upload_scene_data(const Scene& scene) {
-    size_t num_tris = scene.triangles.size();
-
-    // Normals (per-vertex, 3 per triangle)
-    std::vector<float3> normals(num_tris * 3);
-    std::vector<float2> texcoords(num_tris * 3);
-    std::vector<uint32_t> mat_ids(num_tris);
-
-    for (size_t i = 0; i < num_tris; ++i) {
-        normals[i * 3 + 0] = scene.triangles[i].n0;
-        normals[i * 3 + 1] = scene.triangles[i].n1;
-        normals[i * 3 + 2] = scene.triangles[i].n2;
-        texcoords[i * 3 + 0] = scene.triangles[i].uv0;
-        texcoords[i * 3 + 1] = scene.triangles[i].uv1;
-        texcoords[i * 3 + 2] = scene.triangles[i].uv2;
-        mat_ids[i] = scene.triangles[i].material_id;
-    }
-
-    d_normals_.upload(normals);
-    d_texcoords_.upload(texcoords);
-    d_material_ids_.upload(mat_ids);
-
-    // Materials
-    size_t num_mats = scene.materials.size();
-    std::vector<float> Kd(num_mats * NUM_LAMBDA);
-    std::vector<float> Ks(num_mats * NUM_LAMBDA);
-    std::vector<float> Le(num_mats * NUM_LAMBDA);
-    std::vector<float> roughness(num_mats);
-    std::vector<float> ior(num_mats);
-    std::vector<uint8_t> mat_type(num_mats);
-
-    for (size_t m = 0; m < num_mats; ++m) {
-        const Material& mat = scene.materials[m];
-        for (int l = 0; l < NUM_LAMBDA; ++l) {
-            // For glass materials, the GPU uses the Kd slot as the
-            // transmittance filter (Tf).  Copy Tf into Kd so that
-            // dev_get_Kd() on the device returns the correct filter.
-            if (mat.type == MaterialType::Glass ||
-                mat.type == MaterialType::Translucent)
-                Kd[m * NUM_LAMBDA + l] = mat.Tf.value[l];
-            else
-                Kd[m * NUM_LAMBDA + l] = mat.Kd.value[l];
-            Ks[m * NUM_LAMBDA + l] = mat.Ks.value[l];
-            Le[m * NUM_LAMBDA + l] = mat.Le.value[l];
-        }
-        roughness[m] = mat.roughness;
-        ior[m]       = mat.ior;
-        mat_type[m]  = (uint8_t)mat.type;
-    }
-
-    d_Kd_.upload(Kd);
-    d_Ks_.upload(Ks);
-    d_Le_.upload(Le);
-    d_roughness_.upload(roughness);
-    d_ior_.upload(ior);
-    d_mat_type_.upload(mat_type);
-
-    // Per-material chromatic dispersion (Cauchy equation)
-    std::vector<float>   cauchy_A(num_mats);
-    std::vector<float>   cauchy_B(num_mats);
-    std::vector<uint8_t> mat_dispersion(num_mats);
-    for (size_t m = 0; m < num_mats; ++m) {
-        const Material& mat = scene.materials[m];
-        cauchy_A[m]       = mat.cauchy_A;
-        cauchy_B[m]       = mat.cauchy_B;
-        mat_dispersion[m] = mat.dispersion ? (uint8_t)1 : (uint8_t)0;
-    }
-    d_cauchy_A_.upload(cauchy_A);
-    d_cauchy_B_.upload(cauchy_B);
-    d_mat_dispersion_.upload(mat_dispersion);
-
-    // Per-material diffuse texture ID (-1 = none)
-    std::vector<int> diffuse_tex(num_mats);
-    for (size_t m = 0; m < num_mats; ++m)
-        diffuse_tex[m] = scene.materials[m].diffuse_tex;
-    d_diffuse_tex_.upload(diffuse_tex);
-
-    // Per-material emission texture ID (-1 = none)
-    std::vector<int> emission_tex(num_mats);
-    for (size_t m = 0; m < num_mats; ++m)
-        emission_tex[m] = scene.materials[m].emission_tex;
-    d_emission_tex_.upload(emission_tex);
-
-    // Per-material opacity (from MTL 'd' keyword, default 1.0)
-    std::vector<float> opacity(num_mats);
-    for (size_t m = 0; m < num_mats; ++m)
-        opacity[m] = scene.materials[m].opacity;
-    d_opacity_.upload(opacity);
-
-    // Per-material clearcoat / fabric data
-    std::vector<float> clearcoat_weight(num_mats);
-    std::vector<float> clearcoat_roughness(num_mats);
-    std::vector<float> sheen(num_mats);
-    std::vector<float> sheen_tint(num_mats);
-    for (size_t m = 0; m < num_mats; ++m) {
-        clearcoat_weight[m]    = scene.materials[m].pb_clearcoat;
-        clearcoat_roughness[m] = (scene.materials[m].pb_clearcoat_roughness >= 0.f)
-                                   ? scene.materials[m].pb_clearcoat_roughness
-                                   : 0.03f;  // default coat roughness
-        sheen[m]               = scene.materials[m].pb_sheen;
-        sheen_tint[m]          = scene.materials[m].pb_sheen_tint;
-    }
-    d_clearcoat_weight_.upload(clearcoat_weight);
-    d_clearcoat_roughness_.upload(clearcoat_roughness);
-    d_sheen_.upload(sheen);
-    d_sheen_tint_.upload(sheen_tint);
-
-    // Texture atlas: concatenate all textures into one flat RGBA float buffer
-    size_t num_textures = scene.textures.size();
-    if (num_textures > 0) {
-        std::vector<GpuTexDesc> descs(num_textures);
-        size_t total_floats = 0;
-        for (size_t t = 0; t < num_textures; ++t) {
-            descs[t].offset = (int)total_floats;
-            descs[t].width  = scene.textures[t].width;
-            descs[t].height = scene.textures[t].height;
-            total_floats += scene.textures[t].data.size();
-        }
-        std::vector<float> atlas(total_floats);
-        for (size_t t = 0; t < num_textures; ++t) {
-            std::memcpy(&atlas[descs[t].offset],
-                        scene.textures[t].data.data(),
-                        scene.textures[t].data.size() * sizeof(float));
-        }
-        d_tex_atlas_.upload(atlas);
-        d_tex_descs_.upload(descs);
-        std::cout << "[OptiX] Uploaded " << num_textures << " textures ("
-                  << (total_floats * sizeof(float) / (1024*1024)) << " MB atlas)\n";
-    } else {
-        d_tex_atlas_.free();
-        d_tex_descs_.free();
-    }
-
-    // Compute total GPU scene data size
-    size_t scene_bytes =
-        d_normals_.bytes + d_texcoords_.bytes + d_material_ids_.bytes +
-        d_Kd_.bytes + d_Ks_.bytes + d_Le_.bytes +
-        d_roughness_.bytes + d_ior_.bytes + d_mat_type_.bytes +
-        d_cauchy_A_.bytes + d_cauchy_B_.bytes + d_mat_dispersion_.bytes +
-        d_diffuse_tex_.bytes + d_emission_tex_.bytes +
-        d_clearcoat_weight_.bytes + d_clearcoat_roughness_.bytes +
-        d_sheen_.bytes + d_sheen_tint_.bytes +
-        d_tex_atlas_.bytes + d_tex_descs_.bytes;
-    std::printf("[OptiX] Scene data: %zu mats  %zu tris  %zu textures  total=%.2f MB\n",
-                num_mats, num_tris, num_textures,
-                (double)scene_bytes / (1024.0 * 1024.0));
-}
-
-// =====================================================================
-// fill_clearcoat_fabric_params() -- set coat/sheen pointers in LaunchParams
-// =====================================================================
-void OptixRenderer::fill_clearcoat_fabric_params(LaunchParams& lp) const {
-    lp.clearcoat_weight    = d_clearcoat_weight_.d_ptr    ? const_cast<float*>(d_clearcoat_weight_.as<float>())    : nullptr;
-    lp.clearcoat_roughness = d_clearcoat_roughness_.d_ptr ? const_cast<float*>(d_clearcoat_roughness_.as<float>()) : nullptr;
-    lp.sheen               = d_sheen_.d_ptr               ? const_cast<float*>(d_sheen_.as<float>())               : nullptr;
-    lp.sheen_tint          = d_sheen_tint_.d_ptr          ? const_cast<float*>(d_sheen_tint_.as<float>())          : nullptr;
-    // Emissive inverse-index (O(1) light PDF lookup)
-    lp.emissive_local_idx  = d_emissive_local_idx_.d_ptr  ? const_cast<int*>(d_emissive_local_idx_.as<int>())      : nullptr;
-}
-
-// =====================================================================
-// upload_photon_data() -- Upload CPU-side photon map to device
-// =====================================================================
-void OptixRenderer::upload_photon_data(
-    const PhotonSoA& global_photons,
-    const HashGrid& global_grid,
-    const PhotonSoA& /*caustic_photons*/,
-    const HashGrid& /*caustic_grid*/,
-    float gather_radius,
-    float /*caustic_radius*/,
-    int num_photons_emitted)
-{
-    if (global_photons.size() == 0) return;
-
-    // Record N_emitted; fall back to N_stored if caller passes 0
-    num_photons_emitted_ = (num_photons_emitted > 0)
-                               ? num_photons_emitted
-                               : (int)global_photons.size();
-
-    d_photon_pos_x_.upload(global_photons.pos_x);
-    d_photon_pos_y_.upload(global_photons.pos_y);
-    d_photon_pos_z_.upload(global_photons.pos_z);
-    d_photon_wi_x_.upload(global_photons.wi_x);
-    d_photon_wi_y_.upload(global_photons.wi_y);
-    d_photon_wi_z_.upload(global_photons.wi_z);
-    d_photon_norm_x_.upload(global_photons.norm_x);
-    d_photon_norm_y_.upload(global_photons.norm_y);
-    d_photon_norm_z_.upload(global_photons.norm_z);
-    d_photon_lambda_.upload(global_photons.lambda_bin);
-    d_photon_flux_.upload(global_photons.flux);
-    if (!global_photons.num_hero.empty())
-        d_photon_num_hero_.upload(global_photons.num_hero);
-    else
-        d_photon_num_hero_.free();
-
-    if (global_grid.sorted_indices.size() > 0) {
-        d_grid_sorted_indices_.upload(global_grid.sorted_indices);
-        d_grid_cell_start_.upload(global_grid.cell_start);
-        d_grid_cell_end_.upload(global_grid.cell_end);
-    }
-
-    std::cout << "[OptiX] Uploaded " << global_photons.size()
-              << " photons to device\n";
-    gather_radius_ = gather_radius;
-
-    // Copy into stored_photons_
-    stored_photons_ = global_photons;
-}
-
-// =====================================================================
-// upload_emitter_data() -- Upload emitter CDF for GPU photon tracing
-// =====================================================================
-void OptixRenderer::upload_emitter_data(const Scene& scene) {
-    size_t n = scene.emissive_tri_indices.size();
-    num_emissive_ = (int)n;
-    if (n == 0) {
-        std::cout << "[OptiX] No emissive triangles found\n";
-        return;
-    }
-
-    // Upload indices
-    d_emissive_indices_.upload(scene.emissive_tri_indices);
-
-    // Build CDF from weights
-    std::vector<float> weights(n);
-    for (size_t i = 0; i < n; ++i) {
-        uint32_t tri_idx = scene.emissive_tri_indices[i];
-        const auto& tri = scene.triangles[tri_idx];
-        const auto& mat = scene.materials[tri.material_id];
-        weights[i] = tri.area() * mat.mean_emission();
-    }
-    float total = 0.f;
-    for (auto w : weights) total += w;
-
-    std::vector<float> cdf(n);
-    float cum = 0.f;
-    for (size_t i = 0; i < n; ++i) {
-        cum += weights[i] / total;
-        cdf[i] = cum;
-    }
-    cdf[n-1] = 1.0f; // ensure exact 1.0
-
-    d_emissive_cdf_.upload(cdf);
-
-    // Build inverse-index: global tri_id → local emissive index (-1 = not emissive)
-    std::vector<int> local_idx(scene.triangles.size(), -1);
-    for (size_t i = 0; i < n; ++i)
-        local_idx[scene.emissive_tri_indices[i]] = (int)i;
-    d_emissive_local_idx_.upload(local_idx);
-
-    std::printf("[OptiX] Emitter data: %zu tris  total_power=%.4f  max_w=%.4f  min_w=%.4f\n",
-                n, total,
-                *std::max_element(weights.begin(), weights.end()),
-                *std::min_element(weights.begin(), weights.end()));
 }
 
 // =====================================================================
@@ -1426,7 +991,7 @@ void OptixRenderer::render_debug_frame(
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
     lp.frame_number      = frame_number;
-    lp.render_mode       = (int)mode;
+    lp.render_mode       = mode;
     lp.is_final_render   = 0;  // DEBUG: first-hit + direct lighting only
     lp.debug_shadow_rays = shadow_rays ? 1 : 0;
     lp.nee_light_samples = shadow_rays ? DEFAULT_NEE_LIGHT_SAMPLES : 1;
@@ -1503,7 +1068,7 @@ void OptixRenderer::render_one_spp(
     lp.samples_per_pixel  = 1;
     lp.max_bounces        = max_bounces;
     lp.frame_number       = frame_number;
-    lp.render_mode        = RENDER_MODE_FULL;
+    lp.render_mode        = RenderMode::Full;
     lp.is_final_render    = 1;
     lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
     lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
@@ -1675,7 +1240,7 @@ void OptixRenderer::render_caustic_debug_pass(
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
         lp.frame_number       = s;
-        lp.render_mode        = RENDER_MODE_FULL;
+        lp.render_mode        = RenderMode::Full;
         lp.is_final_render    = 1;
         lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
         lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
@@ -1820,32 +1385,6 @@ void OptixRenderer::render_caustic_snapshot(
                               samp_bytes, cudaMemcpyHostToDevice));
 }
 
-// =====================================================================
-// swap_photon_map() -- swap device photon/grid data with a pool slot
-// =====================================================================
-void OptixRenderer::swap_photon_map(PhotonMapSlot& slot) {
-    std::swap(d_photon_pos_x_,  slot.photon_pos_x);
-    std::swap(d_photon_pos_y_,  slot.photon_pos_y);
-    std::swap(d_photon_pos_z_,  slot.photon_pos_z);
-    std::swap(d_photon_wi_x_,   slot.photon_wi_x);
-    std::swap(d_photon_wi_y_,   slot.photon_wi_y);
-    std::swap(d_photon_wi_z_,   slot.photon_wi_z);
-    std::swap(d_photon_norm_x_, slot.photon_norm_x);
-    std::swap(d_photon_norm_y_, slot.photon_norm_y);
-    std::swap(d_photon_norm_z_, slot.photon_norm_z);
-    std::swap(d_photon_lambda_, slot.photon_lambda);
-    std::swap(d_photon_flux_,   slot.photon_flux);
-    std::swap(d_photon_num_hero_,         slot.photon_num_hero);
-    std::swap(d_photon_is_caustic_pass_,  slot.photon_is_caustic_pass);
-    std::swap(d_grid_sorted_indices_,     slot.grid_sorted_indices);
-    std::swap(d_grid_cell_start_,         slot.grid_cell_start);
-    std::swap(d_grid_cell_end_,           slot.grid_cell_end);
-    std::swap(d_tri_photon_irradiance_,   slot.tri_photon_irradiance);
-    std::swap(num_photons_emitted_,       slot.num_photons_emitted);
-    std::swap(num_caustic_emitted_,       slot.num_caustic_emitted);
-    std::swap(gather_radius_,             slot.gather_radius);
-    std::swap(caustic_radius_,            slot.caustic_radius);
-}
 
 // =====================================================================
 // render_final() -- full path tracing (is_final_render = 1)
@@ -1912,7 +1451,7 @@ void OptixRenderer::render_final(
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
         lp.frame_number       = frame_number;
-        lp.render_mode        = RENDER_MODE_FULL;
+        lp.render_mode        = RenderMode::Full;
         lp.is_final_render    = 1;  // FINAL: full path tracing
         lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
         lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
@@ -1978,48 +1517,14 @@ void OptixRenderer::render_final(
         std::cout << line << std::flush;
     };
 
-    // ── Pre-build photon map pool (amortized multi-map) ─────────────
-    // Build PHOTON_MAP_POOL_SIZE maps with different RNG seeds at the
-    // start instead of re-tracing during the SPP loop.  Cycling through
-    // pool slots via pointer-swap is essentially free compared to a
-    // full photon trace + grid build.
-    const int actual_max_spp = adaptive ? max_spp : total_spp;
-    const int num_maps_needed = (MULTI_MAP_SPP_GROUP > 0)
-        ? (actual_max_spp + MULTI_MAP_SPP_GROUP - 1) / MULTI_MAP_SPP_GROUP
-        : 1;
-    const int pool_size = (MULTI_MAP_SPP_GROUP > 0 && PHOTON_MAP_POOL_SIZE > 1)
-        ? (std::min)(PHOTON_MAP_POOL_SIZE, (std::max)(1, num_maps_needed))
-        : 1;
-
-    photon_map_pool_.clear();
-    photon_map_pool_.resize(pool_size);
-
-    for (int m = 0; m < pool_size; ++m) {
-        std::printf("\n[Render] Pre-building photon map %d/%d ...\n", m + 1, pool_size);
-        trace_photons(scene, config, /*grid_radius_override=*/0.f,
-                      /*photon_map_seed=*/m);
-        swap_photon_map(photon_map_pool_[m]);  // drain main → pool[m]
-    }
-
-    // Activate the first map
-    swap_photon_map(photon_map_pool_[0]);
-    active_pool_idx_ = 0;
-
-    // Helper: switch to the correct map slot for sample s
-    auto activate_map_for_sample = [&](int s) {
-        if (pool_size <= 1 || MULTI_MAP_SPP_GROUP <= 0) return;
-        if ((s % MULTI_MAP_SPP_GROUP) != 0) return;  // only switch at group boundaries
-        int map_idx = (s / MULTI_MAP_SPP_GROUP) % pool_size;
-        if (map_idx == active_pool_idx_) return;      // already active
-        swap_photon_map(photon_map_pool_[active_pool_idx_]);  // return current
-        swap_photon_map(photon_map_pool_[map_idx]);           // activate new
-        active_pool_idx_ = map_idx;
-    };
+    // ── Build single photon map ──────────────────────────────────────
+    std::printf("\n[Render] Building photon map ...\n");
+    trace_photons(scene, config, /*grid_radius_override=*/0.f,
+                  /*photon_map_seed=*/0);
 
     if (!adaptive) {
         // ── Non-adaptive path ────────────────────────────────────────
         for (int s = 0; s < total_spp; ++s) {
-            activate_map_for_sample(s);
             launch_pass(s, /*use_mask=*/false);
             print_progress(s + 1, total_spp, /*active=*/-1);
         }
@@ -2027,7 +1532,6 @@ void OptixRenderer::render_final(
         // ── Adaptive path ─────────────────────────────────────────────
         // Phase 1: warmup — render min_spp passes uniformly
         for (int s = 0; s < min_spp; ++s) {
-            activate_map_for_sample(s);
             launch_pass(s, /*use_mask=*/false);
             print_progress(s + 1, max_spp, /*active=*/(int)total_pixels);
         }
@@ -2038,7 +1542,6 @@ void OptixRenderer::render_final(
         const int update_interval = config.adaptive_update_interval;
 
         for (int s = min_spp; s < max_spp; ++s) {
-            activate_map_for_sample(s);
             // Recompute mask at start of adaptive phase and every N passes
             if ((s - min_spp) % update_interval == 0) {
                 AdaptiveParams ap;
@@ -2061,13 +1564,6 @@ void OptixRenderer::render_final(
             print_progress(s + 1, max_spp, active_pixels);
         }
     }
-
-    // ── Release photon map pool ──────────────────────────────────────
-    // Return the active map to its pool slot, then free all slots.
-    if (active_pool_idx_ >= 0 && active_pool_idx_ < (int)photon_map_pool_.size())
-        swap_photon_map(photon_map_pool_[active_pool_idx_]);
-    photon_map_pool_.clear();
-    active_pool_idx_ = -1;
 
     // ── Post-process: optionally denoise, then tonemap ───────────────
     // The per-SPP inline tonemap was skipped (skip_tonemap=1).
@@ -2121,134 +1617,6 @@ void OptixRenderer::render_final(
     std::cout << "\n[Render] Done in " << std::fixed
               << std::setprecision(1) << total_s << "s"
               << "  (~" << (int)mrays << " Mray-bounces/s)\n";
-}
-
-// =====================================================================
-// OptiX AI Denoiser — setup, invoke, cleanup
-// =====================================================================
-void OptixRenderer::setup_denoiser(int w, int h,
-                                    bool guide_albedo, bool guide_normal)
-{
-    // Destroy previous denoiser if dimensions or guide config changed
-    if (denoiser_ && (denoiser_width_ != w || denoiser_height_ != h ||
-                      denoiser_guide_albedo_ != guide_albedo ||
-                      denoiser_guide_normal_ != guide_normal)) {
-        cleanup_denoiser();
-    }
-
-    if (denoiser_) return;  // already set up with matching dimensions
-
-    denoiser_width_  = w;
-    denoiser_height_ = h;
-    denoiser_guide_albedo_ = guide_albedo;
-    denoiser_guide_normal_ = guide_normal;
-
-    OptixDenoiserOptions options = {};
-    options.guideAlbedo = guide_albedo ? 1u : 0u;
-    options.guideNormal = guide_normal ? 1u : 0u;
-
-    OPTIX_CHECK(optixDenoiserCreate(
-        context_,
-        OPTIX_DENOISER_MODEL_KIND_AOV,
-        &options,
-        &denoiser_));
-
-    // Query memory requirements
-    OptixDenoiserSizes sizes = {};
-    OPTIX_CHECK(optixDenoiserComputeMemoryResources(
-        denoiser_, (unsigned int)w, (unsigned int)h, &sizes));
-
-    d_denoiser_state_.alloc(sizes.stateSizeInBytes);
-    // Use recommendedScratchSizeInBytes (larger = better quality)
-    size_t scratch_size = sizes.withoutOverlapScratchSizeInBytes;
-    if (sizes.withOverlapScratchSizeInBytes > scratch_size)
-        scratch_size = sizes.withOverlapScratchSizeInBytes;
-    d_denoiser_scratch_.alloc(scratch_size);
-
-    OPTIX_CHECK(optixDenoiserSetup(
-        denoiser_,
-        nullptr,  // CUDA stream
-        (unsigned int)w, (unsigned int)h,
-        reinterpret_cast<CUdeviceptr>(d_denoiser_state_.d_ptr),
-        d_denoiser_state_.bytes,
-        reinterpret_cast<CUdeviceptr>(d_denoiser_scratch_.d_ptr),
-        d_denoiser_scratch_.bytes));
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-void OptixRenderer::run_denoiser(float blend_factor)
-{
-    if (!denoiser_) return;
-
-    const unsigned int row_stride = (unsigned int)(denoiser_width_ * 4 * sizeof(float));
-
-    // Guide layer: albedo + normal
-    OptixDenoiserGuideLayer guide = {};
-    if (denoiser_guide_albedo_ && d_albedo_buffer_.d_ptr) {
-        guide.albedo.data               = reinterpret_cast<CUdeviceptr>(d_albedo_buffer_.d_ptr);
-        guide.albedo.width              = (unsigned int)denoiser_width_;
-        guide.albedo.height             = (unsigned int)denoiser_height_;
-        guide.albedo.rowStrideInBytes   = row_stride;
-        guide.albedo.pixelStrideInBytes = 4 * sizeof(float);
-        guide.albedo.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
-    }
-    if (denoiser_guide_normal_ && d_normal_buffer_.d_ptr) {
-        guide.normal.data               = reinterpret_cast<CUdeviceptr>(d_normal_buffer_.d_ptr);
-        guide.normal.width              = (unsigned int)denoiser_width_;
-        guide.normal.height             = (unsigned int)denoiser_height_;
-        guide.normal.rowStrideInBytes   = row_stride;
-        guide.normal.pixelStrideInBytes = 4 * sizeof(float);
-        guide.normal.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
-    }
-
-    // Input layer: linear HDR color
-    OptixDenoiserLayer layer = {};
-    layer.input.data               = reinterpret_cast<CUdeviceptr>(d_hdr_buffer_.d_ptr);
-    layer.input.width              = (unsigned int)denoiser_width_;
-    layer.input.height             = (unsigned int)denoiser_height_;
-    layer.input.rowStrideInBytes   = row_stride;
-    layer.input.pixelStrideInBytes = 4 * sizeof(float);
-    layer.input.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
-
-    // Output layer: denoised HDR color
-    layer.output.data               = reinterpret_cast<CUdeviceptr>(d_hdr_denoised_.d_ptr);
-    layer.output.width              = (unsigned int)denoiser_width_;
-    layer.output.height             = (unsigned int)denoiser_height_;
-    layer.output.rowStrideInBytes   = row_stride;
-    layer.output.pixelStrideInBytes = 4 * sizeof(float);
-    layer.output.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
-
-    // Denoiser parameters
-    OptixDenoiserParams params = {};
-    params.blendFactor  = blend_factor;  // 0 = fully denoised, 1 = original
-
-    OPTIX_CHECK(optixDenoiserInvoke(
-        denoiser_,
-        nullptr,  // CUDA stream
-        &params,
-        reinterpret_cast<CUdeviceptr>(d_denoiser_state_.d_ptr),
-        d_denoiser_state_.bytes,
-        &guide,
-        &layer,
-        1,         // numLayers
-        0, 0,      // inputOffsetX, inputOffsetY
-        reinterpret_cast<CUdeviceptr>(d_denoiser_scratch_.d_ptr),
-        d_denoiser_scratch_.bytes));
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-void OptixRenderer::cleanup_denoiser()
-{
-    if (denoiser_) {
-        optixDenoiserDestroy(denoiser_);
-        denoiser_ = nullptr;
-    }
-    d_denoiser_state_.free();
-    d_denoiser_scratch_.free();
-    denoiser_width_  = 0;
-    denoiser_height_ = 0;
 }
 
 // =====================================================================
@@ -2599,255 +1967,4 @@ HitRecord OptixRenderer::trace_single_ray(float3 origin, float3 direction) const
     }
 
     return hit;
-}
-
-// =====================================================================
-// Private: OptiX pipeline creation
-// =====================================================================
-
-void OptixRenderer::create_context() {
-    CUcontext cu_ctx = nullptr;
-    OptixDeviceContextOptions options = {};
-    options.logCallbackFunction = optix_log_callback;
-    options.logCallbackLevel   = 4;
-    OPTIX_CHECK(optixDeviceContextCreate(cu_ctx, &options, &context_));
-    std::cout << "[OptiX] Context created\n";
-}
-
-void OptixRenderer::create_module() {
-    OptixModuleCompileOptions module_compile_options = {};
-    module_compile_options.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-#ifndef NDEBUG
-    module_compile_options.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
-    module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-#else
-    module_compile_options.optLevel   = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-    module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-#endif
-
-    OptixPipelineCompileOptions pipeline_options = {};
-    pipeline_options.usesMotionBlur                  = false;
-    pipeline_options.traversableGraphFlags            = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-    pipeline_options.numPayloadValues                 = OPTIX_NUM_PAYLOAD_VALUES;
-    pipeline_options.numAttributeValues               = OPTIX_NUM_ATTRIBUTE_VALUES;
-    pipeline_options.exceptionFlags                   = OPTIX_EXCEPTION_FLAG_NONE;
-    pipeline_options.pipelineLaunchParamsVariableName  = "params";
-
-    std::string ptx = read_ptx_file(PTX_FILE_PATH);
-
-    char log[2048];
-    size_t log_size = sizeof(log);
-
-    OPTIX_CHECK(optixModuleCreate(
-        context_,
-        &module_compile_options,
-        &pipeline_options,
-        ptx.c_str(), ptx.size(),
-        log, &log_size,
-        &module_));
-
-    if (log_size > 1) std::cout << "[OptiX Module] " << log << "\n";
-    std::cout << "[OptiX] Module created from PTX (" << ptx.size() << " bytes)\n";
-}
-
-void OptixRenderer::create_programs() {
-    OptixProgramGroupOptions pg_options = {};
-    char log[2048];
-    size_t log_size;
-
-    // Raygen (render)
-    {
-        OptixProgramGroupDesc desc = {};
-        desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-        desc.raygen.module = module_;
-        desc.raygen.entryFunctionName = "__raygen__render";
-        log_size = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &raygen_pg_));
-    }
-
-    // Raygen (photon trace)
-    {
-        OptixProgramGroupDesc desc = {};
-        desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-        desc.raygen.module = module_;
-        desc.raygen.entryFunctionName = "__raygen__photon_trace";
-        log_size = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &raygen_photon_pg_));
-    }
-
-    // Raygen (targeted caustic photon trace)
-    {
-        OptixProgramGroupDesc desc = {};
-        desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-        desc.raygen.module = module_;
-        desc.raygen.entryFunctionName = "__raygen__targeted_photon_trace";
-        log_size = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &raygen_targeted_pg_));
-    }
-
-    // Miss (radiance)
-    {
-        OptixProgramGroupDesc desc = {};
-        desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        desc.miss.module = module_;
-        desc.miss.entryFunctionName = "__miss__radiance";
-        log_size = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &miss_pg_));
-    }
-
-    // Miss (shadow)
-    {
-        OptixProgramGroupDesc desc = {};
-        desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        desc.miss.module = module_;
-        desc.miss.entryFunctionName = "__miss__shadow";
-        log_size = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &miss_shadow_pg_));
-    }
-
-    // Hit group (radiance)
-    {
-        OptixProgramGroupDesc desc = {};
-        desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        desc.hitgroup.moduleCH = module_;
-        desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance";
-        desc.hitgroup.moduleAH = module_;
-        desc.hitgroup.entryFunctionNameAH = "__anyhit__radiance";
-        log_size = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_pg_));
-    }
-
-    // Hit group (shadow)
-    {
-        OptixProgramGroupDesc desc = {};
-        desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        desc.hitgroup.moduleCH = module_;
-        desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
-        desc.hitgroup.moduleAH = module_;
-        desc.hitgroup.entryFunctionNameAH = "__anyhit__shadow";
-        log_size = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_shadow_pg_));
-    }
-
-    std::cout << "[OptiX] Program groups created (render + photon trace + targeted)\n";
-}
-
-void OptixRenderer::create_pipeline() {
-    OptixProgramGroup program_groups[] = {
-        raygen_pg_, raygen_photon_pg_, raygen_targeted_pg_,
-        miss_pg_, miss_shadow_pg_,
-        hitgroup_pg_, hitgroup_shadow_pg_
-    };
-
-    OptixPipelineLinkOptions link_options = {};
-    link_options.maxTraceDepth = OPTIX_MAX_TRACE_DEPTH;
-
-    OptixPipelineCompileOptions pipeline_options = {};
-    pipeline_options.usesMotionBlur                  = false;
-    pipeline_options.traversableGraphFlags            = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-    pipeline_options.numPayloadValues                 = OPTIX_NUM_PAYLOAD_VALUES;
-    pipeline_options.numAttributeValues               = OPTIX_NUM_ATTRIBUTE_VALUES;
-    pipeline_options.exceptionFlags                   = OPTIX_EXCEPTION_FLAG_NONE;
-    pipeline_options.pipelineLaunchParamsVariableName  = "params";
-
-    char log[2048];
-    size_t log_size = sizeof(log);
-
-    OPTIX_CHECK(optixPipelineCreate(
-        context_,
-        &pipeline_options,
-        &link_options,
-        program_groups, 6,
-        log, &log_size,
-        &pipeline_));
-
-    // Set stack sizes
-    // Last param is maxTraversableGraphDepth: 1 for single GAS (no IAS)
-    OPTIX_CHECK(optixPipelineSetStackSize(
-        pipeline_,
-        OPTIX_STACK_SIZE,
-        OPTIX_STACK_SIZE,
-        OPTIX_STACK_SIZE,
-        1));
-
-    std::cout << "[OptiX] Pipeline created\n";
-}
-
-void OptixRenderer::build_sbt(const Scene& scene) {
-    // Raygen record (render)
-    {
-        RayGenRecord rec = {};
-        OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg_, &rec));
-        d_raygen_record_.upload(&rec, 1);
-        sbt_.raygenRecord = reinterpret_cast<CUdeviceptr>(d_raygen_record_.d_ptr);
-    }
-
-    // Raygen record (photon trace) -- stored separately, swapped in for photon launch
-    {
-        RayGenRecord rec = {};
-        OPTIX_CHECK(optixSbtRecordPackHeader(raygen_photon_pg_, &rec));
-        d_raygen_photon_record_.upload(&rec, 1);
-    }
-
-    // Raygen record (targeted caustic photon trace)
-    {
-        RayGenRecord rec = {};
-        OPTIX_CHECK(optixSbtRecordPackHeader(raygen_targeted_pg_, &rec));
-        d_raygen_targeted_record_.upload(&rec, 1);
-    }
-
-    // Miss records (radiance + shadow)
-    {
-        std::vector<MissRecord> miss_records(2);
-
-        OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg_, &miss_records[0]));
-        miss_records[0].data.background_color = make_f3(0, 0, 0);
-
-        OPTIX_CHECK(optixSbtRecordPackHeader(miss_shadow_pg_, &miss_records[1]));
-        miss_records[1].data.background_color = make_f3(0, 0, 0);
-
-        d_miss_records_.upload(miss_records);
-        sbt_.missRecordBase          = reinterpret_cast<CUdeviceptr>(d_miss_records_.d_ptr);
-        sbt_.missRecordStrideInBytes = sizeof(MissRecord);
-        sbt_.missRecordCount         = 2;
-    }
-
-    // Hit group records (radiance + shadow)
-    {
-        std::vector<HitGroupRecord> hg_records(2);
-
-        auto fill_hg = [&](HitGroupRecord& rec) {
-            rec.data.vertices     = d_vertices_.as<float3>();
-            rec.data.normals      = d_normals_.as<float3>();
-            rec.data.texcoords    = d_texcoords_.as<float2>();
-            rec.data.material_ids = d_material_ids_.as<uint32_t>();
-            rec.data.Kd           = d_Kd_.as<float>();
-            rec.data.Ks           = d_Ks_.as<float>();
-            rec.data.Le           = d_Le_.as<float>();
-            rec.data.roughness    = d_roughness_.as<float>();
-            rec.data.ior          = d_ior_.as<float>();
-            rec.data.mat_type     = d_mat_type_.as<uint8_t>();
-        };
-
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg_, &hg_records[0]));
-        fill_hg(hg_records[0]);
-
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_shadow_pg_, &hg_records[1]));
-        fill_hg(hg_records[1]);
-
-        d_hitgroup_records_.upload(hg_records);
-        sbt_.hitgroupRecordBase          = reinterpret_cast<CUdeviceptr>(d_hitgroup_records_.d_ptr);
-        sbt_.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
-        sbt_.hitgroupRecordCount         = 2;
-    }
-
-    std::cout << "[OptiX] SBT built (render + photon trace)\n";
-    (void)scene;
 }

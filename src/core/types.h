@@ -101,6 +101,42 @@ struct HitRecord {
 #pragma warning(pop)
 #endif
 
+// ── Material type (shared between CPU and GPU) ─────────────────────
+// Plain (unscoped) enum so device code can compare against uint8_t
+// without casts.  Qualified syntax MaterialType::Mirror still works.
+enum MaterialType : uint8_t {
+    Lambertian        = 0,
+    Mirror            = 1,
+    Glass             = 2,
+    GlossyMetal       = 3,   // Cook-Torrance metallic Fresnel (F0 = Ks)
+    Emissive          = 4,
+    GlossyDielectric  = 5,   // Cook-Torrance + Lambertian (dielectric Fresnel)
+    Translucent       = 6,   // Surface BSDF + interior participating medium
+    Clearcoat         = 7,   // Layered: dielectric coat over base BRDF
+    Fabric            = 8    // Diffuse + sheen lobe (cloth)
+};
+
+// ── Transport mode (adjoint correction, §2.2) ───────────────────────
+// Radiance  = camera / eye paths — standard BSDF.
+// Importance = light / photon paths — η² correction at refractive interfaces.
+enum class TransportMode : int {
+    Radiance   = 0,
+    Importance = 1
+};
+
+// ── Render mode (shared between CPU and GPU) ────────────────────────
+enum class RenderMode : int {
+    Combined      = 0,
+    Full          = Combined,  // Legacy alias
+    DirectOnly    = 1,
+    IndirectOnly  = 2,
+    PhotonMap     = 3,
+    Normals       = 4,
+    MaterialID    = 5,
+    Depth         = 6,
+    Coverage      = 7
+};
+
 // ── Constants ───────────────────────────────────────────────────────
 constexpr float PI       = 3.14159265358979323846f;
 constexpr float TWO_PI   = 6.28318530717958647692f;

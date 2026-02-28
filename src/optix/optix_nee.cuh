@@ -1,0 +1,400 @@
+#pragma once
+
+// optix_nee.cuh – Light PDF, debug render modes, hash-grid photon gather,
+//                  triangle sampling, NEE evaluate sample
+
+// == Compute light sampling PDF for a direction that hit a light =======
+__forceinline__ __device__
+float dev_light_pdf(uint32_t tri_id, float3 geo_normal, float3 wi, float t) {
+    if (params.num_emissive == 0) return 0.f;
+
+    // O(1) lookup via inverse-index table (tri_id → local emissive index)
+    float pdf_tri = 0.f;
+    if (params.emissive_local_idx) {
+        int i = params.emissive_local_idx[tri_id];
+        if (i < 0) return 0.f;  // not an emissive triangle
+        pdf_tri = (i == 0) ? params.emissive_cdf[0]
+                           : params.emissive_cdf[i] - params.emissive_cdf[i - 1];
+    } else {
+        // Fallback: linear scan (shouldn't happen with current upload code)
+        for (int i = 0; i < params.num_emissive; ++i) {
+            if (params.emissive_tri_indices[i] == tri_id) {
+                if (i == 0) pdf_tri = params.emissive_cdf[0];
+                else pdf_tri = params.emissive_cdf[i] - params.emissive_cdf[i - 1];
+                break;
+            }
+        }
+    }
+    if (pdf_tri <= 0.f) return 0.f;
+
+    float3 v0 = params.vertices[tri_id * 3 + 0];
+    float3 v1 = params.vertices[tri_id * 3 + 1];
+    float3 v2 = params.vertices[tri_id * 3 + 2];
+    float area = length(cross(v1 - v0, v2 - v0)) * 0.5f;
+    if (area <= 0.f) return 0.f;
+
+    float cos_o = fabsf(dot(wi * (-1.f), geo_normal));
+    if (cos_o <= 0.f) return 0.f;
+
+    float dist2 = t * t;
+    return nee_pdf_area_to_solid_angle(pdf_tri, 1.f / area, dist2, cos_o);
+}
+
+// == Debug render modes ===============================================
+
+__forceinline__ __device__
+Spectrum render_normals_dev(const TraceResult& hit) {
+    Spectrum s;
+    float r = hit.shading_normal.x * 0.5f + 0.5f;
+    float g = hit.shading_normal.y * 0.5f + 0.5f;
+    float b = hit.shading_normal.z * 0.5f + 0.5f;
+    for (int i = 0; i < NUM_LAMBDA; ++i) s.value[i] = 0.f;
+    for (int i = 0; i < NUM_LAMBDA/3; ++i) s.value[i] = r;
+    for (int i = NUM_LAMBDA/3; i < 2*NUM_LAMBDA/3; ++i) s.value[i] = g;
+    for (int i = 2*NUM_LAMBDA/3; i < NUM_LAMBDA; ++i) s.value[i] = b;
+    return s;
+}
+
+__forceinline__ __device__
+Spectrum render_material_id_dev(uint32_t mat_id) {
+    float hue = fmodf(mat_id * 0.618033988f, 1.f);
+    float r = fabsf(hue*6.f - 3.f) - 1.f;
+    float g = 2.f - fabsf(hue*6.f - 2.f);
+    float b = 2.f - fabsf(hue*6.f - 4.f);
+    r = fminf(fmaxf(r, 0.f), 1.f);
+    g = fminf(fmaxf(g, 0.f), 1.f);
+    b = fminf(fmaxf(b, 0.f), 1.f);
+    Spectrum s;
+    for (int i = 0; i < NUM_LAMBDA; ++i) s.value[i] = 0.f;
+    for (int i = 0; i < NUM_LAMBDA/3; ++i) s.value[i] = r;
+    for (int i = NUM_LAMBDA/3; i < 2*NUM_LAMBDA/3; ++i) s.value[i] = g;
+    for (int i = 2*NUM_LAMBDA/3; i < NUM_LAMBDA; ++i) s.value[i] = b;
+    return s;
+}
+
+__forceinline__ __device__
+Spectrum render_depth_dev(float t, float max_depth) {
+    float d = fminf(t / max_depth, 1.f);
+    return Spectrum::constant(1.f - d);
+}
+
+// == Hash grid photon lookup (device-side) ============================
+
+__forceinline__ __device__
+Spectrum dev_estimate_photon_density(
+    float3 pos, float3 normal,       // shading normal (ONB / BSDF frame)
+    float3 filter_normal,            // geometric normal (surface filtering §15.1.2)
+    float3 wo_local, uint32_t mat_id,
+    float radius, float2 uv)
+{
+    Spectrum L = Spectrum::zero();
+    if (params.num_photons == 0 || params.grid_table_size == 0) return L;
+
+    // ── kNN adaptive-radius photon density estimation ────────────────
+    // Phase 1: Collect the K nearest valid photons into a max-heap
+    //          (tangential distance, photon index).
+    // Phase 2: Determine adaptive radius r_k = distance to k-th nearest.
+    // Phase 3: Accumulate contributions using r_k for Epanechnikov
+    //          kernel + area normalisation.
+    //
+    // At geometric edges, fewer coplanar photons exist inside the search
+    // radius → the k-th nearest is farther → r_k grows → the larger
+    // denominator (π r_k²) compensates for reduced photon count.
+    // Boundary bias vanishes by construction (no heuristic correction).
+
+    const bool dual_budget = (params.photon_is_caustic_pass != nullptr
+                              && params.num_caustic_emitted > 0);
+
+    // Search radius: maximum of the two budgets' fixed radii.
+    // This is the upper bound for kNN — if fewer than K photons are found,
+    // we fall back to this as the normalisation radius.
+    float r_global  = radius;
+    float r_caustic = dual_budget ? params.caustic_gather_radius : radius;
+    float r_max     = fmaxf(r_global, r_caustic);
+    float r2_max    = r_max * r_max;
+
+    float norm_global  = 1.f / (float)params.num_photons_emitted;
+    float norm_caustic = dual_budget ? 1.f / (float)params.num_caustic_emitted
+                                     : norm_global;
+
+    Spectrum L_global  = Spectrum::zero();
+    Spectrum L_caustic = Spectrum::zero();
+
+    // ── Phase 1: kNN candidate collection ────────────────────────────
+    // Max-heap of (d_tan², photon_index).  The root (index 0) holds the
+    // farthest candidate — replaced when a closer photon is found.
+    constexpr int KNN_K = DEFAULT_KNN_K;
+    float    knn_d2[KNN_K];
+    uint32_t knn_idx[KNN_K];
+    int      knn_count = 0;
+
+    float cell_size = params.grid_cell_size;
+    int cx0 = (int)floorf((pos.x - r_max) / cell_size);
+    int cy0 = (int)floorf((pos.y - r_max) / cell_size);
+    int cz0 = (int)floorf((pos.z - r_max) / cell_size);
+    int cx1 = (int)floorf((pos.x + r_max) / cell_size);
+    int cy1 = (int)floorf((pos.y + r_max) / cell_size);
+    int cz1 = (int)floorf((pos.z + r_max) / cell_size);
+
+    uint32_t visited_keys[27];
+    int num_visited = 0;
+
+    // Build ONB once outside the photon loop (reused for every wi transform)
+    ONB frame = ONB::from_normal(normal);
+
+    for (int iz = cz0; iz <= cz1; ++iz)
+    for (int iy = cy0; iy <= cy1; ++iy)
+    for (int ix = cx0; ix <= cx1; ++ix) {
+        uint32_t key = teschner_hash(make_i3(ix, iy, iz), params.grid_table_size);
+
+        bool already_visited = false;
+        for (int v = 0; v < num_visited; ++v) {
+            if (visited_keys[v] == key) { already_visited = true; break; }
+        }
+        if (already_visited) continue;
+        visited_keys[num_visited++] = key;
+
+        uint32_t start = params.grid_cell_start[key];
+        uint32_t end   = params.grid_cell_end[key];
+        if (start == 0xFFFFFFFF) continue;
+
+        for (uint32_t j = start; j < end; ++j) {
+            uint32_t idx = params.grid_sorted_indices[j];
+            float3 pp = make_f3(
+                params.photon_pos_x[idx],
+                params.photon_pos_y[idx],
+                params.photon_pos_z[idx]);
+
+            float3 diff = pos - pp;
+
+            // Tangential-disk distance metric (§7.1 guideline)
+            float d_plane = dot(diff, filter_normal);
+            float3 v_tan = diff - filter_normal * d_plane;
+            float d_tan2 = dot(v_tan, v_tan);
+
+            // Broad-phase: reject beyond search radius
+            if (d_tan2 > r2_max) continue;
+
+            // Early reject: if heap is full and this photon is farther
+            // than the current k-th nearest, skip immediately.
+            if (knn_count >= KNN_K && d_tan2 >= knn_d2[0]) continue;
+
+            float plane_dist = fabsf(d_plane);
+            if (plane_dist > DEFAULT_SURFACE_TAU) continue;
+
+            // Normal gate: reject photons on opposite-facing surfaces
+            float3 photon_n = make_f3(
+                params.photon_norm_x[idx],
+                params.photon_norm_y[idx],
+                params.photon_norm_z[idx]);
+            if (dot(photon_n, filter_normal) <= 0.0f) continue;
+
+            // Wi direction gate
+            float3 wi_world = make_f3(
+                params.photon_wi_x[idx],
+                params.photon_wi_y[idx],
+                params.photon_wi_z[idx]);
+            if (dot(wi_world, filter_normal) <= 0.f) continue;
+
+            // Tag contract (applied in Phase 3 accumulation):
+            //   tag 0 = global non-caustic  → L_global  (1/N_global)
+            //   tag 1 = global caustic      → L_global  (1/N_global)
+            //   tag 2 = targeted caustic    → L_caustic (1/N_caustic)
+
+            // ── Insert into max-heap ────────────────────────────────
+            if (knn_count < KNN_K) {
+                // Heap not full: append and sift up
+                knn_d2[knn_count]  = d_tan2;
+                knn_idx[knn_count] = idx;
+                knn_count++;
+                // Sift up
+                int ci = knn_count - 1;
+                while (ci > 0) {
+                    int pi = (ci - 1) / 2;
+                    if (knn_d2[ci] <= knn_d2[pi]) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
+                    ci = pi;
+                }
+            } else {
+                // Heap full and d_tan2 < root: replace root and sift down
+                knn_d2[0]  = d_tan2;
+                knn_idx[0] = idx;
+                int ci = 0;
+                while (true) {
+                    int left = 2 * ci + 1, right = 2 * ci + 2, largest = ci;
+                    if (left  < KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
+                    if (right < KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
+                    if (largest == ci) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
+                    ci = largest;
+                }
+            }
+        }
+    }
+
+    if (knn_count == 0) return L;
+
+    // ── Phase 2: Determine adaptive radius ───────────────────────────
+    // If we found >= K photons, use the distance to the k-th nearest
+    // (heap root = farthest in heap).  Otherwise fall back to the fixed
+    // search radius so sparse areas render identically to before.
+    float r_k2 = (knn_count >= KNN_K) ? knn_d2[0] : r2_max;
+    r_k2 = fmaxf(r_k2, 1e-12f);  // guard against degenerate zero
+    float inv_area_knn = 2.f / (PI * r_k2);   // Epanechnikov normalisation
+
+    // ── Phase 3: Accumulate contributions from the k nearest ─────────
+    for (int i = 0; i < knn_count; ++i) {
+        uint32_t idx  = knn_idx[i];
+        float d_tan2  = knn_d2[i];
+
+        // Skip photons outside the adaptive radius (possible when
+        // knn_count < K and some heap entries exceed r_k2 — shouldn't
+        // happen, but defensive).
+        if (d_tan2 >= r_k2) continue;
+
+        // Epanechnikov kernel weight with adaptive radius
+        float w = 1.0f - d_tan2 / r_k2;
+
+        // Re-read wi for BSDF evaluation (L1-cached from Phase 1)
+        float3 wi_world = make_f3(
+            params.photon_wi_x[idx],
+            params.photon_wi_y[idx],
+            params.photon_wi_z[idx]);
+        float3 wi_local = frame.world_to_local(wi_world);
+
+        Spectrum f = bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
+
+        // Route to budget based on tag
+        uint8_t tag = dual_budget ? params.photon_is_caustic_pass[idx] : 0;
+        float   my_norm  = (tag == 2) ? norm_caustic : norm_global;
+        Spectrum& L_target = (tag == 2) ? L_caustic : L_global;
+
+        int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
+        for (int h = 0; h < n_hero; ++h) {
+            float p_flux = params.photon_flux[idx * HERO_WAVELENGTHS + h];
+            int bin = (int)params.photon_lambda[idx * HERO_WAVELENGTHS + h];
+            if (bin >= 0 && bin < NUM_LAMBDA)
+                L_target.value[bin] += f.value[bin] * p_flux * w * inv_area_knn * my_norm;
+        }
+    }
+
+    // Additive combination: global map (non-caustic + global caustic,
+    // each normalised by 1/N_global) plus the dedicated targeted caustic
+    // map (tag=2, normalised by 1/N_caustic).  Global caustic photons
+    // contribute to L_global with their correct 1/N_global weight rather
+    // than being discarded.
+    if (dual_budget) {
+        for (int lam = 0; lam < NUM_LAMBDA; ++lam)
+            L.value[lam] = L_global.value[lam] + L_caustic.value[lam];
+    } else {
+        L = L_global;
+    }
+    return L;
+}
+
+// NOTE: CDF binary search lives in core/cdf.h (host+device).
+
+// == Sample triangle barycentric (device) =============================
+__forceinline__ __device__
+float3 sample_triangle_dev(float u1, float u2) {
+    float su = sqrtf(u1);
+    float alpha = 1.f - su;
+    float beta  = u2 * su;
+    float gamma = 1.f - alpha - beta;
+    return make_f3(alpha, beta, gamma);
+}
+
+// NOTE: CDF binary search lives in core/cdf.h (host+device).
+
+// NeeResult: returned by all NEE variants
+struct NeeResult {
+    Spectrum L;                // direct lighting contribution
+    float    visibility;       // fraction of unoccluded shadow samples [0,1]
+};
+
+// =====================================================================
+// dev_nee_evaluate_sample -- shared inner loop for all NEE variants
+//
+// Given a selected emissive triangle (local_idx) and its selection
+// probability (p_tri), samples a point on the triangle, casts a shadow
+// ray, evaluates emission × BSDF × MIS, and returns the single-sample
+// contribution.  Each NEE variant only needs to implement its own
+// emitter selection strategy and PDF computation, then call this helper.
+// =====================================================================
+struct NeeSampleResult {
+    Spectrum L;       // MIS-weighted contribution (zero if occluded/backfacing)
+    bool     visible; // shadow ray unoccluded?
+};
+
+__forceinline__ __device__
+NeeSampleResult dev_nee_evaluate_sample(
+    int local_idx, float p_tri,
+    float3 pos, float3 normal, float3 wo_local,
+    uint32_t mat_id, const ONB& frame, float2 uv, PCGRng& rng)
+{
+    NeeSampleResult r;
+    r.L = Spectrum::zero();
+    r.visible = false;
+
+    uint32_t light_tri = params.emissive_tri_indices[local_idx];
+
+    // Sample uniform point on triangle
+    float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+    float3 lv0 = params.vertices[light_tri * 3 + 0];
+    float3 lv1 = params.vertices[light_tri * 3 + 1];
+    float3 lv2 = params.vertices[light_tri * 3 + 2];
+    float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
+
+    float3 le1 = lv1 - lv0;
+    float3 le2 = lv2 - lv0;
+    float3 light_normal = normalize(cross(le1, le2));
+    float  light_area   = length(cross(le1, le2)) * 0.5f;
+
+    // Direction, distance, cosines
+    float3 to_light = light_pos - pos;
+    float dist2 = dot(to_light, to_light);
+    float dist  = sqrtf(dist2);
+    float3 wi   = to_light * (1.f / dist);
+
+    float cos_x = dot(wi, normal);
+    float cos_y = -dot(wi, light_normal);
+    if (cos_x <= 0.f || cos_y <= 0.f) return r;
+
+    // Shadow ray
+    if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, dist))
+        return r;
+    r.visible = true;
+
+    if (p_tri <= 0.f) return r;
+
+    // Emission and BSDF
+    uint32_t light_mat = params.material_ids[light_tri];
+    float2 luv0 = params.texcoords[light_tri * 3 + 0];
+    float2 luv1 = params.texcoords[light_tri * 3 + 1];
+    float2 luv2 = params.texcoords[light_tri * 3 + 2];
+    float2 light_uv = make_float2(
+        luv0.x * bary.x + luv1.x * bary.y + luv2.x * bary.z,
+        luv0.y * bary.x + luv1.y * bary.y + luv2.y * bary.z);
+    Spectrum Le = dev_get_Le(light_mat, light_uv);
+
+    float3 wi_local = frame.world_to_local(wi);
+    Spectrum f = bsdf_evaluate(mat_id, wo_local, wi_local, uv);
+
+    // PDF conversion: area → solid angle (shared helper)
+    float p_wi = nee_pdf_area_to_solid_angle(p_tri, 1.f / light_area, dist2, cos_y);
+
+    // MIS vs BSDF sampling
+    float w_mis = 1.0f;
+    if (DEFAULT_USE_MIS) {
+        float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
+        w_mis = mis_weight_2(p_wi, pdf_bsdf);
+    }
+
+    // MIS-weighted: f * Le * cos_x / p_wi
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        r.L.value[i] = w_mis * f.value[i] * Le.value[i]
+                      * cos_x / fmaxf(p_wi, 1e-8f);
+    return r;
+}

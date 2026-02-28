@@ -6,9 +6,9 @@
 #include <vector>
 
 #include "core/types.h"
-#include "core/cdf.h"
-#include "core/nee_sampling.h"
-#include "core/guided_nee.h"
+#include "core/random.h"
+#include "renderer/nee_shared.h"
+#include "photon/photon_bins.h"
 
 // ---------------------------------------------------------------------
 // CDF sampling (binary_search_cdf)
@@ -97,52 +97,4 @@ TEST(PhotonBins, DirsInitClampsToMax) {
     EXPECT_EQ(dirs.count, MAX_PHOTON_BIN_COUNT);
 }
 
-TEST(GuidedNEE, FallbackConditions) {
-    EXPECT_TRUE(guided_nee_should_fallback(0, 128, 1.0f));
-    EXPECT_TRUE(guided_nee_should_fallback(129, 128, 1.0f));
-    EXPECT_TRUE(guided_nee_should_fallback(1, 128, 0.0f));
-    EXPECT_TRUE(guided_nee_should_fallback(1, 128, -1.0f));
-    EXPECT_FALSE(guided_nee_should_fallback(1, 128, 0.001f));
-}
 
-TEST(GuidedNEE, BinBoostIsNormalizedAndHemisphereGated) {
-    constexpr int N = 4;
-
-    PhotonBinDirs dirs;
-    dirs.init(N);
-
-    PhotonBin bins[N] = {};
-    bins[0].scalar_flux = 10.0f;
-    bins[1].scalar_flux = 0.0f;
-    bins[2].scalar_flux = 5.0f;
-    bins[3].scalar_flux = 5.0f;
-
-    float total = 0.0f;
-    for (int i = 0; i < N; ++i) total += bins[i].scalar_flux;
-    ASSERT_GT(total, 0.0f);
-
-    // Positive hemisphere: normal aligned with wi.
-    float3 wi = dirs.dirs[0];
-    float3 n  = wi;
-    float boost = guided_nee_bin_boost(wi, n, bins, N, dirs, total);
-    EXPECT_NEAR(boost, bins[0].scalar_flux / total, 1e-6f);
-
-    // Negative hemisphere: no boost.
-    float3 n_back = -wi;
-    float boost_back = guided_nee_bin_boost(wi, n_back, bins, N, dirs, total);
-    EXPECT_NEAR(boost_back, 0.0f, 1e-6f);
-
-    // Total flux zero => no boost.
-    float boost_zero = guided_nee_bin_boost(wi, n, bins, N, dirs, 0.0f);
-    EXPECT_NEAR(boost_zero, 0.0f, 1e-6f);
-}
-
-TEST(GuidedNEE, WeightFormulaMatchesSpec) {
-    float p = 0.25f;
-    float boost = 1.0f;
-    float alpha = 5.0f;
-    EXPECT_NEAR(guided_nee_weight(p, boost, alpha), 1.5f, 1e-6f);
-
-    EXPECT_NEAR(guided_nee_weight(0.0f, 1.0f, 5.0f), 0.0f, 1e-6f);
-    EXPECT_NEAR(guided_nee_weight(0.25f, 0.0f, 5.0f), 0.25f, 1e-6f);
-}

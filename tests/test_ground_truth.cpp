@@ -19,17 +19,14 @@
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "core/random.h"
-#include "core/photon_bins.h"
-#include "core/cdf.h"
-#include "core/nee_sampling.h"
-#include "core/guided_nee.h"
-#include "core/test_data_io.h"
+#include "photon/photon_bins.h"
+#include "renderer/nee_shared.h"
+#include "tests/test_data_io.h"
 #include "scene/scene.h"
 #include "scene/obj_loader.h"
 #include "renderer/renderer.h"
 #include "renderer/camera.h"
 #include "renderer/direct_light.h"
-#include "renderer/mis.h"
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/density_estimator.h"
@@ -45,6 +42,19 @@
 #include <chrono>
 #include <filesystem>
 #include <string>
+
+// Inlined from deleted core/guided_nee.h
+static inline float guided_nee_bin_boost(float3 wi, float3 normal,
+                                         const PhotonBin* bins, int N,
+                                         const PhotonBinDirs& dirs, float total_flux) {
+    (void)N;
+    if (total_flux <= 0.f || dot(wi, normal) <= 0.f) return 0.f;
+    int idx = dirs.find_nearest(wi);
+    return bins[idx].scalar_flux / total_flux;
+}
+static inline float guided_nee_weight(float p, float boost, float alpha) {
+    return p * (1.f + alpha * boost);
+}
 
 namespace fs = std::filesystem;
 

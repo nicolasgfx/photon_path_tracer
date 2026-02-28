@@ -71,36 +71,6 @@ void Renderer::build_photon_maps() {
     float cache_cell_size = config_.gather_radius * 2.0f;
     cell_cache_.build(global_photons_, caustic_photons_,
                       cache_cell_size, config_.gather_radius);
-
-    // §10c: Adaptive caustic shooting — trace extra photons toward
-    // caustic hotspot cells with high flux variance
-    if (caustic_photons_.size() > 0) {
-        EmitterConfig caustic_cfg;
-        caustic_cfg.num_photons    = config_.num_photons;
-        caustic_cfg.max_bounces    = config_.max_bounces;
-        caustic_cfg.rr_threshold   = config_.rr_threshold;
-        caustic_cfg.min_bounces_rr = config_.min_bounces_rr;
-        caustic_cfg.volume_enabled = false;
-
-        size_t before = caustic_photons_.size();
-        trace_targeted_caustic_photons(*scene_, caustic_cfg,
-                                       cell_cache_, caustic_photons_);
-
-        // Rebuild caustic grid if new photons were added
-        if (caustic_photons_.size() > before) {
-            if (config_.use_kdtree) {
-                caustic_kdtree_.build(caustic_photons_);
-            }
-            caustic_grid_.build(caustic_photons_, config_.caustic_radius);
-            std::cout << "[Grid] Caustic hash grid rebuilt ("
-                      << caustic_grid_.table_size << " buckets, "
-                      << caustic_photons_.size() << " photons)\n";
-
-            // Rebuild cell cache with the augmented maps
-            cell_cache_.build(global_photons_, caustic_photons_,
-                              cache_cell_size, config_.gather_radius);
-        }
-    }
 }
 
 // ── k-NN density estimate via KD-tree (§6.3 tangential kernel) ──────

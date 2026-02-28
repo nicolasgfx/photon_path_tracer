@@ -7,8 +7,7 @@
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "core/alias_table.h"
-#include "core/medium.h"
-#include "core/emitter_points.h"
+#include "volume/medium.h"
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -60,9 +59,6 @@ struct Scene {
     AliasTable             emissive_area_alias_table;  // area-weighted (§7.2.1)
     float                  total_emissive_power = 0.f;
     float                  total_emissive_area  = 0.f;
-
-    // Precomputed emitter representative points
-    EmitterPointSet        emitter_points;
 
     AABB                   scene_bounds;
 

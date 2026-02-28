@@ -56,13 +56,8 @@ inline HD float nee_mixture_pdf(
          +        coverage_fraction  * p_area;
 }
 
-// ── Balance heuristic MIS weight (2-way) ────────────────────────────
-// w_a = p_a² / (p_a² + p_b²)
-inline HD float nee_mis_weight_2(float pdf_a, float pdf_b) {
-    float a2 = pdf_a * pdf_a;
-    float b2 = pdf_b * pdf_b;
-    return a2 / fmaxf(a2 + b2, 1e-30f);
-}
+// ── Balance heuristic MIS weight (2-way) — use mis_weight_2() from
+// bsdf/bsdf_shared.h for the shared HD version.
 
 // ── Balance heuristic MIS weight (3-way) ────────────────────────────
 inline HD float nee_mis_weight_3(float pdf_a, float pdf_b, float pdf_c) {
@@ -111,4 +106,14 @@ inline HD float3 nee_shadow_ray_origin(float3 hit_pos, float3 hit_normal) {
 
 inline HD float nee_shadow_ray_tmax(float distance) {
     return distance - 2.f * NEE_RAY_EPSILON;
+}
+
+// ── NEE sample-count policy ─────────────────────────────────────────
+// Matches the device-side behavior:
+//   - bounce 0 uses nee_light_samples
+//   - bounce >=1 uses nee_deep_samples
+//   - clamps to at least 1
+inline HD int nee_shadow_sample_count(int bounce, int nee_light_samples, int nee_deep_samples) {
+    const int cfg = (bounce == 0) ? nee_light_samples : nee_deep_samples;
+    return (cfg > 0) ? cfg : 1;
 }

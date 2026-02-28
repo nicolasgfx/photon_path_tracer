@@ -50,16 +50,16 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/density_estimator.h"
-#include "renderer/mis.h"
+#include "renderer/nee_shared.h"
 #include "renderer/camera.h"
 #include "renderer/renderer.h"
 #include "renderer/direct_light.h"
 #include "scene/scene.h"
 #include "scene/obj_loader.h"
 #include "photon/emitter.h"
-#include "core/photon_bins.h"
-#include "core/cell_bin_grid.h"
-#include "core/sppm.h"
+#include "photon/photon_bins.h"
+#include "photon/cell_bin_grid.h"
+#include "renderer/sppm.h"
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -598,9 +598,9 @@ TEST(MIS, PowerHeuristic3_SumsToOne) {
 }
 
 TEST(MIS, MISWeight3_Consistent) {
-    // mis.h versions should match random.h versions
+    // nee_shared.h versions should match random.h versions
     float pa = 2.f, pb = 3.f, pc = 5.f;
-    float w1 = mis_weight_3(pa, pb, pc);
+    float w1 = nee_mis_weight_3(pa, pb, pc);
     float w2 = power_heuristic_3(pa, pb, pc);
     EXPECT_NEAR(w1, w2, kTol);
 }
@@ -1772,7 +1772,7 @@ TEST(DensityEstimator, SameCellDifferentFacingRejected) {
 }
 
 // =====================================================================
-//  SECTION 17 - MIS weight functions from mis.h
+//  SECTION 17 - MIS weight functions from nee_shared.h
 // =====================================================================
 
 TEST(MISWeights, MISWeight2_NonNegative) {
@@ -1792,7 +1792,7 @@ TEST(MISWeights, MISWeight3_NonNegative) {
         float pa = rng.next_float() * 10.f;
         float pb = rng.next_float() * 10.f;
         float pc = rng.next_float() * 10.f;
-        float w = mis_weight_3(pa, pb, pc);
+        float w = nee_mis_weight_3(pa, pb, pc);
         EXPECT_GE(w, 0.f);
         EXPECT_LE(w, 1.f + kTol);
     }
@@ -2489,42 +2489,6 @@ TEST(Sampling, CosineHemispherePDFIntegration) {
     }
     integral /= N;
     EXPECT_NEAR(integral, 1.0, 0.02) << "Cosine hemisphere PDF should integrate to 1";
-}
-
-// =====================================================================
-//  SECTION 34 - MIS combined estimator
-// =====================================================================
-
-TEST(MIS, MISLightSampleContribution) {
-    Spectrum Li = Spectrum::constant(10.f);
-    Spectrum f_bsdf = Spectrum::constant(0.5f / PI);
-    float cos_theta = 0.8f;
-    float pdf_light = 2.0f;
-    float pdf_bsdf = 0.5f;
-
-    MISContribution c = mis_light_sample(Li, f_bsdf, cos_theta, pdf_light, pdf_bsdf, 0.f);
-
-    // Weight should be > 0.5 since light pdf dominates
-    EXPECT_GT(c.weight, 0.5f);
-    // Radiance should be non-negative
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        EXPECT_GE(c.radiance[i], 0.f);
-    }
-}
-
-TEST(MIS, MISBSDFSampleContribution) {
-    Spectrum Le = Spectrum::constant(5.f);
-    Spectrum f_bsdf = Spectrum::constant(0.3f / PI);
-    float cos_theta = 0.6f;
-    float pdf_bsdf = 1.5f;
-    float pdf_light = 0.1f;
-
-    MISContribution c = mis_bsdf_sample(Le, f_bsdf, cos_theta, pdf_bsdf, pdf_light, 0.f);
-
-    EXPECT_GT(c.weight, 0.5f); // BSDF dominates
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        EXPECT_GE(c.radiance[i], 0.f);
-    }
 }
 
 // =====================================================================

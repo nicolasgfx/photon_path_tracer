@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────
 #include "scene/obj_loader.h"
 #include "core/spectrum.h"
-#include "core/medium.h"
+#include "volume/medium.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"

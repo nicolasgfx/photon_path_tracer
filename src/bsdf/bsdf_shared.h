@@ -28,14 +28,14 @@ inline HD float bsdf_f0_from_ior(float ior) {
 }
 
 // ── Schlick Fresnel (shared) ────────────────────────────────────────
-inline HD float bsdf_fresnel_schlick(float cos_theta, float f0) {
+inline HD float fresnel_schlick(float cos_theta, float f0) {
     float t = 1.f - cos_theta;
     float t2 = t * t;
     return f0 + (1.f - f0) * t2 * t2 * t;
 }
 
 // ── Exact dielectric Fresnel (shared) ───────────────────────────────
-inline HD float bsdf_fresnel_dielectric(float cos_i, float eta) {
+inline HD float fresnel_dielectric(float cos_i, float eta) {
     float sin2_t = eta * eta * (1.f - cos_i * cos_i);
     if (sin2_t >= 1.f) return 1.f; // Total internal reflection
     float cos_t = sqrtf(fmaxf(0.f, 1.f - sin2_t));
@@ -94,23 +94,74 @@ inline HD LobeProbabilities bsdf_dielectric_lobe_probs(
     return bsdf_lobe_probabilities(Ks.max_component() * F0, Kd.max_component());
 }
 
-// ── GGX NDF (shared) ────────────────────────────────────────────────
-inline HD float bsdf_ggx_D(float NdotH, float alpha) {
+// ── GGX NDF (shared, float3 local-frame half-vector) ────────────────
+inline HD float ggx_D(float3 h, float alpha) {
+    float NdotH = h.z; // In local frame, N = (0,0,1)
     if (NdotH <= 0.f) return 0.f;
     float a2 = alpha * alpha;
     float d  = NdotH * NdotH * (a2 - 1.f) + 1.f;
     return a2 / (PI * d * d);
 }
 
-// ── GGX Smith G1 (shared) ──────────────────────────────────────────
-inline HD float bsdf_ggx_G1(float NdotV, float alpha) {
+// ── GGX Smith G1 (shared, float3 local-frame direction) ─────────────
+inline HD float ggx_G1(float3 v, float alpha) {
+    float NdotV = fabsf(v.z);
     float a2 = alpha * alpha;
     return 2.f * NdotV / (NdotV + sqrtf(a2 + (1.f - a2) * NdotV * NdotV));
 }
 
 // ── GGX Smith G (shared) ───────────────────────────────────────────
-inline HD float bsdf_ggx_G(float NdotWo, float NdotWi, float alpha) {
-    return bsdf_ggx_G1(NdotWo, alpha) * bsdf_ggx_G1(NdotWi, alpha);
+inline HD float ggx_G(float3 wo, float3 wi, float alpha) {
+    return ggx_G1(wo, alpha) * ggx_G1(wi, alpha);
+}
+
+// ── GGX Visible Normal Distribution sampling (VNDF) ─────────────────
+inline HD float3 ggx_sample_halfvector(float3 wo, float alpha, float u1, float u2) {
+    // Stretch
+    float3 wh = normalize(make_f3(alpha * wo.x, alpha * wo.y, wo.z));
+
+    // Orthonormal basis
+    float3 t1 = (wh.z < 0.9999f) ? normalize(cross(make_f3(0,0,1), wh))
+                                   : make_f3(1,0,0);
+    float3 t2 = cross(wh, t1);
+
+    // Uniform disk sample
+    float r   = sqrtf(u1);
+    float phi = TWO_PI * u2;
+    float p1  = r * cosf(phi);
+    float p2  = r * sinf(phi);
+    float s   = 0.5f * (1.f + wh.z);
+    p2 = (1.f - s) * sqrtf(fmaxf(0.f, 1.f - p1*p1)) + s * p2;
+
+    // Project onto hemisphere
+    float3 nh = t1 * p1 + t2 * p2 + wh * sqrtf(fmaxf(0.f, 1.f - p1*p1 - p2*p2));
+
+    // Unstretch
+    return normalize(make_f3(alpha * nh.x, alpha * nh.y, fmaxf(0.f, nh.z)));
+}
+
+// ── Reflect / Refract (local shading frame) ─────────────────────────
+
+inline HD float3 reflect_local(float3 wo) {
+    return make_f3(-wo.x, -wo.y, wo.z);
+}
+
+inline HD bool refract_local(float3 wo, float eta, float3& wt) {
+    float cos_i = wo.z;
+    float sin2_i = fmaxf(0.f, 1.f - cos_i * cos_i);
+    float sin2_t = eta * eta * sin2_i;
+    if (sin2_t >= 1.f) return false;
+
+    float cos_t = sqrtf(1.f - sin2_t);
+    wt = make_f3(-eta * wo.x, -eta * wo.y, -cos_t);
+    return true;
+}
+
+// ── MIS weight (2-way power heuristic) ──────────────────────────────
+inline HD float mis_weight_2(float pdf_a, float pdf_b) {
+    float a2 = pdf_a * pdf_a;
+    float b2 = pdf_b * pdf_b;
+    return a2 / fmaxf(a2 + b2, 1e-30f);
 }
 
 // ── Combined PDF for mixture sampling ───────────────────────────────

@@ -3,14 +3,11 @@
 // light_cache.h – Per-cell directional-coverage shadow ray cache (§7.2.2)
 // ─────────────────────────────────────────────────────────────────────
 // For each spatial cell, we precompute a set of shadow ray targets
-// (precomputed emitter points) that provide optimal angular coverage
-// of the unit hemisphere as seen from the cell centre.  At render time,
-// NEE traces one shadow ray to each cached target — no random selection,
-// no importance weighting.  The number of shadow rays varies per cell
-// (coverage-driven, not capped at a fixed K).
-//
-// Input: EmitterPointSet (emitter_points.h) — deduplicated representative
-// points on all emissive surfaces.
+// that provide optimal angular coverage of the unit hemisphere as seen
+// from the cell centre.  At render time, NEE traces one shadow ray to
+// each cached target — no random selection, no importance weighting.
+// The number of shadow rays varies per cell (coverage-driven, not
+// capped at a fixed K).
 //
 // Algorithm per cell (CPU preprocessing):
 //   1. Compute direction from cell centre to every emitter point.
@@ -18,11 +15,13 @@
 //   3. Greedy set-cover: accept the point that fills the most empty bins.
 //      Stop when no more empty bins can be covered.
 //   4. Store the variable-length list of accepted point indices.
+#include "core/types.h"
+#include "core/hash.h"
 //
 // Memory layout (variable-length):
 //   cell_offset[TABLE_SIZE]    — start index into flat point_indices[]
 //   cell_count[TABLE_SIZE]     — number of entries for this cell
-//   point_indices[total]       — indices into EmitterPointSet::points[]
+//   point_indices[total]       — indices into shadow ray targets
 //
 // The old fixed-stride CellLightEntry is retained for backward compat
 // (GPU struct field alignment) but the importance field is set to 1.0.
@@ -31,7 +30,6 @@
 #include "core/config.h"
 
 #ifndef __CUDACC__
-#include "core/emitter_points.h"
 #include "photon/photon.h"
 #include <vector>
 #include <algorithm>
@@ -125,10 +123,7 @@ struct LightCache {
 
     // ── Spatial hash (same algorithm as HashGrid, different table size) ──
     static HD uint32_t cache_cell_key(int3 cell) {
-        uint32_t h = (uint32_t)(cell.x * 73856093u)
-                   ^ (uint32_t)(cell.y * 19349663u)
-                   ^ (uint32_t)(cell.z * 83492791u);
-        return h % LIGHT_CACHE_TABLE_SIZE;
+        return teschner_hash(cell, LIGHT_CACHE_TABLE_SIZE);
     }
 
     HD int3 cell_coord(float3 pos) const {
@@ -166,200 +161,7 @@ struct LightCache {
         return bj * B + bi;
     }
 
-    // ── Build from EmitterPointSet using hemisphere coverage ────────
-    //
-    // For each occupied cell, compute directions to all emitter points,
-    // then greedily select points that provide maximum angular coverage
-    // of the unit sphere (full sphere, not just hemisphere — emitters
-    // can be below the cell centre).
-    //
-    // The cell_size is still needed for spatial hashing — we use the
-    // photon hash grid's cell_size for consistency.
-    void build_from_emitter_points(
-        const EmitterPointSet& emitter_pts,
-        const PhotonSoA& photons,
-        float grid_cell_size)
-    {
-        auto t_start = std::chrono::high_resolution_clock::now();
-
-        cell_size = grid_cell_size;
-
-        // ── Phase 0: Determine which cells are occupied ─────────────
-        // We only process cells that actually contain photon deposits.
-        // This keeps the computation bounded even with 64K hash buckets.
-
-        // Collect unique cell keys from photon positions
-        std::vector<bool> cell_occupied(LIGHT_CACHE_TABLE_SIZE, false);
-        std::vector<float3> cell_center_accum(LIGHT_CACHE_TABLE_SIZE, make_f3(0, 0, 0));
-        std::vector<int> cell_photon_count(LIGHT_CACHE_TABLE_SIZE, 0);
-
-        const size_t n_photons = photons.size();
-        for (size_t i = 0; i < n_photons; ++i) {
-            float3 pos = make_f3(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
-            int3 cc = cell_coord(pos);
-            uint32_t key = cache_cell_key(cc);
-            cell_occupied[key] = true;
-            cell_center_accum[key] = cell_center_accum[key] + pos;
-            cell_photon_count[key]++;
-        }
-
-        // Compute approximate cell centres (centroid of photons in cell)
-        std::vector<float3> cell_centers(LIGHT_CACHE_TABLE_SIZE);
-        for (uint32_t k = 0; k < LIGHT_CACHE_TABLE_SIZE; ++k) {
-            if (cell_photon_count[k] > 0) {
-                float inv = 1.0f / (float)cell_photon_count[k];
-                cell_centers[k] = cell_center_accum[k] * inv;
-            }
-        }
-
-        // ── Phase 1: Per-cell hemisphere coverage ───────────────────
-        // Allocate legacy fixed-stride storage
-        entries.resize((size_t)LIGHT_CACHE_TABLE_SIZE * NEE_CELL_TOP_K);
-        count.resize(LIGHT_CACHE_TABLE_SIZE, 0);
-        total_importance.resize(LIGHT_CACHE_TABLE_SIZE, 0.f);
-        for (auto& e : entries) { e.emissive_idx = 0xFFFFu; e.importance = 0.f; }
-
-        // New variable-length storage
-        cell_offset.resize(LIGHT_CACHE_TABLE_SIZE, 0);
-        cell_count.resize(LIGHT_CACHE_TABLE_SIZE, 0);
-
-        if (emitter_pts.empty()) {
-            std::cout << "[LightCache] No emitter points — cache empty\n";
-            return;
-        }
-
-        const int N_pts = (int)emitter_pts.size();
-        const int B = HEMI_COVERAGE_BINS;
-
-        // Per-thread temporary storage for parallelism
-        // First pass: compute per-cell results into thread-local vectors
-        struct CellResult {
-            uint32_t cell_key;
-            std::vector<int> accepted_point_indices;
-        };
-
-        std::vector<uint32_t> occupied_keys;
-        occupied_keys.reserve(LIGHT_CACHE_TABLE_SIZE);
-        for (uint32_t k = 0; k < LIGHT_CACHE_TABLE_SIZE; ++k) {
-            if (cell_occupied[k]) occupied_keys.push_back(k);
-        }
-
-        const int n_occupied = (int)occupied_keys.size();
-        std::vector<CellResult> cell_results(n_occupied);
-
-        #pragma omp parallel for schedule(dynamic, 16)
-        for (int ci = 0; ci < n_occupied; ++ci) {
-            uint32_t key = occupied_keys[ci];
-            float3 center = cell_centers[key];
-
-            // Compute direction + bin for each emitter point
-            struct Candidate {
-                int point_idx;
-                int bin;
-                float dist2;
-            };
-            std::vector<Candidate> candidates;
-            candidates.reserve(N_pts);
-
-            for (int p = 0; p < N_pts; ++p) {
-                float3 dir = emitter_pts.points[p].position - center;
-                float d2 = dot(dir, dir);
-                if (d2 < 1e-12f) continue;
-
-                float inv_d = 1.0f / sqrtf(d2);
-                float3 d_norm = dir * inv_d;
-
-                int bin = hemi_bin(d_norm, B);
-                candidates.push_back({p, bin, d2});
-            }
-
-            // Sort candidates by distance (closer points preferred for coverage)
-            std::sort(candidates.begin(), candidates.end(),
-                [](const Candidate& a, const Candidate& b) {
-                    return a.dist2 < b.dist2;
-                });
-
-            // Greedy hemisphere coverage
-            // Track which bins are covered (full sphere via B×B grid)
-            std::vector<bool> covered(HEMI_TOTAL_BINS, false);
-            int covered_count = 0;
-
-            CellResult& result = cell_results[ci];
-            result.cell_key = key;
-
-            for (const auto& cand : candidates) {
-                if ((int)result.accepted_point_indices.size() >= MAX_SHADOW_TARGETS_PER_CELL)
-                    break;
-
-                if (!covered[cand.bin]) {
-                    // This point covers a new direction — accept it
-                    covered[cand.bin] = true;
-                    ++covered_count;
-                    result.accepted_point_indices.push_back(cand.point_idx);
-                }
-            }
-        }
-
-        // ── Phase 2: Flatten results into variable-length arrays ────
-        // Count total shadow targets across all cells
-        size_t total_targets = 0;
-        for (const auto& cr : cell_results) {
-            total_targets += cr.accepted_point_indices.size();
-        }
-
-        shadow_targets.resize(total_targets);
-        size_t write_pos = 0;
-
-        int max_per_cell = 0;
-        int min_per_cell = N_pts;
-        float avg_per_cell = 0;
-
-        for (const auto& cr : cell_results) {
-            int nc = (int)cr.accepted_point_indices.size();
-            cell_offset[cr.cell_key] = (int)write_pos;
-            cell_count[cr.cell_key] = nc;
-
-            for (int j = 0; j < nc; ++j) {
-                int pi = cr.accepted_point_indices[j];
-                const EmitterPoint& ep = emitter_pts.points[pi];
-                ShadowRayTarget& st = shadow_targets[write_pos + j];
-                st.position = ep.position;
-                st.normal = ep.normal;
-                st.emissive_local_idx = ep.emissive_local_idx;
-                st.global_tri_idx = ep.global_tri_idx;
-            }
-
-            // Also populate legacy fixed-stride entries (for GPU compat)
-            int legacy_nc = (std::min)(nc, NEE_CELL_TOP_K);
-            for (int j = 0; j < legacy_nc; ++j) {
-                int pi = cr.accepted_point_indices[j];
-                entries[(size_t)cr.cell_key * NEE_CELL_TOP_K + j].emissive_idx =
-                    emitter_pts.points[pi].emissive_local_idx;
-                entries[(size_t)cr.cell_key * NEE_CELL_TOP_K + j].importance = 1.0f;
-            }
-            count[cr.cell_key] = legacy_nc;
-            total_importance[cr.cell_key] = (float)legacy_nc;
-
-            write_pos += nc;
-            max_per_cell = (std::max)(max_per_cell, nc);
-            if (nc > 0) min_per_cell = (std::min)(min_per_cell, nc);
-            avg_per_cell += nc;
-        }
-
-        if (n_occupied > 0) avg_per_cell /= n_occupied;
-        if (min_per_cell == N_pts) min_per_cell = 0;
-
-        auto t_end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-
-        std::printf("[LightCache] Hemisphere coverage: %d cells  %zu total targets  "
-                    "per-cell: min=%d avg=%.1f max=%d  bins=%dx%d  %.1f ms\n",
-                    n_occupied, total_targets,
-                    min_per_cell, avg_per_cell, max_per_cell,
-                    B, B, ms);
-    }
-
-    // ── Legacy build from photon flux (kept for fallback / tests) ───
+    // ── Build from photon flux ──────────────────────────────────────
     void build(const PhotonSoA& photons, float grid_cell_size) {
         auto t_start = std::chrono::high_resolution_clock::now();
 

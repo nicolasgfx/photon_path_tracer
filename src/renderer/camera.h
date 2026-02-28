@@ -6,6 +6,63 @@
 #include "core/config.h"
 #include "core/random.h"
 
+// ─────────────────────────────────────────────────────────────────────
+// generate_camera_ray – Unified HD camera ray generation
+// ─────────────────────────────────────────────────────────────────────
+// Supports sub-pixel jitter, optional stratification, focus-range
+// jitter, and thin-lens DOF (Shirley concentric disk).
+//
+// sample_index < 0 → simple random jitter (SPPM / debug / CPU preview).
+// sample_index >= 0 → stratified sub-pixel when is_final_render.
+// ─────────────────────────────────────────────────────────────────────
+inline HD Ray generate_camera_ray(
+    int px, int py, PCGRng& rng,
+    int img_width, int img_height,
+    float3 lower_left, float3 horizontal, float3 vertical,
+    float3 cam_pos, float3 cam_u, float3 cam_v,
+    float lens_radius, float focus_dist, float focus_range,
+    int sample_index = -1, bool is_final_render = false)
+{
+    // Sub-pixel jitter (optionally stratified)
+    float jx, jy;
+    if (sample_index >= 0 && is_final_render
+        && STRATA_X > 1 && STRATA_Y > 1) {
+        int stratum_x = sample_index % STRATA_X;
+        int stratum_y = (sample_index / STRATA_X) % STRATA_Y;
+        jx = ((float)stratum_x + rng.next_float()) / (float)STRATA_X;
+        jy = ((float)stratum_y + rng.next_float()) / (float)STRATA_Y;
+    } else {
+        jx = rng.next_float();
+        jy = rng.next_float();
+    }
+
+    float s = ((float)px + jx) / (float)img_width;
+    float t = ((float)py + jy) / (float)img_height;
+
+    float3 focus_target = lower_left + horizontal * s + vertical * t;
+
+    // Focus-range jitter
+    if (focus_range > 0.f && focus_dist > 0.f) {
+        float range_jitter = (rng.next_float() - 0.5f) * focus_range;
+        float jittered_dist = fmaxf(focus_dist + range_jitter, 1e-4f);
+        float scale = jittered_dist / focus_dist;
+        focus_target = cam_pos + (focus_target - cam_pos) * scale;
+    }
+
+    // Thin-lens DOF (Shirley concentric disk)
+    Ray ray;
+    if (lens_radius > 0.f) {
+        float2 disk = sample_concentric_disk(rng.next_float(), rng.next_float());
+        float3 lens_offset = (cam_u * disk.x + cam_v * disk.y) * lens_radius;
+        ray.origin    = cam_pos + lens_offset;
+        ray.direction = normalize(focus_target - ray.origin);
+    } else {
+        ray.origin    = cam_pos;
+        ray.direction = normalize(focus_target - cam_pos);
+    }
+    return ray;
+}
+
 struct Camera {
     float3 position;
     float3 look_at;
@@ -61,26 +118,14 @@ struct Camera {
     }
 
     // Generate a ray for pixel (px, py) with jitter for anti-aliasing
-    Ray generate_ray(int px, int py, PCGRng& rng) const {
-        float s = ((float)px + rng.next_float()) / (float)width;
-        float t = ((float)py + rng.next_float()) / (float)height;
-
-        // Focus-plane target (same whether DOF is on or off)
-        float3 target = lower_left + horizontal * s + vertical * t;
-
-        Ray ray;
-        if (lens_radius > 0.f) {
-            // Thin-lens: sample a point on the circular aperture
-            float2 disk = sample_concentric_disk(rng.next_float(), rng.next_float());
-            float3 lens_offset = (u * disk.x + v * disk.y) * lens_radius;
-            ray.origin    = position + lens_offset;
-            ray.direction = normalize(target - ray.origin);
-        } else {
-            // Pinhole (original behaviour)
-            ray.origin    = position;
-            ray.direction = normalize(target - position);
-        }
-        return ray;
+    Ray generate_ray(int px, int py, PCGRng& rng,
+                     int sample_index = -1, bool is_final_render = false) const {
+        return generate_camera_ray(
+            px, py, rng, width, height,
+            lower_left, horizontal, vertical,
+            position, u, v,
+            lens_radius, dof_focus_dist, dof_focus_range,
+            sample_index, is_final_render);
     }
 
     // Default Cornell Box camera

@@ -5,23 +5,15 @@
 #include "core/types.h"
 #include "core/spectrum.h"
 #include "core/config.h"
-#include "core/photon_bins.h"
-#include "core/light_cache.h"
+#include "photon/photon_bins.h"
+#include "renderer/light_cache.h"
 
 #ifdef PPT_USE_OPTIX
 #include <optix.h>
 #endif
 
-// ── Render mode (matches RenderMode in renderer.h) ──────────────────
-// Duplicated as int for device compatibility
-constexpr int RENDER_MODE_FULL          = 0;
-constexpr int RENDER_MODE_DIRECT_ONLY   = 1;
-constexpr int RENDER_MODE_INDIRECT_ONLY = 2;
-constexpr int RENDER_MODE_PHOTON_MAP    = 3;
-constexpr int RENDER_MODE_NORMALS       = 4;
-constexpr int RENDER_MODE_MATERIAL_ID   = 5;
-constexpr int RENDER_MODE_DEPTH         = 6;
-constexpr int RENDER_MODE_COVERAGE      = 7;  // shadow-ray coverage per cell
+// RenderMode enum class is now defined in core/types.h
+// (shared between CPU and GPU — no more duplicated int constants).
 
 // ── GPU texture descriptor (for flat atlas lookup) ──────────────────
 struct GpuTexDesc {
@@ -68,7 +60,7 @@ struct LaunchParams {
     int    max_bounces;
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
     int    frame_number;
-    int    render_mode;          // one of RENDER_MODE_* constants
+    RenderMode render_mode;      // shared enum from core/types.h
     int    is_final_render;      // 0 = debug first-hit, 1 = full path tracing
     int    debug_shadow_rays;    // 1 = debug_first_hit casts shadow rays (NEE PNG)
     int    nee_light_samples;    // M: shadow-ray samples at bounce 0
