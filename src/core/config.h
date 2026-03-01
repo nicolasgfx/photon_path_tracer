@@ -32,8 +32,8 @@
 //#define SCENE_CORNELL_BOX
 //#define SCENE_CORNELL_SPHERE
 //#define SCENE_CORNELL_MIRROR
-#define SCENE_CORNELL_WATER
-//#define SCENE_LIVING_ROOM
+//#define SCENE_CORNELL_WATER
+#define SCENE_LIVING_ROOM
 //#define SCENE_CONFERENCE
 //#define SCENE_SALLE_DE_BAIN
 //#define SCENE_MORI_KNOB
@@ -71,8 +71,8 @@ constexpr int STRATA_Y = 16;
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 2000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.

@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
 #include "photon/photon_analysis.h"   // build_cell_analysis (PA-07/PA-08)
+#include "photon/photon_bins.h"       // PhotonBinDirs, PHOTON_BIN_COUNT
 
 #include <cuda_runtime.h>
 #include <vector>
@@ -226,6 +227,37 @@ void OptixRenderer::upload_photon_data(
 
     // Copy into stored_photons_
     stored_photons_ = global_photons;
+
+    // ── Build CellBinGrid (directional histograms for guided sampling) ──
+    // Same logic as trace_photons(): precompute bin_idx, build 3D grid,
+    // upload to GPU, then build per-cell analysis.
+    {
+        PhotonBinDirs bin_dirs;
+        bin_dirs.init(PHOTON_BIN_COUNT);
+        stored_photons_.bin_idx.resize(stored_photons_.size());
+        for (size_t i = 0; i < stored_photons_.size(); ++i) {
+            float3 wi = make_f3(stored_photons_.wi_x[i],
+                                stored_photons_.wi_y[i],
+                                stored_photons_.wi_z[i]);
+            stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
+        }
+
+        cell_bin_grid_.build(stored_photons_, gather_radius_, PHOTON_BIN_COUNT);
+
+        if (cell_bin_grid_.total_cells() > 0 && !cell_bin_grid_.bins.empty())
+            d_cell_bin_grid_.upload(cell_bin_grid_.bins);
+        else
+            d_cell_bin_grid_.free();
+
+        // Build per-cell photon analysis and upload to GPU
+        float cache_cell_size = gather_radius_ * 2.0f;
+        CellInfoCache cell_cache;
+        PhotonSoA empty_caustic;
+        cell_cache.build(stored_photons_, empty_caustic,
+                         cache_cell_size, gather_radius_);
+        float cell_area = cache_cell_size * cache_cell_size;
+        upload_cell_analysis(cell_cache, cell_bin_grid_, cell_area);
+    }
 }
 
 // =====================================================================

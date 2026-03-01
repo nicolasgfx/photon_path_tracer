@@ -166,6 +166,7 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
     float3 origin    = shadow_origin;
     float3 direction = dir;
     bool on_caustic_path = false;  // becomes true after first specular hit
+    uint8_t path_flags = 0;  // PHOTON_FLAG_* accumulator for F2 debug overlay
     IORStack ior_stack;  // track nested dielectrics across bounces
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
@@ -209,6 +210,8 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
                     params.out_photon_source_emissive[slot] = (uint16_t)local_idx;
                     if (params.out_photon_is_caustic)
                         params.out_photon_is_caustic[slot] = (uint8_t)1;
+                    if (params.out_photon_path_flags)
+                        params.out_photon_path_flags[slot] = path_flags;
                     if (params.out_photon_tri_id)
                         params.out_photon_tri_id[slot] = hit.triangle_id;
                 }
@@ -220,6 +223,18 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
         // Specular/translucent hit: mark caustic path and bounce
         if (dev_is_specular(hit_mat) || dev_is_translucent(hit_mat)) {
             on_caustic_path = true;
+            // Track detailed path flags for F2 debug overlay
+            // Must distinguish Glass/Translucent (glass flags) from Mirror (specular flag).
+            // Matches CPU emitter.h flag logic.
+            if (dev_is_glass(hit_mat) || dev_is_translucent(hit_mat)) {
+                path_flags |= 0x01;  // PHOTON_FLAG_TRAVERSED_GLASS
+                if (bounce == 0)
+                    path_flags |= 0x02;  // PHOTON_FLAG_CAUSTIC_GLASS (direct caustic only)
+                if (dev_has_dispersion(hit_mat))
+                    path_flags |= 0x08;  // PHOTON_FLAG_DISPERSION
+            } else {
+                path_flags |= 0x10;  // PHOTON_FLAG_CAUSTIC_SPECULAR (Mirror only)
+            }
             SpecularBounceResult sb = dev_specular_bounce(
                 direction, hit.position, hit.shading_normal, hit.geo_normal,
                 hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS, &ior_stack,

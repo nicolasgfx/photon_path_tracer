@@ -44,6 +44,7 @@
 #include <cstring>
 #include <cmath>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <cstdio>
 #include <iomanip>
@@ -516,12 +517,6 @@ static void key_callback(GLFWwindow* window, int key,
     if (action != GLFW_PRESS) return;
 
     if (key == GLFW_KEY_ESCAPE) {
-        // ESC during rendering -> cancel the render
-        if (s_app.rendering) {
-            s_app.render_cancel_requested = true;
-            printf("\n[Render] Cancelling...\n");
-            return;
-        }
         // ESC when mouse captured -> release mouse
         if (s_app.mouse_captured) {
             s_app.mouse_captured = false;
@@ -543,56 +538,14 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // "R" -> load render_config.json then start final render
+    // "R" -> save timestamped snapshot (PNG + JSON statistics)
     if (key == GLFW_KEY_R) {
-        // ── Reload render_config.json ────────────────────────────────
-        if (g_active_options && g_active_camera && g_active_optix_renderer) {
-            RuntimeConfigFlags flags;
-            bool loaded = load_runtime_config(
-                "render_config.json",
-                g_active_options->config,
-                *g_active_camera,
-                flags);
-            if (loaded) {
-                std::printf("[Config] render_config.json loaded.\n");
-                if (flags.photon_params_changed || flags.gather_radius_changed) {
-                    std::printf("[Config]   Photon/gather params changed — will retrace photons.\n");
-                    s_app.photon_retrace_requested = true;
-                }
-                if (flags.exposure_changed) {
-                    g_active_optix_renderer->set_exposure(flags.exposure);
-                    std::printf("[Config]   Exposure: %.3f\n", flags.exposure);
-                }
-                if (flags.dof_changed) {
-                    g_active_camera->update();
-                    s_app.camera_moved = true;  // reset accumulation
-                    std::printf("[Config]   DOF params changed.\n");
-                }
-                if (flags.resolution_changed) {
-                    std::printf("[Config]   Resolution/SPP: %dx%d @ %d spp\n",
-                        g_active_options->config.image_width,
-                        g_active_options->config.image_height,
-                        g_active_options->config.samples_per_pixel);
-                }
-            } else {
-                std::printf("[Config] render_config.json not found — using current settings.\n");
-            }
-        }
-        s_app.showing_final = false;
-        s_app.render_requested = true;
-        // Release mouse cursor during render so the camera stays frozen
-        s_app.mouse_was_captured = s_app.mouse_captured;
-        if (s_app.mouse_captured) {
-            s_app.mouse_captured = false;
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            s_app.first_mouse = true;
-        }
+        s_app.snapshot_requested = true;
         return;
     }
 
     // Left-click or M to toggle mouse capture
     if (key == GLFW_KEY_M) {
-        s_app.showing_final = false;
         s_app.mouse_captured = !s_app.mouse_captured;
         glfwSetInputMode(window, GLFW_CURSOR,
             s_app.mouse_captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
@@ -607,7 +560,6 @@ static void key_callback(GLFWwindow* window, int key,
             g_active_optix_renderer->set_volume_enabled(s_app.volume_enabled);
         printf("[Volume] Scattering: %s\n", s_app.volume_enabled ? "ON" : "OFF");
         s_app.camera_moved  = true;  // reset accumulation
-        s_app.showing_final = false;
         return;
     }
 
@@ -618,12 +570,11 @@ static void key_callback(GLFWwindow* window, int key,
             g_active_optix_renderer->set_use_dense_grid(s_app.use_dense_grid);
         printf("[Gather] Dense grid: %s\n", s_app.use_dense_grid ? "ON" : "OFF");
         s_app.camera_moved  = true;  // reset accumulation
-        s_app.showing_final = false;
         return;
     }
 
     // Scene switching – keys 1-9
-    if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9 && !s_app.rendering) {
+    if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
         int idx = key - GLFW_KEY_1;  // 0-8
         if (idx < NUM_SCENE_PROFILES && idx != s_app.active_scene_index) {
             s_app.scene_switch_requested = idx;
@@ -635,13 +586,13 @@ static void key_callback(GLFWwindow* window, int key,
     }
 
     // Light brightness – +/= increase, -/_ decrease
-    if ((key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) && !s_app.rendering) {
+    if ((key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD)) {
         s_app.light_scale = fminf(LIGHT_SCALE_MAX, s_app.light_scale * LIGHT_SCALE_STEP);
         s_app.light_scale_changed = true;
         printf("[Light] Brightness: %.2fx\n", s_app.light_scale);
         return;
     }
-    if ((key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) && !s_app.rendering) {
+    if ((key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT)) {
         s_app.light_scale = fmaxf(LIGHT_SCALE_MIN, s_app.light_scale / LIGHT_SCALE_STEP);
         s_app.light_scale_changed = true;
         printf("[Light] Brightness: %.2fx\n", s_app.light_scale);
@@ -700,16 +651,14 @@ static void key_callback(GLFWwindow* window, int key,
         if (dof_changed) {
             cam.update();
             s_app.camera_moved   = true;
-            s_app.showing_final  = false;
             return;
         }
     }
 
     // P -> retrace photons (rebuild photon map)
-    if (key == GLFW_KEY_P && !s_app.rendering) {
+    if (key == GLFW_KEY_P) {
         s_app.photon_retrace_requested = true;
         s_app.camera_moved  = true;  // reset accumulation
-        s_app.showing_final = false;
         printf("[Photon] Retrace requested (rebuild photon maps)\n");
         return;
     }
@@ -733,8 +682,7 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // Any debug toggle should return to the interactive debug view.
-    s_app.showing_final = false;
+    // Handle debug key toggles
     handle_debug_key(key, s_app.debug);
 
     // Sync GPU-side debug state that lives on the renderer
@@ -769,7 +717,6 @@ static void mouse_button_callback(GLFWwindow* window, int button,
             cam.dof_focus_dist = hit.t;
             cam.update();
             s_app.camera_moved  = true;
-            s_app.showing_final = false;
             printf("[DOF] Auto-focus (cursor): %.4f\n", cam.dof_focus_dist);
         } else {
             printf("[DOF] Auto-focus: no hit\n");
@@ -960,7 +907,6 @@ void run_interactive(
                 s_app.active_cam_speed    = prof.cam_speed;
                 s_app.active_scene_index  = idx;
                 s_app.camera_moved        = true;
-                s_app.showing_final       = false;
                 opt.scene_file            = obj_path;
 
                 // Re-capture original emission for brightness scaling
@@ -983,7 +929,7 @@ void run_interactive(
         }
 
         // ── Photon retrace request (P key) ────────────────────────────
-        if (s_app.photon_retrace_requested && !s_app.rendering) {
+        if (s_app.photon_retrace_requested) {
             s_app.photon_retrace_requested = false;
 
             std::cout << "[Photon] Re-tracing photon maps...\n";
@@ -996,7 +942,6 @@ void run_interactive(
             frame = 0;
             optix_renderer.clear_buffers();
             s_app.camera_moved  = true;
-            s_app.showing_final = false;
         }
 
         // ── Light brightness change (+/- keys) ─────────────────────────
@@ -1028,7 +973,6 @@ void run_interactive(
             std::cout << "[Light] Photon re-trace done in " << photon_ms << " ms\n";
 
             s_app.camera_moved  = true;
-            s_app.showing_final = false;
         }
 
         // Mouse cursor position for hover inspectors.
@@ -1047,7 +991,7 @@ void run_interactive(
 
         // -- Mouse look -------------------------------------------------
         constexpr float kMouseSens = 0.0005f; // radians per pixel
-        if (s_app.mouse_captured && !s_app.rendering) {
+        if (s_app.mouse_captured) {
             double mx, my;
             glfwGetCursorPos(window, &mx, &my);
             if (s_app.first_mouse) {
@@ -1070,8 +1014,7 @@ void run_interactive(
             }
         }
 
-        // -- WASD movement (disabled during rendering) ------------------
-        if (!s_app.rendering)
+        // -- WASD movement -----------------------------------------------
         {
             // Forward direction (camera looks along -w in its frame)
             float3 forward = make_f3(
@@ -1111,436 +1054,157 @@ void run_interactive(
             optix_renderer.clear_buffers();
             frame = 0;
             s_app.camera_moved = false;
-            s_app.showing_final = false;
         }
 
-        // Handle "R" key: start progressive final render (or SPPM)
-        if (s_app.render_requested && !s_app.rendering) {
-            // Freeze camera for the render
-            s_app.render_cam = camera;
-            s_app.render_cam.width  = opt.config.image_width;
-            s_app.render_cam.height = opt.config.image_height;
-            s_app.render_cam.update();
+        // ── Handle "R" key: save timestamped snapshot (PNG + JSON) ───
+        if (s_app.snapshot_requested) {
+            s_app.snapshot_requested = false;
 
-            // ── SPPM render path ────────────────────────────────────
-            if (opt.config.sppm_enabled) {
-                s_app.render_requested = false;
-                s_app.showing_final = true;
+            // Ensure output directory exists
+            fs::create_directories("output");
 
-                std::cout << "\n========================================\n";
-                std::cout << "  SPPM Render (R key)\n";
-                std::cout << "  Camera pos: (" << camera.position.x << ", "
-                          << camera.position.y << ", " << camera.position.z << ")\n";
-                std::cout << "  " << opt.config.image_width << "x"
-                          << opt.config.image_height << " @ "
-                          << opt.config.sppm_iterations << " SPPM iterations, "
-                          << opt.config.num_photons << " photons/iter\n";
-                std::cout << "  Initial radius: " << opt.config.sppm_initial_radius
-                          << "  alpha: " << opt.config.sppm_alpha << "\n";
-                std::cout << "========================================\n";
+            // Build timestamped prefix: output/snapshot_YYYYMMDD_HHMMSS
+            auto now_tp = std::chrono::system_clock::now();
+            std::time_t now_t = std::chrono::system_clock::to_time_t(now_tp);
+            std::tm tm_buf;
+            localtime_s(&tm_buf, &now_t);
+            char ts[64];
+            std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+            std::string prefix = std::string("output/snapshot_") + ts;
 
-                // Build timestamp prefix once so all iteration PNGs sort together.
-                auto sppm_start_tp = std::chrono::system_clock::now();
-                std::time_t sppm_start_t = std::chrono::system_clock::to_time_t(sppm_start_tp);
-                std::tm sppm_tm_buf;
-                localtime_s(&sppm_tm_buf, &sppm_start_t);
-                char sppm_ts[64];
-                std::strftime(sppm_ts, sizeof(sppm_ts), "%Y%m%d_%H%M%S", &sppm_tm_buf);
-                std::string sppm_run_prefix = std::string("output/sppm_") + sppm_ts;
+            // Save PNG
+            std::string png_path = prefix + ".png";
+            optix_renderer.download_framebuffer(display_fb);
+            write_png(png_path, display_fb);
 
-                // Per-iteration callback: save a progress PNG after each full iteration.
-                auto sppm_iter_cb = [&](int iter, const FrameBuffer& iter_fb) {
-                    char iter_str[16];
-                    std::snprintf(iter_str, sizeof(iter_str), "_iter%04d", iter + 1);
-                    write_png(sppm_run_prefix + iter_str + ".png", iter_fb);
-                };
-
-                // Run blocking SPPM render
-                optix_renderer.render_sppm(
-                    s_app.render_cam, opt.config, scene, sppm_iter_cb);
-
-                // Download and save final composite
-                FrameBuffer final_fb;
-                optix_renderer.download_framebuffer(final_fb);
-
-                std::string sppm_path = sppm_run_prefix + "_final.png";
-
-                write_png(sppm_path, final_fb);
-
-                // Update display
-                display_fb = final_fb;
-
-                std::cout << "========================================\n";
-                std::cout << "  Saved: " << sppm_path << "\n";
-                std::cout << "========================================\n\n";
-
-            // ── Normal progressive render path ──────────────────────
-            } else {
-            s_app.rendering = true;
-            s_app.showing_final = false;
-            s_app.render_spp_done  = 0;
-            s_app.render_spp_total = opt.config.samples_per_pixel;
-            s_app.render_start = std::chrono::high_resolution_clock::now();
-
-            // Clean stale progress snapshots from previous runs
-            if constexpr (PROGRESS_SNAPSHOT_ENABLED) {
-                fs::path progress_dir("output/progress");
-                if (fs::exists(progress_dir)) {
-                    std::error_code ec;
-                    for (auto& entry : fs::directory_iterator(progress_dir, ec)) {
-                        if (entry.is_regular_file(ec))
-                            fs::remove(entry.path(), ec);
-                    }
-                }
+            // Save raw (un-denoised) version when denoiser is active
+            std::string raw_path;
+            if (opt.config.denoiser_enabled) {
+                raw_path = prefix + "_raw.png";
+                FrameBuffer raw_fb;
+                optix_renderer.download_raw_framebuffer(raw_fb);
+                write_png(raw_path, raw_fb);
             }
 
-            optix_renderer.resize(opt.config.image_width, opt.config.image_height);
-            optix_renderer.clear_buffers();  // ensure clean accumulation
+            // Gather statistics and write JSON
+            const char* scene_name = (s_app.active_scene_index >= 0
+                && s_app.active_scene_index < NUM_SCENE_PROFILES)
+                ? SCENE_PROFILES[s_app.active_scene_index].display_name
+                : SCENE_DISPLAY_NAME;
+            auto stats = optix_renderer.gather_stats(scene_name);
+
+            std::string json_path = prefix + ".json";
+            {
+                std::ofstream jf(json_path);
+                jf << std::fixed << std::setprecision(6);
+                jf << "{\n";
+                jf << "  \"timestamp\": \"" << ts << "\",\n";
+                jf << "  \"png_file\": \"" << png_path << "\",\n";
+
+                // Image
+                jf << "  \"image\": {\n";
+                jf << "    \"width\": " << stats.image_width << ",\n";
+                jf << "    \"height\": " << stats.image_height << ",\n";
+                jf << "    \"accumulated_spp\": " << stats.accumulated_spp << "\n";
+                jf << "  },\n";
+
+                // Camera
+                jf << "  \"camera\": {\n";
+                jf << "    \"position\": [" << camera.position.x << ", "
+                   << camera.position.y << ", " << camera.position.z << "],\n";
+                jf << "    \"look_at\": [" << camera.look_at.x << ", "
+                   << camera.look_at.y << ", " << camera.look_at.z << "],\n";
+                jf << "    \"fov_deg\": " << camera.fov_deg << ",\n";
+                jf << "    \"yaw\": " << s_app.yaw << ",\n";
+                jf << "    \"pitch\": " << s_app.pitch << "\n";
+                jf << "  },\n";
+
+                // Photon map
+                jf << "  \"photon_map\": {\n";
+                jf << "    \"photons_emitted\": " << stats.photons_emitted << ",\n";
+                jf << "    \"photons_stored\": " << stats.photons_stored << ",\n";
+                jf << "    \"caustic_emitted\": " << stats.caustic_emitted << ",\n";
+                jf << "    \"gather_radius\": " << stats.gather_radius << ",\n";
+                jf << "    \"caustic_radius\": " << stats.caustic_radius << ",\n";
+                jf << "    \"tag_distribution\": {\n";
+                jf << "      \"noncaustic\": " << stats.noncaustic_stored << ",\n";
+                jf << "      \"global_caustic\": " << stats.global_caustic_stored << ",\n";
+                jf << "      \"targeted_caustic\": " << stats.caustic_stored << "\n";
+                jf << "    }\n";
+                jf << "  },\n";
+
+                // Guidance / cell analysis
+                jf << "  \"guidance\": {\n";
+                jf << "    \"cell_analysis_cells\": " << stats.cell_analysis_cells << ",\n";
+                jf << "    \"avg_guide_fraction\": " << stats.avg_guide_fraction << ",\n";
+                jf << "    \"avg_caustic_fraction\": " << stats.avg_caustic_fraction << "\n";
+                jf << "  },\n";
+
+                // Render config
+                jf << "  \"config\": {\n";
+                jf << "    \"max_bounces_camera\": " << stats.max_bounces_camera << ",\n";
+                jf << "    \"max_bounces_photon\": " << stats.max_bounces_photon << ",\n";
+                jf << "    \"min_bounces_rr\": " << stats.min_bounces_rr << ",\n";
+                jf << "    \"rr_threshold\": " << stats.rr_threshold << ",\n";
+                jf << "    \"guide_fraction\": " << stats.guide_fraction << ",\n";
+                jf << "    \"exposure\": " << stats.exposure << ",\n";
+                jf << "    \"denoiser_enabled\": " << (stats.denoiser_enabled ? "true" : "false") << ",\n";
+                jf << "    \"knn_k\": " << stats.knn_k << ",\n";
+                jf << "    \"surface_tau\": " << stats.surface_tau << ",\n";
+                jf << "    \"light_scale\": " << s_app.light_scale << "\n";
+                jf << "  },\n";
+
+                // Scene
+                jf << "  \"scene\": {\n";
+                jf << "    \"name\": \"" << stats.scene_name << "\",\n";
+                jf << "    \"num_triangles\": " << stats.num_triangles << ",\n";
+                jf << "    \"num_emissive_tris\": " << stats.num_emissive_tris << "\n";
+                jf << "  }\n";
+
+                jf << "}\n";
+            }
 
             std::cout << "\n========================================\n";
-            std::cout << "  Progressive Render (R key)\n";
-            std::cout << "  Camera pos: (" << camera.position.x << ", "
-                      << camera.position.y << ", " << camera.position.z << ")\n";
-            std::cout << "  " << opt.config.image_width << "x"
-                      << opt.config.image_height << " @ "
-                      << s_app.render_spp_total << " spp\n";
-            std::cout << "  Output:     " << opt.output_file << "\n";
-            std::cout << "========================================\n";
-
-            // ── Photon-indirect + caustic debug PNGs (early output) ──
-            // Gated by DEBUG_COMPONENT_PNGS in config.h.
-            if constexpr (DEBUG_COMPONENT_PNGS) {
-                auto t_pi_start = std::chrono::high_resolution_clock::now();
-                constexpr int EARLY_DEBUG_SPP = 8;
-
-                // Quick pass for photon indirect
-                std::printf("[Debug] Starting photon-indirect debug pass (%d spp)...\n", EARLY_DEBUG_SPP);
-                std::cout.flush();
-                for (int s = 0; s < EARLY_DEBUG_SPP; ++s) {
-                    std::printf("[Debug] Photon-indirect spp %d/%d\n", s + 1, EARLY_DEBUG_SPP);
-                    std::cout.flush();
-                    optix_renderer.render_one_spp(
-                        s_app.render_cam, s, opt.config.max_bounces);
-                }
-                std::cout << "[Debug] Photon-indirect render done, downloading buffers...\n";
-                std::cout.flush();
-
-                std::vector<float> pi_spec, pi_samp, dummy;
-                optix_renderer.download_component_buffers(dummy, pi_spec, pi_samp);
-                std::cout << "[Debug] Buffers downloaded, converting to PNG...\n";
-                std::cout.flush();
-
-                int cw = opt.config.image_width;
-                int ch = opt.config.image_height;
-
-                // Helper: spectral buffer → sRGB FrameBuffer
-                auto spectral_to_fb = [&](const std::vector<float>& spec_buf,
-                                          const std::vector<float>& sc,
-                                          FrameBuffer& fb) {
-                    fb.resize(cw, ch);
-                    for (int y = 0; y < ch; ++y) {
-                        for (int x = 0; x < cw; ++x) {
-                            int px = y * cw + x;
-                            float n = sc[px];
-                            Spectrum avg = Spectrum::zero();
-                            if (n > 0.f)
-                                for (int k = 0; k < NUM_LAMBDA; ++k)
-                                    avg.value[k] = spec_buf[px * NUM_LAMBDA + k] / n;
-                            float3 rgb = spectrum_to_srgb(avg);
-                            rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
-                            rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
-                            rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
-                            fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
-                            fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
-                            fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
-                            fb.srgb[px * 4 + 3] = 255;
-                        }
-                    }
-                };
-
-                FrameBuffer pi_fb;
-                spectral_to_fb(pi_spec, pi_samp, pi_fb);
-                write_png("output/out_debug_photon_indirect.png", pi_fb);
-                std::cout << "[Debug] Wrote output/out_debug_photon_indirect.png\n";
-                std::cout.flush();
-
-                // Clear buffers before caustic pass
-                std::cout << "[Init] Clearing buffers before caustic pass...\n";
-                std::cout.flush();
-                optix_renderer.clear_buffers();
-                std::cout << "[Init] Buffers cleared.\n";
-                std::cout.flush();
-
-                // Caustic-only pass
-                {
-                    std::cout << "[Debug] Starting caustic debug pass...\n";
-                    std::cout.flush();
-                    std::vector<float> caustic_spec, caustic_samp;
-                    optix_renderer.render_caustic_debug_pass(
-                        s_app.render_cam, opt.config, caustic_spec, caustic_samp);
-                    std::cout << "[Debug] Caustic pass done.\n";
-                    std::cout.flush();
-
-                    if (!caustic_spec.empty()) {
-                        FrameBuffer caustic_fb;
-                        spectral_to_fb(caustic_spec, caustic_samp, caustic_fb);
-                        write_png("output/out_debug_caustic_indirect.png", caustic_fb);
-                        std::cout << "[Debug] Wrote output/out_debug_caustic_indirect.png\n";
-                        std::cout.flush();
-                    } else {
-                        std::cout << "[Debug] Caustic buffer empty, skipping PNG write.\n";
-                        std::cout.flush();
-                    }
-                }
-
-                auto t_pi_end = std::chrono::high_resolution_clock::now();
-                double ms = std::chrono::duration<double, std::milli>(
-                    t_pi_end - t_pi_start).count();
-                std::printf("[Timing] Photon debug PNGs: %8.1f ms\n", ms);
-                std::cout << "[Debug] Saved: output/out_debug_photon_indirect.png\n";
-                std::cout << "[Debug] Saved: output/out_debug_caustic_indirect.png\n";
-
-                // Clear buffers so the progressive render starts clean
-                std::cout << "[Init] Final buffer clear before progressive render...\n";
-                std::cout.flush();
-                optix_renderer.clear_buffers();
-                std::cout << "[Init] Ready. Starting progressive render.\n";
-                std::cout.flush();
-            }
-
-            s_app.render_requested = false;
-            } // end else (normal progressive render)
+            std::cout << "  [Snapshot] " << png_path << "\n";
+            std::cout << "  [Snapshot] " << json_path << "\n";
+            if (!raw_path.empty())
+                std::cout << "  [Snapshot] " << raw_path << " (raw)\n";
+            std::cout << "  SPP: " << stats.accumulated_spp
+                      << "  Photons: " << stats.photons_stored
+                      << "  Cells: " << stats.cell_analysis_cells << "\n";
+            std::cout << "========================================\n\n";
         }
 
-        // Progressive rendering: one spp per main-loop iteration
-        if (s_app.rendering) {
-            // Check for cancel request (ESC key)
-            if (s_app.render_cancel_requested) {
-                s_app.render_cancel_requested = false;
-                s_app.rendering = false;
-                s_app.showing_final = false;
-                s_app.render_requested = false;
+        // ── Preview path: continuous progressive path tracing ────────
+        {
+            // Photon overlay mode: GL_POINTS only, no ray tracing
+            if (s_app.debug.photon_overlay_active()) {
+                // Clear to black background
+                memset(display_fb.srgb.data(), 0,
+                       display_fb.srgb.size() * sizeof(display_fb.srgb[0]));
+                // Set alpha to 255
+                for (int p = 0; p < display_fb.width * display_fb.height; ++p)
+                    display_fb.srgb[p * 4 + 3] = 255;
 
-                // Restore mouse capture state
-                if (s_app.mouse_was_captured) {
-                    s_app.mouse_captured = true;
-                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-                    s_app.first_mouse = true;
+                const PhotonSoA& photons = optix_renderer.photons();
+                if (photons.size() > 0) {
+                    uint8_t flag = photon_filter_flag(s_app.debug.photon_filter);
+                    overlay_photon_points(
+                        display_fb,
+                        camera,
+                        photons,
+                        s_app.debug.spectral_coloring,
+                        flag,
+                        2.0f);
                 }
-
-                // Resize back to preview
-                optix_renderer.resize(win_w, win_h);
-                optix_renderer.clear_buffers();
-                frame = 0;
-
-                std::cout << "\n[Render] Cancelled at "
-                          << s_app.render_spp_done << "/"
-                          << s_app.render_spp_total << " spp\n";
             } else {
-                auto t_spp_start = std::chrono::high_resolution_clock::now();
-
-                optix_renderer.render_one_spp(
-                    s_app.render_cam, s_app.render_spp_done,
-                    opt.config.max_bounces);
-                s_app.render_spp_done++;
-
-                // Download and display the progressive result
+                // Normal preview (1 spp per iteration, progressive accumulation)
+                optix_renderer.render_debug_frame(
+                    camera, frame, s_app.debug.current_mode, 1);
                 optix_renderer.download_framebuffer(display_fb);
-
-                // Console progress: 1-liner per SPP with step timing
-                auto t_now = std::chrono::high_resolution_clock::now();
-                double step_ms = std::chrono::duration<double, std::milli>(t_now - t_spp_start).count();
-                double elapsed = std::chrono::duration<double>(t_now - s_app.render_start).count();
-                double eta = (s_app.render_spp_done < s_app.render_spp_total)
-                    ? elapsed * (s_app.render_spp_total - s_app.render_spp_done) / s_app.render_spp_done
-                    : 0.0;
-                double spp_per_sec = (elapsed > 0.0) ? s_app.render_spp_done / elapsed : 0.0;
-                std::printf("  [Render] spp %3d/%d  %6.0f ms  |  %.1fs elapsed  %.1f spp/s  ETA %.1fs\n",
-                            s_app.render_spp_done, s_app.render_spp_total,
-                            step_ms, elapsed, spp_per_sec, eta);
-                std::fflush(stdout);
-
-                // ── Progress snapshots ───────────────────────────────
-                if constexpr (PROGRESS_SNAPSHOT_ENABLED) {
-                    int spp = s_app.render_spp_done;
-                    // Snapshot when interval divides spp, or at power-of-2
-                    // (interval=0 reverts to legacy power-of-2 only mode).
-                    bool is_pow2 = (spp > 0) && ((spp & (spp - 1)) == 0);
-                    bool do_snap = (PROGRESS_SNAPSHOT_INTERVAL > 0)
-                                       ? (spp % PROGRESS_SNAPSHOT_INTERVAL == 0)
-                                       : is_pow2;
-                    if (do_snap) {
-                        static bool progress_dir_created = false;
-                        if (!progress_dir_created) {
-                            fs::create_directories("output/progress");
-                            progress_dir_created = true;
-                        }
-                        char snap_prefix[128];
-                        std::snprintf(snap_prefix, sizeof(snap_prefix),
-                                      "output/progress/spp_%04d", spp);
-
-                        // Combined
-                        write_png(std::string(snap_prefix) + "_combined.png", display_fb);
-
-                        // Component buffers (NEE direct, photon indirect, caustic)
-                        // Gated by DEBUG_COMPONENT_PNGS — these are heavy downloads.
-                        if constexpr (DEBUG_COMPONENT_PNGS) {
-                        std::vector<float> snap_nee, snap_photon, snap_samp;
-                        optix_renderer.download_component_buffers(
-                            snap_nee, snap_photon, snap_samp);
-
-                        int cw = display_fb.width;
-                        int ch = display_fb.height;
-                        auto snap_spectral_to_fb = [&](const std::vector<float>& spec_buf,
-                                                       FrameBuffer& fb) {
-                            fb.resize(cw, ch);
-                            for (int y = 0; y < ch; ++y) {
-                                for (int x = 0; x < cw; ++x) {
-                                    int px = y * cw + x;
-                                    float n = snap_samp[px];
-                                    Spectrum avg = Spectrum::zero();
-                                    if (n > 0.f)
-                                        for (int k = 0; k < NUM_LAMBDA; ++k)
-                                            avg.value[k] = spec_buf[px * NUM_LAMBDA + k] / n;
-                                    float3 rgb = spectrum_to_srgb(avg);
-                                    rgb.x = fminf(fmaxf(rgb.x, 0.f), 1.f);
-                                    rgb.y = fminf(fmaxf(rgb.y, 0.f), 1.f);
-                                    rgb.z = fminf(fmaxf(rgb.z, 0.f), 1.f);
-                                    fb.srgb[px * 4 + 0] = (uint8_t)(rgb.x * 255.f);
-                                    fb.srgb[px * 4 + 1] = (uint8_t)(rgb.y * 255.f);
-                                    fb.srgb[px * 4 + 2] = (uint8_t)(rgb.z * 255.f);
-                                    fb.srgb[px * 4 + 3] = 255;
-                                }
-                            }
-                        };
-
-                        FrameBuffer snap_nee_fb, snap_photon_fb;
-                        snap_spectral_to_fb(snap_nee, snap_nee_fb);
-                        write_png(std::string(snap_prefix) + "_nee_direct.png", snap_nee_fb);
-
-                        snap_spectral_to_fb(snap_photon, snap_photon_fb);
-                        write_png(std::string(snap_prefix) + "_photon_indirect.png", snap_photon_fb);
-
-                        // Caustic-indirect via non-destructive snapshot pass
-                        {
-                            std::vector<float> caus_spec, caus_samp;
-                            optix_renderer.render_caustic_snapshot(
-                                s_app.render_cam, opt.config, caus_spec, caus_samp);
-                            if (!caus_spec.empty()) {
-                                FrameBuffer snap_caus_fb;
-                                snap_caus_fb.resize(cw, ch);
-                                for (int y2 = 0; y2 < ch; ++y2) {
-                                    for (int x2 = 0; x2 < cw; ++x2) {
-                                        int px2 = y2 * cw + x2;
-                                        float n2 = caus_samp[px2];
-                                        Spectrum avg2 = Spectrum::zero();
-                                        if (n2 > 0.f)
-                                            for (int k2 = 0; k2 < NUM_LAMBDA; ++k2)
-                                                avg2.value[k2] = caus_spec[px2 * NUM_LAMBDA + k2] / n2;
-                                        float3 rgb2 = spectrum_to_srgb(avg2);
-                                        rgb2.x = fminf(fmaxf(rgb2.x, 0.f), 1.f);
-                                        rgb2.y = fminf(fmaxf(rgb2.y, 0.f), 1.f);
-                                        rgb2.z = fminf(fmaxf(rgb2.z, 0.f), 1.f);
-                                        snap_caus_fb.srgb[px2 * 4 + 0] = (uint8_t)(rgb2.x * 255.f);
-                                        snap_caus_fb.srgb[px2 * 4 + 1] = (uint8_t)(rgb2.y * 255.f);
-                                        snap_caus_fb.srgb[px2 * 4 + 2] = (uint8_t)(rgb2.z * 255.f);
-                                        snap_caus_fb.srgb[px2 * 4 + 3] = 255;
-                                    }
-                                }
-                                write_png(std::string(snap_prefix) + "_caustic_indirect.png", snap_caus_fb);
-                            }
-                        }
-                        } // end DEBUG_COMPONENT_PNGS
-
-                        std::printf("  [Snapshot] %d spp -> %s_*.png\n", spp, snap_prefix);
-                    }
-                }
-
-                // Check if done
-                if (s_app.render_spp_done >= s_app.render_spp_total) {
-                std::cout << "[Render] Done!\n";
-
-                // Print GPU kernel profiling summary
-                optix_renderer.print_kernel_profiling();
-
-                // Build timestamped prefix: output/render_YYYYMMDD_HHMMSS
-                auto now_tp = std::chrono::system_clock::now();
-                std::time_t now_t = std::chrono::system_clock::to_time_t(now_tp);
-                std::tm tm_buf;
-                localtime_s(&tm_buf, &now_t);
-                char ts[64];
-                std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
-                std::string prefix = std::string("output/render_") + ts;
-
-                std::string final_path   = prefix + ".png";
-
-                FrameBuffer final_fb;
-                optix_renderer.download_framebuffer(final_fb);
-                write_png(final_path, final_fb);
-
-                // Save raw (un-denoised) version when denoiser was active
-                std::string raw_path;
-                if (opt.config.denoiser_enabled) {
-                    raw_path = prefix + "_raw.png";
-                    FrameBuffer raw_fb;
-                    optix_renderer.download_raw_framebuffer(raw_fb);
-                    write_png(raw_path, raw_fb);
-                }
-
-                // Restore mouse capture state
-                if (s_app.mouse_was_captured) {
-                    s_app.mouse_captured = true;
-                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-                    s_app.first_mouse = true;
-                }
-
-                // Reset to debug view
-                s_app.rendering = false;
-                s_app.showing_final = true;
-
-                // Keep display_fb at render resolution for final display —
-                // the texture blit handles resolution mismatch.
-                // Resize renderer back to preview on next user action
-                // (showing_final → false triggers preview path).
-
-                std::cout << "========================================\n";
-                std::cout << "  Saved: " << final_path << "\n";
-                if (!raw_path.empty())
-                    std::cout << "  Saved: " << raw_path << " (raw, before denoiser)\n";
-                std::cout << "========================================\n\n";
-                }
             }
-        } else {
-            if (!s_app.showing_final) {
-                // Photon overlay mode: GL_POINTS only, no ray tracing
-                if (s_app.debug.photon_overlay_active()) {
-                    // Clear to black background
-                    memset(display_fb.srgb.data(), 0,
-                           display_fb.srgb.size() * sizeof(display_fb.srgb[0]));
-                    // Set alpha to 255
-                    for (int p = 0; p < display_fb.width * display_fb.height; ++p)
-                        display_fb.srgb[p * 4 + 3] = 255;
 
-                    const PhotonSoA& photons = optix_renderer.photons();
-                    if (photons.size() > 0) {
-                        uint8_t flag = photon_filter_flag(s_app.debug.photon_filter);
-                        overlay_photon_points(
-                            display_fb,
-                            camera,
-                            photons,
-                            s_app.debug.spectral_coloring,
-                            flag,
-                            2.0f);
-                    }
-                } else {
-                    // Normal debug preview (first-hit, 1 spp per iteration)
-                    optix_renderer.render_debug_frame(
-                        camera, frame, s_app.debug.current_mode, 1);
-                    optix_renderer.download_framebuffer(display_fb);
-                }
-
-                frame++;
-            }
+            frame++;
         }
 
         // Blit to OpenGL texture (handle resolution changes between preview and render)

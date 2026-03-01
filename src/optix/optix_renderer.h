@@ -262,6 +262,10 @@ public:
     void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
     bool is_use_dense_grid() const  { return use_dense_grid_; }
 
+    /// Fill CellBinGrid / guidance params into LaunchParams.
+    /// Called after fill_common_params at every launch site.
+    void fill_cell_grid_params(LaunchParams& lp) const;
+
     /// Render coverage debug PNG (stub — no-op when DEBUG_COMPONENT_PNGS is false).
     template<typename CamT, typename FbT>
     void render_coverage_debug_png(const CamT&, const FbT&) {}
@@ -269,6 +273,48 @@ public:
     /// Download GPU kernel profiling data and print a summary.
     /// Call after the final render completes.
     void print_kernel_profiling() const;
+
+    /// Snapshot of renderer statistics (for JSON export).
+    struct RenderStats {
+        // Image
+        int    image_width          = 0;
+        int    image_height         = 0;
+        int    accumulated_spp      = 0;
+
+        // Photon map
+        int    photons_emitted      = 0;
+        int    photons_stored       = 0;
+        int    caustic_emitted      = 0;
+        float  gather_radius        = 0.f;
+        float  caustic_radius       = 0.f;
+        int    caustic_stored       = 0;   // tag-2 (targeted) count
+        int    noncaustic_stored    = 0;   // tag-0
+        int    global_caustic_stored = 0;  // tag-1
+
+        // Cell analysis / guidance
+        int    cell_analysis_cells  = 0;
+        float  avg_guide_fraction   = 0.f;
+        float  avg_caustic_fraction = 0.f;
+
+        // Config
+        int    max_bounces_camera   = 0;
+        int    max_bounces_photon   = 0;
+        int    min_bounces_rr       = 0;
+        float  rr_threshold         = 0.f;
+        float  guide_fraction       = 0.f;
+        float  exposure             = 0.f;
+        bool   denoiser_enabled     = false;
+        int    knn_k                = 0;
+        float  surface_tau          = 0.f;
+
+        // Scene
+        std::string scene_name;
+        int    num_triangles        = 0;
+        int    num_emissive_tris    = 0;
+    };
+
+    /// Collect current renderer statistics into a struct.
+    RenderStats gather_stats(const char* scene_name) const;
 
     /// Access the stored photon data and hash grid (available after
     /// trace_photons() completes)
@@ -430,6 +476,7 @@ private:
     DeviceBuffer d_out_photon_num_hero_;  // uint8_t [max_stored] hero count per photon
     DeviceBuffer d_out_photon_source_emissive_;  // uint16_t [max_stored] source emissive idx
     DeviceBuffer d_out_photon_is_caustic_;       // uint8_t  [max_stored] caustic flag
+    DeviceBuffer d_out_photon_path_flags_;       // uint8_t  [max_stored] PHOTON_FLAG_* bits
     DeviceBuffer d_out_photon_tri_id_;           // uint32_t [max_stored] deposit triangle
     DeviceBuffer d_out_photon_count_;
 
@@ -463,6 +510,9 @@ private:
 
     // Host-side cell-bin grid (kept after build for save/test access)
     CellBinGrid cell_bin_grid_;  // empty unless dense grid is built
+
+    // Device-side cell-bin grid (for guided sampling on GPU)
+    DeviceBuffer d_cell_bin_grid_;  // PhotonBin [total_cells * bin_count]
 
     // Per-cell photon analysis (PA-08: GPU upload buffers)
     DeviceBuffer d_cell_guide_fraction_;

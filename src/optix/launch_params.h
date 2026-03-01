@@ -176,6 +176,7 @@ struct LaunchParams {
     uint8_t*  out_photon_num_hero; // [max_stored] valid hero count per photon
     uint16_t* out_photon_source_emissive; // [max_stored] source emissive local index
     uint8_t*  out_photon_is_caustic;     // [max_stored] 1 = caustic path, 0 = global
+    uint8_t*  out_photon_path_flags;     // [max_stored] PHOTON_FLAG_* bit field (F2 debug overlay)
     uint32_t* out_photon_tri_id;         // [max_stored] scene triangle index at deposit
     unsigned int* out_photon_count;  // atomic counter (device)
     int       max_stored_photons;

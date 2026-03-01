@@ -31,11 +31,9 @@ struct Options {
 // -- Application state accessible from main ---------------------------
 struct AppState {
     DebugState debug;
-    bool       render_requested = false;  // R key pressed
-    bool       rendering        = false;
+    bool       snapshot_requested = false;  // R key: save PNG + JSON snapshot
     bool       volume_enabled   = DEFAULT_VOLUME_ENABLED;  // V key toggle
     bool       use_dense_grid   = DEFAULT_USE_DENSE_GRID;  // G key toggle
-    bool       showing_final    = false;  // keep final render on-screen
 
     // Scene switching (keys 1-8)
     int        scene_switch_requested = -1;  // -1 = none, 0-7 = profile index
@@ -46,23 +44,13 @@ struct AppState {
     float      light_scale            = DEFAULT_LIGHT_SCALE;
     bool       light_scale_changed    = false;  // triggers photon re-trace
 
-    // Render cancellation
-    bool       render_cancel_requested = false;
-
     // Photon retrace request (P key)
     bool       photon_retrace_requested = false;
-
-    // Progressive final render state
-    int        render_spp_done  = 0;      // samples completed so far
-    int        render_spp_total = 0;      // target spp
-    Camera     render_cam;                // frozen camera for render
-    std::chrono::high_resolution_clock::time_point render_start;
 
     // Camera angles (yaw/pitch in radians)
     float      yaw   = 0.f;     // horizontal angle
     float      pitch = 0.f;     // vertical angle
     bool       mouse_captured = true;  // start with mouse captured
-    bool       mouse_was_captured = true; // saved state before render
     double     last_mx = 0.0, last_my = 0.0;
     bool       first_mouse = true;
     bool       camera_moved = false;  // flag to reset accumulation

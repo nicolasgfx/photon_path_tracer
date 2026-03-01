@@ -85,8 +85,4 @@ newmtl water
     pb_transmission 1.0
     pb_roughness 0.001
     pb_dispersion 3200.0
-    pb_medium homogeneous
-    pb_sigma_a 0.25 0.06 0.01
-    pb_sigma_s 0.0 0.0 0.0
-    pb_g 0.0
 

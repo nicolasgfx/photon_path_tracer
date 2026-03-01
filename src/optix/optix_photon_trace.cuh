@@ -124,6 +124,7 @@ extern "C" __global__ void __raygen__photon_trace() {
     // to false on diffuse/glossy.  Only L→S→D (or L→D→S→D) paths
     // are tagged as caustic.
     bool on_caustic_path = false;
+    uint8_t path_flags = 0;  // PHOTON_FLAG_* accumulator for F2 debug overlay
     IORStack ior_stack;  // track nested dielectrics across bounces
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
@@ -157,6 +158,7 @@ extern "C" __global__ void __raygen__photon_trace() {
                 float t_ff = -logf(fmaxf(1.f - u_ff, 1e-12f)) / sig_t_lam;
 
                 if (t_ff < seg_t) {
+                    path_flags |= 0x04;  // PHOTON_FLAG_VOLUME_SEGMENT
                     float3 vol_pos = origin + direction * t_ff;
                     float sig_s_lam = med.sigma_s.value[hero_bins[0]];
                     float vol_flux = hero_flux[0] * (sig_s_lam / fmaxf(sig_t_lam, 1e-20f));
@@ -213,6 +215,8 @@ extern "C" __global__ void __raygen__photon_trace() {
                 params.out_photon_source_emissive[slot] = (uint16_t)local_idx;
                 if (params.out_photon_is_caustic)
                     params.out_photon_is_caustic[slot] = on_caustic_path ? (uint8_t)1 : (uint8_t)0;
+                if (params.out_photon_path_flags)
+                    params.out_photon_path_flags[slot] = path_flags;
                 if (params.out_photon_tri_id)
                     params.out_photon_tri_id[slot] = hit.triangle_id;
             }
@@ -223,6 +227,19 @@ extern "C" __global__ void __raygen__photon_trace() {
         float rr_albedo = 1.0f;
         if (dev_is_specular(hit_mat) || dev_is_translucent(hit_mat)) {
             on_caustic_path = true;  // specular → mark caustic (matches CPU emitter.h)
+            // Track detailed path flags for F2 debug overlay
+            // Must distinguish Glass/Translucent (glass flags) from Mirror (specular flag).
+            // dev_is_specular() returns true for BOTH Mirror AND Glass, so we need
+            // explicit glass check.  Matches CPU emitter.h flag logic.
+            if (dev_is_glass(hit_mat) || dev_is_translucent(hit_mat)) {
+                path_flags |= 0x01;  // PHOTON_FLAG_TRAVERSED_GLASS
+                if (bounce == 0)
+                    path_flags |= 0x02;  // PHOTON_FLAG_CAUSTIC_GLASS (direct caustic only)
+                if (dev_has_dispersion(hit_mat))
+                    path_flags |= 0x08;  // PHOTON_FLAG_DISPERSION
+            } else {
+                path_flags |= 0x10;  // PHOTON_FLAG_CAUSTIC_SPECULAR (Mirror only)
+            }
             SpecularBounceResult sb = dev_specular_bounce(
                 direction, hit.position, hit.shading_normal, hit.geo_normal,
                 hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS, &ior_stack,
