@@ -878,21 +878,21 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 
 | ID | Task | Status |
 |---|---|---|
-| CL-01 | Remove `DEFAULT_NEE_LIGHT_SAMPLES`, `DEFAULT_NEE_DEEP_SAMPLES` from `config.h` | [ ] |
-| CL-02 | Remove `DEFAULT_NEE_COVERAGE_FRACTION` from `config.h` | [ ] |
-| CL-03 | Remove `DEFAULT_MAX_GLOSSY_BOUNCES` from `config.h` | [ ] |
-| CL-04 | Remove `DEFAULT_ENABLE_BRESENHAM_BSDF` from `config.h` | [ ] |
-| CL-05 | Remove `nee_shadow_sample_count()` from `nee_shared.h` | [ ] |
-| CL-06 | Remove `dev_nee_golden_stratified()` from `optix_nee_dispatch.cuh` | [ ] |
-| CL-07 | Collapse `optix_nee_dispatch.cuh` into `optix_nee.cuh` | [ ] |
-| CL-08 | Remove `emissive_area_alias_table` from `scene.h` | [ ] |
-| CL-09 | Remove `light_cache.h` and all `light_cache_*` from `LaunchParams` | [ ] |
-| CL-10 | Remove `lobe_balance` from `LaunchParams` | [ ] |
-| CL-11 | Remove `is_final_render`, `debug_shadow_rays` from `LaunchParams` | [ ] |
-| CL-12 | Simplify `PixelLighting` to 3 channels (combined, direct, indirect) | [ ] |
-| CL-13 | Add new config.h parameters (§1.2) | [ ] |
-| CL-14 | Rename `dev_bsdf_pdf` → `bsdf_pdf`, `dev_bsdf_sample` → `bsdf_sample`, `DevBSDFSample` → `BSDFSample` | [ ] |
-| CL-15 | Remove `dev_generate_camera_ray` wrapper | [ ] |
+| CL-01 | Remove `DEFAULT_NEE_LIGHT_SAMPLES`, `DEFAULT_NEE_DEEP_SAMPLES` from `config.h` | [x] |
+| CL-02 | Remove `DEFAULT_NEE_COVERAGE_FRACTION` from `config.h` | [x] |
+| CL-03 | Remove `DEFAULT_MAX_GLOSSY_BOUNCES` from `config.h` | [x] |
+| CL-04 | Remove `DEFAULT_ENABLE_BRESENHAM_BSDF` from `config.h` | [x] |
+| CL-05 | Remove `nee_shadow_sample_count()` from `nee_shared.h` | [x] |
+| CL-06 | Remove `dev_nee_golden_stratified()` from `optix_nee_dispatch.cuh` | [x] |
+| CL-07 | Collapse `optix_nee_dispatch.cuh` into `optix_nee.cuh` | [x] |
+| CL-08 | Remove `emissive_area_alias_table` from `scene.h` | [x] |
+| CL-09 | Remove `light_cache.h` and all `light_cache_*` from `LaunchParams` | [x] |
+| CL-10 | Remove `lobe_balance` from `LaunchParams` | [x] |
+| CL-11 | Remove `is_final_render`, `debug_shadow_rays` from `LaunchParams` | [x] |
+| CL-12 | Simplify `PixelLighting` to 3 channels (combined, direct, indirect) | [x] |
+| CL-13 | Add new config.h parameters (§1.2) | [x] |
+| CL-14 | Rename `dev_bsdf_pdf` → `bsdf_pdf`, `dev_bsdf_sample` → `bsdf_sample`, `DevBSDFSample` → `BSDFSample` | [x] |
+| CL-15 | Remove `dev_generate_camera_ray` wrapper | [x] |
 | CL-16 | Slim `main.cpp` to ≤ 200 lines | [ ] |
 | CL-17 | Slim `optix_renderer.cpp` to ≤ 1200 lines | [ ] |
 
@@ -900,38 +900,38 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 
 | ID | Task | Status |
 |---|---|---|
-| PA-01 | Create `photon_analysis.h` with `CellAnalysis` struct | [ ] |
-| PA-02 | Implement directional analysis (active bin count, guide fraction) | [ ] |
-| PA-03 | Implement spatial density metric (flux per cell area) | [ ] |
-| PA-04 | Implement spatial variance (cross-cell CV) | [ ] |
-| PA-05 | Implement caustic fraction per cell | [ ] |
-| PA-06 | Implement photon energy / saturation metric | [ ] |
-| PA-07 | Build `CellAnalysis` array after photon map build | [ ] |
-| PA-08 | Upload `cell_caustic_fraction`, `cell_flux_density`, `cell_guide_fraction` to GPU | [ ] |
+| PA-01 | Create `photon_analysis.h` with `CellAnalysis` struct | [x] |
+| PA-02 | Implement directional analysis (active bin count, guide fraction) | [x] |
+| PA-03 | Implement spatial density metric (flux per cell area) | [x] |
+| PA-04 | Implement spatial variance (cross-cell CV) | [x] |
+| PA-05 | Implement caustic fraction per cell | [x] |
+| PA-06 | Implement photon energy / saturation metric | [x] |
+| PA-07 | Build `CellAnalysis` array after photon map build | [x] |
+| PA-08 | Upload `cell_caustic_fraction`, `cell_flux_density`, `cell_guide_fraction` to GPU | [x] |
 
 ### 11.3 Path Tracer Core (§4)
 
 | ID | Task | Status |
 |---|---|---|
-| PT-01 | Create `optix_path_trace_v3.cuh` with iterative `full_path_trace_v3()` | [ ] |
-| PT-02 | Single bounce loop: delta surfaces, NEE, guided/BSDF direction | [ ] |
-| PT-03 | Emission MIS (carry forward `pdf_bsdf_prev`) | [ ] |
-| PT-04 | Photon caustic additive contribution at non-delta hits | [ ] |
-| PT-05 | Photon final gather at terminal bounce | [ ] |
-| PT-06 | Adaptive guide fraction from photon analysis (§3.1) | [ ] |
-| PT-07 | Russian roulette with spectral throughput | [ ] |
-| PT-08 | IOR stack integration for nested dielectrics | [ ] |
-| PT-09 | Remove old `full_path_trace()` and `debug_first_hit()` | [ ] |
-| PT-10 | Update `__raygen__render` to call `full_path_trace_v3()` | [ ] |
+| PT-01 | Create `optix_path_trace_v3.cuh` with iterative `full_path_trace_v3()` | [x] |
+| PT-02 | Single bounce loop: delta surfaces, NEE, guided/BSDF direction | [x] |
+| PT-03 | Emission MIS (carry forward `pdf_bsdf_prev`) | [x] |
+| PT-04 | Photon caustic additive contribution at non-delta hits | [x] |
+| PT-05 | Photon final gather at terminal bounce | [x] |
+| PT-06 | Adaptive guide fraction from photon analysis (§3.1) | [x] |
+| PT-07 | Russian roulette with spectral throughput | [x] |
+| PT-08 | IOR stack integration for nested dielectrics | [x] |
+| PT-09 | Remove old `full_path_trace()` and `debug_first_hit()` | [x] |
+| PT-10 | Update `__raygen__render` to call `full_path_trace_v3()` | [x] |
 
 ### 11.4 CPU Reference (§6)
 
 | ID | Task | Status |
 |---|---|---|
-| CP-01 | Create `path_trace.h` with `path_trace_cpu()` | [ ] |
-| CP-02 | Mirror GPU algorithm exactly (same bounce loop, same MIS, same RR) | [ ] |
-| CP-03 | Connect to `render_frame()` in `renderer.cpp` | [ ] |
-| CP-04 | CPU↔GPU consistency test | [ ] |
+| CP-01 | Create `path_trace.h` with `path_trace_cpu()` | [x] |
+| CP-02 | Mirror GPU algorithm exactly (same bounce loop, same MIS, same RR) | [x] |
+| CP-03 | Connect to `render_frame()` in `renderer.cpp` | [x] |
+| CP-04 | CPU↔GPU consistency test | [x] |
 
 ### 11.5 Adaptive Sampling (§7)
 
@@ -939,8 +939,8 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 |---|---|---|
 | AS-01 | Pilot pass (4 SPP uniform) with luminance moment accumulation | [ ] |
 | AS-02 | Per-pixel cost map from photon analysis + pilot variance | [ ] |
-| AS-03 | Variable SPP per pixel (clamp to [1, 4×base]) | [ ] |
-| AS-04 | GPU implementation of `compute_pixel_spp()` | [ ] |
+| AS-03 | Variable SPP per pixel (clamp to [1, 4×base]) | [x] |
+| AS-04 | GPU implementation of `compute_pixel_spp()` | [x] |
 | AS-05 | Progress-aware SPP tracking (partial pixels) | [ ] |
 
 ### 11.6 View-Adaptive Budgeting (§8)
@@ -970,7 +970,7 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 
 | ID | Task | Status |
 |---|---|---|
-| VP-01 | Volume photon deposit at scatter events (new `volume_photons` SoA) | [ ] |
+| VP-01 | Volume photon deposit at scatter events (new `volume_photons` SoA) | [x] |
 | VP-02 | 3D `volume_grid` hash grid for volume photons | [ ] |
 | VP-03 | `vol_cell_bin_grid` directional histograms from volume photons | [ ] |
 | VP-04 | Remove beam segment recording from photon bounce loop | [ ] |
@@ -987,7 +987,7 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 | DB-03 | Add "Caustic Only" render mode | [ ] |
 | DB-04 | Per-bounce AOV buffers | [ ] |
 | DB-05 | F3 guide visualisation (hemisphere heatmap) | [ ] |
-| DB-06 | Console printout of photon analysis statistics | [ ] |
+| DB-06 | Console printout of photon analysis statistics | [x] |
 
 ---
 
@@ -995,39 +995,40 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 
 The work is sequenced to maintain a working renderer at every step, with the test suite passing.
 
-### Phase 1 — Cleanup and Foundation (1 week)
+### Phase 1 — Cleanup and Foundation ✅
 
-1. **CL-01 through CL-13:** Remove NEE multi-sample infrastructure, add new config parameters.
-2. **CL-14 through CL-17:** Carry-forward Part 1 naming/size cleanup.
-3. **PA-01 through PA-08:** Photon analysis build + upload.
-4. **Build + test** — renderer still works with old `full_path_trace()`.
+1. **CL-01 through CL-15:** ✅ Remove NEE multi-sample infrastructure, add new config parameters, naming/size cleanup.
+2. **CL-16, CL-17:** Remaining carry-forward cleanup (not yet started).
+3. **PA-01 through PA-08:** ✅ Photon analysis build + upload.
+4. **Build + test** — ✅ 337 tests pass, renderer works with `full_path_trace_v3()`.
 
-### Phase 2 — Core Path Tracer (1–2 weeks)
+### Phase 2 — Core Path Tracer ✅
 
-5. **PT-01 through PT-03:** Create `full_path_trace_v3()` with single bounce loop, delta surface handling, emission MIS.  Wire into `__raygen__render`.
-6. **PT-04, PT-05:** Add caustic contribution and photon final gather.
-7. **PT-06, PT-07, PT-08:** Adaptive guide fraction, RR, IOR stack.
-8. **PT-09, PT-10:** Remove old path, update raygen.
-9. **CP-01 through CP-04:** CPU reference + consistency test.
-10. **Build + test** — renderer produces correct images.
+5. **PT-01 through PT-03:** ✅ Created `full_path_trace_v3()` with single bounce loop, delta surface handling, emission MIS.
+6. **PT-04, PT-05:** ✅ Caustic contribution and photon final gather.
+7. **PT-06, PT-07, PT-08:** ✅ Adaptive guide fraction, RR, IOR stack.
+8. **PT-09, PT-10:** ✅ Removed old path, updated raygen.
+9. **CP-01 through CP-04:** ✅ CPU reference + consistency test.
+10. **Build + test** — ✅ Renderer produces correct images.
 
-### Phase 3 — Adaptive Sampling (1 week)
+### Phase 3 — Adaptive Sampling (in progress)
 
-11. **AS-01 through AS-05:** Pilot pass + variable SPP.
-12. **VA-01 through VA-05:** View-adaptive photon budgeting.
-13. **Build + test** — adaptive mode improves convergence.
+11. **AS-03, AS-04:** ✅ Variable SPP with active mask + lum_sum2 variance.
+12. **AS-01, AS-02, AS-05:** Not yet started (pilot pass, cost map, progress-aware tracking).
+13. **VA-01 through VA-05:** Not yet started (view-adaptive photon budgeting).
 
-### Phase 4 — Medium Transport (1 week, if needed)
+### Phase 4 — Medium Transport (not started)
 
-14. **VP-01 through VP-07:** Part 1 update — volume photon deposits (replaces beam segments).
-15. **MT-01 through MT-08:** Camera-side volumetric path tracing.
-16. **Build + test** — participating media renders correctly.
+14. **VP-01 through VP-07:** Partially started — VP-01 (volume photon SoA) done.
+15. **MT-01 through MT-08:** Not yet started (camera-side volumetric path tracing).
+16. **Build + test** — participating media not yet testable.
 
-### Phase 5 — Polish (ongoing)
+### Phase 5 — Polish (in progress)
 
-16. **DB-01 through DB-06:** Debug visualisation updates.
-17. Validation renders: Cornell Box, Cornell Sphere, Salle de Bain etc.
-18. Performance profiling and register pressure tuning.
+17. **DB-06:** ✅ Console printout of photon analysis statistics.
+18. **DB-01 through DB-05:** Not yet started (render modes, AOV buffers, guide vis).
+19. Validation renders: Cornell Box, Cornell Sphere, Salle de Bain etc.
+20. Performance profiling and register pressure tuning.
 
 ---
 

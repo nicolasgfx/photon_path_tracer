@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------
 //
 // Programs:
-//   __raygen__render                  - debug first-hit OR full path tracing
+//   __raygen__render                  - v3 photon-guided path tracing
 //   __raygen__photon_trace            - GPU photon emission + tracing
 //   __raygen__targeted_photon_trace   - GPU targeted caustic emission (Jensen §9.2)
 //   __closesthit__radiance            - closest-hit for radiance rays
@@ -60,10 +60,8 @@ extern "C" {
 #include "optix/optix_bsdf.cuh"
 #include "optix/optix_nee.cuh"
 #include "optix/optix_specular.cuh"
-#include "optix/optix_debug.cuh"
-#include "optix/optix_nee_dispatch.cuh"
 #include "optix/optix_guided.cuh"
-#include "optix/optix_path_trace.cuh"
+#include "optix/optix_path_trace_v3.cuh"
 #include "optix/optix_camera.cuh"
 #include "optix/optix_sppm.cuh"
 
@@ -83,7 +81,7 @@ extern "C" __global__ void __raygen__render() {
             (uint64_t)pixel_idx + 1);
 
         float3 origin, direction;
-        dev_generate_camera_ray(px, py, rng, origin, direction);
+        generate_camera_ray_from_params(px, py, rng, origin, direction);
 
         // Reset valid flag before camera pass
         params.sppm_vp_valid[pixel_idx] = 0;
@@ -123,10 +121,11 @@ extern "C" __global__ void __raygen__render() {
         int sample_index = params.frame_number * params.samples_per_pixel + s;
 
         float3 origin, direction;
-        dev_generate_camera_ray(px, py, rng, origin, direction, sample_index);
+        generate_camera_ray_from_params(px, py, rng, origin, direction, sample_index);
 
-        if (params.is_final_render || params.debug_shadow_rays) {
-            PathTraceResult ptr = full_path_trace(origin, direction, rng, pixel_idx, s, params.samples_per_pixel);
+        // v3: photon-guided iterative path tracer (Part 2 §4)
+        {
+            PathTraceResult ptr = full_path_trace_v3(origin, direction, rng, pixel_idx, s, params.samples_per_pixel);
             L_accum        += ptr.combined;
             L_nee_accum    += ptr.nee_direct;
             L_photon_accum += ptr.photon_indirect;
@@ -152,9 +151,6 @@ extern "C" __global__ void __raygen__render() {
                     params.normal_buffer[pixel_idx * 4 + 3] = 0.0f;
                 }
             }
-        } else {
-            Spectrum L = debug_first_hit(origin, direction, rng);
-            L_accum += L;
         }
     }
 
@@ -173,18 +169,18 @@ extern "C" __global__ void __raygen__render() {
         params.lum_sum2[pixel_idx] += Y * Y;
     }
 
-    // Component accumulation (only during final render)
-    if (params.is_final_render && params.nee_direct_buffer) {
+    // Component accumulation
+    if (params.nee_direct_buffer) {
         for (int i = 0; i < NUM_LAMBDA; ++i)
             params.nee_direct_buffer[pixel_idx * NUM_LAMBDA + i] += L_nee_accum.value[i];
     }
-    if (params.is_final_render && params.photon_indirect_buffer) {
+    if (params.photon_indirect_buffer) {
         for (int i = 0; i < NUM_LAMBDA; ++i)
             params.photon_indirect_buffer[pixel_idx * NUM_LAMBDA + i] += L_photon_accum.value[i];
     }
 
-    // Profiling accumulation (final render only, if buffers exist)
-    if (params.is_final_render && params.prof_total) {
+    // Profiling accumulation (if buffers exist)
+    if (params.prof_total) {
         params.prof_total[pixel_idx]         += prof_total_clk;
         params.prof_ray_trace[pixel_idx]     += prof_ray;
         params.prof_nee[pixel_idx]           += prof_nee;

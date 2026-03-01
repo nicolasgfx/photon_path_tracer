@@ -8,6 +8,7 @@
 #include "photon/tri_photon_irradiance.h"  // per-triangle irradiance heatmap
 #include "photon/emitter.h"                // CPU photon tracing
 #include "photon/hash_grid.h"              // gpu_build_hash_grid
+#include "photon/cell_cache.h"             // CellInfoCache (for PA-08 cell analysis)
 #include "renderer/tonemap.h"              // launch_tonemap_kernel etc.
 
 #include <cuda_runtime.h>
@@ -573,6 +574,26 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         }
     }
 
+    // ── Reconstruct spectral_flux from hero wavelength data ─────────
+    // The GPU emits photons with HERO_WAVELENGTHS per-hero (lambda_bin,
+    // flux) pairs.  The CPU-side spectral_flux array (NUM_LAMBDA floats
+    // per photon) is not populated by the GPU download, so we rebuild it
+    // here so that total_flux() / get_flux() return correct values for
+    // debug overlays (F1/F2 photon visualisation, heatmap, etc.).
+    {
+        const size_t n = stored_photons_.size();
+        // spectral_flux was zero-initialised by resize(); splat hero data
+        for (size_t i = 0; i < n; ++i) {
+            int nh = stored_photons_.num_hero[i];
+            for (int h = 0; h < nh; ++h) {
+                uint16_t bin = stored_photons_.lambda_bin[i * HERO_WAVELENGTHS + h];
+                float    f   = stored_photons_.flux[i * HERO_WAVELENGTHS + h];
+                if (bin < NUM_LAMBDA)
+                    stored_photons_.spectral_flux[i * NUM_LAMBDA + bin] += f;
+            }
+        }
+    }
+
     // ── GPU-side caustic tag computation ──────────────────────────────
     // Build 3-valued tags directly on GPU, avoiding CPU loop + upload.
     // Uses d_out_photon_is_caustic_ from the global pass (already on GPU
@@ -801,6 +822,19 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
             gather_radius_ = median_r;
         }
     }
+
+    // ── PA-08: Build per-cell photon analysis and upload to GPU ──────
+    // Build a CellInfoCache from the downloaded photon data, then call
+    // upload_cell_analysis() to extract guide/caustic/density arrays.
+    if (stored_photons_.size() > 0) {
+        float cache_cell_size = gather_radius_ * 2.0f;
+        CellInfoCache cell_cache;
+        PhotonSoA empty_caustic;
+        cell_cache.build(stored_photons_, empty_caustic,
+                         cache_cell_size, gather_radius_);
+        float cell_area = cache_cell_size * cache_cell_size;
+        upload_cell_analysis(cell_cache, cell_bin_grid_, cell_area);
+    }
 }
 
 // =====================================================================
@@ -843,7 +877,10 @@ static void fill_common_params(
     const DeviceBuffer& prof_bsdf,
     // ── Volume participating-medium params ──
     bool volume_enabled, float volume_density, float volume_falloff,
-    float volume_albedo, int volume_samples, float volume_max_t)
+    float volume_albedo, int volume_samples, float volume_max_t,
+    // ── Per-cell photon analysis (PA-08) ──
+    const DeviceBuffer& cell_guide, const DeviceBuffer& cell_caustic,
+    const DeviceBuffer& cell_density)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -927,6 +964,14 @@ static void fill_common_params(
         p.grid_table_size = (uint32_t)(grid_start.bytes / sizeof(uint32_t));
     }
 
+    // Per-cell photon analysis (PA-08)
+    p.cell_guide_fraction   = cell_guide.d_ptr
+        ? const_cast<float*>(cell_guide.as<float>()) : nullptr;
+    p.cell_caustic_fraction = cell_caustic.d_ptr
+        ? const_cast<float*>(cell_caustic.as<float>()) : nullptr;
+    p.cell_flux_density     = cell_density.d_ptr
+        ? const_cast<float*>(cell_density.as<float>()) : nullptr;
+
     // Emitter data (for NEE in render and photon trace)
     p.emissive_tri_indices = const_cast<uint32_t*>(emissive_idx.as<uint32_t>());
     p.emissive_cdf         = const_cast<float*>(emissive_cdf.as<float>());
@@ -946,11 +991,11 @@ static void fill_common_params(
 }
 
 // =====================================================================
-// render_debug_frame() -- first-hit only (is_final_render = 0)
+// render_debug_frame() -- first-hit preview (v3: always traces full path)
 // =====================================================================
 void OptixRenderer::render_debug_frame(
     const Camera& camera, int frame_number,
-    RenderMode mode, int spp, bool shadow_rays)
+    RenderMode mode, int spp, bool /*shadow_rays*/)
 {
     LaunchParams lp = {};
     fill_common_params(lp,
@@ -975,7 +1020,8 @@ void OptixRenderer::render_debug_frame(
         DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(),
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
-        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
+        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
+        d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
     fill_clearcoat_fabric_params(lp);
 
     // Dual-budget caustic params
@@ -990,12 +1036,12 @@ void OptixRenderer::render_debug_frame(
 
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
+    lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
+    lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
+    lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
+    lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
     lp.frame_number      = frame_number;
     lp.render_mode       = mode;
-    lp.is_final_render   = 0;  // DEBUG: first-hit + direct lighting only
-    lp.debug_shadow_rays = shadow_rays ? 1 : 0;
-    lp.nee_light_samples = shadow_rays ? DEFAULT_NEE_LIGHT_SAMPLES : 1;
-    lp.nee_deep_samples   = shadow_rays ? DEFAULT_NEE_DEEP_SAMPLES  : 1;
     lp.exposure           = exposure_;
 
     // Per-triangle photon irradiance heatmap
@@ -1052,7 +1098,8 @@ void OptixRenderer::render_one_spp(
         d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
         d_prof_photon_gather_, d_prof_bsdf_,
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
-        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
+        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
+        d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
     fill_clearcoat_fabric_params(lp);
 
     // Dual-budget caustic params
@@ -1067,11 +1114,12 @@ void OptixRenderer::render_one_spp(
 
     lp.samples_per_pixel  = 1;
     lp.max_bounces        = max_bounces;
+    lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
+    lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
+    lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
+    lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
     lp.frame_number       = frame_number;
     lp.render_mode        = RenderMode::Full;
-    lp.is_final_render    = 1;
-    lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
-    lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
     lp.exposure           = exposure_;
 
     last_launch_params_host_ = lp;
@@ -1196,7 +1244,6 @@ void OptixRenderer::render_caustic_debug_pass(
     CUDA_CHECK(cudaMemset(d_sample_counts_.d_ptr,   0, d_sample_counts_.bytes));
     CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
-    CUDA_CHECK(cudaMemset(d_lobe_balance_.d_ptr, 0, d_lobe_balance_.bytes));
 
     // 6. Launch camera pass at CAUSTIC_DEBUG_SPP
     std::printf("[CausticDebug] Rendering %d spp with caustic-only photon map...\n",
@@ -1226,7 +1273,8 @@ void OptixRenderer::render_caustic_debug_pass(
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
             config.volume_enabled, config.volume_density, config.volume_falloff,
-            config.volume_albedo, config.volume_samples, config.volume_max_t);
+            config.volume_albedo, config.volume_samples, config.volume_max_t,
+            d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
         fill_clearcoat_fabric_params(lp);
 
         // Disable dual-budget for this debug pass — all photons are
@@ -1239,11 +1287,12 @@ void OptixRenderer::render_caustic_debug_pass(
         lp.photon_num_hero    = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
+        lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
+        lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
+        lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
+        lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
         lp.frame_number       = s;
         lp.render_mode        = RenderMode::Full;
-        lp.is_final_render    = 1;
-        lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
-        lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
         lp.exposure           = exposure_;
 
         d_launch_params_.ensure_alloc(sizeof(LaunchParams));
@@ -1346,7 +1395,6 @@ void OptixRenderer::render_caustic_snapshot(
     std::vector<float> saved_nee(pixels * NUM_LAMBDA);
     std::vector<float> saved_photon(pixels * NUM_LAMBDA);
     std::vector<float> saved_samp(pixels);
-    std::vector<float> saved_lobe(pixels);
 
     if (d_spectrum_buffer_.d_ptr)
         CUDA_CHECK(cudaMemcpy(saved_spectrum.data(), d_spectrum_buffer_.d_ptr,
@@ -1359,9 +1407,6 @@ void OptixRenderer::render_caustic_snapshot(
                               spec_bytes, cudaMemcpyDeviceToHost));
     if (d_sample_counts_.d_ptr)
         CUDA_CHECK(cudaMemcpy(saved_samp.data(), d_sample_counts_.d_ptr,
-                              samp_bytes, cudaMemcpyDeviceToHost));
-    if (d_lobe_balance_.d_ptr)
-        CUDA_CHECK(cudaMemcpy(saved_lobe.data(), d_lobe_balance_.d_ptr,
                               samp_bytes, cudaMemcpyDeviceToHost));
 
     // 2. Run destructive caustic debug pass (it restores photon map internally)
@@ -1380,14 +1425,11 @@ void OptixRenderer::render_caustic_snapshot(
     if (d_sample_counts_.d_ptr)
         CUDA_CHECK(cudaMemcpy(d_sample_counts_.d_ptr, saved_samp.data(),
                               samp_bytes, cudaMemcpyHostToDevice));
-    if (d_lobe_balance_.d_ptr)
-        CUDA_CHECK(cudaMemcpy(d_lobe_balance_.d_ptr, saved_lobe.data(),
-                              samp_bytes, cudaMemcpyHostToDevice));
 }
 
 
 // =====================================================================
-// render_final() -- full path tracing (is_final_render = 1)
+// render_final() -- full path tracing (v3)
 // =====================================================================
 void OptixRenderer::render_final(
     const Camera& camera, const RenderConfig& config, const Scene& scene)
@@ -1435,7 +1477,8 @@ void OptixRenderer::render_final(
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
             config.volume_enabled, config.volume_density, config.volume_falloff,
-            config.volume_albedo, config.volume_samples, config.volume_max_t);
+            config.volume_albedo, config.volume_samples, config.volume_max_t,
+            d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
         fill_clearcoat_fabric_params(lp);
 
         // Dual-budget caustic params
@@ -1450,11 +1493,12 @@ void OptixRenderer::render_final(
 
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
+        lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
+        lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
+        lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
+        lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
         lp.frame_number       = frame_number;
         lp.render_mode        = RenderMode::Full;
-        lp.is_final_render    = 1;  // FINAL: full path tracing
-        lp.nee_light_samples  = DEFAULT_NEE_LIGHT_SAMPLES;
-        lp.nee_deep_samples   = DEFAULT_NEE_DEEP_SAMPLES;
         lp.exposure           = exposure_;
         lp.skip_tonemap       = 1;  // defer tonemap to post-process kernel
 
@@ -1471,9 +1515,6 @@ void OptixRenderer::render_final(
             ? reinterpret_cast<float*>(d_lum_sum2_.d_ptr)  : nullptr;
         lp.active_mask = (adaptive && use_mask)
             ? reinterpret_cast<uint8_t*>(d_active_mask_.d_ptr) : nullptr;
-
-        // Per-pixel lobe balance (Bresenham accumulator, persists across frames)
-        lp.lobe_balance = reinterpret_cast<float*>(d_lobe_balance_.d_ptr);
 
         d_launch_params_.ensure_alloc(sizeof(LaunchParams));
         CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
@@ -1691,7 +1732,8 @@ void OptixRenderer::render_sppm(
                 d_nee_direct_buffer_, d_photon_indirect_buffer_,
                 d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
                 d_prof_photon_gather_, d_prof_bsdf_,
-                false, 0.f, 0.f, 0.f, 0, 0.f);  // volume disabled for SPPM
+                false, 0.f, 0.f, 0.f, 0, 0.f,  // volume disabled for SPPM
+                d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
             fill_clearcoat_fabric_params(lp);
 
             // Dual-budget caustic params
@@ -1707,9 +1749,10 @@ void OptixRenderer::render_sppm(
             lp.sppm_alpha           = config.sppm_alpha;
             lp.sppm_min_radius      = config.sppm_min_radius;
             lp.max_bounces          = config.max_bounces;
-            lp.nee_light_samples    = DEFAULT_NEE_LIGHT_SAMPLES;
-            lp.nee_deep_samples     = DEFAULT_NEE_DEEP_SAMPLES;
-            lp.is_final_render      = 1;
+            lp.max_bounces_camera   = DEFAULT_MAX_BOUNCES_CAMERA;
+            lp.min_bounces_rr       = DEFAULT_MIN_BOUNCES_RR;
+            lp.rr_threshold         = DEFAULT_RR_THRESHOLD;
+            lp.guide_fraction       = DEFAULT_GUIDE_FRACTION;
             lp.samples_per_pixel    = 1;
             lp.frame_number         = k;
             lp.exposure             = exposure_;
@@ -1779,7 +1822,8 @@ void OptixRenderer::render_sppm(
                 d_nee_direct_buffer_, d_photon_indirect_buffer_,
                 d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
                 d_prof_photon_gather_, d_prof_bsdf_,
-                false, 0.f, 0.f, 0.f, 0, 0.f);
+                false, 0.f, 0.f, 0.f, 0, 0.f,
+                d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
             fill_clearcoat_fabric_params(lp);
 
             // Dual-budget caustic params
@@ -1795,7 +1839,6 @@ void OptixRenderer::render_sppm(
             lp.sppm_photons_per_iter = N_p;
             lp.sppm_alpha           = config.sppm_alpha;
             lp.sppm_min_radius      = config.sppm_min_radius;
-            lp.is_final_render      = 1;
             lp.samples_per_pixel    = 1;
 
             lp.sppm_vp_pos_x     = d_sppm_vp_pos_x_.as<float>();

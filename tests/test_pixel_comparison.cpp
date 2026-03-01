@@ -424,8 +424,7 @@ static Spectrum optimized_nee_guided(
     int num_emissive = (int)scene.emissive_tri_indices.size();
     bool use_guided = (total_bin_flux > 0.0f && num_emissive <= NEE_GUIDED_MAX_EMISSIVE);
 
-    int M = nee_shadow_sample_count(
-        bounce, DEFAULT_NEE_LIGHT_SAMPLES, DEFAULT_NEE_DEEP_SAMPLES);
+    int M = 1;  // v3: single NEE sample per bounce
 
     std::vector<float> guided_cdf;
     if (use_guided) {

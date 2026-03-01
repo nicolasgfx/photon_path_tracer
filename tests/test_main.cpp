@@ -3116,6 +3116,7 @@ TEST(OptiX, DebugFrameNonZero) {
 // -- 36.6 Normals debug mode produces varied output ------------------
 
 TEST(OptiX, NormalsDebugMode) {
+    GTEST_SKIP() << "Debug render modes removed in v3 (PT-09)";
     Scene scene = build_cornell_test_scene();
     if (scene.triangles.empty()) { GTEST_SKIP() << "No scene geometry"; }
 

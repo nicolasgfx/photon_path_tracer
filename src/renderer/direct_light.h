@@ -1,14 +1,9 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// direct_light.h – Coverage-aware NEE (§7.2.1, v2.1)
+// direct_light.h – Single-sample NEE direct light sampling (v3)
 // ─────────────────────────────────────────────────────────────────────
-// Mixture sampling: p_select = (1-c) * p_power + c * p_area
-//   c = DEFAULT_NEE_COVERAGE_FRACTION (default 0.3)
-//   p_power = power-weighted alias table (existing)
-//   p_area  = area-weighted (uniform over emissive surface area)
-//
-// This prevents dark spots under large dim emitters (coverage problem)
-// while preserving low variance for small bright lights.
+// v3 simplification: pure power-weighted alias table sampling.
+// Coverage-aware mixture removed (Part 2 §1.1, CL-08).
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
 #include "core/spectrum.h"
@@ -26,16 +21,13 @@ struct DirectLightSample {
     bool     visible;      // Shadow ray result
 };
 
-// ── Sample direct illumination (coverage-aware mixture, §7.2.1) ─────
-//
-// Mixture of power-weighted + area-weighted light sampling.
-// coverage_fraction: 0 = pure importance, 1 = pure area, 0.3 = default
+// ── Sample direct illumination (pure power-weighted, v3) ─────────────
 inline DirectLightSample sample_direct_light(
     float3 hit_pos,
     float3 hit_normal,
     const Scene& scene,
     PCGRng& rng,
-    float coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION)
+    float /*coverage_fraction*/ = 0.f)  // kept for API compat, ignored
 {
     DirectLightSample result;
     result.Li      = Spectrum::zero();
@@ -43,30 +35,11 @@ inline DirectLightSample sample_direct_light(
 
     if (scene.emissive_tri_indices.empty()) return result;
 
-    // ── Select emissive triangle via mixture ────────────────────────
-    float u_select = rng.next_float();
-    int local_idx;
-    float pdf_tri;
-
-    if (u_select > coverage_fraction) {
-        // Power-weighted branch (probability 1-c)
-        float u1 = rng.next_float();
-        float u2 = rng.next_float();
-        local_idx = scene.emissive_alias_table.sample(u1, u2);
-
-        float p_power = scene.emissive_alias_table.pdf(local_idx);
-        float p_area  = scene.emissive_area_alias_table.pdf(local_idx);
-        pdf_tri = nee_mixture_pdf(p_power, p_area, coverage_fraction);
-    } else {
-        // Area-weighted branch (probability c): sample proportional to area
-        float u1 = rng.next_float();
-        float u2 = rng.next_float();
-        local_idx = scene.emissive_area_alias_table.sample(u1, u2);
-
-        float p_power = scene.emissive_alias_table.pdf(local_idx);
-        float p_area  = scene.emissive_area_alias_table.pdf(local_idx);
-        pdf_tri = nee_mixture_pdf(p_power, p_area, coverage_fraction);
-    }
+    // ── Select emissive triangle via power-weighted alias table ──────
+    float u1 = rng.next_float();
+    float u2 = rng.next_float();
+    int local_idx = scene.emissive_alias_table.sample(u1, u2);
+    float pdf_tri = scene.emissive_alias_table.pdf(local_idx);
 
     uint32_t tri_idx = scene.emissive_tri_indices[local_idx];
     const Triangle& light_tri = scene.triangles[tri_idx];
@@ -119,13 +92,13 @@ inline DirectLightSample sample_direct_light(
     return result;
 }
 
-// ── PDF of direct light sampling for a given direction (§7.2.1) ─────
-// Uses coverage-aware mixture PDF: p = (1-c)*p_power + c*p_area
+// ── PDF of direct light sampling for a given direction (v3) ──────────
+// Pure power-weighted PDF.
 inline float direct_light_pdf(
     float3 hit_pos,
     float3 wi,
     const Scene& scene,
-    float coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION)
+    float /*coverage_fraction*/ = 0.f)  // kept for API compat, ignored
 {
     // Trace ray in direction wi and check if it hits an emissive surface
     Ray ray;
@@ -147,21 +120,15 @@ inline float direct_light_pdf(
     const Triangle& tri = scene.triangles[hit.triangle_id];
     float area = tri.area();
 
-    // Find which emissive triangle was hit and compute mixture PDF
+    // Find power-weighted PDF for this emissive triangle
     float p_power = 0.f;
-    float p_area  = 0.f;
     for (size_t i = 0; i < scene.emissive_tri_indices.size(); ++i) {
         if (scene.emissive_tri_indices[i] == hit.triangle_id) {
             p_power = scene.emissive_alias_table.pdf((int)i);
-            p_area  = scene.emissive_area_alias_table.pdf((int)i);
             break;
         }
     }
 
-    // Coverage-aware mixture PDF (§7.2.1, shared helper)
-    float pdf_tri_mix = nee_mixture_pdf(p_power, p_area, coverage_fraction);
-
     float dist2 = hit.t * hit.t;
-
-    return nee_pdf_area_to_solid_angle(pdf_tri_mix, 1.0f / area, dist2, cos_theta);
+    return nee_pdf_area_to_solid_angle(p_power, 1.0f / area, dist2, cos_theta);
 }

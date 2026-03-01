@@ -117,8 +117,6 @@ inline bool load_runtime_config(
 
         // §4 – Camera pass & direct lighting
         else if (key == "max_specular_chain")    { cfg.max_specular_chain    = as_int();   }
-        else if (key == "nee_coverage_fraction") { cfg.nee_coverage_fraction = as_float(); }
-
         // §5 – Tone mapping
         else if (key == "exposure") {
             cfg.exposure           = as_float();

@@ -56,9 +56,6 @@ struct RenderConfig {
     bool   use_kdtree         = true;   // primary spatial index
     bool   use_knn_adaptive   = false;  // k-NN adaptive gather radius (§C2)
 
-    // NEE coverage fraction (§7.2.1)
-    float  nee_coverage_fraction = DEFAULT_NEE_COVERAGE_FRACTION;
-
     // Targeted caustic emission (§9.2)
     bool   targeted_caustic_emission_enabled = true;
     float  targeted_caustic_mix = DEFAULT_TARGETED_CAUSTIC_MIX;
@@ -203,16 +200,16 @@ public:
     const HashGrid&  caustic_grid()    const { return caustic_grid_; }
     const CellInfoCache& cell_cache()  const { return cell_cache_; }
 
-    // Result of a single camera ray (first-hit + specular chain)
-    // v2.2: Uses PixelLighting for explicit per-channel decomposition.
+    // Result of a single camera ray.
+    // v3: Uses 3-channel PixelLighting (combined, direct, indirect).
     struct TraceResult {
         PixelLighting lighting;  ///< decomposed per-channel radiance
-        Spectrum combined;       ///< full combined radiance (= lighting.combined())
-        Spectrum nee_direct;     ///< direct-lighting component (= lighting.direct_nee)
+        Spectrum combined;       ///< full combined radiance (= lighting.combined)
+        Spectrum nee_direct;     ///< direct-lighting component (= lighting.direct)
 
-        /// Construct from a filled PixelLighting; auto-computes combined / nee_direct.
+        /// Construct from a filled PixelLighting.
         static TraceResult from(const PixelLighting& pl) {
-            return { pl, pl.combined(), pl.direct_nee };
+            return { pl, pl.combined, pl.direct };
         }
     };
 

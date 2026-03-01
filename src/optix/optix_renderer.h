@@ -156,6 +156,12 @@ public:
                             float caustic_radius,
                             int num_photons_emitted = 0);
 
+    /// Build per-cell photon analysis from CellInfoCache + CellBinGrid
+    /// and upload the result arrays to GPU (PA-07/PA-08).
+    void upload_cell_analysis(const CellInfoCache& cell_cache,
+                              const CellBinGrid&   bin_grid,
+                              float                cell_area);
+
     /// Upload emitter data to device (for GPU photon tracing)
     void upload_emitter_data(const Scene& scene);
 
@@ -173,7 +179,7 @@ public:
     // -- Rendering ----------------------------------------------------
 
     /// Launch a single frame of the debug viewer (1 spp, progressive)
-    /// @param shadow_rays  If true, debug_first_hit casts shadow rays (for NEE PNG)
+    /// @param shadow_rays  (unused in v3 — kept for API compat)
     void render_debug_frame(const Camera& camera, int frame_number,
                             RenderMode mode, int spp = 1,
                             bool shadow_rays = false);
@@ -344,9 +350,6 @@ private:
     DeviceBuffer d_nee_direct_buffer_;       // float [W*H*NUM_LAMBDA]
     DeviceBuffer d_photon_indirect_buffer_;  // float [W*H*NUM_LAMBDA]
 
-    // Per-pixel lobe balance (Bresenham accumulator)
-    DeviceBuffer d_lobe_balance_;     // float [W*H]
-
     // Adaptive sampling buffers
     DeviceBuffer d_lum_sum_;          // float [W*H]
     DeviceBuffer d_lum_sum2_;         // float [W*H]
@@ -461,6 +464,12 @@ private:
     // Host-side cell-bin grid (kept after build for save/test access)
     CellBinGrid cell_bin_grid_;  // empty unless dense grid is built
 
+    // Per-cell photon analysis (PA-08: GPU upload buffers)
+    DeviceBuffer d_cell_guide_fraction_;
+    DeviceBuffer d_cell_caustic_fraction_;
+    DeviceBuffer d_cell_flux_density_;
+    int          cell_analysis_count_ = 0;  // number of cells uploaded
+
     // Volume photon storage
     PhotonSoA volume_photons_;
 
@@ -519,9 +528,6 @@ inline void OptixRenderer::resize(int w, int h) {
     d_hdr_buffer_.alloc(pixels * 4 * sizeof(float));
     d_hdr_denoised_.alloc(pixels * 4 * sizeof(float));
 
-    // Per-pixel lobe balance
-    d_lobe_balance_.alloc(pixels * sizeof(float));
-
     // Adaptive sampling buffers
     d_lum_sum_.alloc(pixels * sizeof(float));
     d_lum_sum2_.alloc(pixels * sizeof(float));
@@ -547,7 +553,6 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_normal_buffer_.d_ptr,   0, d_normal_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_hdr_buffer_.d_ptr,      0, d_hdr_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_hdr_denoised_.d_ptr,    0, d_hdr_denoised_.bytes));
-    CUDA_CHECK(cudaMemset(d_lobe_balance_.d_ptr,     0, d_lobe_balance_.bytes));
     CUDA_CHECK(cudaMemset(d_lum_sum_.d_ptr,          0, d_lum_sum_.bytes));
     CUDA_CHECK(cudaMemset(d_lum_sum2_.d_ptr,         0, d_lum_sum2_.bytes));
     CUDA_CHECK(cudaMemset(d_active_mask_.d_ptr,      0, d_active_mask_.bytes));

@@ -13,9 +13,9 @@ static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixe
 // camera.h, populating args from OptiX launch params.
 // =====================================================================
 __forceinline__ __device__
-void dev_generate_camera_ray(int px, int py, PCGRng& rng,
-                             float3& origin, float3& direction,
-                             int sample_index = -1)
+void generate_camera_ray_from_params(int px, int py, PCGRng& rng,
+                                     float3& origin, float3& direction,
+                                     int sample_index = -1)
 {
     Ray ray = generate_camera_ray(
         px, py, rng,
@@ -23,7 +23,7 @@ void dev_generate_camera_ray(int px, int py, PCGRng& rng,
         params.cam_lower_left, params.cam_horizontal, params.cam_vertical,
         params.cam_pos, params.cam_u, params.cam_v,
         params.cam_lens_radius, params.cam_focus_dist, params.cam_focus_range,
-        sample_index, params.is_final_render);
+        sample_index);  // v3: always stratified when sample_index >= 0
     origin    = ray.origin;
     direction = ray.direction;
 }

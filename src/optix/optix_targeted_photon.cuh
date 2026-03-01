@@ -236,7 +236,7 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
             ONB bounce_frame = ONB::from_normal(hit.shading_normal);
             float3 wo_local = bounce_frame.world_to_local(-direction);
             if (wo_local.z <= 0.f) break;
-            DevBSDFSample bs = dev_bsdf_sample(hit_mat, wo_local, hit.uv, rng);
+            BSDFSample bs = bsdf_sample(hit_mat, wo_local, hit.uv, rng);
             if (bs.pdf <= 0.f || bs.wi.z <= 0.f) break;
             for (int h = 0; h < HERO_WAVELENGTHS; ++h)
                 hero_flux[h] *= bs.f.value[hero_bins[h]] * bs.wi.z / bs.pdf;

@@ -50,22 +50,6 @@ TEST(Cdf, BinarySearchWithPlateaus) {
 }
 
 // ---------------------------------------------------------------------
-// NEE sample count policy (bounce-dependent shadow rays)
-// ---------------------------------------------------------------------
-
-TEST(NEE, ShadowSampleCountPolicy) {
-    EXPECT_EQ(nee_shadow_sample_count(0, 4, 1), 4);
-    EXPECT_EQ(nee_shadow_sample_count(1, 4, 1), 1);
-    EXPECT_EQ(nee_shadow_sample_count(7, 4, 1), 1);
-
-    // Clamp to at least 1
-    EXPECT_EQ(nee_shadow_sample_count(0, 0, 0), 1);
-    EXPECT_EQ(nee_shadow_sample_count(1, -10, -2), 1);
-    EXPECT_EQ(nee_shadow_sample_count(0, -10, 5), 1);
-    EXPECT_EQ(nee_shadow_sample_count(2, 5, -10), 1);
-}
-
-// ---------------------------------------------------------------------
 // Photon directional bins / guided NEE helpers
 // ---------------------------------------------------------------------
 

@@ -1,17 +1,16 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// nee_shared.h – Shared NEE math helpers for CPU↔GPU consistency
+// nee_shared.h – Shared NEE math helpers for CPU↔GPU consistency (v3)
 // ─────────────────────────────────────────────────────────────────────
-// v2.2 consistency reset: CPU sample_direct_light() and GPU
-// dev_nee_direct() must both use these exact helpers for:
+// v3 simplification: pure power-weighted alias table, single sample.
+// CPU sample_direct_light() and GPU dev_nee_direct() both use:
 //   - Triangle point sampling
 //   - Area-to-solid-angle PDF conversion
 //   - Balance heuristic MIS weights
 //   - Backfacing/validity checks
 //
-// Canonical NEE v2.2 algorithm:
-//   1. Select emissive triangle via mixture:
-//        p_tri = (1-c)*p_power + c*p_area
+// Canonical NEE v3 algorithm:
+//   1. Select emissive triangle via power-weighted alias table
 //   2. Sample point on triangle uniformly (barycentric):
 //        p_A = 1/Area(tri)
 //   3. Convert to solid angle at shading point:
@@ -43,17 +42,6 @@ inline HD float nee_pdf_area_to_solid_angle(
 {
     if (cos_emitter <= 0.f || pdf_pos <= 0.f) return 0.f;
     return pdf_tri * pdf_pos * dist_squared / cos_emitter;
-}
-
-// ── Coverage-aware mixture triangle selection PDF ───────────────────
-// p = (1-c)*p_power + c*p_area
-inline HD float nee_mixture_pdf(
-    float p_power,            // Power-weighted alias table PDF
-    float p_area,             // Area-weighted alias table PDF
-    float coverage_fraction)  // Mixture weight [0,1]
-{
-    return (1.f - coverage_fraction) * p_power
-         +        coverage_fraction  * p_area;
 }
 
 // ── Balance heuristic MIS weight (2-way) — use mis_weight_2() from
@@ -108,12 +96,4 @@ inline HD float nee_shadow_ray_tmax(float distance) {
     return distance - 2.f * NEE_RAY_EPSILON;
 }
 
-// ── NEE sample-count policy ─────────────────────────────────────────
-// Matches the device-side behavior:
-//   - bounce 0 uses nee_light_samples
-//   - bounce >=1 uses nee_deep_samples
-//   - clamps to at least 1
-inline HD int nee_shadow_sample_count(int bounce, int nee_light_samples, int nee_deep_samples) {
-    const int cfg = (bounce == 0) ? nee_light_samples : nee_deep_samples;
-    return (cfg > 0) ? cfg : 1;
-}
+

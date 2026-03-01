@@ -469,9 +469,7 @@ static Spectrum optimized_nee_guided(
     // Fall back to standard NEE if bins are empty or too many emissives
     bool use_guided = (total_bin_flux > 0.0f && num_emissive <= NEE_GUIDED_MAX_EMISSIVE);
 
-    // Bounce-dependent sample count
-    int M = nee_shadow_sample_count(
-        bounce, DEFAULT_NEE_LIGHT_SAMPLES, DEFAULT_NEE_DEEP_SAMPLES);
+    int M = 1;  // v3: single NEE sample per bounce
 
     // Build guided CDF if applicable
     std::vector<float> guided_cdf;

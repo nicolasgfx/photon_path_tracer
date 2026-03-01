@@ -6,11 +6,13 @@
 //   upload_photon_data(), upload_emitter_data()
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
+#include "photon/photon_analysis.h"   // build_cell_analysis (PA-07/PA-08)
 
 #include <cuda_runtime.h>
 #include <vector>
 #include <cstring>
 #include <cstdio>
+#include <numeric>
 #include <algorithm>
 #include <iostream>
 
@@ -271,4 +273,41 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
                 n, total,
                 *std::max_element(weights.begin(), weights.end()),
                 *std::min_element(weights.begin(), weights.end()));
+}
+
+// =====================================================================
+// upload_cell_analysis() -- Build per-cell photon analysis on CPU and
+//     upload guide_fraction / caustic_fraction / flux_density to GPU.
+// =====================================================================
+void OptixRenderer::upload_cell_analysis(
+    const CellInfoCache& cell_cache,
+    const CellBinGrid&   bin_grid,
+    float                cell_area)
+{
+    auto analysis = build_cell_analysis(cell_cache, bin_grid, cell_area);
+    if (analysis.empty()) {
+        cell_analysis_count_ = 0;
+        return;
+    }
+
+    const size_t N = analysis.size();
+    cell_analysis_count_ = (int)N;
+
+    // Extract SoA float arrays from the CellAnalysis vector
+    std::vector<float> guide(N), caustic(N), density(N);
+    for (size_t i = 0; i < N; ++i) {
+        guide[i]   = analysis[i].guide_fraction;
+        caustic[i] = analysis[i].caustic_fraction;
+        density[i] = analysis[i].flux_density;
+    }
+
+    d_cell_guide_fraction_.upload(guide);
+    d_cell_caustic_fraction_.upload(caustic);
+    d_cell_flux_density_.upload(density);
+
+    std::printf("[OptiX] Uploaded cell analysis: %zu cells  "
+                "avg_guide=%.3f  avg_caustic=%.3f\n",
+                N,
+                std::accumulate(guide.begin(), guide.end(), 0.f) / (float)N,
+                std::accumulate(caustic.begin(), caustic.end(), 0.f) / (float)N);
 }

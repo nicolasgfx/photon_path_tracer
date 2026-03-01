@@ -1,13 +1,13 @@
 #pragma once
 #include <cstdint>
 // ─────────────────────────────────────────────────────────────────────
-// config.h – Central configuration for the photon-centric renderer v2.3
+// config.h – Central configuration for the photon-guided path tracer v3
 // ─────────────────────────────────────────────────────────────────────
 //
-//   Architecture: photon-centric (doc/architecture/architecture.md)
-//     Camera rays  → first-hit only → NEE + photon gather
-//     Photon rays  → full path tracing from lights (the real tracers)
-//     Gather       → adaptive kNN on tangent plane, not fixed-radius 3D sphere
+//   Architecture: photon-guided path tracing (doc/architecture/architecture.md)
+//     Pass 1: photon tracing → photon map + cell-bin grid
+//     Pass 2: camera path tracing → iterative bounce loop with photon guide
+//     Gather → adaptive kNN on tangent plane (final gather at path termination)
 //     Spatial index → KD-tree (CPU), hash grid (GPU)
 //
 //   Only scene-level and algorithm-level tunables belong here.
@@ -38,19 +38,16 @@
 //#define SCENE_SALLE_DE_BAIN
 //#define SCENE_MORI_KNOB
 
-// ── v2.2 Consistency Reset Flags ────────────────────────────────────
-// Bresenham per-pixel lobe balance (GPU BSDF heuristic):
-// disabled by default for CPU↔GPU consistency.  Enable only after
-// CPU has the same mechanism and equivalence tests pass.
-constexpr bool DEFAULT_ENABLE_BRESENHAM_BSDF = false;
+// ── v3 flags ────────────────────────────────────────────────────────
+// (Bresenham lobe balance removed in v3 — no per-pixel lobe balance)
 
 
 // =====================================================================
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 512;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 1920;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 1080;           // [R]
 
 
 // =====================================================================
@@ -63,20 +60,12 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
 // Anti-aliasing + noise averaging.  This is the single biggest
 // quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
-constexpr int DEFAULT_SPP = 16;                       // [R]
+constexpr int DEFAULT_SPP = 256;                       // [R]
 
 // Sub-pixel stratified jitter grid.
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP.
-constexpr int STRATA_X = 4;                           // 4 × 4 = 16 = DEFAULT_SPP
-constexpr int STRATA_Y = 4;
-
-// ── NEE shadow rays ─────────────────────────────────────────────────
-// Shadow rays per shading point (bounce 0).  The bin/cache system
-// improves *which* emitters are chosen, but M still controls how
-// many shadow rays are cast.  See DEFAULT_NEE_DEEP_SAMPLES for
-// bounces ≥ 1.
-//   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
-constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
+constexpr int STRATA_X = 16;                           // 4 × 4 = 16 = DEFAULT_SPP
+constexpr int STRATA_Y = 16;
 
 // ── Photon budgets ──────────────────────────────────────────────────
 // Total photons emitted per pass.  The photon map carries ALL indirect
@@ -136,30 +125,26 @@ constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
 
 // =====================================================================
-//  §4  CAMERA RAYS & DIRECT LIGHTING
+//  §4  CAMERA PATH TRACING (v3 — Photon-Guided)
 // =====================================================================
 
-// ── Specular chain ──────────────────────────────────────────────────
-// Camera ray follows mirror/glass bounces until hitting a diffuse
-// surface, then evaluates NEE + photon gather.
-//   Fast: 4  |  Balanced: 8  |  Quality: 12–16
-constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 12;         // [R]
+// ── Path depth ──────────────────────────────────────────────────────
+// v3: single iterative bounce loop replaces specular chain + glossy.
+constexpr int DEFAULT_MAX_BOUNCES_CAMERA = 12;         // [R]  max camera path depth
+constexpr int DEFAULT_MIN_BOUNCES_RR     = 3;          // [R]  guaranteed bounces before RR
+constexpr float DEFAULT_RR_THRESHOLD     = 0.95f;      // [R]  max survival probability
 
-// ── Glossy continuation bounces ─────────────────────────────────────
-// After the first non-specular hit, glossy surfaces can trace extra
-// BSDF-sampled reflection bounces.
-//   0 = off  |  2 = balanced  |  3–4 = quality (expensive)
-constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 2;
+// ── Photon-guided sampling ──────────────────────────────────────────
+constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;       // [R]  probability of guided vs BSDF sample
+constexpr bool  DEFAULT_USE_GUIDE        = true;        // [K]  enable/disable guided sampling
 
-// ── NEE emitter selection mix ───────────────────────────────────────
-// Power-weighted vs area-weighted emitter selection for shadow rays.
-//   0.0 = pure power  |  0.3 = balanced  |  1.0 = pure area
-constexpr float DEFAULT_NEE_COVERAGE_FRACTION = 0.3f; // [R]
+// ── Photon density fallback ─────────────────────────────────────────
+constexpr int  DEFAULT_GUIDE_FALLBACK_BOUNCE = 3;       // [R]  switch to photon gather after this bounce
+constexpr bool DEFAULT_PHOTON_FINAL_GATHER   = true;    // [K]  use photon map as final gather at terminal bounces
 
-// ── MIS (power heuristic) ───────────────────────────────────────────
-// Balances NEE shadow rays vs BSDF-sampled rays that hit emitters.
-// Should always be true — disabling causes double-counting on glossy.
-constexpr bool DEFAULT_USE_MIS = true;
+// ── Legacy aliases (still referenced by SPPM, CPU renderer, NEE) ────
+constexpr int   DEFAULT_MAX_SPECULAR_CHAIN     = DEFAULT_MAX_BOUNCES_CAMERA;  // alias for SPPM camera pass
+constexpr bool  DEFAULT_USE_MIS                = true;
 
 
 // =====================================================================
@@ -284,12 +269,9 @@ constexpr bool DEFAULT_USE_DENSE_GRID = false;          // use cell-bin dense gr
 //  §11  LEGACY ALIASES
 // =====================================================================
 // Still referenced across the GPU pipeline and tests.
-// TODO: migrate callers to the canonical names, then remove.
+// TODO(v3): migrate callers to canonical names, then remove.
 
-constexpr int   DEFAULT_NEE_DEEP_SAMPLES = 4;         // v1 deep NEE (still wired in optix_renderer)
 constexpr int   DEFAULT_MAX_BOUNCES      = DEFAULT_PHOTON_MAX_BOUNCES;
-constexpr int   DEFAULT_MIN_BOUNCES_RR   = DEFAULT_PHOTON_MIN_BOUNCES_RR;
-constexpr float DEFAULT_RR_THRESHOLD     = DEFAULT_PHOTON_RR_THRESHOLD;
 constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
 
 

@@ -1,12 +1,13 @@
 // ─────────────────────────────────────────────────────────────────────
-// renderer.cpp – Photon-centric renderer (v2 Architecture)
+// renderer.cpp – CPU render pipeline (v3 iterative path tracer)
 // ─────────────────────────────────────────────────────────────────────
-// Camera rays are first-hit probes with specular chain (§E3).
-// All indirect lighting comes from the photon map.
-// Direct lighting via NEE at the camera first-hit point.
+// trace_path() now delegates to path_trace_cpu() (Part 2 §6).
+// render_pixel() is the legacy v2 first-hit + specular chain path,
+// kept for backward compat with existing integration tests.
 // ─────────────────────────────────────────────────────────────────────
 #include "renderer/renderer.h"
 #include "renderer/direct_light.h"
+#include "renderer/path_trace.h"
 #include "photon/emitter.h"
 #include "photon/density_estimator.h"
 #include "photon/surface_filter.h"
@@ -150,20 +151,20 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
 
         // Emission: only on first bounce (camera sees a light)
         if (mat.is_emissive() && bounce == 0) {
-            pl.emission += throughput * mat.Le;
+            pl.combined += throughput * mat.Le;
         }
 
         // Debug render modes (return immediately)
         if (config_.mode != RenderMode::Combined) {
             switch (config_.mode) {
                 case RenderMode::Normals:
-                    { PixelLighting d = PixelLighting::zero(); d.emission = render_normals(hit);     return TraceResult::from(d); }
+                    { PixelLighting d = PixelLighting::zero(); d.combined = render_normals(hit);     return TraceResult::from(d); }
                 case RenderMode::MaterialID:
-                    { PixelLighting d = PixelLighting::zero(); d.emission = render_material_id(hit); return TraceResult::from(d); }
+                    { PixelLighting d = PixelLighting::zero(); d.combined = render_material_id(hit); return TraceResult::from(d); }
                 case RenderMode::Depth:
-                    { PixelLighting d = PixelLighting::zero(); d.emission = render_depth(hit, 5.0f); return TraceResult::from(d); }
+                    { PixelLighting d = PixelLighting::zero(); d.combined = render_depth(hit, 5.0f); return TraceResult::from(d); }
                 case RenderMode::PhotonMap:
-                    { PixelLighting d = PixelLighting::zero(); d.emission = render_photon_density(hit, ray.direction * (-1.f));
+                    { PixelLighting d = PixelLighting::zero(); d.combined = render_photon_density(hit, ray.direction * (-1.f));
                       return TraceResult::from(d); }
                 default: break;
             }
@@ -205,7 +206,8 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                 if (cos_theta > 0.f) {
                     Spectrum f = bsdf::evaluate(mat, wo_local, wi_local);
                     Spectrum contrib = dls.Li * f * (cos_theta / dls.pdf_light);
-                    pl.direct_nee += throughput * contrib;
+                    pl.direct += throughput * contrib;
+                    pl.combined += throughput * contrib;
                 }
             }
         }
@@ -234,7 +236,8 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                     global_photons_, global_grid_, de_config,
                     eff_radius);
             }
-            pl.indirect_global += throughput * L_photon;
+            pl.indirect += throughput * L_photon;
+            pl.combined += throughput * L_photon;
         }
 
         // 3. Caustic map gather
@@ -259,7 +262,8 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                         caustic_photons_, caustic_grid_, de_config,
                         config_.caustic_radius);
                 }
-                pl.indirect_caustic += throughput * L_caustic;
+                pl.indirect += throughput * L_caustic;
+                pl.combined += throughput * L_caustic;
             }
         }
 
@@ -338,7 +342,8 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                     // here.  (DEFAULT_USE_MIS has no numerical effect for the
                     // CPU mirror path; it will matter when stochastic BSDF
                     // sampling replaces the mirror continuation.)
-                    pl.glossy_indirect += glossy_tp * rmat.Le;
+                    pl.indirect += glossy_tp * rmat.Le;
+                    pl.combined += glossy_tp * rmat.Le;
                     break;
                 }
 
@@ -355,7 +360,9 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
                             float rcos = fmaxf(0.f, rwi.z);
                             if (rcos > 0.f) {
                                 Spectrum rf_val = bsdf::evaluate(rmat, rwo, rwi);
-                                pl.glossy_indirect += glossy_tp * rdls.Li * rf_val * (rcos / rdls.pdf_light);
+                                Spectrum glossy_contrib = glossy_tp * rdls.Li * rf_val * (rcos / rdls.pdf_light);
+                                pl.indirect += glossy_contrib;
+                                pl.combined += glossy_contrib;
                             }
                         }
                     }
@@ -378,10 +385,20 @@ Renderer::TraceResult Renderer::render_pixel(Ray ray, PCGRng& rng) {
     return TraceResult::from(pl);
 }
 
-// ── Legacy wrapper (backward compatibility) ─────────────────────────
+// ── v3 trace_path: delegates to path_trace_cpu() ──────────────────────
 
 Renderer::TraceResult Renderer::trace_path(Ray ray, PCGRng& rng) {
-    return render_pixel(ray, rng);
+    CpuPathTraceResult cptr = path_trace_cpu(
+        ray, rng, *scene_, config_,
+        global_photons_, global_grid_,
+        caustic_photons_, caustic_grid_);
+
+    // Wrap into TraceResult — maps directly to 3-channel PixelLighting
+    PixelLighting pl = PixelLighting::zero();
+    pl.combined = cptr.combined;
+    pl.direct   = cptr.nee_direct;
+    pl.indirect = cptr.photon_indirect;
+    return TraceResult::from(pl);
 }
 
 // ── Debug render modes ──────────────────────────────────────────────

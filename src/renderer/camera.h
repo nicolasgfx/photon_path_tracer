@@ -12,8 +12,7 @@
 // Supports sub-pixel jitter, optional stratification, focus-range
 // jitter, and thin-lens DOF (Shirley concentric disk).
 //
-// sample_index < 0 → simple random jitter (SPPM / debug / CPU preview).
-// sample_index >= 0 → stratified sub-pixel when is_final_render.
+// sample_index >= 0 → stratified sub-pixel jitter.
 // ─────────────────────────────────────────────────────────────────────
 inline HD Ray generate_camera_ray(
     int px, int py, PCGRng& rng,
@@ -21,11 +20,11 @@ inline HD Ray generate_camera_ray(
     float3 lower_left, float3 horizontal, float3 vertical,
     float3 cam_pos, float3 cam_u, float3 cam_v,
     float lens_radius, float focus_dist, float focus_range,
-    int sample_index = -1, bool is_final_render = false)
+    int sample_index = -1)
 {
-    // Sub-pixel jitter (optionally stratified)
+    // Sub-pixel jitter (stratified when sample_index >= 0)
     float jx, jy;
-    if (sample_index >= 0 && is_final_render
+    if (sample_index >= 0
         && STRATA_X > 1 && STRATA_Y > 1) {
         int stratum_x = sample_index % STRATA_X;
         int stratum_y = (sample_index / STRATA_X) % STRATA_Y;
@@ -119,13 +118,13 @@ struct Camera {
 
     // Generate a ray for pixel (px, py) with jitter for anti-aliasing
     Ray generate_ray(int px, int py, PCGRng& rng,
-                     int sample_index = -1, bool is_final_render = false) const {
+                     int sample_index = -1) const {
         return generate_camera_ray(
             px, py, rng, width, height,
             lower_left, horizontal, vertical,
             position, u, v,
             lens_radius, dof_focus_dist, dof_focus_range,
-            sample_index, is_final_render);
+            sample_index);
     }
 
     // Default Cornell Box camera

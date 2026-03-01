@@ -237,7 +237,7 @@ extern "C" __global__ void __raygen__photon_trace() {
             float3 wo_local = bounce_frame.world_to_local(-direction);
             if (wo_local.z <= 0.f) break;
 
-            DevBSDFSample bs = dev_bsdf_sample(hit_mat, wo_local, hit.uv, rng);
+            BSDFSample bs = bsdf_sample(hit_mat, wo_local, hit.uv, rng);
             if (bs.pdf <= 0.f || bs.wi.z <= 0.f) break;
 
             float cos_theta_b = bs.wi.z;

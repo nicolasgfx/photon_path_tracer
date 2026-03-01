@@ -43,6 +43,11 @@ struct Spectrum {
         for (int i = 0; i < NUM_LAMBDA; ++i) r.value[i] = value[i] + o.value[i];
         return r;
     }
+    HD Spectrum operator-(const Spectrum& o) const {
+        Spectrum r;
+        for (int i = 0; i < NUM_LAMBDA; ++i) r.value[i] = value[i] - o.value[i];
+        return r;
+    }
     HD Spectrum operator*(const Spectrum& o) const {
         Spectrum r;
         for (int i = 0; i < NUM_LAMBDA; ++i) r.value[i] = value[i] * o.value[i];
@@ -61,6 +66,10 @@ struct Spectrum {
     }
     HD Spectrum& operator+=(const Spectrum& o) {
         for (int i = 0; i < NUM_LAMBDA; ++i) value[i] += o.value[i];
+        return *this;
+    }
+    HD Spectrum& operator-=(const Spectrum& o) {
+        for (int i = 0; i < NUM_LAMBDA; ++i) value[i] -= o.value[i];
         return *this;
     }
     HD Spectrum& operator*=(float s) {

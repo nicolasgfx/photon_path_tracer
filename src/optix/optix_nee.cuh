@@ -40,44 +40,6 @@ float dev_light_pdf(uint32_t tri_id, float3 geo_normal, float3 wi, float t) {
     return nee_pdf_area_to_solid_angle(pdf_tri, 1.f / area, dist2, cos_o);
 }
 
-// == Debug render modes ===============================================
-
-__forceinline__ __device__
-Spectrum render_normals_dev(const TraceResult& hit) {
-    Spectrum s;
-    float r = hit.shading_normal.x * 0.5f + 0.5f;
-    float g = hit.shading_normal.y * 0.5f + 0.5f;
-    float b = hit.shading_normal.z * 0.5f + 0.5f;
-    for (int i = 0; i < NUM_LAMBDA; ++i) s.value[i] = 0.f;
-    for (int i = 0; i < NUM_LAMBDA/3; ++i) s.value[i] = r;
-    for (int i = NUM_LAMBDA/3; i < 2*NUM_LAMBDA/3; ++i) s.value[i] = g;
-    for (int i = 2*NUM_LAMBDA/3; i < NUM_LAMBDA; ++i) s.value[i] = b;
-    return s;
-}
-
-__forceinline__ __device__
-Spectrum render_material_id_dev(uint32_t mat_id) {
-    float hue = fmodf(mat_id * 0.618033988f, 1.f);
-    float r = fabsf(hue*6.f - 3.f) - 1.f;
-    float g = 2.f - fabsf(hue*6.f - 2.f);
-    float b = 2.f - fabsf(hue*6.f - 4.f);
-    r = fminf(fmaxf(r, 0.f), 1.f);
-    g = fminf(fmaxf(g, 0.f), 1.f);
-    b = fminf(fmaxf(b, 0.f), 1.f);
-    Spectrum s;
-    for (int i = 0; i < NUM_LAMBDA; ++i) s.value[i] = 0.f;
-    for (int i = 0; i < NUM_LAMBDA/3; ++i) s.value[i] = r;
-    for (int i = NUM_LAMBDA/3; i < 2*NUM_LAMBDA/3; ++i) s.value[i] = g;
-    for (int i = 2*NUM_LAMBDA/3; i < NUM_LAMBDA; ++i) s.value[i] = b;
-    return s;
-}
-
-__forceinline__ __device__
-Spectrum render_depth_dev(float t, float max_depth) {
-    float d = fminf(t / max_depth, 1.f);
-    return Spectrum::constant(1.f - d);
-}
-
 // == Hash grid photon lookup (device-side) ============================
 
 __forceinline__ __device__
@@ -388,7 +350,7 @@ NeeSampleResult dev_nee_evaluate_sample(
     // MIS vs BSDF sampling
     float w_mis = 1.0f;
     if (DEFAULT_USE_MIS) {
-        float pdf_bsdf = dev_bsdf_pdf(mat_id, wo_local, wi_local);
+        float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
         w_mis = mis_weight_2(p_wi, pdf_bsdf);
     }
 
@@ -397,4 +359,66 @@ NeeSampleResult dev_nee_evaluate_sample(
         r.L.value[i] = w_mis * f.value[i] * Le.value[i]
                       * cos_x / fmaxf(p_wi, 1e-8f);
     return r;
+}
+
+// =====================================================================
+// Emitter selection: pure power-weighted CDF
+// =====================================================================
+
+__forceinline__ __device__
+int dev_nee_select_global(PCGRng& rng, float& p_tri_out) {
+    float xi = rng.next_float();
+    int local_idx = binary_search_cdf(
+        params.emissive_cdf, params.num_emissive, xi);
+    if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+
+    p_tri_out = (local_idx == 0)
+        ? params.emissive_cdf[0]
+        : params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+    return local_idx;
+}
+
+// PDF for a given emissive index under the power-weighted CDF
+__forceinline__ __device__
+float dev_nee_global_pdf(int local_idx) {
+    return (local_idx == 0)
+        ? params.emissive_cdf[0]
+        : params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+}
+
+// =====================================================================
+// Single-sample NEE direct lighting
+// =====================================================================
+
+__forceinline__ __device__
+NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
+                         uint32_t mat_id, PCGRng& rng, int bounce,
+                         float2 uv)
+{
+    NeeResult result;
+    result.L = Spectrum::zero();
+    result.visibility = 0.f;
+    if (params.num_emissive <= 0) return result;
+
+    ONB frame = ONB::from_normal(normal);
+    float p_tri;
+    int local_idx = dev_nee_select_global(rng, p_tri);
+
+    NeeSampleResult sr = dev_nee_evaluate_sample(
+        local_idx, p_tri, pos, normal, wo_local, mat_id, frame, uv, rng);
+    result.L = sr.L;
+    result.visibility = sr.visible ? 1.f : 0.f;
+    return result;
+}
+
+// =====================================================================
+// dev_nee_dispatch — entry point for all NEE calls
+// =====================================================================
+
+__forceinline__ __device__
+NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
+                           uint32_t mat_id, PCGRng& rng, int bounce,
+                           float2 uv)
+{
+    return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
 }

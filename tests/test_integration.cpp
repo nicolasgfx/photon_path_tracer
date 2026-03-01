@@ -638,7 +638,6 @@ TEST_F(IntegrationTest, CoverageAwareNEEValid) {
 
     RenderConfig cfg = config_;
     cfg.mode = RenderMode::DirectOnly;
-    cfg.nee_coverage_fraction = 0.3f;  // §7.2.1 default
     renderer.set_config(cfg);
     renderer.build_photon_maps();
 
@@ -879,7 +878,6 @@ TEST_F(IntegrationTest, FullRenderTangentialValid) {
     cfg.samples_per_pixel = 2;
     cfg.num_photons  = 20000;
     cfg.use_kdtree   = true;  // use tangential KD-tree path
-    cfg.nee_coverage_fraction = 0.3f;  // coverage-aware NEE
     renderer.set_config(cfg);
     renderer.build_photon_maps();
 
@@ -1074,4 +1072,174 @@ TEST_F(CpuGpuTest, CombinedPsnrAbove20dB) {
     EXPECT_GE(psnr, 20.0f)
         << "PSNR below 20 dB suggests a systematic divergence between "
            "CPU and GPU combined rendering";
+}
+
+// ─ 18. CPU ↔ GPU: total energy ratio within 5% ───────────────────
+//
+// Render combined mode on both, sum spectral energy, and check the
+// GPU/CPU energy ratio is ∈ [0.95, 1.05].  Uses raw spectral data
+// (not sRGB) to avoid tone-map quantisation.
+TEST_F(CpuGpuTest, EnergyConservation) {
+    if (!scene_ok()) GTEST_SKIP() << "Cornell Box scene not available";
+    if (global_photons().size() == 0) GTEST_SKIP() << "No photons available";
+
+    const int W = 32, H = 32;
+
+    // ── CPU reference ──
+    RenderConfig cfg = config();
+    cfg.image_width       = W;
+    cfg.image_height      = H;
+    cfg.samples_per_pixel = 4;
+    cfg.mode              = RenderMode::Combined;
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(scene());
+    Camera cam = camera();
+    cam.width  = W;
+    cam.height = H;
+    cam.update();
+    cpu_renderer.set_camera(cam);
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+    cpu_renderer.render_frame();
+
+    const FrameBuffer& cpu_fb = cpu_renderer.framebuffer();
+
+    // Sum CPU spectral energy (per-pixel average radiance)
+    double cpu_energy = 0.0;
+    for (int i = 0; i < W * H; ++i) {
+        float sc = cpu_fb.sample_count[i];
+        if (sc <= 0.f) continue;
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            cpu_energy += (double)(cpu_fb.pixels[i].value[b] / sc);
+    }
+
+    // ── GPU reference ──
+    OptixRenderer gpu;
+    try {
+        gpu.init();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "OptiX not available: " << e.what();
+    }
+    gpu.build_accel(*scene());
+    gpu.upload_scene_data(*scene());
+    gpu.upload_emitter_data(*scene());
+    gpu.resize(W, H);
+    gpu.clear_buffers();
+    gpu.upload_photon_data(
+        global_photons(), global_grid(),
+        caustic_photons(), caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius,
+        cfg.num_photons);
+
+    for (int s = 0; s < cfg.samples_per_pixel; ++s)
+        gpu.render_one_spp(cam, s, cfg.max_bounces);
+
+    // Download raw spectral component buffers
+    std::vector<float> gpu_nee, gpu_indirect, gpu_samp;
+    gpu.download_component_buffers(gpu_nee, gpu_indirect, gpu_samp);
+
+    double gpu_energy = 0.0;
+    for (int i = 0; i < W * H; ++i) {
+        float sc = gpu_samp[i];
+        if (sc <= 0.f) continue;
+        for (int b = 0; b < NUM_LAMBDA; ++b) {
+            float nee = gpu_nee[i * NUM_LAMBDA + b];
+            float ind = gpu_indirect[i * NUM_LAMBDA + b];
+            gpu_energy += (double)((nee + ind) / sc);
+        }
+    }
+
+    ASSERT_GT(cpu_energy, 0.0) << "CPU produced zero energy";
+    ASSERT_GT(gpu_energy, 0.0) << "GPU produced zero energy";
+
+    double ratio = gpu_energy / cpu_energy;
+    std::printf("[CPU↔GPU] Energy ratio (GPU/CPU): %.4f  "
+                "(CPU=%.2f, GPU=%.2f)\n", ratio, cpu_energy, gpu_energy);
+    EXPECT_GE(ratio, 0.95)
+        << "GPU energy too low vs CPU — ratio " << ratio;
+    EXPECT_LE(ratio, 1.05)
+        << "GPU energy too high vs CPU — ratio " << ratio;
+}
+
+// ─ 19. CPU ↔ GPU: no negative radiance values ────────────────────
+//
+// Both renderers should produce non-negative spectral radiance in
+// every pixel and every bin.
+TEST_F(CpuGpuTest, NoNegativeValues) {
+    if (!scene_ok()) GTEST_SKIP() << "Cornell Box scene not available";
+
+    const int W = 32, H = 32;
+
+    // ── CPU ──
+    RenderConfig cfg = config();
+    cfg.image_width       = W;
+    cfg.image_height      = H;
+    cfg.samples_per_pixel = 4;
+    cfg.mode              = RenderMode::Combined;
+
+    Renderer cpu_renderer;
+    cpu_renderer.set_scene(scene());
+    Camera cam = camera();
+    cam.width  = W;
+    cam.height = H;
+    cam.update();
+    cpu_renderer.set_camera(cam);
+    cpu_renderer.set_config(cfg);
+    cpu_renderer.build_photon_maps();
+    cpu_renderer.render_frame();
+
+    const FrameBuffer& cpu_fb = cpu_renderer.framebuffer();
+
+    int cpu_neg = 0;
+    float cpu_min = 0.f;
+    for (int i = 0; i < W * H; ++i) {
+        float sc = cpu_fb.sample_count[i];
+        if (sc <= 0.f) continue;
+        for (int b = 0; b < NUM_LAMBDA; ++b) {
+            float v = cpu_fb.pixels[i].value[b] / sc;
+            if (v < 0.f) { ++cpu_neg; cpu_min = (std::min)(cpu_min, v); }
+        }
+    }
+    EXPECT_EQ(cpu_neg, 0)
+        << "CPU produced " << cpu_neg << " negative radiance values (min=" << cpu_min << ")";
+
+    // ── GPU ──
+    OptixRenderer gpu;
+    try {
+        gpu.init();
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "OptiX not available: " << e.what();
+    }
+    gpu.build_accel(*scene());
+    gpu.upload_scene_data(*scene());
+    gpu.upload_emitter_data(*scene());
+    gpu.resize(W, H);
+    gpu.clear_buffers();
+    gpu.upload_photon_data(
+        global_photons(), global_grid(),
+        caustic_photons(), caustic_grid(),
+        cfg.gather_radius, cfg.caustic_radius,
+        cfg.num_photons);
+
+    for (int s = 0; s < cfg.samples_per_pixel; ++s)
+        gpu.render_one_spp(cam, s, cfg.max_bounces);
+
+    std::vector<float> gpu_nee, gpu_indirect, gpu_samp;
+    gpu.download_component_buffers(gpu_nee, gpu_indirect, gpu_samp);
+
+    int gpu_neg = 0;
+    float gpu_min = 0.f;
+    for (int i = 0; i < W * H; ++i) {
+        float sc = gpu_samp[i];
+        if (sc <= 0.f) continue;
+        for (int b = 0; b < NUM_LAMBDA; ++b) {
+            float nee = gpu_nee[i * NUM_LAMBDA + b] / sc;
+            float ind = gpu_indirect[i * NUM_LAMBDA + b] / sc;
+            if (nee < 0.f) { ++gpu_neg; gpu_min = (std::min)(gpu_min, nee); }
+            if (ind < 0.f) { ++gpu_neg; gpu_min = (std::min)(gpu_min, ind); }
+        }
+    }
+    EXPECT_EQ(gpu_neg, 0)
+        << "GPU produced " << gpu_neg << " negative radiance values (min=" << gpu_min << ")";
 }

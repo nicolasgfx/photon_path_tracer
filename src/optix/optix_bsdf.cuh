@@ -117,7 +117,7 @@ Spectrum bsdf_evaluate(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
 }
 
 __forceinline__ __device__
-float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
+float bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
     if (wi.z <= 0.f || wo.z <= 0.f) return 0.f;
 
     float diff_pdf = fmaxf(0.f, wi.z) * INV_PI;
@@ -164,7 +164,7 @@ float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
         spec_weight = Ks.max_component();
         diff_weight = Kd.max_component();
     }
-    // Must match the roughness boost in dev_bsdf_sample()
+    // Must match the roughness boost in bsdf_sample()
     float roughness_boost = 1.f / (1.f + 10.f * alpha);
     spec_weight = fmaxf(spec_weight, roughness_boost);
 
@@ -181,12 +181,12 @@ float dev_bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
 
 // Overload for backward compatibility (Lambertian-only call sites)
 __forceinline__ __device__
-float dev_bsdf_pdf(float3 wi) {
+float bsdf_pdf(float3 wi) {
     return fmaxf(0.f, wi.z) * INV_PI;
 }
 
 // Result struct for device BSDF sampling
-struct DevBSDFSample {
+struct BSDFSample {
     float3   wi;          // sampled direction (local frame)
     float    pdf;         // probability density
     Spectrum f;           // BSDF value f(wo, wi) per wavelength
@@ -197,9 +197,9 @@ struct DevBSDFSample {
 // pixel_idx >= 0 enables the per-pixel Bresenham lobe balance accumulator
 // (pass -1 to fall back to a random coin flip, e.g. for photon tracing).
 __forceinline__ __device__
-DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
-                              PCGRng& rng, int pixel_idx = -1) {
-    DevBSDFSample s;
+BSDFSample bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
+                       PCGRng& rng, int pixel_idx = -1) {
+    BSDFSample s;
     s.is_specular = false;
 
     Spectrum Kd = dev_get_Kd(mat_id, uv);
@@ -313,30 +313,8 @@ DevBSDFSample dev_bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
     float total_w = spec_weight + diff_weight;
     float p_spec = (total_w > 0.f) ? spec_weight / total_w : 0.5f;
 
-    // ── Lobe selection via Bresenham accumulator ─────────────────────
-    // v2.2: Gated behind DEFAULT_ENABLE_BRESENHAM_BSDF (off by default
-    // to ensure CPU↔GPU consistency).
-    // When pixel_idx >= 0 and the lobe_balance buffer is available we
-    // use a Bresenham error accumulator instead of a random coin flip.
-    // Positive balance = specular deficit → choose specular this sample.
-    // This guarantees that over K samples the specular count is within
-    // 1 of K * p_spec, eliminating binomial variance in lobe counts.
-    bool choose_specular;
-    if constexpr (DEFAULT_ENABLE_BRESENHAM_BSDF) {
-        if (pixel_idx >= 0 && params.lobe_balance) {
-            float balance = params.lobe_balance[pixel_idx];
-            choose_specular = (balance >= 0.f);
-            if (choose_specular)
-                balance -= (1.f - p_spec);
-            else
-                balance += p_spec;
-            params.lobe_balance[pixel_idx] = balance;
-        } else {
-            choose_specular = (rng.next_float() < p_spec);
-        }
-    } else {
-        choose_specular = (rng.next_float() < p_spec);
-    }
+    // ── Lobe selection via random coin flip ────────────────────────
+    bool choose_specular = (rng.next_float() < p_spec);
 
     if (choose_specular) {
         // Sample GGX specular lobe

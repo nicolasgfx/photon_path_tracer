@@ -1,12 +1,11 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// launch_params.h – Shared data between host and OptiX device code
+// launch_params.h – Shared data between host and OptiX device code (v3)
 // ─────────────────────────────────────────────────────────────────────
 #include "core/types.h"
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "photon/photon_bins.h"
-#include "renderer/light_cache.h"
 
 #ifdef PPT_USE_OPTIX
 #include <optix.h>
@@ -57,14 +56,21 @@ struct LaunchParams {
 
     // Rendering parameters
     int    samples_per_pixel;
-    int    max_bounces;
+    int    max_bounces;           // [legacy] max specular chain bounces
+    int    max_bounces_camera;    // [v3] max camera path depth (§4)
+    int    min_bounces_rr;        // [v3] guaranteed bounces before RR
+    float  rr_threshold;          // [v3] max RR survival probability
+    float  guide_fraction;        // [v3] photon-guided fraction (0..1)
+    int    guide_fallback_bounce; // [v3] switch to photon gather after this bounce
+    int    photon_final_gather;   // [v3] 1 = use photon map at terminal bounce
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
+
+    // ── Per-cell photon analysis (precomputed, §3) ──────────────────
+    float* cell_guide_fraction;   // [grid_total_cells] precomputed p_guide
+    float* cell_caustic_fraction; // [grid_total_cells] fraction of caustic photons
+    float* cell_flux_density;     // [grid_total_cells] photon flux / cell area
     int    frame_number;
     RenderMode render_mode;      // shared enum from core/types.h
-    int    is_final_render;      // 0 = debug first-hit, 1 = full path tracing
-    int    debug_shadow_rays;    // 1 = debug_first_hit casts shadow rays (NEE PNG)
-    int    nee_light_samples;    // M: shadow-ray samples at bounce 0
-    int    nee_deep_samples;     // shadow-ray samples at bounce >= 1
     float  exposure;             // linear exposure multiplier (applied before tone mapping)
     int    skip_tonemap;         // 1 = skip inline tonemap in __raygen__render (use post-process kernel)
 
@@ -195,13 +201,6 @@ struct LaunchParams {
     long long* prof_photon_gather;   // time in photon density estimation
     long long* prof_bsdf;            // time in BSDF eval + continuation
 
-    // ── Per-pixel lobe balance (Bresenham accumulator) ────────────────
-    // Persistent across frames.  Positive = specular deficit,
-    // negative = diffuse deficit.  Guarantees optimal lobe coverage
-    // so each pixel converges without redundant same-lobe paths.
-    // nullptr disables the feature (falls back to random coin flip).
-    float*   lobe_balance;  // [width * height]
-
     // ── Adaptive sampling ────────────────────────────────────────────
     // All three pointers are nullptr when adaptive sampling is disabled.
     float*   lum_sum;       // [width * height]  Σ Y_i   (linear luminance)
@@ -245,28 +244,6 @@ struct LaunchParams {
     int        vol_cell_grid_dim_x;
     int        vol_cell_grid_dim_y;
     int        vol_cell_grid_dim_z;
-
-    // ── Light importance cache (per-cell top-K lights for NEE) ────────
-    // Built from photon deposition statistics.  Each hash cell stores
-    // the top NEE_CELL_TOP_K most important light sources ranked by
-    // accumulated photon flux.  NEE samples from this cache instead
-    // of the global power CDF, reducing shadow-ray variance.
-    CellLightEntry* light_cache_entries;         // [LIGHT_CACHE_TABLE_SIZE * NEE_CELL_TOP_K]
-    int*            light_cache_count;            // [LIGHT_CACHE_TABLE_SIZE]
-    float*          light_cache_total_importance; // [LIGHT_CACHE_TABLE_SIZE]
-    float           light_cache_cell_size;        // cell size (same as hash grid)
-    int             light_cache_valid;            // 1 = cache uploaded, 0 = not available
-    int             use_light_cache;              // 1 = use cached NEE, 0 = standard NEE
-
-    // ── Coverage-based shadow ray targets (per-cell, variable-length) ─
-    // Built from EmitterPointSet using hemisphere directional coverage.
-    // Each cell stores a variable number of precomputed shadow ray
-    // targets, accessed via offset + count.
-    ShadowRayTarget* shadow_ray_targets;         // flattened array of all targets
-    int*             shadow_ray_cell_offset;     // [LIGHT_CACHE_TABLE_SIZE] start into targets
-    int*             shadow_ray_cell_count;      // [LIGHT_CACHE_TABLE_SIZE] num targets per cell
-    int              shadow_ray_cache_valid;      // 1 = coverage data uploaded
-    float            coverage_max_value;           // max cell count (for normalised viz)
 
     // ── SPPM (Stochastic Progressive Photon Mapping) ────────────────
     // Per-pixel visible-point buffers (written by camera pass, read by

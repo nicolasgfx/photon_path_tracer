@@ -160,10 +160,9 @@ int main(int argc, char* argv[]) {
                     scene.bvh_nodes.size());
 
         scene.build_emissive_distribution();
-        std::printf("[Scene]  Emissive tris: %d   total power = %.4f   total area = %.4f\n",
+        std::printf("[Scene]  Emissive tris: %d   total power = %.4f\n",
                     (int)scene.num_emissive(),
-                    scene.total_emissive_power,
-                    scene.total_emissive_area);
+                    scene.total_emissive_power);
         std::printf("[Scene]  Render config: %dx%d  spp=%d  photons=%d  radius=%.5f  bounces=%d\n",
                     opt.config.image_width, opt.config.image_height,
                     opt.config.samples_per_pixel, opt.config.num_photons,
