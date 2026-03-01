@@ -56,7 +56,22 @@ if errorlevel 1 call :find_ninja
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 REM -- Configure (only if needed or if extra options changed) ----------
-if not exist "%BUILD_DIR%\build.ninja" (
+REM  Also reconfigure if the cache says a non-Ninja generator (e.g. VS)
+set "NEED_CONFIGURE="
+if not exist "%BUILD_DIR%\build.ninja" set "NEED_CONFIGURE=1"
+if not exist "%BUILD_DIR%\CMakeCache.txt" (
+    set "NEED_CONFIGURE=1"
+) else (
+    findstr /C:"CMAKE_GENERATOR:INTERNAL=Ninja" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+    if errorlevel 1 (
+        echo [build.bat] Stale CMake cache detected ^(wrong generator^). Cleaning...
+        del /q "%BUILD_DIR%\CMakeCache.txt" 2>nul
+        if exist "%BUILD_DIR%\CMakeFiles" rmdir /s /q "%BUILD_DIR%\CMakeFiles" 2>nul
+        set "NEED_CONFIGURE=1"
+    )
+)
+
+if defined NEED_CONFIGURE (
     echo [build.bat] Configuring ^(%BUILD_TYPE%, Ninja^)...
     cmake -B %BUILD_DIR% -G Ninja -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl %CMAKE_EXTRA%
     if errorlevel 1 goto :error
