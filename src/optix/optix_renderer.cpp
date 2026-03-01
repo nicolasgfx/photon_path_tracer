@@ -1104,7 +1104,7 @@ void OptixRenderer::render_debug_frame(
     lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
-    lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
+    lp.guide_fraction    = guide_fraction_;
     lp.frame_number      = frame_number;
     lp.render_mode       = mode;
     lp.exposure           = exposure_;
@@ -1183,7 +1183,7 @@ void OptixRenderer::render_one_spp(
     lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
-    lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
+    lp.guide_fraction    = guide_fraction_;
     lp.frame_number       = frame_number;
     lp.render_mode        = RenderMode::Full;
     lp.exposure           = exposure_;
@@ -1357,7 +1357,7 @@ void OptixRenderer::render_caustic_debug_pass(
         lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
         lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
         lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
-        lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
+        lp.guide_fraction    = guide_fraction_;
         lp.frame_number       = s;
         lp.render_mode        = RenderMode::Full;
         lp.exposure           = exposure_;
@@ -1564,7 +1564,7 @@ void OptixRenderer::render_final(
         lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
         lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
         lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
-        lp.guide_fraction    = DEFAULT_GUIDE_FRACTION;
+        lp.guide_fraction    = guide_fraction_;
         lp.frame_number       = frame_number;
         lp.render_mode        = RenderMode::Full;
         lp.exposure           = exposure_;
@@ -1821,7 +1821,7 @@ void OptixRenderer::render_sppm(
             lp.max_bounces_camera   = DEFAULT_MAX_BOUNCES_CAMERA;
             lp.min_bounces_rr       = DEFAULT_MIN_BOUNCES_RR;
             lp.rr_threshold         = DEFAULT_RR_THRESHOLD;
-            lp.guide_fraction       = DEFAULT_GUIDE_FRACTION;
+            lp.guide_fraction       = guide_fraction_;
             lp.samples_per_pixel    = 1;
             lp.frame_number         = k;
             lp.exposure             = exposure_;
@@ -2095,7 +2095,7 @@ OptixRenderer::RenderStats OptixRenderer::gather_stats(const char* scene_name) c
     s.max_bounces_photon  = DEFAULT_PHOTON_MAX_BOUNCES;
     s.min_bounces_rr      = DEFAULT_MIN_BOUNCES_RR;
     s.rr_threshold        = DEFAULT_RR_THRESHOLD;
-    s.guide_fraction      = DEFAULT_GUIDE_FRACTION;
+    s.guide_fraction      = guide_fraction_;
     s.exposure            = exposure_;
     s.denoiser_enabled    = denoiser_enabled_;
     s.knn_k               = DEFAULT_KNN_K;

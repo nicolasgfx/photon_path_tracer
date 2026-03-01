@@ -10,6 +10,7 @@
 
 #include "core/config.h"
 #include "debug/debug.h"            // DebugState
+#include "debug/stats_collector.h"  // RendererStats, ENABLE_STATS
 #include "renderer/camera.h"
 #include "renderer/renderer.h"      // FrameBuffer
 #include "scene/scene.h"
@@ -46,6 +47,22 @@ struct AppState {
 
     // Photon retrace request (P key)
     bool       photon_retrace_requested = false;
+
+    // Guided path tracing toggle (T key)
+    bool       guided_enabled    = DEFAULT_USE_GUIDE;   // true = photon-guided, false = brute force
+    // Histogram-only conclusion mode (C key, only effective when guided)
+    bool       histogram_only    = false;
+
+    // Show statistics overlay (S key)
+    bool       show_stats_overlay = false;
+
+    // Render timing: timestamp when progressive accumulation started
+    std::chrono::steady_clock::time_point render_start_time;
+    bool       render_timing_active = false;
+    double     last_render_ms       = 0.0;  // elapsed ms at last snapshot
+
+    // Collected statistics (populated on snapshot)
+    RendererStats last_stats;
 
     // Camera angles (yaw/pitch in radians)
     float      yaw   = 0.f;     // horizontal angle

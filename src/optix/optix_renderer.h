@@ -262,6 +262,21 @@ public:
     void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
     bool is_use_dense_grid() const  { return use_dense_grid_; }
 
+    /// Runtime guide fraction (T key: toggle guided/unguided).
+    void set_guide_fraction(float f) { guide_fraction_ = f; }
+    float get_guide_fraction() const  { return guide_fraction_; }
+
+    /// Toggle histogram-only conclusion mode (C key).
+    void set_histogram_only(bool v) { histogram_only_ = v; }
+    bool is_histogram_only() const  { return histogram_only_; }
+
+    /// GPU device info (populated during init()).
+    const std::string& gpu_name()    const { return gpu_name_; }
+    size_t  gpu_vram_total()         const { return gpu_vram_total_; }
+    int     gpu_sm_count()           const { return gpu_sm_count_; }
+    int     gpu_cc_major()           const { return gpu_cc_major_; }
+    int     gpu_cc_minor()           const { return gpu_cc_minor_; }
+
     /// Fill CellBinGrid / guidance params into LaunchParams.
     /// Called after fill_common_params at every launch site.
     void fill_cell_grid_params(LaunchParams& lp) const;
@@ -551,6 +566,16 @@ private:
     float caustic_radius_ = DEFAULT_CAUSTIC_RADIUS;   // tighter radius for caustic gather
     float exposure_      = DEFAULT_EXPOSURE;          // runtime exposure (set_exposure / R key)
 
+    // Runtime guide fraction (T key toggle: 0 = unguided, DEFAULT = guided)
+    float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
+    bool  histogram_only_ = false;  // C key: use only histogram conclusions
+
+    // GPU device info (populated in init())
+    std::string gpu_name_;
+    size_t      gpu_vram_total_ = 0;
+    int         gpu_sm_count_   = 0;
+    int         gpu_cc_major_   = 0;
+    int         gpu_cc_minor_   = 0;
 };
 
 // ---------------------------------------------------------------------

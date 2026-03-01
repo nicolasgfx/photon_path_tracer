@@ -76,6 +76,21 @@ void OptixRenderer::init() {
     // Initialise CUDA
     CUDA_CHECK(cudaFree(nullptr)); // forces context creation
 
+    // Query GPU device properties
+    {
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+        gpu_name_       = prop.name;
+        gpu_vram_total_ = prop.totalGlobalMem;
+        gpu_sm_count_   = prop.multiProcessorCount;
+        gpu_cc_major_   = prop.major;
+        gpu_cc_minor_   = prop.minor;
+        std::printf("[GPU] %s  |  %.0f MB VRAM  |  %d SMs  |  CC %d.%d\n",
+                    gpu_name_.c_str(),
+                    (double)gpu_vram_total_ / (1024.0 * 1024.0),
+                    gpu_sm_count_, gpu_cc_major_, gpu_cc_minor_);
+    }
+
     // Initialise OptiX
     OPTIX_CHECK(optixInit());
 

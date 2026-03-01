@@ -110,11 +110,13 @@ inline HD float compute_guide_fraction(
 
 #include "photon/cell_cache.h"
 #include "photon/cell_bin_grid.h"
+#include "debug/stats_collector.h"
 
 inline std::vector<CellAnalysis> build_cell_analysis(
     const CellInfoCache& cell_cache,
     const CellBinGrid&   bin_grid,
-    float                cell_area)
+    float                cell_area,
+    ConclusionCounters*  conclusion_counters = nullptr)
 {
     const size_t N = cell_cache.cells.size();
     if (N == 0) return {};
@@ -185,6 +187,22 @@ inline std::vector<CellAnalysis> build_cell_analysis(
             ci.flux_variance,
             ci.irradiance,
             a.active_bins);
+
+        // ── Conclusion counters (gated by ENABLE_STATS) ─────────
+        if constexpr (ENABLE_STATS) {
+            if (conclusion_counters) {
+                conclusion_counters->total_cells++;
+                if (a.active_bins <= 2 && a.active_bins > 0)
+                    conclusion_counters->c1_c6_histogram++;
+                if (ci.photon_count < 30)
+                    conclusion_counters->c4_low_count++;
+                float cv = ci.flux_variance / fmaxf(ci.irradiance, 1e-6f);
+                if (cv / 2.f > 0.01f)  // any CV attenuation
+                    conclusion_counters->c5_high_var++;
+                if (ci.directional_spread > 0.9f)
+                    conclusion_counters->c3_too_diffuse++;
+            }
+        }
     }
 
     return result;

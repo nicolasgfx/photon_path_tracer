@@ -392,8 +392,135 @@ static void render_help_overlay(int win_w, int win_h,
     ly += line_h * 0.7f;
 
     ly += line_h * 0.3f;
+    draw_overlay_text(0, ly, "--- Statistics ---", 1.f, 1.f, 0.3f, 1.f);
+    ly += line_h;
+    draw_overlay_text(0, ly, "T    Toggle guided/unguided tracing", 0.8f, 0.8f, 0.8f, 1.f);
+    ly += line_h * 0.7f;
+    draw_overlay_text(0, ly, "C    Toggle histogram-only conclusions", 0.8f, 0.8f, 0.8f, 1.f);
+    ly += line_h * 0.7f;
+    draw_overlay_text(0, ly, "S    Toggle stats overlay", 0.8f, 0.8f, 0.8f, 1.f);
+    ly += line_h * 0.7f;
+
+    ly += line_h * 0.3f;
     draw_overlay_text(0, ly, "H  Toggle this overlay", 0.6f, 0.6f, 0.6f, 1.f);
 
+    glPopMatrix();
+
+    // Restore GL state
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
+
+// ── Stats overlay (S key) ────────────────────────────────────────────
+// Displays live renderer statistics in the top-right corner.
+// Gated by ENABLE_STATS at compile time and show_stats_overlay at runtime.
+static void render_stats_overlay(int win_w, int win_h,
+                                 const AppState& app,
+                                 const OptixRenderer* renderer)
+{
+    if constexpr (!ENABLE_STATS) return;
+    if (!app.show_stats_overlay || !renderer) return;
+
+    // Gather stats snapshot
+    auto rs = renderer->gather_stats("");
+
+    // Format lines
+    char buf[256];
+    std::vector<std::string> lines;
+
+    lines.push_back("=== Renderer Stats ===");
+    snprintf(buf, sizeof(buf), "SPP: %d", rs.accumulated_spp);
+    lines.push_back(buf);
+
+    snprintf(buf, sizeof(buf), "Guided: %s  Hist-only: %s",
+             app.guided_enabled ? "ON" : "off",
+             app.histogram_only ? "ON" : "off");
+    lines.push_back(buf);
+
+    snprintf(buf, sizeof(buf), "Guide frac: %.2f", renderer->get_guide_fraction());
+    lines.push_back(buf);
+
+    lines.push_back("");
+    lines.push_back("--- Photon Map ---");
+    snprintf(buf, sizeof(buf), "Emitted: %d  Stored: %d",
+             rs.photons_emitted, rs.photons_stored);
+    lines.push_back(buf);
+    snprintf(buf, sizeof(buf), "Global: %d  Caustic: %d  Targeted: %d",
+             rs.noncaustic_stored, rs.global_caustic_stored, rs.caustic_stored);
+    lines.push_back(buf);
+    snprintf(buf, sizeof(buf), "Radii  gather: %.5f  caustic: %.5f",
+             rs.gather_radius, rs.caustic_radius);
+    lines.push_back(buf);
+
+    lines.push_back("");
+    lines.push_back("--- Hardware ---");
+    snprintf(buf, sizeof(buf), "GPU: %s", renderer->gpu_name().c_str());
+    lines.push_back(buf);
+    snprintf(buf, sizeof(buf), "VRAM: %zu MB  SMs: %d",
+             renderer->gpu_vram_total() / (1024 * 1024),
+             renderer->gpu_sm_count());
+    lines.push_back(buf);
+    snprintf(buf, sizeof(buf), "Compute: %d.%d",
+             renderer->gpu_cc_major(), renderer->gpu_cc_minor());
+    lines.push_back(buf);
+
+    if (app.last_render_ms > 0.0) {
+        lines.push_back("");
+        lines.push_back("--- Timing ---");
+        snprintf(buf, sizeof(buf), "Render: %.0f ms", app.last_render_ms);
+        lines.push_back(buf);
+    }
+
+    // Compute box dimensions
+    float scale   = 1.12f;
+    float line_h  = 7.84f;
+    float box_h   = (float)lines.size() * line_h + 16.f;
+    float box_w   = 260.f;
+    float bx      = (float)win_w - box_w - 10.f;
+    float by      = 10.f;
+
+    // Set up 2D projection
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, win_w, win_h, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Background box
+    glColor4f(0.0f, 0.0f, 0.0f, 0.7f);
+    glBegin(GL_QUADS);
+    glVertex2f(bx,         by);
+    glVertex2f(bx + box_w, by);
+    glVertex2f(bx + box_w, by + box_h);
+    glVertex2f(bx,         by + box_h);
+    glEnd();
+
+    // Draw text lines
+    glPushMatrix();
+    glTranslatef(bx + 8.f, by + 8.f, 0.f);
+    glScalef(scale, scale, 1.f);
+    float ly = 0.f;
+    for (const auto& line : lines) {
+        if (line.empty()) {
+            ly += line_h / scale * 0.5f;
+            continue;
+        }
+        bool is_header = (line[0] == '=' || line[0] == '-');
+        if (is_header)
+            draw_overlay_text(0, ly, line.c_str(), 0.3f, 0.9f, 0.3f, 1.f);
+        else
+            draw_overlay_text(0, ly, line.c_str(), 0.9f, 0.9f, 0.9f, 1.f);
+        ly += line_h / scale;
+    }
     glPopMatrix();
 
     // Restore GL state
@@ -660,6 +787,43 @@ static void key_callback(GLFWwindow* window, int key,
         s_app.photon_retrace_requested = true;
         s_app.camera_moved  = true;  // reset accumulation
         printf("[Photon] Retrace requested (rebuild photon maps)\n");
+        return;
+    }
+
+    // T -> toggle guided/unguided path tracing
+    if (key == GLFW_KEY_T) {
+        s_app.guided_enabled = !s_app.guided_enabled;
+        if (g_active_optix_renderer) {
+            float frac = s_app.guided_enabled ? DEFAULT_GUIDE_FRACTION : 0.0f;
+            g_active_optix_renderer->set_guide_fraction(frac);
+        }
+        s_app.camera_moved = true;  // reset accumulation
+        printf("[Stats] Guided path tracing %s (guide_fraction = %.2f)\n",
+               s_app.guided_enabled ? "ENABLED" : "DISABLED",
+               s_app.guided_enabled ? DEFAULT_GUIDE_FRACTION : 0.0f);
+        return;
+    }
+
+    // C -> toggle histogram-only conclusions (skip expensive analysis)
+    if (key == GLFW_KEY_C) {
+        if (!s_app.guided_enabled) {
+            printf("[Stats] Cannot toggle histogram-only: guided tracing is off\n");
+            return;
+        }
+        s_app.histogram_only = !s_app.histogram_only;
+        if (g_active_optix_renderer)
+            g_active_optix_renderer->set_histogram_only(s_app.histogram_only);
+        s_app.camera_moved = true;  // reset accumulation
+        printf("[Stats] Histogram-only conclusions %s\n",
+               s_app.histogram_only ? "ON" : "OFF");
+        return;
+    }
+
+    // S -> toggle stats overlay
+    if (key == GLFW_KEY_S) {
+        s_app.show_stats_overlay = !s_app.show_stats_overlay;
+        printf("[Stats] Overlay %s\n",
+               s_app.show_stats_overlay ? "SHOWN" : "HIDDEN");
         return;
     }
 
@@ -1173,6 +1337,47 @@ void run_interactive(
                       << "  Photons: " << stats.photons_stored
                       << "  Cells: " << stats.cell_analysis_cells << "\n";
             std::cout << "========================================\n\n";
+
+            // Print detailed grouped stats to console (gated)
+            if constexpr (ENABLE_STATS) {
+                RendererStats rs;
+                // Path tracing
+                rs.spp_min = rs.spp_max = stats.accumulated_spp;
+                rs.spp_avg        = (float)stats.accumulated_spp;
+                rs.guided_enabled = s_app.guided_enabled;
+                rs.histogram_only = s_app.histogram_only;
+                rs.guide_fraction = g_active_optix_renderer
+                                  ? g_active_optix_renderer->get_guide_fraction()
+                                  : 0.f;
+                // Photon mapping
+                rs.photons_emitted  = stats.photons_emitted;
+                rs.photons_stored   = stats.photons_stored;
+                rs.photons_global   = stats.noncaustic_stored;
+                rs.photons_global_caustic = stats.global_caustic_stored;
+                rs.photons_targeted = stats.caustic_stored;
+                rs.gather_radius    = stats.gather_radius;
+                rs.caustic_radius   = stats.caustic_radius;
+                // Geometry
+                rs.num_triangles    = stats.num_triangles;
+                rs.num_emissive_tris= stats.num_emissive_tris;
+                // Hardware
+                if (g_active_optix_renderer) {
+                    rs.gpu_name      = g_active_optix_renderer->gpu_name();
+                    rs.gpu_vram_bytes= g_active_optix_renderer->gpu_vram_total();
+                    rs.gpu_sm_count  = g_active_optix_renderer->gpu_sm_count();
+                    rs.gpu_cc_major  = g_active_optix_renderer->gpu_cc_major();
+                    rs.gpu_cc_minor  = g_active_optix_renderer->gpu_cc_minor();
+                    // Photon flag tallies
+                    rs.photon_flags  = tally_photon_flags(
+                        g_active_optix_renderer->photons());
+                    // Grid occupancy
+                    rs.grid_occupancy = compute_grid_occupancy(
+                        g_active_optix_renderer->grid());
+                }
+                // Timing
+                rs.timing.total_render_ms = s_app.last_render_ms;
+                print_stats_console(rs);
+            }
         }
 
         // ── Preview path: continuous progressive path tracing ────────
@@ -1240,6 +1445,9 @@ void run_interactive(
             render_help_overlay(win_w, win_h, s_app.debug, camera, s_app.volume_enabled,
                                 s_app.use_dense_grid, s_app.active_scene_index, s_app.light_scale);
         }
+
+        // Draw stats overlay (S key)
+        render_stats_overlay(win_w, win_h, s_app, &optix_renderer);
 
         // Draw hover-cell overlay (when map mode toggles are active and
         // mouse is released for inspection).

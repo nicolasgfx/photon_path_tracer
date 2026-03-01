@@ -252,8 +252,14 @@ constexpr float SCENE_REF_EXTENT = 1.0f;
 
 
 // =====================================================================
-//  §10  DEBUG
+//  §10  DEBUG & STATISTICS
 // =====================================================================
+
+// Gate runtime statistics collection.  When false, the compiler
+// eliminates all stats code paths (zero overhead).  When true,
+// per-cell conclusion/measure counters, photon flag tallies, and
+// timing breakdowns are collected and displayed on screen / console.
+constexpr bool ENABLE_STATS = true;
 
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;     // stop photon after 1st hit
 constexpr bool DEBUG_PHOTON_INDIRECT_PNG  = false;     // emit photon-indirect preview PNGs at launch
