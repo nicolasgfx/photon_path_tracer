@@ -564,7 +564,7 @@ $$\omega_i = \text{cosine\_hemisphere}(u_1, u_2), \qquad p(\omega_i) = \frac{\co
 
 $$\Phi' = \Phi \cdot \frac{f_r \cdot \cos\theta_i}{p(\omega_i)} = \Phi \cdot K_d$$
 
-**Code:** `lambertian_sample()` in `bsdf.h`. Cosine hemisphere sampling, pdf = $\cos\theta_i / \pi$, $f = K_d / \pi$.
+**Code:** `lambertian_sample()` in `bsdf.h` (CPU). GPU photon trace (`optix_photon_trace.cuh`) uses `sample_cosine_hemisphere_dev()` + direct $K_d$ throughput multiplication. GPU gather uses `bsdf_sample()` in `optix_bsdf.cuh`. Cosine hemisphere sampling, pdf = $\cos\theta_i / \pi$, $f = K_d / \pi$.
 
 ---
 
@@ -588,11 +588,15 @@ where $\omega_r = (-\omega_{o,x},\; -\omega_{o,y},\; \omega_{o,z})$ is the refle
 
 $$\omega_i = \text{reflect}(\omega_o) = (-\omega_{o,x},\; -\omega_{o,y},\; +\omega_{o,z})$$
 
-**Throughput update:**
+**Throughput update (CPU):**
 
 $$\Phi' = \Phi \cdot K_s$$
 
-**Code:** `mirror_sample()` returns `f = Ks / (|cos θ_i| + ε)`, pdf = 1. The $1/\cos\theta_i$ in $f$ cancels with the $\cos\theta_i$ geometry factor in the throughput update, leaving $\Phi' = \Phi \cdot K_s$.
+**Code (CPU):** `mirror_sample()` in `bsdf.h` returns `f = Ks / (|cos θ_i| + ε)`, pdf = 1. The $1/\cos\theta_i$ in $f$ cancels with the $\cos\theta_i$ geometry factor in the throughput update, leaving $\Phi' = \Phi \cdot K_s$.
+
+**Code (GPU):** `dev_specular_bounce()` in `optix_specular.cuh` returns `filter = 1.0` for Mirror — the Ks attenuation is **not** applied inside the specular bounce helper. The comment notes "Ks is applied by the caller (shading pipeline)." In the GPU photon bounce loop (`optix_photon_trace.cuh`), the throughput update is `hero_flux[h] *= sb.filter.value[hero_bins[h]]`, which for mirror is effectively $\Phi' = \Phi$. This means photon flux is preserved unattenuated through GPU mirror bounces. In practice most mirrors have $K_s \approx 1$, so the impact is negligible.
+
+> **CPU↔GPU divergence:** CPU photon trace applies $K_s$ at mirror bounces (via `bsdf::sample`). GPU photon trace does not (filter = 1.0).
 
 ---
 
@@ -608,7 +612,7 @@ Key behaviours:
 - **Chromatic dispersion** (optional): each wavelength has a slightly different IOR via the Cauchy equation, so different wavelengths refract at different angles — producing rainbows and chromatic caustics.
 - **Transmittance filter** $T_f$: only applied to transmitted light (not reflected). This gives coloured glass its colour.
 - **IOR stack**: nested dielectrics (e.g., glass sphere in water) are tracked via a push/pop stack so that $\eta = \eta_\text{outer} / \eta_\text{inner}$ is always correct.
-- **Medium stack**: if the glass has an interior participating medium (`medium_id >= 0`), entering pushes it onto the medium stack; exiting pops it.
+- **Medium stack** (CPU only): if the glass has an interior participating medium (`medium_id >= 0`), entering pushes it onto the medium stack; exiting pops it. The GPU does not maintain a medium stack.
 
 A photon hitting glass is **not deposited** (delta surface). It continues as a caustic path.
 
@@ -640,11 +644,27 @@ $$n(\lambda) = A + \frac{B}{\lambda^2} \qquad (\lambda \text{ in nm})$$
 
 One "hero" wavelength determines the refraction direction. All other wavelength bins get per-bin Fresnel weights using their own $n(\lambda)$ but share the hero direction (spectral MIS). Bins that would undergo TIR at their own IOR get zero weight.
 
-**Entering vs exiting:** determined by $\omega_o \cdot \hat{n}$ (sign of `wo.z`).
-- Entering ($\omega_o \cdot \hat{n} > 0$): $\eta = 1 / n_\text{mat}$, push IOR stack, push medium stack.
-- Exiting ($\omega_o \cdot \hat{n} < 0$): $\eta = n_\text{mat}$ (or top of IOR stack), pop IOR stack, pop medium stack.
+**Entering vs exiting:**
 
-**Code:** `glass_sample(wo, mat, rng, hero_bin)` in `bsdf.h`. TIR fallback reflects with `f = 1/|cos θ|` (neutral). The emitter loop in `emitter.h` handles IOR stack push/pop and medium stack push/pop for Glass and Translucent types.
+- **CPU BSDF** (`glass_sample` in `bsdf.h`): determined by $\omega_o \cdot \hat{n}$ (sign of `wo.z` in the local shading frame). Entering ($\omega_o \cdot \hat{n} > 0$): $\eta = 1 / n_\text{mat}$. Exiting ($\omega_o \cdot \hat{n} < 0$): $\eta = n_\text{mat}$.
+- **Photon tracers** (CPU `emitter.h`, GPU `optix_specular.cuh`): determined by `dot(ray_direction, geometric_normal)`. Negative = entering, positive = exiting. Using the **geometric normal** (not shading normal) avoids incorrect inside/outside classification at curved mesh edges where interpolated shading normals can flip sign.
+
+In both cases:
+- Entering: push IOR onto stack, push medium stack (CPU only).
+- Exiting: pop IOR stack, pop medium stack (CPU only).
+
+**Hero wavelength and D-line fallback:** When called from a camera path (no hero bin specified), both CPU and GPU default to the **D-line bin** ($\lambda \approx 589\text{ nm}$) so that the refraction direction matches the material's nominal IOR. Photon tracers pass the photon's primary hero bin, producing physically correct chromatic dispersion where each photon refracts at its own wavelength.
+
+**η² adjoint correction (photon transport):** When the transport mode is `Importance` (photon paths), the throughput is multiplied by $\eta^2$ on refraction. This accounts for the change in solid angle when light crosses a dielectric interface and ensures energy-correct bidirectional transport (PBRT §5.6.2). The correction is:
+
+$$\Phi'_\text{refract} = \Phi \cdot T_f \cdot \frac{(1-F_b)}{(1-F_\text{hero})} \cdot \eta_b^2 \quad (\text{dispersive})$$
+$$\Phi'_\text{refract} = \Phi \cdot T_f \cdot \eta^2 \quad (\text{non-dispersive})$$
+
+For camera paths (Radiance transport), the correction is not applied.
+
+**IOR stack push value:** For dispersive glass, the IOR pushed onto the stack is the **hero wavelength's IOR** (via Cauchy equation), not the material's nominal IOR. This means nested dielectric tracking uses the wavelength-specific refractive index.
+
+**Code:** `glass_sample(wo, mat, rng, hero_bin)` in `bsdf.h` (CPU). `dev_specular_bounce()` in `optix_specular.cuh` (GPU). The emitter loop in `emitter.h` handles IOR stack push/pop and medium stack push/pop. The GPU photon loop in `optix_photon_trace.cuh` handles IOR stack push/pop only (no medium stack on GPU).
 
 ---
 
@@ -676,9 +696,17 @@ $$G(\omega_o, \omega_i, \alpha) = G_1(\omega_o, \alpha) \cdot G_1(\omega_i, \alp
 
 $$F_\text{Schlick}(\cos\theta, F_0) = F_0 + (1 - F_0)(1 - \cos\theta)^5$$
 
-**Lobe selection probability:**
+**Lobe selection probability (CPU):**
 
 $$p_\text{spec} = \frac{\max(K_s)}{\max(K_s) + \max(K_d)}, \qquad p_\text{diff} = 1 - p_\text{spec}$$
+
+**Lobe selection probability (GPU):** The GPU applies a **roughness boost** to prevent low-roughness (near-mirror) metals from wasting almost all samples on the diffuse lobe:
+
+$$r_\text{boost} = \frac{1}{1 + 10\alpha}$$
+$$\text{spec\_weight} = \max\left(\max(K_s),\; r_\text{boost}\right)$$
+$$p_\text{spec} = \frac{\text{spec\_weight}}{\text{spec\_weight} + \max(K_d)}$$
+
+For a material with $K_s = 0.1$, $K_d = 0.9$, $\alpha = 0.01$: CPU gives $p_\text{spec} = 0.1$, GPU gives $p_\text{spec} \approx 0.50$ (boosted by $r_\text{boost} = 0.91$). This dramatically reduces noise for shiny metals.
 
 **Specular sampling:** VNDF (Visible Normal Distribution Function) sampling of GGX half-vector, then reflect.
 
@@ -686,7 +714,9 @@ $$p_\text{spec} = \frac{\max(K_s)}{\max(K_s) + \max(K_d)}, \qquad p_\text{diff} 
 
 $$p(\omega_i) = p_\text{spec} \cdot \frac{D(\mathbf{h}) \cdot |\mathbf{h} \cdot \hat{n}|}{4\,|\omega_o \cdot \mathbf{h}|} + p_\text{diff} \cdot \frac{\cos\theta_i}{\pi}$$
 
-**Code:** `glossy_sample()` in `bsdf.h`. Uses `ggx_sample_halfvector()` for VNDF-based specular sampling with Smith-G and single-scatter Cook-Torrance evaluation.
+**Code (CPU):** `glossy_sample()` in `bsdf.h`. Uses `ggx_sample_halfvector()` for VNDF-based specular sampling with Smith-G and single-scatter Cook-Torrance evaluation.
+
+**Code (GPU):** `bsdf_sample()` in `optix_bsdf.cuh`. Same GGX VNDF sampling and Cook-Torrance evaluation, but with the roughness boost described above.
 
 ---
 
@@ -702,7 +732,7 @@ Emission: $L_e(\lambda)$ is the spectral radiance of the light.
 
 BSDF for bouncing: identical to Lambertian ($f_r = K_d / \pi$), cosine-hemisphere sampling.
 
-**Code:** The `sample()` dispatch routes Emissive to `lambertian_sample()`. The `evaluate()` and `pdf()` functions also treat Emissive as Lambertian.
+**Code:** The `sample()` dispatch routes Emissive to `lambertian_sample()` (CPU) / cosine hemisphere (GPU). The `evaluate()` and `pdf()` functions also treat Emissive as Lambertian.
 
 ---
 
@@ -724,13 +754,23 @@ $$f_r(\omega_o, \omega_i) = K_s(\lambda) \cdot \frac{D \cdot G \cdot F_\text{Sch
 
 where $F_0 = \left(\frac{\eta - 1}{\eta + 1}\right)^2$ and $F_r = F_\text{Schlick}(\omega_o \cdot \mathbf{h},\, F_0)$.
 
-**Lobe probability (energy-aware):**
+**Lobe probability (CPU):**
 
-$$p_\text{spec} = \text{clamp}\left(\frac{\max(K_s) \cdot F_0}{\max(K_s) \cdot F_0 + \max(K_d)},\; 0.05,\; 0.95\right)$$
+$$p_\text{spec} = \max\left(\frac{\max(K_s) \cdot F_0}{\max(K_s) \cdot F_0 + \max(K_d)},\; 0.05\right)$$
 
-The 0.05 lower clamp ensures the specular peak always gets some samples, even for mostly-diffuse materials.
+The 0.05 lower clamp ensures the specular peak always gets some samples, even for mostly-diffuse materials. There is **no upper clamp** in the current implementation.
 
-**Code:** `glossy_dielectric_sample()` in `bsdf.h`. Same GGX VNDF sampling machinery as GlossyMetal, but with IOR-based $F_0$ and $(1 - F_r)$ energy conservation on the diffuse term.
+**Lobe probability (GPU):** Same roughness boost as GlossyMetal is applied:
+
+$$r_\text{boost} = \frac{1}{1 + 10\alpha}$$
+$$\text{spec\_weight} = \max\left(\max(K_s) \cdot F_0,\; 0.05,\; r_\text{boost}\right)$$
+$$p_\text{spec} = \frac{\text{spec\_weight}}{\text{spec\_weight} + \max(K_d)}$$
+
+This prevents near-perfect dielectrics (low roughness, small $F_0$) from starving the specular lobe of samples.
+
+**Code (CPU):** `glossy_dielectric_sample()` in `bsdf.h`. Same GGX VNDF sampling machinery as GlossyMetal, but with IOR-based $F_0$ and $(1 - F_r)$ energy conservation on the diffuse term.
+
+**Code (GPU):** `bsdf_sample()` in `optix_bsdf.cuh`. Unified code path with GlossyMetal, distinguished by the `is_diel` flag which selects IOR-based $F_0$ and $(1-F_r)$ diffuse weighting.
 
 ---
 
@@ -740,22 +780,29 @@ The 0.05 lower clamp ensures the specular peak always gets some samples, even fo
 
 A glass-like surface with an **interior participating medium** (volumetric scattering inside). Think of a marble ball, a jade figurine, or a glass of milk. The **surface BSDF is identical to Glass** (Fresnel reflect/refract, Snell's law, optional dispersion). The difference is what happens *inside*: the material has absorption coefficient $\sigma_a(\lambda)$, scattering coefficient $\sigma_s(\lambda)$, and a phase function asymmetry parameter $g$.
 
-When a photon enters a Translucent object:
+> **CPU-only feature:** Interior medium transport (Beer–Lambert, free-flight sampling, HG phase function) is implemented only on the CPU via `MediumStack` and beam tracing in `emitter.h`. The GPU treats Translucent surfaces identically to Glass — it performs Fresnel reflect/refract at the surface and tracks the IOR stack, but has **no `MediumStack`** and performs **no interior volumetric scattering**. Only the legacy atmospheric volume system (`params.volume_enabled`) operates on the GPU.
+
+**CPU photon trace:** When a photon enters a Translucent object:
 1. The surface interaction is the same as Glass (Fresnel decision, refraction).
 2. The entry pushes the material's `medium_id` onto the medium stack.
 3. Inside the medium, **Beer–Lambert attenuation** reduces flux: $T(d) = e^{-\sigma_t d}$.
 4. The photon may **scatter** inside the medium before reaching the next surface (free-flight sampling).
-5. When the photon hits the inner surface to exit, it's another Fresnel reflect/refract with IOR stack pop.
+5. When the photon hits the inner surface to exit, it's another Fresnel reflect/refract with IOR stack pop + medium stack pop.
+
+**GPU photon trace:** When a photon enters a Translucent object:
+1. The surface interaction is the same as Glass (Fresnel decision, refraction, IOR stack push/pop).
+2. No interior volumetric effects — the photon travels in a straight line to the next surface.
+3. Exit interaction: Fresnel reflect/refract with IOR stack pop.
 
 #### Mathematics
 
-**Surface BSDF:** identical to Glass (§7.3 above).
+**Surface BSDF:** identical to Glass (§7.3 above), including all dispersion, IOR stack, and η² adjoint correction behaviour.
 
-**Interior medium — Beer–Lambert transmittance:**
+**Interior medium (CPU only) — Beer–Lambert transmittance:**
 
 $$T(\lambda, d) = \exp\left(-\sigma_t(\lambda) \cdot d\right), \qquad \sigma_t = \sigma_s + \sigma_a$$
 
-**Free-flight sampling (hero wavelength scheme):**
+**Free-flight sampling (CPU only, hero wavelength scheme):**
 
 Pick hero bin $h$ uniformly. Sample free-flight distance:
 
@@ -769,13 +816,13 @@ If $t \geq d_\text{surface}$: the photon reaches the next surface. Transmittance
 
 $$w(\lambda) = \frac{e^{-\sigma_t(\lambda) \cdot d}}{\frac{1}{N}\sum_j e^{-\sigma_t^{(j)} \cdot d}}$$
 
-**Phase function (Henyey-Greenstein):**
+**Phase function (CPU only, Henyey-Greenstein):**
 
 $$p_\text{HG}(\cos\theta, g) = \frac{1 - g^2}{4\pi\left(1 + g^2 - 2g\cos\theta\right)^{3/2}}$$
 
 $g = 0$ is isotropic, $g > 0$ is forward-scattering, $g < 0$ is back-scattering.
 
-**Code:** The surface BSDF uses `glass_sample()`. Medium tracking uses `MediumStack` in `emitter.h`. The free-flight + spectral MIS logic is in the beam tracing section of `trace_photons()` (lines ~460–590 of `emitter.h`). `HomogeneousMedium` is defined in `medium.h`.
+**Code:** The surface BSDF uses `glass_sample()` (CPU) or `dev_specular_bounce()` (GPU). CPU medium tracking uses `MediumStack` in `emitter.h`. The free-flight + spectral MIS logic is in the beam tracing section of `trace_photons()` in `emitter.h`. `HomogeneousMedium` is defined in `medium.h`.
 
 ---
 
@@ -801,7 +848,7 @@ where $F_{0,\text{coat}} = \left(\frac{\eta_\text{coat} - 1}{\eta_\text{coat} + 
 
 $$p_\text{coat} = \text{clamp}(w_\text{coat} \cdot F_{0,\text{coat}},\; 0.05,\; 0.95)$$
 
-**Code:** `clearcoat_sample()` in `bsdf.h`. The coat uses the material's `ior` for its $F_0$, and `pb_clearcoat_roughness` for its GGX alpha. Base is Lambert with energy deduction.
+**Code:** `clearcoat_sample()` in `bsdf.h` (CPU) and `bsdf_sample()` in `optix_bsdf.cuh` (GPU). The coat uses the material's `ior` for its $F_0$, and `pb_clearcoat_roughness` for its GGX alpha. Base is Lambert with energy deduction.
 
 ---
 
@@ -827,7 +874,7 @@ $w_\text{sheen}$ = `pb_sheen`, $t_\text{tint}$ = `pb_sheen_tint`.
 
 **Sampling:** Cosine hemisphere (same as Lambertian). The sheen term is evaluated but not importance-sampled (it's low-energy and diffuse-like, so cosine sampling is adequate).
 
-**Code:** `fabric_sample()` in `bsdf.h`. Simple cosine hemisphere + sheen evaluate.
+**Code:** `fabric_sample()` in `bsdf.h` (CPU) and `bsdf_sample()` in `optix_bsdf.cuh` (GPU). Simple cosine hemisphere + sheen evaluate.
 
 ---
 
@@ -846,20 +893,22 @@ When a photon enters a dielectric (Glass or Translucent), it pushes the material
 
 Entering/exiting is determined by `dot(ray_direction, geometric_normal)`: negative = entering, positive = exiting. The geometric normal (not shading normal) is used for robustness near mesh edges.
 
-**Code:** `IORStack` struct in `emitter.h`, push on entering, pop on exiting.
+**Code:** `IORStack` struct in `core/ior_stack.h` (shared HD, used by both CPU and GPU), push on entering, pop on exiting.
 
-#### Medium Stack (Participating Media)
+#### Medium Stack (Participating Media — CPU Only)
 
 Parallel to the IOR stack, a `MediumStack` tracks which participating medium the photon is currently inside. When a photon crosses into a Translucent surface with `medium_id >= 0`, that medium is pushed. When it exits, popped.
 
-While inside a medium, the photon trace loop:
+> **GPU limitation:** The GPU has **no `MediumStack`**. Only the `IORStack` is maintained on the GPU. Interior medium transport (Beer–Lambert, free-flight, HG phase function) operates exclusively on the CPU photon tracer.
+
+While inside a medium (CPU only), the photon trace loop:
 1. Records a **beam segment** from the current position to the next surface hit.
 2. Applies Beer–Lambert attenuation to the spectral flux using spectral MIS (hero wavelength scheme).
 3. May scatter within the medium (Henyey-Greenstein phase function) before reaching the surface.
 
 If no participating medium is active (`medium_stack.current_medium_id() == -1`), no volumetric processing occurs.
 
-**Code:** `MediumStack` struct in `emitter.h`, `HomogeneousMedium` in `medium.h`.
+**Code:** `MediumStack` struct in `emitter.h` (CPU only), `HomogeneousMedium` in `medium.h`.
 
 ---
 
@@ -891,7 +940,7 @@ This is the combination of an Emissive surface enclosed by a Translucent shell. 
 | GlossyMetal | No | Yes (bounce > 0) | GGX VNDF + cosine mix | — |
 | Emissive | No | Yes (bounce > 0) | Cosine hemisphere | — |
 | GlossyDielectric | No | Yes (bounce > 0) | GGX VNDF + cosine mix | — |
-| Translucent | Yes (surface) | No | Fresnel reflect/refract + medium | `TRAVERSED_GLASS`, `CAUSTIC_GLASS` |
+| Translucent | Yes (surface) | No | Fresnel reflect/refract (+ medium on CPU) | `TRAVERSED_GLASS`, `CAUSTIC_GLASS` |
 | Clearcoat | No | Yes (bounce > 0) | GGX coat + cosine base mix | — |
 | Fabric | No | Yes (bounce > 0) | Cosine hemisphere | — |
 
@@ -906,9 +955,17 @@ After each bounce, the spectral flux is updated:
 $$\Phi'(\lambda) = \Phi(\lambda) \cdot \frac{f(\lambda) \cdot |\cos\theta_i|}{p(\omega_i)}$$
 
 For delta distributions (Mirror, Glass, Translucent), $p = 1$ or $p = F$ and the $\cos\theta_i$ in $f$ cancels with the geometry factor, yielding clean throughput:
-- Mirror: $\Phi' = \Phi \cdot K_s$
+- Mirror (CPU): $\Phi' = \Phi \cdot K_s$
+- Mirror (GPU): $\Phi' = \Phi$ (filter = 1.0; see §7.2 GPU note)
 - Glass reflect: $\Phi' = \Phi \cdot 1$ (energy-neutral Fresnel)
-- Glass refract: $\Phi' = \Phi \cdot T_f$
+- Glass refract (Radiance transport): $\Phi' = \Phi \cdot T_f$
+- Glass refract (Importance / photon transport): $\Phi' = \Phi \cdot T_f \cdot \eta^2$ (adjoint correction; see §7.3)
+
+For dispersive glass, the per-bin throughput uses spectral MIS weights:
+- Reflect: $\Phi'(\lambda) = \Phi(\lambda) \cdot F_\lambda / F_\text{hero}$
+- Refract: $\Phi'(\lambda) = \Phi(\lambda) \cdot T_f(\lambda) \cdot (1 - F_\lambda) / (1 - F_\text{hero}) \cdot [\eta_\lambda^2]$
+
+where the $\eta^2$ term applies only in Importance transport. Bins with TIR at their wavelength get $\Phi' = 0$.
 
 ---
 
@@ -921,7 +978,7 @@ $$p_\text{survive} = \min\left(\text{rr\_threshold},\; \max_\lambda \Phi(\lambda
 If terminated ($\xi \geq p_\text{survive}$): path ends, no deposit.
 If surviving: $\Phi \mathrel{{/}{=}} p_\text{survive}$ (unbiased energy compensation).
 
-This applies both inside media (scatter events) and at surfaces.
+This applies at surfaces and inside media scatter events (CPU only — the GPU has no interior medium transport).
 
 **Specular exemption:** Russian roulette is **skipped** for specular and translucent bounces (GPU: explicit guard; CPU targeted trace: `!mat.is_specular()` check). This ensures caustic photons survive the full glass/mirror chain unattenuated. Without this, multi-bounce glass caustics (e.g. light inside a glass sphere) would be prematurely terminated.
 

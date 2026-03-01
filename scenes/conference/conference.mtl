@@ -1,332 +1,295 @@
-# Blender MTL File: 'None'
-# Material Count: 33
+# ── Conference Room – Photon-Beam materials ──────────────────────────
+#
+# Original Blender export had generic mesh*_SG names.
+# Semantic roles inferred from Kd/Ks colour analysis:
+#
+#   Emissive:     mesh35_SG (ceiling lights), mesh18_SG (green indicator)
+#   Metal:        mesh9/12/15/24/25/32_SG (aluminum / brushed steel frames)
+#   Wood:         mesh1/2/8/13/19/20/28_SG (table, credenza, door frames)
+#   Dark plastic: Material__0, mesh6/22/26/30_SG (monitors, trim, electronics)
+#   Fabric:       mesh11_SG (green), mesh23/31_SG (red), mesh4_SG (maroon)
+#   Surfaces:     mesh0/5/7/10/16/17/27/29_SG (walls, ceiling, panels)
+#   Leather:      mesh21_SG (dark brown)
+# ─────────────────────────────────────────────────────────────────────
 
-newmtl Material__0
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.047059 0.047059 0.047059
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
+# ── Emissive ─────────────────────────────────────────────────────────
 
-newmtl mesh0_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.639216 0.600000 0.607843
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh10_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.600000 0.600000 0.600000
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh11_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.117647 0.258824 0.149020
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh12_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.427451 0.427451 0.427451
-Ks 0.427451 0.427451 0.427451
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh13_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.517647 0.447059 0.337255
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh15_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.447059 0.447059 0.447059
-Ks 0.447059 0.447059 0.447059
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh16_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 1.000000 1.000000 1.000000
-Ks 0.498039 0.498039 0.498039
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh17_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.498039 0.498039 0.498039
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh18_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.400000 0.400000 0.400000
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 1.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh19_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.878431 0.717647 0.576471
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh1_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.639216 0.400000 0.129412
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh20_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.827451 0.698039 0.427451
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh21_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.286275 0.149020 0.129412
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh22_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.078431 0.078431 0.078431
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh23_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.819608 0.086275 0.066667
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh24_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.698039 0.698039 0.698039
-Ks 0.698039 0.698039 0.698039
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh25_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.600000 0.600000 0.600000
-Ks 0.600000 0.600000 0.600000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh26_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.098039 0.098039 0.098039
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh27_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.466667 0.447059 0.427451
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh28_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.639216 0.439216 0.317647
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh29_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 1.000000 1.000000 1.000000
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh2_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.737255 0.400000 0.156863
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh30_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.058824 0.058824 0.058824
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh31_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.976471 0.176471 0.168627
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh32_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.600000 0.600000 0.600000
-Ks 0.600000 0.600000 0.600000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
+# Ceiling light panels – warm white
 newmtl mesh35_SG
-Ns 39.999995
-Ka 1.000000 0.950000 0.880000
-Kd 0.600000 0.600000 0.600000
-Ks 0.200000 0.200000 0.200000
-Ke 3.500000 3.400000 3.750000
-Ni 1.500000
-d 1.000000
-illum 2
+    Kd 0.60 0.60 0.60
+    Ke 3.50 3.40 3.75
+    pb_brdf emissive
 
-newmtl mesh4_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.176471 0.058824 0.058824
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
+# Green indicator LED / exit sign
+newmtl mesh18_SG
+    Kd 0.40 0.40 0.40
+    Ke 0.0 1.0 0.0
+    pb_brdf emissive
 
-newmtl mesh5_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.898039 0.898039 0.898039
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
+# ── Metal (Kd ≈ Ks → conductor) ─────────────────────────────────────
 
-newmtl mesh6_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.066667 0.066667 0.066667
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh7_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.698039 0.698039 0.698039
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
-newmtl mesh8_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.686275 0.427451 0.168627
-Ks 0.200000 0.200000 0.200000
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
-
+# Polished aluminum – bright
 newmtl mesh9_SG
-Ns 39.999995
-Ka 1.000000 1.000000 1.000000
-Kd 0.709804 0.709804 0.709804
-Ks 0.709804 0.709804 0.709804
-Ke 0.000000 0.000000 0.000000
-Ni 1.500000
-d 1.000000
-illum 2
+    Ks 0.71 0.71 0.71
+    pb_brdf conductor
+    pb_semantic metal
+    pb_roughness 0.08
+    pb_conductor_eta 1.35 0.96 0.61
+    pb_conductor_k   7.47 6.40 5.31
+
+# Dark brushed metal hardware
+newmtl mesh12_SG
+    Ks 0.43 0.43 0.43
+    pb_brdf conductor
+    pb_semantic metal
+    pb_roughness 0.25
+
+# Satin metal fittings
+newmtl mesh15_SG
+    Ks 0.45 0.45 0.45
+    pb_brdf conductor
+    pb_semantic metal
+    pb_roughness 0.20
+
+# Polished chrome frame
+newmtl mesh24_SG
+    Ks 0.70 0.70 0.70
+    pb_brdf conductor
+    pb_semantic metal
+    pb_roughness 0.06
+    pb_conductor_eta 1.35 0.96 0.61
+    pb_conductor_k   7.47 6.40 5.31
+
+# Satin nickel surface
+newmtl mesh25_SG
+    Ks 0.60 0.60 0.60
+    pb_brdf conductor
+    pb_semantic metal
+    pb_roughness 0.15
+
+# Metal bracket / structural
+newmtl mesh32_SG
+    Ks 0.60 0.60 0.60
+    pb_brdf conductor
+    pb_semantic metal
+    pb_roughness 0.18
+
+# ── Wood (warm browns → clearcoat over diffuse) ─────────────────────
+
+# Dark walnut panel
+newmtl mesh1_SG
+    Kd 0.64 0.40 0.13
+    pb_brdf clearcoat
+    pb_semantic wood_natural
+    pb_roughness 0.40
+    pb_clearcoat 0.55
+    pb_clearcoat_roughness 0.08
+    pb_base_brdf lambert
+
+# Cherry wood trim
+newmtl mesh2_SG
+    Kd 0.74 0.40 0.16
+    pb_brdf clearcoat
+    pb_semantic wood_natural
+    pb_roughness 0.40
+    pb_clearcoat 0.55
+    pb_clearcoat_roughness 0.08
+    pb_base_brdf lambert
+
+# Oak table surface
+newmtl mesh8_SG
+    Kd 0.69 0.43 0.17
+    pb_brdf clearcoat
+    pb_semantic wood_natural
+    pb_roughness 0.35
+    pb_clearcoat 0.60
+    pb_clearcoat_roughness 0.06
+    pb_base_brdf lambert
+
+# Ash / light-grain wood panel
+newmtl mesh13_SG
+    Kd 0.52 0.45 0.34
+    pb_brdf clearcoat
+    pb_semantic wood_natural
+    pb_roughness 0.45
+    pb_clearcoat 0.45
+    pb_clearcoat_roughness 0.10
+    pb_base_brdf lambert
+
+# Birch / maple credenza
+newmtl mesh19_SG
+    Kd 0.88 0.72 0.58
+    pb_brdf clearcoat
+    pb_semantic wood_natural
+    pb_roughness 0.35
+    pb_clearcoat 0.50
+    pb_clearcoat_roughness 0.08
+    pb_base_brdf lambert
+
+# Honey oak veneer
+newmtl mesh20_SG
+    Kd 0.83 0.70 0.43
+    pb_brdf clearcoat
+    pb_semantic wood_natural
+    pb_roughness 0.35
+    pb_clearcoat 0.55
+    pb_clearcoat_roughness 0.07
+    pb_base_brdf lambert
+
+# Medium oak door frame
+newmtl mesh28_SG
+    Kd 0.64 0.44 0.32
+    pb_brdf clearcoat
+    pb_semantic wood_natural
+    pb_roughness 0.40
+    pb_clearcoat 0.50
+    pb_clearcoat_roughness 0.08
+    pb_base_brdf lambert
+
+# ── Dark plastic / electronics ───────────────────────────────────────
+
+# Dark glossy plastic (monitor bezel)
+newmtl Material__0
+    Kd 0.047 0.047 0.047
+    pb_brdf clearcoat
+    pb_semantic plastic
+    pb_roughness 0.50
+    pb_clearcoat 0.45
+    pb_clearcoat_roughness 0.06
+    pb_base_brdf lambert
+
+# Dark plastic trim
+newmtl mesh6_SG
+    Kd 0.067 0.067 0.067
+    pb_brdf clearcoat
+    pb_semantic plastic
+    pb_roughness 0.55
+    pb_clearcoat 0.35
+    pb_clearcoat_roughness 0.12
+    pb_base_brdf lambert
+
+# Dark matte plastic housing
+newmtl mesh22_SG
+    Kd 0.078 0.078 0.078
+    pb_brdf clearcoat
+    pb_semantic plastic
+    pb_roughness 0.60
+    pb_clearcoat 0.25
+    pb_clearcoat_roughness 0.15
+    pb_base_brdf lambert
+
+# Dark plastic equipment casing
+newmtl mesh26_SG
+    Kd 0.098 0.098 0.098
+    pb_brdf clearcoat
+    pb_semantic plastic
+    pb_roughness 0.55
+    pb_clearcoat 0.30
+    pb_clearcoat_roughness 0.12
+    pb_base_brdf lambert
+
+# Near-black plastic electronics
+newmtl mesh30_SG
+    Kd 0.059 0.059 0.059
+    pb_brdf clearcoat
+    pb_semantic plastic
+    pb_roughness 0.55
+    pb_clearcoat 0.30
+    pb_clearcoat_roughness 0.10
+    pb_base_brdf lambert
+
+# ── Fabric / upholstery ─────────────────────────────────────────────
+
+# Dark green chair fabric
+newmtl mesh11_SG
+    Kd 0.118 0.259 0.149
+    pb_brdf fabric
+    pb_semantic fabric
+    pb_roughness 0.85
+    pb_sheen 0.50
+    pb_sheen_tint 0.40
+
+# Red chair fabric
+newmtl mesh23_SG
+    Kd 0.82 0.086 0.067
+    pb_brdf fabric
+    pb_semantic fabric
+    pb_roughness 0.80
+    pb_sheen 0.45
+    pb_sheen_tint 0.50
+
+# Bright red upholstery
+newmtl mesh31_SG
+    Kd 0.976 0.176 0.169
+    pb_brdf fabric
+    pb_semantic fabric
+    pb_roughness 0.80
+    pb_sheen 0.45
+    pb_sheen_tint 0.50
+
+# Dark maroon carpet / seating
+newmtl mesh4_SG
+    Kd 0.176 0.059 0.059
+    pb_brdf fabric
+    pb_semantic fabric
+    pb_roughness 0.90
+    pb_sheen 0.55
+    pb_sheen_tint 0.35
+
+# Dark brown leather
+newmtl mesh21_SG
+    Kd 0.286 0.149 0.129
+    pb_brdf fabric
+    pb_semantic leather
+    pb_roughness 0.60
+    pb_sheen 0.15
+    pb_sheen_tint 0.30
+
+# ── Walls, ceiling, panels ──────────────────────────────────────────
+
+# Warm grey-pink wall panel
+newmtl mesh0_SG
+    Kd 0.639 0.600 0.608
+    pb_brdf lambert
+    pb_semantic wallpaper
+
+# Light ceiling / upper wall
+newmtl mesh5_SG
+    Kd 0.898 0.898 0.898
+    pb_brdf lambert
+    pb_semantic wallpaper
+
+# Mid-grey structural surface
+newmtl mesh7_SG
+    Kd 0.698 0.698 0.698
+    pb_brdf lambert
+
+# Grey panel
+newmtl mesh10_SG
+    Kd 0.600 0.600 0.600
+    pb_brdf lambert
+
+# White glossy surface (whiteboard / projection screen)
+newmtl mesh16_SG
+    Kd 0.98 0.98 0.98
+    pb_brdf clearcoat
+    pb_roughness 0.30
+    pb_clearcoat 0.80
+    pb_clearcoat_roughness 0.01
+    pb_base_brdf lambert
+
+# Medium grey panel
+newmtl mesh17_SG
+    Kd 0.498 0.498 0.498
+    pb_brdf lambert
+
+# Warm grey surface
+newmtl mesh27_SG
+    Kd 0.467 0.447 0.427
+    pb_brdf lambert
+
+# White wall / ceiling
+newmtl mesh29_SG
+    Kd 0.95 0.95 0.95
+    pb_brdf lambert
+    pb_semantic wallpaper

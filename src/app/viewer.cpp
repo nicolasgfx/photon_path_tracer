@@ -232,12 +232,12 @@ static void render_help_overlay(int win_w, int win_h,
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Semi-transparent background box
-    float pad   = 10.f;
-    float box_w = 280.f;
-    float box_h = 575.f;
-    float bx    = pad;
-    float by    = pad;
+    // Semi-transparent background box – right edge at window center minus gap
+    float gap   = 10.f;
+    float box_w = 196.f;
+    float box_h = 402.f;
+    float bx    = (float)win_w * 0.5f - gap - box_w;
+    float by    = 10.f;
 
     glColor4f(0.0f, 0.0f, 0.0f, 0.6f);
     glBegin(GL_QUADS);
@@ -250,11 +250,11 @@ static void render_help_overlay(int win_w, int win_h,
     // Build overlay text lines
     auto on_off = [](bool v) -> const char* { return v ? "ON " : "off"; };
 
-    // Scale text 1.6x for readability
-    float scale = 1.6f;
-    float tx = bx + 12.f;
-    float ty = by + 12.f;
-    float line_h = 11.2f; // stb_easy_font is ~7px tall, scaled 1.6x ≈ 11.2
+    // Scale text 1.12x for readability (70% of original 1.6x)
+    float scale = 1.12f;
+    float tx = bx + 8.4f;
+    float ty = by + 8.4f;
+    float line_h = 7.84f; // stb_easy_font is ~7px tall, scaled 1.12x ≈ 7.84
 
     glPushMatrix();
     glTranslatef(tx, ty, 0.f);
@@ -448,7 +448,7 @@ static void render_hover_cell_overlay(
 
     float box_w = 340.f;
     float box_h = 150.f;
-    float bx = (float)win_w - box_w - 10.f;
+    float bx = (float)win_w * 0.5f + 10.f;   // left edge at window center + gap
     float by = 10.f;
 
     glColor4f(0.0f, 0.0f, 0.0f, 0.72f);
