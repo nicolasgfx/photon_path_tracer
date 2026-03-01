@@ -41,6 +41,24 @@ float dev_get_ior(uint32_t mat_id) {
     return params.ior[mat_id];
 }
 
+// Return the interior medium_id for a material (-1 = no medium).
+__forceinline__ __device__
+int dev_get_medium_id(uint32_t mat_id) {
+    return (params.mat_medium_id) ? params.mat_medium_id[mat_id] : -1;
+}
+
+// Return true if the material has an interior participating medium.
+__forceinline__ __device__
+bool dev_has_medium(uint32_t mat_id) {
+    return dev_get_medium_id(mat_id) >= 0;
+}
+
+// Load a HomogeneousMedium from the device media table.
+__forceinline__ __device__
+HomogeneousMedium dev_get_medium(int medium_id) {
+    return params.media[medium_id];
+}
+
 // Sample any texture by texture ID at the given UV.
 // Returns linear RGB (0-1).  Falls back to (1,1,1) when no texture.
 __forceinline__ __device__

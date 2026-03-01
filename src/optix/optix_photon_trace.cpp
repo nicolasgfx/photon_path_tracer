@@ -142,6 +142,11 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.tex_descs         = d_tex_descs_.d_ptr   ? d_tex_descs_.as<GpuTexDesc>() : nullptr;
     lp.num_textures      = (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc));
 
+    // Per-material interior medium (§7.7 Translucent)
+    lp.mat_medium_id = d_mat_medium_id_.d_ptr ? d_mat_medium_id_.as<int>() : nullptr;
+    lp.media         = d_media_.d_ptr ? d_media_.as<HomogeneousMedium>() : nullptr;
+    lp.num_media     = d_media_.d_ptr ? (int)(d_media_.bytes / sizeof(HomogeneousMedium)) : 0;
+
     lp.num_photons       = num_photons;
     lp.max_bounces       = config.max_bounces;
     lp.photon_max_bounces = DEBUG_PHOTON_SINGLE_BOUNCE ? 1 : config.max_bounces;

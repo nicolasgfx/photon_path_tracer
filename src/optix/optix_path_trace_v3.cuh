@@ -48,6 +48,7 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
 
     Spectrum throughput = Spectrum::constant(1.0f);
     IORStack ior_stack;
+    MediumStack medium_stack;  // per-material interior medium tracking (§7.10)
     bool aov_written = false;
 
     // Fibonacci sphere directions for cell-bin histogram sampling
@@ -68,12 +69,102 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
 
         if (!hit.hit) break;
 
-        // ── MT-02: Free-flight sampling inside participating media ──
-        // When volume is enabled, each ray segment may scatter before
-        // reaching the surface.  Uses a reference wavelength (median
-        // bin) to sample the free-flight distance; per-wavelength
-        // throughput is weighted by spectral MIS (§9.4).
-        if (params.volume_enabled && params.volume_density > 0.f) {
+        // ── Per-material interior medium transport (§7.7) ───────────
+        // When the camera ray is inside a Translucent object's medium,
+        // apply free-flight sampling / Beer-Lambert over the segment.
+        // Uses the same spectral MIS scheme as the atmospheric volume.
+        bool inside_object_medium = false;
+        {
+            int cur_mid = medium_stack.current_medium_id();
+            if (cur_mid >= 0 && params.media) {
+                inside_object_medium = true;
+                HomogeneousMedium med = dev_get_medium(cur_mid);
+
+                constexpr int REF_BIN = NUM_LAMBDA / 2;
+                float sig_t_ref = med.sigma_t.value[REF_BIN];
+
+                if (sig_t_ref > 0.f) {
+                    float u_ff = rng.next_float();
+                    float t_ff = -logf(fmaxf(u_ff, 1e-12f)) / sig_t_ref;
+
+                    if (t_ff < hit.t) {
+                        // ── Scatter event inside per-material medium ─
+                        float3 scatter_pos = origin + direction * t_ff;
+
+                        // Spectral MIS scatter weight (§9.4)
+                        float inv_ref = 1.f / sig_t_ref;
+                        for (int i = 0; i < NUM_LAMBDA; ++i) {
+                            float w = med.sigma_s.value[i]
+                                    * expf(-(med.sigma_t.value[i] - sig_t_ref) * t_ff)
+                                    * inv_ref;
+                            throughput.value[i] *= w;
+                        }
+
+                        // NEE at scatter event
+                        if (params.render_mode != RenderMode::IndirectOnly) {
+                            NeeResult vnee = dev_nee_volume_scatter(
+                                scatter_pos, direction, med.g, med, rng);
+                            Spectrum vnee_contrib = throughput * vnee.L;
+                            result.combined   += vnee_contrib;
+                            result.nee_direct += vnee_contrib;
+                            if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                                result.bounce_contrib[bounce] += vnee_contrib;
+                        }
+
+                        // Terminal bounce: photon final gather
+                        if (bounce == max_bounces - 1 && params.photon_final_gather) {
+                            if (params.render_mode != RenderMode::DirectOnly) {
+                                Spectrum L_vol = dev_estimate_volume_photon_density(
+                                    scatter_pos, direction, med.g, med);
+                                Spectrum vol_contrib = throughput * L_vol;
+                                result.combined        += vol_contrib;
+                                result.photon_indirect += vol_contrib;
+                                if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                                    result.bounce_contrib[bounce] += vol_contrib;
+                            }
+                            break;
+                        }
+
+                        // HG phase function sampling for next direction
+                        ONB scatter_frame = ONB::from_normal(direction * (-1.f));
+                        float3 wi_local = sample_henyey_greenstein(
+                            med.g, rng.next_float(), rng.next_float());
+                        float3 wi_world = scatter_frame.local_to_world(wi_local);
+
+                        // RR inside per-material media
+                        if (bounce >= params.min_bounces_rr) {
+                            float max_tp = throughput.max_component();
+                            float max_albedo = med.sigma_s.value[REF_BIN]
+                                             / fmaxf(med.sigma_t.value[REF_BIN], 1e-20f);
+                            float p_survive = fminf(params.rr_threshold,
+                                                    fmaxf(max_tp, max_albedo));
+                            if (p_survive < 1e-4f) break;
+                            if (rng.next_float() >= p_survive) break;
+                            float inv_survive = 1.f / p_survive;
+                            for (int i = 0; i < NUM_LAMBDA; ++i)
+                                throughput.value[i] *= inv_survive;
+                        }
+
+                        origin    = scatter_pos;
+                        direction = wi_world;
+                        pdf_combined_prev = 0.f;
+                        continue;
+                    } else {
+                        // No scatter: Beer-Lambert transmittance
+                        for (int i = 0; i < NUM_LAMBDA; ++i) {
+                            throughput.value[i] *= expf(
+                                -(med.sigma_t.value[i] - sig_t_ref) * hit.t);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── MT-02: Free-flight sampling inside atmospheric medium ───
+        // §7.10 Double-attenuation guard: skip atmospheric volume when
+        // inside a per-material medium to avoid double-counting.
+        if (params.volume_enabled && params.volume_density > 0.f
+            && !inside_object_medium) {
             float mid_y = origin.y + direction.y * (hit.t * 0.5f);
             HomogeneousMedium med = make_rayleigh_medium(
                 params.volume_density, params.volume_albedo,
@@ -224,7 +315,8 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         if (dev_is_specular(mat_id) && !dev_is_translucent(mat_id)) {
             SpecularBounceResult sb = dev_specular_bounce(
                 direction, hit.position, hit.shading_normal, hit.geo_normal,
-                mat_id, hit.uv, rng, nullptr, 0, &ior_stack);
+                mat_id, hit.uv, rng, nullptr, 0, &ior_stack,
+                TransportMode::Radiance, &medium_stack);
             for (int i = 0; i < NUM_LAMBDA; ++i)
                 throughput.value[i] *= sb.filter.value[i];
             direction = sb.new_dir;
@@ -234,13 +326,13 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         }
 
         // ── Translucent surface (delta + medium boundary) ───────────
-        // §4.4: Same as glass but manages medium stack transition.
-        // Currently treated as a pure dielectric boundary (volumetric
-        // scattering inside the medium is Phase 4 — MT-01 through MT-08).
+        // §7.7: Dielectric boundary with interior participating medium.
+        // MediumStack push/pop happens inside dev_specular_bounce.
         if (dev_is_translucent(mat_id)) {
             SpecularBounceResult sb = dev_specular_bounce(
                 direction, hit.position, hit.shading_normal, hit.geo_normal,
-                mat_id, hit.uv, rng, nullptr, 0, &ior_stack);
+                mat_id, hit.uv, rng, nullptr, 0, &ior_stack,
+                TransportMode::Radiance, &medium_stack);
             for (int i = 0; i < NUM_LAMBDA; ++i)
                 throughput.value[i] *= sb.filter.value[i];
             direction = sb.new_dir;

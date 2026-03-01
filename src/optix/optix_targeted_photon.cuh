@@ -167,7 +167,8 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
     float3 direction = dir;
     bool on_caustic_path = false;  // becomes true after first specular hit
     uint8_t path_flags = 0;  // PHOTON_FLAG_* accumulator for F2 debug overlay
-    IORStack ior_stack;  // track nested dielectrics across bounces
+    IORStack ior_stack;      // track nested dielectrics across bounces
+    MediumStack medium_stack; // track per-material interior media (§7.10)
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
@@ -184,6 +185,19 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
         }
 
         uint32_t hit_mat = hit.material_id;
+
+        // ── Per-material interior medium Beer-Lambert (§7.7) ────────
+        {
+            int cur_mid = medium_stack.current_medium_id();
+            if (cur_mid >= 0 && params.media) {
+                HomogeneousMedium med = dev_get_medium(cur_mid);
+                float seg_t = hit.t;
+                for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                    float sig_t_h = med.sigma_t.value[hero_bins[h]];
+                    hero_flux[h] *= expf(-sig_t_h * seg_t);
+                }
+            }
+        }
 
         // Skip emissive surfaces
         if (dev_is_emissive(hit_mat)) break;
@@ -238,7 +252,7 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
             SpecularBounceResult sb = dev_specular_bounce(
                 direction, hit.position, hit.shading_normal, hit.geo_normal,
                 hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS, &ior_stack,
-                TransportMode::Importance);
+                TransportMode::Importance, &medium_stack);
             for (int h = 0; h < HERO_WAVELENGTHS; ++h)
                 hero_flux[h] *= sb.filter.value[hero_bins[h]];
             direction = sb.new_dir;

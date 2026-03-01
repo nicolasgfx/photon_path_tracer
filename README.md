@@ -242,9 +242,10 @@ position the camera and inspect the scene before committing to a full render.
 
 | Input | Action |
 |---|---|
-| **W / A / S / D** | Move forward / left / back / right |
-| **Space / Ctrl** | Move up / down |
-| **Shift** | 3× speed |
+| **W / A / S / D** | Move forward / left / back / right (polled) |
+| **Space** | Move up |
+| **Left Ctrl** | Move down |
+| **Left Shift** | 3× speed (hold) |
 | **Mouse** | Look around (when captured) |
 | **M** | Toggle mouse capture |
 | **Left click** | Re-capture mouse |
@@ -253,46 +254,56 @@ position the camera and inspect the scene before committing to a full render.
 
 | Key | Action |
 |---|---|
-| **R** | Full render (progressive SPP or SPPM) |
+| **R** | Save timestamped snapshot (PNG + JSON stats + analysis report) |
 | **P** | Re-trace photons + rebuild spatial index |
-| **TAB** | Cycle mode: Full → Direct → Indirect → Photon → Normals → Material → Depth |
-| **ESC** | Cancel render → release mouse → quit (3-tier) |
-| **Q** | Quit immediately |
+| **TAB** | Cycle render mode: Full → Direct → Indirect → Photon → Normals → Material → Depth → GuideMap → CausticOnly |
+| **ESC** | Release mouse → quit (2-tier) |
+| **Q** | Release mouse → quit |
+
+### Statistics & Guidance
+
+| Key | Action |
+|---|---|
+| **T** | Toggle guided / unguided path tracing (sets `guide_fraction` to 0 or default) |
+| **C** | Toggle histogram-only conclusions (only when guided is ON) |
+| **S** | Toggle live statistics overlay (top-right corner) |
 
 ### Depth of Field
 
 | Key | Action |
 |---|---|
-| **O** | Toggle DoF |
-| **[ / ]** | Aperture narrower / wider (⅓ stop) |
-| **, / .** | Focus nearer / farther (10%) |
+| **O** | Toggle DoF on / off |
+| **[** | Widen aperture (lower f-number, more blur, ⅓ stop per press) |
+| **]** | Narrow aperture (higher f-number, less blur, ⅓ stop per press) |
+| **,** | Focus nearer (−10%) |
+| **.** | Focus farther (+10%) |
 | **F** | Auto-focus on screen centre |
-| **Middle mouse** | Auto-focus on cursor |
+| **Middle mouse** | Auto-focus on cursor position |
 
 ### Light & Scene
 
 | Key | Action |
 |---|---|
-| **+ / =** | Increase brightness (re-traces photons) |
-| **−** | Decrease brightness (re-traces photons) |
+| **+ / =** | Increase light brightness (×1.25 step) |
+| **− / _** | Decrease light brightness (÷1.25 step) |
 | **1 – 8** | Switch scene (see [Scenes](#scenes)) |
-| **V** | Toggle participating medium *(state tracked; currently disabled)* |
+| **V** | Toggle participating medium *(state tracked; volume currently disabled)* |
 | **G** | Toggle dense cell-bin grid gather |
 
 ### Debug Overlays
 
 | Key | Overlay |
 |---|---|
-| **F1** | Photon point visualisation |
-| **F2** | Global photon map (+ hover-cell inspector) |
-| **F3** | Caustic photon map *(no separate map yet — shares global)* |
+| **F1** | Photon point visualisation (all photons, disables F2 filter) |
+| **F2** | Cycle photon filter: Off → All → TraversedGlass → CausticGlass → Volume → Dispersion → CausticSpecular → Off |
+| **F3** | Toggle Guide Map visualisation (photon-guided direction overlay) |
 | **F4** | Hash grid cell visualisation *(planned)* |
 | **F5** | Photon direction arrows *(planned)* |
 | **F6** | PDF visualisation *(planned)* |
 | **F7** | Gather radius sphere *(planned)* |
 | **F8** | MIS weight display *(planned)* |
 | **F9** | Spectral wavelength colouring (photon overlay) |
-| **F10** | Save camera position to scene folder |
+| **F10** | Save camera position to active scene folder (`saved_camera.json`) |
 | **F11** | Photon heatmap (per-triangle irradiance, GPU false-colour) |
 | **H** | Toggle help overlay |
 

@@ -455,6 +455,10 @@ private:
     DeviceBuffer d_emission_tex_;   // int [num_materials]
     DeviceBuffer d_opacity_;        // float [num_materials]
 
+    // Per-material interior medium (§7.7 Translucent)
+    DeviceBuffer d_mat_medium_id_;  // int [num_materials]  medium index or -1
+    DeviceBuffer d_media_;          // HomogeneousMedium [num_media]
+
     // Clearcoat / Fabric per-material data
     DeviceBuffer d_clearcoat_weight_;    // float [num_materials]
     DeviceBuffer d_clearcoat_roughness_; // float [num_materials]

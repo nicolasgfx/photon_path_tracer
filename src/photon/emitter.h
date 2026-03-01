@@ -116,31 +116,7 @@ inline uint64_t rng_spatial_seed(float3 pos, int bounce, int photon_idx) {
 }
 
 
-// ── Medium stack for participating media boundary tracking ──────────
-struct MediumStack {
-    static constexpr int MAX_DEPTH = 4;
-    int stack[MAX_DEPTH] = {-1, -1, -1, -1};  // medium_id per nesting level
-    int depth    = 0;
-    int current_medium_id() const { return depth > 0 ? stack[depth-1] : -1; }
-    void push(int medium_id) {
-        if (depth < MAX_DEPTH)
-            stack[depth++] = medium_id;
-        // else: overflow — clamped at MAX_DEPTH (logged in debug builds)
-#ifndef NDEBUG
-        else
-            printf("[MediumStack] WARNING: overflow at depth %d\n", depth);
-#endif
-    }
-    void pop() {
-        if (depth > 0)
-            --depth;
-        // else: underflow — likely inconsistent mesh winding
-#ifndef NDEBUG
-        else
-            printf("[MediumStack] WARNING: underflow (pop on empty stack)\n");
-#endif
-    }
-};
+// MediumStack is now in volume/medium.h (shared HD for CPU + GPU).
 
 inline void trace_photons(const Scene& scene,
                            const EmitterConfig& config,
@@ -206,11 +182,29 @@ inline void trace_photons(const Scene& scene,
                 rng = PCGRng::seed(sp_seed, (uint64_t)(photon_idx + 1));
             }
 
-            // ── Volume photon deposit (Beer–Lambert free-flight) ─────
+            // ── Per-material interior medium Beer-Lambert (§7.7) ─────
+            // If the photon is inside a Translucent object, apply
+            // Beer-Lambert transmittance over the ray segment.
+            bool inside_object_medium = false;
+            {
+                int cur_mid = medium_stack.current_medium_id();
+                if (cur_mid >= 0 && cur_mid < (int)scene.media.size()) {
+                    inside_object_medium = true;
+                    const HomogeneousMedium& med = scene.media[cur_mid];
+                    float seg_t = hit.t;
+                    for (int b = 0; b < NUM_LAMBDA; ++b)
+                        spectral_flux.value[b] *= expf(-med.sigma_t.value[b] * seg_t);
+                }
+            }
+
+            // ── Atmospheric volume photon deposit (Beer–Lambert free-flight) ─────
             // Legacy atmospheric fog volume photon system.
             // Volume point deposits — runtime gated via config.volume_enabled.
+            // §7.10 Double-attenuation guard: skip atmospheric volume when
+            // inside a per-material medium.
             {
-            if (volume_map && config.volume_enabled && config.volume_density > 0.f) {
+            if (volume_map && config.volume_enabled && config.volume_density > 0.f
+                && !inside_object_medium) {
                 path_flags |= PHOTON_FLAG_VOLUME_SCATTER;
                 float seg_t = hit.t;
                 float mid_y = ray.origin.y + ray.direction.y * (seg_t * 0.5f);
@@ -479,6 +473,17 @@ inline void trace_targeted_caustic_emission(
                 uint64_t sp_seed = rng_spatial_seed(hit.position, bounce,
                                                      photon_idx);
                 rng = PCGRng::seed(sp_seed, (uint64_t)(photon_idx + 1));
+            }
+
+            // ── Per-material interior medium Beer-Lambert (§7.7) ─────
+            {
+                int cur_mid = medium_stack.current_medium_id();
+                if (cur_mid >= 0 && cur_mid < (int)scene.media.size()) {
+                    const HomogeneousMedium& med = scene.media[cur_mid];
+                    float seg_t = hit.t;
+                    for (int b = 0; b < NUM_LAMBDA; ++b)
+                        spectral_flux.value[b] *= expf(-med.sigma_t.value[b] * seg_t);
+                }
             }
 
             const Material& mat = scene.materials[hit.material_id];

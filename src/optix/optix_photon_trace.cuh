@@ -125,7 +125,8 @@ extern "C" __global__ void __raygen__photon_trace() {
     // are tagged as caustic.
     bool on_caustic_path = false;
     uint8_t path_flags = 0;  // PHOTON_FLAG_* accumulator for F2 debug overlay
-    IORStack ior_stack;  // track nested dielectrics across bounces
+    IORStack ior_stack;      // track nested dielectrics across bounces
+    MediumStack medium_stack; // track per-material interior media (§7.10)
 
     for (int bounce = 0; bounce < params.photon_max_bounces; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
@@ -143,8 +144,29 @@ extern "C" __global__ void __raygen__photon_trace() {
 
         uint32_t hit_mat = hit.material_id;
 
-        // ── Volume photon deposit (Beer–Lambert free-flight) ───────
-        if (params.volume_enabled && params.volume_density > 0.f && hit.hit) {
+        // ── Per-material interior medium (§7.7 Translucent) ────────
+        // If the photon is inside a per-material medium, apply
+        // Beer-Lambert transmittance over the ray segment.
+        bool inside_object_medium = false;
+        {
+            int cur_mid = medium_stack.current_medium_id();
+            if (cur_mid >= 0 && params.media) {
+                inside_object_medium = true;
+                HomogeneousMedium med = dev_get_medium(cur_mid);
+                float seg_t = hit.t;
+                // Beer-Lambert attenuation per hero wavelength
+                for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                    float sig_t_h = med.sigma_t.value[hero_bins[h]];
+                    hero_flux[h] *= expf(-sig_t_h * seg_t);
+                }
+            }
+        }
+
+        // ── Atmospheric volume photon deposit (Beer–Lambert free-flight) ───────
+        // §7.10 Double-attenuation guard: skip atmospheric volume when
+        // inside a per-material medium to avoid double-counting extinction.
+        if (params.volume_enabled && params.volume_density > 0.f && hit.hit
+            && !inside_object_medium) {
             float seg_t = hit.t;
             float mid_y = origin.y + direction.y * (seg_t * 0.5f);
             HomogeneousMedium med = make_rayleigh_medium(
@@ -243,7 +265,7 @@ extern "C" __global__ void __raygen__photon_trace() {
             SpecularBounceResult sb = dev_specular_bounce(
                 direction, hit.position, hit.shading_normal, hit.geo_normal,
                 hit_mat, hit.uv, rng, hero_bins, HERO_WAVELENGTHS, &ior_stack,
-                TransportMode::Importance);
+                TransportMode::Importance, &medium_stack);
             // Apply transmittance filter to hero channels
             for (int h = 0; h < HERO_WAVELENGTHS; ++h)
                 hero_flux[h] *= sb.filter.value[hero_bins[h]];

@@ -780,7 +780,7 @@ This prevents near-perfect dielectrics (low roughness, small $F_0$) from starvin
 
 A glass-like surface with an **interior participating medium** (volumetric scattering inside). Think of a marble ball, a jade figurine, or a glass of milk. The **surface BSDF is identical to Glass** (Fresnel reflect/refract, Snell's law, optional dispersion). The difference is what happens *inside*: the material has absorption coefficient $\sigma_a(\lambda)$, scattering coefficient $\sigma_s(\lambda)$, and a phase function asymmetry parameter $g$.
 
-> **CPU-only feature:** Interior medium transport (Beer–Lambert, free-flight sampling, HG phase function) is implemented only on the CPU via `MediumStack` and beam tracing in `emitter.h`. The GPU treats Translucent surfaces identically to Glass — it performs Fresnel reflect/refract at the surface and tracks the IOR stack, but has **no `MediumStack`** and performs **no interior volumetric scattering**. Only the legacy atmospheric volume system (`params.volume_enabled`) operates on the GPU.
+> **Fully implemented on CPU and GPU.** Interior medium transport (Beer–Lambert, free-flight sampling, HG phase function) is implemented on both the CPU (`MediumStack` + beam tracing in `emitter.h`) and the GPU (`MediumStack` in all OptiX trace kernels). Per-material `HomogeneousMedium` data is uploaded to the GPU as a struct array; each Translucent surface pushes/pops its `medium_id` on the GPU `MediumStack` (parallel to `IORStack`). A **double-attenuation guard** prevents the legacy atmospheric volume from applying when inside an object medium.
 
 **CPU photon trace:** When a photon enters a Translucent object:
 1. The surface interaction is the same as Glass (Fresnel decision, refraction).
@@ -791,18 +791,20 @@ A glass-like surface with an **interior participating medium** (volumetric scatt
 
 **GPU photon trace:** When a photon enters a Translucent object:
 1. The surface interaction is the same as Glass (Fresnel decision, refraction, IOR stack push/pop).
-2. No interior volumetric effects — the photon travels in a straight line to the next surface.
-3. Exit interaction: Fresnel reflect/refract with IOR stack pop.
+2. The entry pushes the material's `medium_id` onto the GPU medium stack.
+3. Inside the medium, **Beer–Lambert attenuation** reduces hero flux: $T(d) = e^{-\sigma_t d}$ per spectral bin.
+4. Exit interaction: Fresnel reflect/refract with IOR stack pop + medium stack pop.
+5. A double-attenuation guard skips the legacy atmospheric volume when inside a per-material medium.
 
 #### Mathematics
 
 **Surface BSDF:** identical to Glass (§7.3 above), including all dispersion, IOR stack, and η² adjoint correction behaviour.
 
-**Interior medium (CPU only) — Beer–Lambert transmittance:**
+**Interior medium (CPU + GPU) — Beer–Lambert transmittance:**
 
 $$T(\lambda, d) = \exp\left(-\sigma_t(\lambda) \cdot d\right), \qquad \sigma_t = \sigma_s + \sigma_a$$
 
-**Free-flight sampling (CPU only, hero wavelength scheme):**
+**Free-flight sampling (CPU + GPU camera pass, hero wavelength scheme):**
 
 Pick hero bin $h$ uniformly. Sample free-flight distance:
 
@@ -816,13 +818,13 @@ If $t \geq d_\text{surface}$: the photon reaches the next surface. Transmittance
 
 $$w(\lambda) = \frac{e^{-\sigma_t(\lambda) \cdot d}}{\frac{1}{N}\sum_j e^{-\sigma_t^{(j)} \cdot d}}$$
 
-**Phase function (CPU only, Henyey-Greenstein):**
+**Phase function (CPU + GPU camera pass, Henyey-Greenstein):**
 
 $$p_\text{HG}(\cos\theta, g) = \frac{1 - g^2}{4\pi\left(1 + g^2 - 2g\cos\theta\right)^{3/2}}$$
 
 $g = 0$ is isotropic, $g > 0$ is forward-scattering, $g < 0$ is back-scattering.
 
-**Code:** The surface BSDF uses `glass_sample()` (CPU) or `dev_specular_bounce()` (GPU). CPU medium tracking uses `MediumStack` in `emitter.h`. The free-flight + spectral MIS logic is in the beam tracing section of `trace_photons()` in `emitter.h`. `HomogeneousMedium` is defined in `medium.h`.
+**Code:** The surface BSDF uses `glass_sample()` (CPU) or `dev_specular_bounce()` (GPU). Medium tracking uses the shared `MediumStack` struct in `volume/medium.h` (HD — used by both CPU and GPU). CPU: `emitter.h` trace loops. GPU: `optix_path_trace_v3.cuh` (full free-flight + spectral MIS + HG + NEE), `optix_photon_trace.cuh` / `optix_targeted_photon.cuh` / `optix_sppm.cuh` (Beer–Lambert). Per-material media are uploaded via `optix_upload.cpp` (`mat_medium_id[]` + `media[]`). `HomogeneousMedium` is defined in `medium.h`.
 
 ---
 
@@ -895,20 +897,18 @@ Entering/exiting is determined by `dot(ray_direction, geometric_normal)`: negati
 
 **Code:** `IORStack` struct in `core/ior_stack.h` (shared HD, used by both CPU and GPU), push on entering, pop on exiting.
 
-#### Medium Stack (Participating Media — CPU Only)
+#### Medium Stack (Participating Media — CPU + GPU)
 
-Parallel to the IOR stack, a `MediumStack` tracks which participating medium the photon is currently inside. When a photon crosses into a Translucent surface with `medium_id >= 0`, that medium is pushed. When it exits, popped.
+Parallel to the IOR stack, a `MediumStack` tracks which participating medium the ray/photon is currently inside. When it crosses into a Translucent surface with `medium_id >= 0`, that medium is pushed. When it exits, popped. The struct is shared HD (`volume/medium.h`), identical on CPU and GPU.
 
-> **GPU limitation:** The GPU has **no `MediumStack`**. Only the `IORStack` is maintained on the GPU. Interior medium transport (Beer–Lambert, free-flight, HG phase function) operates exclusively on the CPU photon tracer.
-
-While inside a medium (CPU only), the photon trace loop:
+While inside a medium, the trace loop:
 1. Records a **beam segment** from the current position to the next surface hit.
 2. Applies Beer–Lambert attenuation to the spectral flux using spectral MIS (hero wavelength scheme).
 3. May scatter within the medium (Henyey-Greenstein phase function) before reaching the surface.
 
 If no participating medium is active (`medium_stack.current_medium_id() == -1`), no volumetric processing occurs.
 
-**Code:** `MediumStack` struct in `emitter.h` (CPU only), `HomogeneousMedium` in `medium.h`.
+**Code:** `MediumStack` struct in `volume/medium.h` (shared HD, CPU + GPU), `HomogeneousMedium` in `medium.h`. GPU upload in `optix_upload.cpp`; device helpers in `optix_material.cuh`.
 
 ---
 
@@ -1244,7 +1244,7 @@ A comprehensive checklist covering every documented rule and behaviour. Each ite
 - [x] **MI-07** Glass: hero wavelength determines refraction angle; companions get per-bin Fresnel weights
 - [x] **MI-08** GlossyMetal: GGX VNDF specular + Lambertian diffuse, lobe selection by max(Ks)/max(Kd)
 - [x] **MI-09** GlossyDielectric: IOR-based F0, $(1-F_r)$ energy conservation on diffuse
-- [x] **MI-10** Translucent: Glass surface BSDF + interior medium. Medium stack push/pop — *CPU: full MediumStack; GPU: IORStack only (no GPU MediumStack)*
+- [x] **MI-10** Translucent: Glass surface BSDF + interior medium. Medium stack push/pop — *CPU: full MediumStack; GPU: MediumStack parallel to IORStack*
 - [x] **MI-11** Clearcoat: coat GGX + Lambertian base with $(1 - w_\text{coat} F_r)$ attenuation
 - [x] **MI-12** Fabric: Lambertian + sheen (Schlick Fresnel term)
 - [x] **MI-13** Emissive: BSDF treated as Lambertian for bouncing (§7.5)
@@ -1252,16 +1252,16 @@ A comprehensive checklist covering every documented rule and behaviour. Each ite
 
 ### 10.5 Medium Transport
 
-- [~] **MT-01** Medium stack tracks current participating medium (push on enter, pop on exit) — *CPU only; GPU has IORStack but no MediumStack*
+- [x] **MT-01** Medium stack tracks current participating medium (push on enter, pop on exit) — *CPU + GPU; shared HD struct in `volume/medium.h`*
 - [x] **MT-02** Beer–Lambert transmittance: $T(\lambda, d) = \exp(-\sigma_t(\lambda) d)$
-- [~] **MT-03** Free-flight sampling from hero bin's exponential $\sigma_t$ — *GPU: hero bin σt; CPU: uses average σt across all bins*
-- [ ] **MT-04** Spectral MIS weights applied for scatter and no-scatter events — *not implemented; uniform attenuation only*
-- [ ] **MT-05** Scatter direction sampled from HG phase function — *HG sampler exists in `medium.h` but is not wired into any trace loop*
-- [ ] **MT-06** Phase function PDF cancels with sampling (importance sampling) — *blocked by MT-05*
+- [x] **MT-03** Free-flight sampling from hero bin's exponential $\sigma_t$ — *GPU camera pass: hero bin σt with spectral MIS; CPU + GPU photon trace: Beer–Lambert only*
+- [x] **MT-04** Spectral MIS weights applied for scatter and no-scatter events — *GPU camera pass (`optix_path_trace_v3.cuh`)*
+- [x] **MT-05** Scatter direction sampled from HG phase function — *GPU camera pass + CPU photon trace*
+- [x] **MT-06** Phase function PDF cancels with sampling (importance sampling) — *HG importance-sampled; PDF cancels in throughput update*
 - [ ] **MT-07** Beam segments recorded for beam estimator (p0 → scatter point or surface) — *no beam estimator infrastructure*
-- [ ] **MT-08** Volume double-attenuation guard: legacy atmospheric skipped when inside object medium — *guard not present; legacy volume runs unconditionally*
-- [ ] **MT-09** RR inside media uses same threshold logic as surface bounces — *no in-medium scatter loop exists*
-- [~] **MT-10** Medium stack overflow/underflow logged in debug builds — *CPU: yes (`#ifndef NDEBUG` printf); GPU: no MediumStack*
+- [x] **MT-08** Volume double-attenuation guard: legacy atmospheric skipped when inside object medium — *`inside_object_medium` flag in all GPU kernels + CPU emitter*
+- [x] **MT-09** RR inside media uses same threshold logic as surface bounces — *GPU camera pass in-medium scatter loop*
+- [x] **MT-10** Medium stack overflow/underflow logged in debug builds — *CPU: `#ifndef NDEBUG` printf; GPU: depth clamped (stack overflow protection)*
 
 ### 10.6 Russian Roulette & Path Termination
 
@@ -1346,7 +1346,7 @@ A comprehensive checklist covering every documented rule and behaviour. Each ite
 | 10.2 Targeted Caustic | 13 | 0 | 0 | 13 |
 | 10.3 Photon Deposit Rules | 10 | 0 | 0 | 10 |
 | 10.4 Material Interactions | 14 | 0 | 0 | 14 |
-| 10.5 Medium Transport | 1 | 3 | 6 | 10 |
+| 10.5 Medium Transport | 9 | 0 | 1 | 10 |
 | 10.6 Russian Roulette | 4 | 0 | 1 | 5 |
 | 10.7 Spectral/Hero λ | 7 | 0 | 0 | 7 |
 | 10.8 RNG & Decorrelation | 4 | 1 | 0 | 5 |
@@ -1354,7 +1354,7 @@ A comprehensive checklist covering every documented rule and behaviour. Each ite
 | 10.10 Adjoint Correction | 3 | 0 | 1 | 4 |
 | 10.11 View-Adaptive | 0 | 1 | 3 | 4 |
 | 10.12 Guided Path Tracing | 3 | 2 | 1 | 6 |
-| **Totals** | **75** | **9** | **12** | **96** |
+| **Totals** | **83** | **6** | **7** | **96** |
 
 ### What's Solid (ready for Part 2)
 
@@ -1373,7 +1373,7 @@ The photon mapping subsystem is production-quality:
 
 | Category | Items | Priority for Part 2 |
 |---|---|---|
-| **Volume/medium transport** | MT-04 through MT-09: spectral MIS, HG scatter, beam estimator, double-attenuation guard, in-medium RR | Low — volumes are disabled by default; revisit when enabling participating media |
+| **Volume/medium transport** | MT-07: beam segment recording for beam estimator | Low — no beam estimator infrastructure exists yet |
 | **View-adaptive budgeting** | VA-01 through VA-04: pilot pass, per-emitter tallying, adaptive CDF | Medium — useful for multi-light scenes; `source_emissive_idx` plumbing exists |
 | **Adaptive SPP** | GP-06: per-cell path type → SPP allocation | Medium — CellInfoCache has the raw data; needs a consumer |
 | **Shading normal correction** | AC-04 | Low — no bump maps in current scenes |
@@ -1385,6 +1385,6 @@ These items describe behaviour in the design doc that does not match the actual 
 
 1. **CP-02/CP-03 (§3.3 Step 1)**: Doc describes GPU uniform mix (`DEFAULT_PHOTON_EMITTER_UNIFORM_MIX`) for photon emission triangle selection. Code was deleted in §1.1 cleanup — GPU photon emission now uses **pure power CDF**. The uniform mix only exists in NEE dispatch. *The §3.3 text should be updated.*
 2. **RN-03 (§8.6)**: Doc describes cell-stratified Fibonacci bouncing (`DEFAULT_PHOTON_BOUNCE_STRATA`). Deleted in §1.1 cleanup. *The §8.6 text is now historical.*
-3. **MT-08 (§8.10)**: Doc describes a volume double-attenuation guard. Code runs legacy atmospheric system unconditionally with no medium-stack check. *Guard was never implemented.*
+3. **MT-08 (§8.10)**: ~~Doc describes a volume double-attenuation guard. Code runs legacy atmospheric system unconditionally with no medium-stack check.~~ **Fixed** — `inside_object_medium` guard now present in all GPU kernels and CPU emitter. Legacy atmospheric volume is skipped when inside a per-material medium.
 4. **GP-03 (§4.3)**: Doc specifies "64K cells × 32 bins × 4 bytes = 8 MB". Actual implementation uses dynamic grid sizing from photon AABB and ~52 B per bin. *Budget estimate is aspirational, not enforced.*
 5. **GP-05 (§4.4)**: Doc specifies "power heuristic" for MIS. Code uses balance heuristic (mixture PDF). *Functionally correct but terminology differs.*

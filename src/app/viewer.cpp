@@ -219,7 +219,7 @@ static void render_help_overlay(int win_w, int win_h,
                                  bool use_dense_grid,
                                  int active_scene_index = -1,
                                  float light_scale = 1.0f) {
-    // Set up 2D orthographic projection for overlay
+    // ---------- 2D orthographic projection for overlay ----------
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -232,181 +232,205 @@ static void render_help_overlay(int win_w, int win_h,
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Semi-transparent background box – right edge at window center minus gap
-    float gap   = 10.f;
-    float box_w = 196.f;
-    float box_h = 402.f;
-    float bx    = (float)win_w * 0.5f - gap - box_w;
-    float by    = 10.f;
+    // ---------- Layout constants ----------
+    // 2× scale gives ~14px glyphs – readable on 1080p+
+    constexpr float scale  = 2.0f;
+    constexpr float line_h = 14.0f;          // 7px glyph * 2.0 scale
+    constexpr float gap_section = line_h * 0.45f;
+    constexpr float col_w  = 280.f;          // width of one column (scaled px)
+    constexpr float gutter = 30.f;           // gap between columns
+    constexpr float pad    = 16.f;           // inner padding around content
 
-    glColor4f(0.0f, 0.0f, 0.0f, 0.6f);
-    glBegin(GL_QUADS);
-    glVertex2f(bx,         by);
-    glVertex2f(bx + box_w, by);
-    glVertex2f(bx + box_w, by + box_h);
-    glVertex2f(bx,         by + box_h);
-    glEnd();
+    // Two-column box, centered on screen
+    float box_w = pad + col_w + gutter + col_w + pad;
+    float bx = ((float)win_w - box_w) * 0.5f;
+    float by = floorf((float)win_h * 0.08f); // 8% from top
 
-    // Build overlay text lines
+    // ---- Pre-compute content height so the background fits exactly ----
+    constexpr float ln = line_h * 0.78f;     // normal line step
+    // Left column: title + nav(4) + render(3) + stats(3) + dof(6) + light(1)
+    float left_h  = line_h * 1.1f                       // title
+                  + (gap_section + line_h + 4 * ln)      // navigation
+                  + (gap_section + line_h + 3 * ln)      // rendering
+                  + (gap_section + line_h + 3 * ln)      // statistics
+                  + (gap_section + line_h + 6 * ln)      // dof
+                  + (gap_section + line_h + 1 * ln);     // light
+    // Right column: debug toggles(10+maybe filter) + volume(2) + scenes(N) + misc(1)
+    int extra_filter = (debug.photon_filter != PhotonFilterMode::Off) ? 1 : 0;
+    float right_h = (gap_section + line_h + (10 + extra_filter) * ln) // debug overlays
+                  + (gap_section + line_h + 2 * ln)                   // volume
+                  + (gap_section + line_h + NUM_SCENE_PROFILES * ln)  // scenes
+                  + (gap_section + line_h + 1 * ln);                  // misc
+    float content_h = (left_h > right_h) ? left_h : right_h;
+    float box_h = pad + content_h + gap_section + line_h + pad; // +footer
+
+    // ---------- Draw background ----------
+    // Dark near-opaque background with subtle border
+    auto draw_rect = [](float x, float y, float w, float h,
+                        float r, float g, float b, float a) {
+        glColor4f(r, g, b, a);
+        glBegin(GL_QUADS);
+        glVertex2f(x,     y);
+        glVertex2f(x + w, y);
+        glVertex2f(x + w, y + h);
+        glVertex2f(x,     y + h);
+        glEnd();
+    };
+    // Border (1 px visual) around the box
+    draw_rect(bx - 1, by - 1, box_w + 2, box_h + 2,
+              0.35f, 0.35f, 0.40f, 0.70f);
+    // Solid dark fill
+    draw_rect(bx, by, box_w, box_h,
+              0.05f, 0.05f, 0.08f, 0.88f);
+
+    // ---------- Text helpers ----------
     auto on_off = [](bool v) -> const char* { return v ? "ON " : "off"; };
 
-    // Scale text 1.12x for readability (70% of original 1.6x)
-    float scale = 1.12f;
-    float tx = bx + 8.4f;
-    float ty = by + 8.4f;
-    float line_h = 7.84f; // stb_easy_font is ~7px tall, scaled 1.12x ≈ 7.84
+    // Shadow-text: draw black offset copy first, then foreground
+    auto draw_shadow_text = [&](float x, float y, const char* text,
+                                float r, float g, float b, float a) {
+        draw_overlay_text(x + 0.7f, y + 0.7f, text, 0.f, 0.f, 0.f, a * 0.6f);
+        draw_overlay_text(x, y, text, r, g, b, a);
+    };
+
+    // Column cursors
+    float lx  = bx + pad;              // left column x
+    float rx  = bx + pad + col_w + gutter; // right column x
+    float ly  = by + pad;              // left column y cursor
+    float ry  = by + pad;              // right column y cursor
 
     glPushMatrix();
-    glTranslatef(tx, ty, 0.f);
     glScalef(scale, scale, 1.f);
+    // All coordinates are now in *scaled* space, so divide by scale
+    float inv = 1.f / scale;
 
-    float ly = 0.f;
-    // Title
-    draw_overlay_text(0, ly, "=== Debug Controls ===", 1.f, 1.f, 0.3f, 1.f);
-    ly += line_h;
-
-    // Navigation
-    draw_overlay_text(0, ly, "WASD   Move camera", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "Mouse  Look around", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "Shift  Fast move (3x)", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "M      Toggle mouse capture", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "R      Load render_config.json + render", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "ESC    Cancel render / release mouse / quit", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h;
-
-    // Render modes
+    // Handy lambdas (work in unscaled coords, emit at scaled positions)
     char buf[128];
-    snprintf(buf, sizeof(buf), "TAB  Mode: %s",
-             DebugState::render_mode_name(debug.current_mode));
-    draw_overlay_text(0, ly, buf, 0.3f, 1.f, 0.5f, 1.f);
-    ly += line_h;
 
-    // Debug toggles
-    draw_overlay_text(0, ly, "--- Debug Toggles ---", 1.f, 1.f, 0.3f, 1.f);
-    ly += line_h;
-
-    struct Toggle { const char* key; const char* label; bool on; };
-    Toggle toggles[] = {
-        {"F1", "All photons",     debug.show_photon_points},
-        {"F2", "Photon filter",    debug.photon_filter != PhotonFilterMode::Off},
-        {"F3", "(reserved)",       false},
-        {"F4", "Hash grid",       debug.show_hash_grid},
-        {"F5", "Photon dirs",      debug.show_photon_dirs},
-        {"F6", "PDFs",             debug.show_pdfs},
-        {"F7", "Radius sphere",    debug.show_radius_sphere},
-        {"F8", "MIS weights",      debug.show_mis_weights},
-        {"F9", "Spectral color",   debug.spectral_coloring},
-        {"F11","Photon heatmap",   debug.show_photon_heatmap},
+    auto section = [&](float& cy, float cx, const char* title) {
+        cy += gap_section;
+        draw_shadow_text(cx * inv, cy * inv, title, 1.0f, 0.9f, 0.35f, 1.f);
+        cy += line_h;
     };
-    for (auto& t : toggles) {
-        snprintf(buf, sizeof(buf), "%s  %s [%s]", t.key, t.label, on_off(t.on));
-        float cr = t.on ? 0.3f : 0.5f;
-        float cg = t.on ? 1.0f : 0.5f;
-        float cb = t.on ? 0.3f : 0.5f;
-        draw_overlay_text(0, ly, buf, cr, cg, cb, 1.f);
-        ly += line_h * 0.7f;
+
+    auto line = [&](float& cy, float cx, const char* text,
+                    float r = 0.82f, float g = 0.82f, float b = 0.82f) {
+        draw_shadow_text(cx * inv, cy * inv, text, r, g, b, 1.f);
+        cy += line_h * 0.78f;
+    };
+
+    auto toggle_line = [&](float& cy, float cx,
+                           const char* key, const char* label, bool on) {
+        snprintf(buf, sizeof(buf), "%-5s %s [%s]", key, label, on_off(on));
+        float cr = on ? 0.35f : 0.50f;
+        float cg = on ? 1.00f : 0.50f;
+        float cb = on ? 0.35f : 0.50f;
+        draw_shadow_text(cx * inv, cy * inv, buf, cr, cg, cb, 1.f);
+        cy += line_h * 0.78f;
+    };
+
+    // ===================== LEFT COLUMN =====================
+
+    // Title
+    draw_shadow_text(lx * inv, ly * inv,
+                     "PHOTON PATH TRACER",
+                     0.6f, 0.85f, 1.0f, 1.f);
+    ly += line_h * 1.1f;
+
+    // -- Navigation --
+    section(ly, lx, "Navigation");
+    line(ly, lx, "WASD    Move camera");
+    line(ly, lx, "Mouse   Look around");
+    line(ly, lx, "Shift   Fast move (3x)");
+    line(ly, lx, "M       Toggle mouse capture");
+
+    // -- Rendering --
+    section(ly, lx, "Rendering");
+    {
+        snprintf(buf, sizeof(buf), "TAB   Mode: %s",
+                 DebugState::render_mode_name(debug.current_mode));
+        line(ly, lx, buf, 0.35f, 1.0f, 0.55f);
     }
+    line(ly, lx, "R       Snapshot to PNG");
+    line(ly, lx, "ESC     Cancel / release / quit");
+
+    // -- Statistics & Guidance --
+    section(ly, lx, "Statistics & Guidance");
+    toggle_line(ly, lx, "T", "Guided path tracing", true);   // always shown
+    line(ly, lx, "C       Toggle histogram-only");
+    line(ly, lx, "S       Toggle stats overlay");
+
+    // -- Depth of Field --
+    section(ly, lx, "Depth of Field");
+    toggle_line(ly, lx, "O", "Depth of Field", camera.dof_enabled);
+    {
+        snprintf(buf, sizeof(buf), "[/]   f-number: f/%.1f", camera.dof_f_number);
+        line(ly, lx, buf);
+        snprintf(buf, sizeof(buf), ",/.   Focus dist: %.4f", camera.dof_focus_dist);
+        line(ly, lx, buf);
+    }
+    line(ly, lx, "F       Auto-focus (center)");
+    line(ly, lx, "MMB     Auto-focus (cursor)");
+
+    // -- Light Brightness --
+    section(ly, lx, "Light Brightness");
+    {
+        snprintf(buf, sizeof(buf), "+/-   Brightness: %.2fx", light_scale);
+        line(ly, lx, buf);
+    }
+
+    // ===================== RIGHT COLUMN =====================
+
+    // -- Debug Overlays --
+    section(ry, rx, "Debug Overlays");
+    toggle_line(ry, rx, "F1",  "All photons",      debug.show_photon_points);
+    toggle_line(ry, rx, "F2",  "Cycle photon filt", debug.photon_filter != PhotonFilterMode::Off);
     if (debug.photon_filter != PhotonFilterMode::Off) {
-        snprintf(buf, sizeof(buf), "      Filter: %s", photon_filter_name(debug.photon_filter));
-        draw_overlay_text(0, ly, buf, 0.2f, 0.8f, 1.0f, 1.f);
-        ly += line_h * 0.7f;
+        snprintf(buf, sizeof(buf), "        Filter: %s",
+                 photon_filter_name(debug.photon_filter));
+        line(ry, rx, buf, 0.25f, 0.80f, 1.0f);
     }
+    toggle_line(ry, rx, "F3",  "Guide map",        false);
+    toggle_line(ry, rx, "F4",  "Hash grid",        debug.show_hash_grid);
+    toggle_line(ry, rx, "F5",  "Photon dirs",      debug.show_photon_dirs);
+    toggle_line(ry, rx, "F6",  "PDFs",             debug.show_pdfs);
+    toggle_line(ry, rx, "F7",  "Radius sphere",    debug.show_radius_sphere);
+    toggle_line(ry, rx, "F8",  "MIS weights",      debug.show_mis_weights);
+    toggle_line(ry, rx, "F9",  "Spectral color",   debug.spectral_coloring);
+    toggle_line(ry, rx, "F11", "Photon heatmap",   debug.show_photon_heatmap);
 
-    ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "--- Volume Scattering ---", 1.f, 1.f, 0.3f, 1.f);
-    ly += line_h;
-    {
-        char vbuf[64];
-        snprintf(vbuf, sizeof(vbuf), "V    Volume [%s]", volume_enabled ? "ON" : "OFF");
-        float vr = volume_enabled ? 0.3f : 0.5f;
-        float vg = volume_enabled ? 1.0f : 0.5f;
-        float vb = volume_enabled ? 0.3f : 0.5f;
-        draw_overlay_text(0, ly, vbuf, vr, vg, vb, 1.f);
-        ly += line_h * 0.7f;
+    // -- Volume Scattering --
+    section(ry, rx, "Volume Scattering");
+    toggle_line(ry, rx, "V", "Volume",     volume_enabled);
+    toggle_line(ry, rx, "G", "Dense Grid", use_dense_grid);
 
-        char gbuf[64];
-        snprintf(gbuf, sizeof(gbuf), "G    Dense Grid [%s]", use_dense_grid ? "ON" : "OFF");
-        float gr = use_dense_grid ? 0.3f : 0.5f;
-        float gg = use_dense_grid ? 1.0f : 0.5f;
-        float gb = use_dense_grid ? 0.3f : 0.5f;
-        draw_overlay_text(0, ly, gbuf, gr, gg, gb, 1.f);
-        ly += line_h * 0.7f;
-    }
-
-    ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "--- Scenes (1-9) ---", 1.f, 1.f, 0.3f, 1.f);
-    ly += line_h;
+    // -- Scenes --
+    section(ry, rx, "Scenes (1-9)");
     for (int i = 0; i < NUM_SCENE_PROFILES; ++i) {
-        char sbuf[128];
-        snprintf(sbuf, sizeof(sbuf), "%d    %s%s", i + 1,
-                 SCENE_PROFILES[i].display_name,
-                 (i == active_scene_index) ? " [*]" : "");
-        float sr = (i == active_scene_index) ? 0.3f : 0.5f;
-        float sg = (i == active_scene_index) ? 1.0f : 0.5f;
-        float sb = (i == active_scene_index) ? 0.3f : 0.5f;
-        draw_overlay_text(0, ly, sbuf, sr, sg, sb, 1.f);
-        ly += line_h * 0.7f;
+        snprintf(buf, sizeof(buf), "%d     %s", i + 1,
+                 SCENE_PROFILES[i].display_name);
+        bool active = (i == active_scene_index);
+        float cr = active ? 0.35f : 0.50f;
+        float cg = active ? 1.00f : 0.50f;
+        float cb = active ? 0.35f : 0.50f;
+        draw_shadow_text(rx * inv, ry * inv, buf, cr, cg, cb, 1.f);
+        ry += line_h * 0.78f;
     }
 
-    ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "--- Light Brightness ---", 1.f, 1.f, 0.3f, 1.f);
-    ly += line_h;
-    {
-        char lbuf[128];
-        snprintf(lbuf, sizeof(lbuf), "+/-  Brightness: %.2fx", light_scale);
-        draw_overlay_text(0, ly, lbuf, 0.8f, 0.8f, 0.8f, 1.f);
-        ly += line_h * 0.7f;
-    }
+    // -- Misc --
+    section(ry, rx, "Misc");
+    line(ry, rx, "F10     Save camera position");
 
-    ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "--- Depth of Field ---", 1.f, 1.f, 0.3f, 1.f);
-    ly += line_h;
-    {
-        char dof_buf[128];
-        snprintf(dof_buf, sizeof(dof_buf), "O    DOF [%s]",
-                 camera.dof_enabled ? "ON" : "OFF");
-        float dr = camera.dof_enabled ? 0.3f : 0.5f;
-        float dg = camera.dof_enabled ? 1.0f : 0.5f;
-        float db = camera.dof_enabled ? 0.3f : 0.5f;
-        draw_overlay_text(0, ly, dof_buf, dr, dg, db, 1.f);
-        ly += line_h * 0.7f;
-        snprintf(dof_buf, sizeof(dof_buf), "[/]  f-number: f/%.1f", camera.dof_f_number);
-        draw_overlay_text(0, ly, dof_buf, 0.8f, 0.8f, 0.8f, 1.f);
-        ly += line_h * 0.7f;
-        snprintf(dof_buf, sizeof(dof_buf), ",/.  Focus dist: %.4f", camera.dof_focus_dist);
-        draw_overlay_text(0, ly, dof_buf, 0.8f, 0.8f, 0.8f, 1.f);
-        ly += line_h * 0.7f;
-        draw_overlay_text(0, ly, "F    Auto-focus (center)", 0.8f, 0.8f, 0.8f, 1.f);
-        ly += line_h * 0.7f;
-        draw_overlay_text(0, ly, "MMB  Auto-focus (cursor)", 0.8f, 0.8f, 0.8f, 1.f);
-        ly += line_h * 0.7f;
-    }
-
-    ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "F10  Save camera position", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-
-    ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "--- Statistics ---", 1.f, 1.f, 0.3f, 1.f);
-    ly += line_h;
-    draw_overlay_text(0, ly, "T    Toggle guided/unguided tracing", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "C    Toggle histogram-only conclusions", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-    draw_overlay_text(0, ly, "S    Toggle stats overlay", 0.8f, 0.8f, 0.8f, 1.f);
-    ly += line_h * 0.7f;
-
-    ly += line_h * 0.3f;
-    draw_overlay_text(0, ly, "H  Toggle this overlay", 0.6f, 0.6f, 0.6f, 1.f);
+    // ---- Footer ----
+    float footer_y = (ly > ry ? ly : ry) + gap_section;
+    float center_x = bx + box_w * 0.5f - 60.f; // approximate centering
+    draw_shadow_text(center_x * inv, footer_y * inv,
+                     "H  Toggle this overlay",
+                     0.50f, 0.50f, 0.55f, 0.8f);
 
     glPopMatrix();
 
-    // Restore GL state
+    // ---------- Restore GL state ----------
     glDisable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
     glMatrixMode(GL_PROJECTION);
@@ -1250,96 +1274,101 @@ void run_interactive(
                 write_png(raw_path, raw_fb);
             }
 
-            // Gather statistics and write JSON
-            const char* scene_name = (s_app.active_scene_index >= 0
-                && s_app.active_scene_index < NUM_SCENE_PROFILES)
-                ? SCENE_PROFILES[s_app.active_scene_index].display_name
-                : SCENE_DISPLAY_NAME;
-            auto stats = optix_renderer.gather_stats(scene_name);
-
-            std::string json_path = prefix + ".json";
-            {
-                std::ofstream jf(json_path);
-                jf << std::fixed << std::setprecision(6);
-                jf << "{\n";
-                jf << "  \"timestamp\": \"" << ts << "\",\n";
-                jf << "  \"png_file\": \"" << png_path << "\",\n";
-
-                // Image
-                jf << "  \"image\": {\n";
-                jf << "    \"width\": " << stats.image_width << ",\n";
-                jf << "    \"height\": " << stats.image_height << ",\n";
-                jf << "    \"accumulated_spp\": " << stats.accumulated_spp << "\n";
-                jf << "  },\n";
-
-                // Camera
-                jf << "  \"camera\": {\n";
-                jf << "    \"position\": [" << camera.position.x << ", "
-                   << camera.position.y << ", " << camera.position.z << "],\n";
-                jf << "    \"look_at\": [" << camera.look_at.x << ", "
-                   << camera.look_at.y << ", " << camera.look_at.z << "],\n";
-                jf << "    \"fov_deg\": " << camera.fov_deg << ",\n";
-                jf << "    \"yaw\": " << s_app.yaw << ",\n";
-                jf << "    \"pitch\": " << s_app.pitch << "\n";
-                jf << "  },\n";
-
-                // Photon map
-                jf << "  \"photon_map\": {\n";
-                jf << "    \"photons_emitted\": " << stats.photons_emitted << ",\n";
-                jf << "    \"photons_stored\": " << stats.photons_stored << ",\n";
-                jf << "    \"caustic_emitted\": " << stats.caustic_emitted << ",\n";
-                jf << "    \"gather_radius\": " << stats.gather_radius << ",\n";
-                jf << "    \"caustic_radius\": " << stats.caustic_radius << ",\n";
-                jf << "    \"tag_distribution\": {\n";
-                jf << "      \"noncaustic\": " << stats.noncaustic_stored << ",\n";
-                jf << "      \"global_caustic\": " << stats.global_caustic_stored << ",\n";
-                jf << "      \"targeted_caustic\": " << stats.caustic_stored << "\n";
-                jf << "    }\n";
-                jf << "  },\n";
-
-                // Guidance / cell analysis
-                jf << "  \"guidance\": {\n";
-                jf << "    \"cell_analysis_cells\": " << stats.cell_analysis_cells << ",\n";
-                jf << "    \"avg_guide_fraction\": " << stats.avg_guide_fraction << ",\n";
-                jf << "    \"avg_caustic_fraction\": " << stats.avg_caustic_fraction << "\n";
-                jf << "  },\n";
-
-                // Render config
-                jf << "  \"config\": {\n";
-                jf << "    \"max_bounces_camera\": " << stats.max_bounces_camera << ",\n";
-                jf << "    \"max_bounces_photon\": " << stats.max_bounces_photon << ",\n";
-                jf << "    \"min_bounces_rr\": " << stats.min_bounces_rr << ",\n";
-                jf << "    \"rr_threshold\": " << stats.rr_threshold << ",\n";
-                jf << "    \"guide_fraction\": " << stats.guide_fraction << ",\n";
-                jf << "    \"exposure\": " << stats.exposure << ",\n";
-                jf << "    \"denoiser_enabled\": " << (stats.denoiser_enabled ? "true" : "false") << ",\n";
-                jf << "    \"knn_k\": " << stats.knn_k << ",\n";
-                jf << "    \"surface_tau\": " << stats.surface_tau << ",\n";
-                jf << "    \"light_scale\": " << s_app.light_scale << "\n";
-                jf << "  },\n";
-
-                // Scene
-                jf << "  \"scene\": {\n";
-                jf << "    \"name\": \"" << stats.scene_name << "\",\n";
-                jf << "    \"num_triangles\": " << stats.num_triangles << ",\n";
-                jf << "    \"num_emissive_tris\": " << stats.num_emissive_tris << "\n";
-                jf << "  }\n";
-
-                jf << "}\n";
-            }
-
+            // Basic snapshot log (always shown, even when ENABLE_STATS == false)
             std::cout << "\n========================================\n";
             std::cout << "  [Snapshot] " << png_path << "\n";
-            std::cout << "  [Snapshot] " << json_path << "\n";
             if (!raw_path.empty())
                 std::cout << "  [Snapshot] " << raw_path << " (raw)\n";
-            std::cout << "  SPP: " << stats.accumulated_spp
-                      << "  Photons: " << stats.photons_stored
-                      << "  Cells: " << stats.cell_analysis_cells << "\n";
             std::cout << "========================================\n\n";
 
-            // Print detailed grouped stats to console (gated)
+            // ── Statistics gathering, JSON export, analysis report ────
+            // Entire block gated by ENABLE_STATS: when false, snapshot
+            // saves only the PNG(s) with zero stats overhead.
             if constexpr (ENABLE_STATS) {
+                const char* scene_name = (s_app.active_scene_index >= 0
+                    && s_app.active_scene_index < NUM_SCENE_PROFILES)
+                    ? SCENE_PROFILES[s_app.active_scene_index].display_name
+                    : SCENE_DISPLAY_NAME;
+                auto stats = optix_renderer.gather_stats(scene_name);
+
+                // ── Snapshot JSON ────────────────────────────────────
+                std::string json_path = prefix + ".json";
+                {
+                    std::ofstream jf(json_path);
+                    jf << std::fixed << std::setprecision(6);
+                    jf << "{\n";
+                    jf << "  \"timestamp\": \"" << ts << "\",\n";
+                    jf << "  \"png_file\": \"" << png_path << "\",\n";
+
+                    // Image
+                    jf << "  \"image\": {\n";
+                    jf << "    \"width\": " << stats.image_width << ",\n";
+                    jf << "    \"height\": " << stats.image_height << ",\n";
+                    jf << "    \"accumulated_spp\": " << stats.accumulated_spp << "\n";
+                    jf << "  },\n";
+
+                    // Camera
+                    jf << "  \"camera\": {\n";
+                    jf << "    \"position\": [" << camera.position.x << ", "
+                       << camera.position.y << ", " << camera.position.z << "],\n";
+                    jf << "    \"look_at\": [" << camera.look_at.x << ", "
+                       << camera.look_at.y << ", " << camera.look_at.z << "],\n";
+                    jf << "    \"fov_deg\": " << camera.fov_deg << ",\n";
+                    jf << "    \"yaw\": " << s_app.yaw << ",\n";
+                    jf << "    \"pitch\": " << s_app.pitch << "\n";
+                    jf << "  },\n";
+
+                    // Photon map
+                    jf << "  \"photon_map\": {\n";
+                    jf << "    \"photons_emitted\": " << stats.photons_emitted << ",\n";
+                    jf << "    \"photons_stored\": " << stats.photons_stored << ",\n";
+                    jf << "    \"caustic_emitted\": " << stats.caustic_emitted << ",\n";
+                    jf << "    \"gather_radius\": " << stats.gather_radius << ",\n";
+                    jf << "    \"caustic_radius\": " << stats.caustic_radius << ",\n";
+                    jf << "    \"tag_distribution\": {\n";
+                    jf << "      \"noncaustic\": " << stats.noncaustic_stored << ",\n";
+                    jf << "      \"global_caustic\": " << stats.global_caustic_stored << ",\n";
+                    jf << "      \"targeted_caustic\": " << stats.caustic_stored << "\n";
+                    jf << "    }\n";
+                    jf << "  },\n";
+
+                    // Guidance / cell analysis
+                    jf << "  \"guidance\": {\n";
+                    jf << "    \"cell_analysis_cells\": " << stats.cell_analysis_cells << ",\n";
+                    jf << "    \"avg_guide_fraction\": " << stats.avg_guide_fraction << ",\n";
+                    jf << "    \"avg_caustic_fraction\": " << stats.avg_caustic_fraction << "\n";
+                    jf << "  },\n";
+
+                    // Render config
+                    jf << "  \"config\": {\n";
+                    jf << "    \"max_bounces_camera\": " << stats.max_bounces_camera << ",\n";
+                    jf << "    \"max_bounces_photon\": " << stats.max_bounces_photon << ",\n";
+                    jf << "    \"min_bounces_rr\": " << stats.min_bounces_rr << ",\n";
+                    jf << "    \"rr_threshold\": " << stats.rr_threshold << ",\n";
+                    jf << "    \"guide_fraction\": " << stats.guide_fraction << ",\n";
+                    jf << "    \"exposure\": " << stats.exposure << ",\n";
+                    jf << "    \"denoiser_enabled\": " << (stats.denoiser_enabled ? "true" : "false") << ",\n";
+                    jf << "    \"knn_k\": " << stats.knn_k << ",\n";
+                    jf << "    \"surface_tau\": " << stats.surface_tau << ",\n";
+                    jf << "    \"light_scale\": " << s_app.light_scale << "\n";
+                    jf << "  },\n";
+
+                    // Scene
+                    jf << "  \"scene\": {\n";
+                    jf << "    \"name\": \"" << stats.scene_name << "\",\n";
+                    jf << "    \"num_triangles\": " << stats.num_triangles << ",\n";
+                    jf << "    \"num_emissive_tris\": " << stats.num_emissive_tris << "\n";
+                    jf << "  }\n";
+
+                    jf << "}\n";
+                }
+
+                std::cout << "  [Snapshot] " << json_path << "\n";
+                std::cout << "  SPP: " << stats.accumulated_spp
+                          << "  Photons: " << stats.photons_stored
+                          << "  Cells: " << stats.cell_analysis_cells << "\n";
+
+                // ── Build RendererStats for console + analysis ───────
                 RendererStats rs;
                 // Path tracing
                 rs.spp_min = rs.spp_max = stats.accumulated_spp;
@@ -1377,6 +1406,29 @@ void run_interactive(
                 // Timing
                 rs.timing.total_render_ms = s_app.last_render_ms;
                 print_stats_console(rs);
+
+                // ── Analysis report JSON (for LLM / GPU expert) ──────
+                AnalysisReport report;
+                report.stats     = rs;
+                report.timestamp = ts;
+                report.png_path  = png_path;
+                report.cam_pos[0] = camera.position.x;
+                report.cam_pos[1] = camera.position.y;
+                report.cam_pos[2] = camera.position.z;
+                report.cam_lookat[0] = camera.look_at.x;
+                report.cam_lookat[1] = camera.look_at.y;
+                report.cam_lookat[2] = camera.look_at.z;
+                report.cam_fov       = camera.fov_deg;
+                report.light_scale   = s_app.light_scale;
+                report.accumulated_spp = stats.accumulated_spp;
+                // Cell analysis averages
+                report.avg_guide_fraction   = stats.avg_guide_fraction;
+                report.avg_caustic_fraction = stats.avg_caustic_fraction;
+                report.cell_analysis_cells  = stats.cell_analysis_cells;
+
+                std::string analysis_path = prefix + "_analysis.json";
+                write_analysis_json(report, analysis_path);
+                std::cout << "  [Snapshot] " << analysis_path << " (analysis)\n";
             }
         }
 

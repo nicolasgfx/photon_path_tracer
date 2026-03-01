@@ -1,6 +1,6 @@
 # Photon-Beam Material Extensions for Wavefront MTL (`pb_*`)
 
-**Status:** Draft spec for renderer integration (MTL remains backward compatible)
+**Status:** Implemented — all `pb_*` tokens are parsed and stored; surface BRDFs are fully rendered on the GPU.  Per-material interior media (`pb_medium homogeneous`) are **fully rendered on both CPU and GPU**: Beer–Lambert transmittance, free-flight sampling with spectral MIS, HG phase function, and per-ray `MediumStack` tracking.
 
 This document defines how to interpret the custom `pb_*` tokens added to standard Wavefront `.mtl` files.
 
@@ -246,7 +246,54 @@ These parameters define a **homogeneous participating medium**, typically used f
 - foggy glass
 - ceramic/porcelain-like bulk scattering (approx.)
 
-Tokens:
+### 6.1 Implementation status
+
+The renderer has **two independent volume systems**.  Understanding which one applies is critical for getting the desired look.
+
+#### Per-material interior medium (`pb_medium`) — Fully implemented (CPU + GPU)
+
+The full `pb_medium` pipeline is wired on **both CPU and GPU**:
+
+1. All tokens below are parsed and stored in the `Material` struct.
+2. `finalize_pb_materials()` creates a `HomogeneousMedium` (spectral $\sigma_a$, $\sigma_s$, $\sigma_t$, $g$), applies `pb_density / pb_meters_per_unit` scaling, and stores it in `Scene::media`.
+3. The material's `medium_id` links to its entry; `MaterialType::Translucent` is set.
+4. On the GPU, per-material media are uploaded as a struct array (`LaunchParams::media[]` + `mat_medium_id[]`). Each Translucent surface pushes/pops its `medium_id` on the GPU `MediumStack` (parallel to `IORStack`) inside `dev_specular_bounce()`. Camera-side path tracing performs full free-flight sampling with spectral MIS, HG phase function, NEE at scatter events, and Russian roulette inside media. Photon-side kernels apply Beer–Lambert attenuation per segment. A double-attenuation guard prevents the legacy atmospheric volume from applying when inside a per-material medium.
+
+**What this means in practice:** adding `pb_medium homogeneous` to a material will:
+- correctly mark it as `Translucent` (not `Glass`),
+- store the medium coefficients,
+- upload them to the GPU,
+- and **render interior absorption, scattering, and Beer–Lambert transmittance** on both CPU and GPU.
+
+The gap described in earlier versions of this document (GPU Translucent = Glass) is now closed.
+
+#### Global atmospheric medium — fully functional
+
+A **scene-wide Rayleigh-like participating medium** is fully implemented (MT-01 through MT-08):
+
+| `RenderConfig` field | Default | Meaning |
+|---|---|---|
+| `volume_enabled` | `false` | Master on/off switch (toggle at runtime with **V** key) |
+| `volume_density` | `0.15` | Extinction scale $\sigma_t$ |
+| `volume_falloff` | `0.0` | Height-dependent falloff (0 = homogeneous) |
+| `volume_albedo` | `0.95` | Single-scattering albedo $\sigma_s / \sigma_t$ |
+| `volume_samples` | `2` | Medium samples per ray segment |
+| `volume_max_t` | `2.0` | Maximum march distance (scene units) |
+
+When enabled, **every ray segment** is subject to:
+- Spectral free-flight sampling (hero-wavelength MIS),
+- Henyey–Greenstein phase-function scatter,
+- NEE at medium scatter events (with Beer–Lambert shadow attenuation),
+- Volume photon density estimation at terminal scatters,
+- Guide + HG mixture sampling,
+- Russian roulette.
+
+This medium has a Rayleigh spectral profile ($\sigma_t \propto 1/\lambda^4$) and is **not** connected to any `pb_*` tokens — it is controlled entirely through `RenderConfig` or the runtime **V** key.
+
+> **Tip — faking per-object translucency today:**
+> If you need a visible scattering effect *right now*, enable the global medium (`V` key or `volume_enabled = true`) and tune `volume_density` / `volume_albedo`.  This affects the entire scene (like fog/haze) rather than individual objects, but can approximate atmospheric or underwater looks.
+
+### 6.2 Tokens
 
 - `pb_medium homogeneous`
   - Enables a homogeneous medium inside a closed mesh.
@@ -344,6 +391,7 @@ Two common regimes:
   - Use Fresnel from `pb_eta`/`Ni`.
   - Use transmission controlled by `pb_transmission` if present, else default to 1.
   - If `pb_medium homogeneous` is present, apply the interior medium for refracted paths.
+  - **GPU behaviour:** adding `pb_medium` promotes the type to `Translucent` (separate enum). The GPU uploads the medium data and performs full interior medium transport: Beer–Lambert transmittance, free-flight sampling with spectral MIS (camera pass), HG phase function, and `MediumStack` tracking parallel to the `IORStack`.
 
 2) **Plastic / paint / non-transmissive dielectric**
   - Typically: `Kd > 0`, mild `Ks`, `illum 1/2`.
@@ -386,6 +434,10 @@ Practical mapping suggestions:
 These are *defaults* when explicit parameters are missing.
 
 ### 8.1 Translucency (milk, ceramic, water)
+
+> **Fully supported:** per-material interior media are parsed, stored, uploaded to the GPU, and rendered with Beer–Lambert + free-flight + HG phase function.  The recipes below produce correct results.
+>
+> **Tip — global atmospheric medium:** for scene-wide fog/haze effects (separate from per-object translucency), enable `volume_enabled = true` (or press **V** at runtime) and adjust `volume_density` / `volume_albedo` in `RenderConfig`.
 
 - **Milk / cloudy liquids:** dielectric + homogeneous medium
   - high scattering (`pb_sigma_s` large)
@@ -431,22 +483,26 @@ These are *defaults* when explicit parameters are missing.
 
 ## 9) Renderer integration checklist
 
-When you implement this in the renderer later:
-
-1. **Parse:** store both classic MTL fields and `pb_*` overrides.
-2. **Normalize:** apply defaulting/derivation rules.
-3. **Convert colors:** RGB → spectrum consistently.
-4. **Pick BRDF:** from `pb_brdf` (or derived).
-5. **Layering:** if `clearcoat`, build layered model.
-6. **Media:** if `pb_medium homogeneous`, attach interior medium.
-7. **Units:** apply `pb_meters_per_unit` conversion for volumetric coefficients.
-8. **Energy sanity:** clamp extreme values; avoid NaNs.
+| # | Step | Status |
+|---|------|--------|
+| 1 | **Parse:** store both classic MTL fields and `pb_*` overrides | ✅ Done — `obj_loader.cpp` parses all tokens |
+| 2 | **Normalize:** apply defaulting/derivation rules | ✅ Done — `finalize_pb_materials()` handles type inference, roughness derivation, Ns→α conversion |
+| 3 | **Convert colors:** RGB → spectrum consistently | ✅ Done — `rgb_to_spectrum_reflectance()` at upload time |
+| 4 | **Pick BRDF:** from `pb_brdf` (or derived) | ✅ Done — all 6 BRDF types mapped to `MaterialType` enum |
+| 5 | **Layering:** if `clearcoat`, build layered model | ✅ Done — clearcoat weight, roughness, base BRDF uploaded and rendered on GPU |
+| 6 | **Media:** if `pb_medium homogeneous`, attach interior medium | ✅ **Done** — CPU creates `HomogeneousMedium` & sets `medium_id`; GPU uploads `media[]` + `mat_medium_id[]` and renders full interior medium transport |
+| 7 | **Units:** apply `pb_meters_per_unit` conversion for volumetric coefficients | ✅ Done — `finalize_pb_materials()` divides by `pb_meters_per_unit` |
+| 8 | **Energy sanity:** clamp extreme values; avoid NaNs | ✅ Done — roughness clamped to [0.001, 1.0], IOR to safe range |
 
 ---
 
 ## 10) Appendix: Minimal examples
 
 ### 10.1 Subsurface fruit
+
+> **Note:** The `pb_medium` tokens are parsed, stored, and **fully rendered**
+> on the GPU with interior Beer–Lambert + free-flight + HG scattering.
+> This material will render with volumetric subsurface effects.
 
 ```
 newmtl Apple

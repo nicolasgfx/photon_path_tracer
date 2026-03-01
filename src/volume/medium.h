@@ -67,6 +67,20 @@ struct HomogeneousMedium {
     float    g = 0.0f;  // Henyey-Greenstein asymmetry parameter
 };
 
+// ── Medium stack (nested-object interior tracking) ──────────────────
+// Parallel to IORStack (core/ior_stack.h): push medium_id on entering
+// a Translucent surface, pop on exiting.  Empty stack → no interior
+// medium (-1).  Shared HD for CPU emitter and GPU kernels (§7.10).
+struct MediumStack {
+    static constexpr int MAX_DEPTH = 4;
+    int  stack[MAX_DEPTH] = {-1, -1, -1, -1};
+    int  depth            = 0;
+
+    HD int  current_medium_id() const { return depth > 0 ? stack[depth - 1] : -1; }
+    HD void push(int medium_id) { if (depth < MAX_DEPTH) stack[depth++] = medium_id; }
+    HD void pop()               { if (depth > 0) --depth; }
+};
+
 // ── Build a Rayleigh-like medium from user knobs ────────────────────
 // density  : overall optical‐thickness scale
 // albedo   : σ_s / σ_t  (probability of scatter vs absorb)

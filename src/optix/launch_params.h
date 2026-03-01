@@ -6,6 +6,7 @@
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "photon/photon_bins.h"
+#include "volume/medium.h"
 
 #ifdef PPT_USE_OPTIX
 #include <optix.h>
@@ -98,6 +99,11 @@ struct LaunchParams {
     uint8_t*  mat_dispersion;     // [num_materials]  1 = Cauchy dispersion enabled
     float*    cauchy_A;           // [num_materials]  Cauchy A coefficient
     float*    cauchy_B;           // [num_materials]  Cauchy B coefficient
+
+    // Per-material interior medium (§7.7 Translucent surfaces)
+    int*              mat_medium_id;  // [num_materials]  medium index or -1
+    HomogeneousMedium* media;         // [num_media]  flat array of interior media
+    int               num_media;      // number of entries in the media table
 
     // Texture atlas (flat RGBA float buffer, all textures concatenated)
     float*      tex_atlas;        // [total_texels * 4]

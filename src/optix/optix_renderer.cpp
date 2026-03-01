@@ -1021,7 +1021,9 @@ void OptixRenderer::render_sppm(
 }
 
 // print_kernel_profiling() -- download GPU timing data and print summary
+// Gated by ENABLE_STATS — heavy D2H copy, not needed in production.
 void OptixRenderer::print_kernel_profiling() const {
+    if constexpr (!ENABLE_STATS) return;
     if (!d_prof_total_.d_ptr) {
         std::cout << "[Profiling] No kernel profiling data available.\n";
         return;

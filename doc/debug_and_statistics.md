@@ -93,3 +93,67 @@ read `guide_fraction_` instead of the constant.  The T hotkey sets it to 0
 
 Printed at startup (`[GPU]` line) and available via public accessors for
 overlay and console stats.
+
+---
+
+## §6 Debug Output Gating
+
+All debug file output is subordinate to `ENABLE_STATS`.  When the gate is
+`false`, no stats JSON, no progress snapshots, and no debug PNGs are
+emitted — the snapshot R-key still saves the PNG but skips all statistics.
+
+### Gated flags (config.h)
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `PROGRESS_SNAPSHOT_ENABLED` | `ENABLE_STATS && true` | Power-of-2 SPP snapshots |
+| `DEBUG_COMPONENT_PNGS` | `ENABLE_STATS && false` | per-component PNGs |
+| `DEBUG_PHOTON_INDIRECT_PNG` | `ENABLE_STATS && false` | photon-indirect preview |
+| `DEBUG_CAUSTIC_PNG` | `ENABLE_STATS && false` | caustic-only debug |
+| `DEBUG_COVERAGE_PNG` | `ENABLE_STATS && false` | coverage debug |
+
+### Gated code paths
+
+- **JSON stats block** (`viewer.cpp`, R-key handler) — wrapped in
+  `if constexpr (ENABLE_STATS)`.  Includes the snapshot JSON, console
+  RendererStats, and analysis report.
+- **`print_kernel_profiling()`** (`optix_renderer.cpp`) — early return when
+  `ENABLE_STATS == false` (heavy D2H copy).
+
+**Files:**
+- `src/core/config.h` — flag subordination
+- `src/app/viewer.cpp` — JSON + stats gating
+- `src/optix/optix_renderer.cpp` — profiling gating
+
+---
+
+## §7 Analysis Report & GPU Expert Prompt
+
+On R-key snapshot, an `_analysis.json` file is written alongside the
+normal snapshot JSON.  This file follows schema `photon_tracer_analysis_v1`
+and contains the full `RendererStats` (hardware, geometry, photon mapping,
+path tracing, timing, config) plus camera state.
+
+### Usage
+
+1. Render to desired SPP, press **R**
+2. Find `output/snapshot_*_analysis.json`
+3. Paste contents into [doc/prompts/gpu_expert_analysis.md](prompts/gpu_expert_analysis.md)
+4. Send to LLM for automated performance / quality analysis
+
+### Schema top-level keys
+
+| Key | Contents |
+|-----|----------|
+| `hardware` | GPU name, VRAM, SM count, compute capability |
+| `image` | Resolution, accumulated SPP |
+| `camera` | Position, look_at, FOV, light scale |
+| `geometry` | Triangles, emissive tris, materials |
+| `photon_map` | Budgets, radii, flags, grid occupancy |
+| `path_tracing` | Guide state, conclusions, histogram, SPP range |
+| `timing_ms` | Per-phase breakdown |
+| `config` | Compile-time constants snapshot |
+
+**Files:**
+- `src/debug/stats_collector.h` — `AnalysisReport`, `write_analysis_json()`
+- `doc/prompts/gpu_expert_analysis.md` — reusable LLM prompt template

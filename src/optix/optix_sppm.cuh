@@ -14,11 +14,22 @@ static __forceinline__ __device__ void sppm_camera_pass(
 {
     Spectrum throughput = Spectrum::constant(1.0f);
     Spectrum L_direct   = Spectrum::zero();
-    IORStack ior_stack;  // track nested dielectrics across camera bounces
+    IORStack ior_stack;      // track nested dielectrics across camera bounces
+    MediumStack medium_stack; // per-material interior medium tracking (§7.10)
 
     for (int bounce = 0; bounce <= DEFAULT_MAX_SPECULAR_CHAIN; ++bounce) {
         TraceResult hit = trace_radiance(origin, direction);
         if (!hit.hit) break;
+
+        // ── Per-material interior medium Beer-Lambert (§7.7) ─────
+        {
+            int cur_mid = medium_stack.current_medium_id();
+            if (cur_mid >= 0 && params.media) {
+                HomogeneousMedium med = dev_get_medium(cur_mid);
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    throughput.value[i] *= expf(-med.sigma_t.value[i] * hit.t);
+            }
+        }
 
         uint32_t mat_id = hit.material_id;
 
@@ -32,7 +43,8 @@ static __forceinline__ __device__ void sppm_camera_pass(
         if (dev_is_specular(mat_id) || dev_is_translucent(mat_id)) {
             SpecularBounceResult sb = dev_specular_bounce(
                 direction, hit.position, hit.shading_normal, hit.geo_normal,
-                mat_id, hit.uv, rng, nullptr, 0, &ior_stack);
+                mat_id, hit.uv, rng, nullptr, 0, &ior_stack,
+                TransportMode::Radiance, &medium_stack);
             for (int i = 0; i < NUM_LAMBDA; ++i)
                 throughput.value[i] *= sb.filter.value[i];
             direction = sb.new_dir;

@@ -65,7 +65,8 @@ SpecularBounceResult dev_specular_bounce(
     uint32_t mat_id, float2 uv, PCGRng& rng,
     const int* hero_bins = nullptr, int num_hero = 0,
     IORStack* ior_stack = nullptr,
-    TransportMode mode = TransportMode::Radiance)
+    TransportMode mode = TransportMode::Radiance,
+    MediumStack* medium_stack = nullptr)
 {
     SpecularBounceResult r;
     r.filter = Spectrum::constant(1.0f);
@@ -125,6 +126,16 @@ SpecularBounceResult dev_specular_bounce(
                     ior_stack->push(hero_ior);
                 else
                     ior_stack->pop();
+            }
+            // Update medium stack for Translucent surfaces (§7.10).
+            if (medium_stack && dev_is_translucent(mat_id)) {
+                int mid = dev_get_medium_id(mat_id);
+                if (mid >= 0) {
+                    if (entering)
+                        medium_stack->push(mid);
+                    else if (medium_stack->depth > 0)
+                        medium_stack->pop();
+                }
             }
 
             float sin2_hero = eta_hero * eta_hero * (1.f - cos_i * cos_i);

@@ -1017,11 +1017,11 @@ The work is sequenced to maintain a working renderer at every step, with the tes
 12. **AS-01, AS-02, AS-05:** Not yet started (pilot pass, cost map, progress-aware tracking).
 13. **VA-01 through VA-05:** Not yet started (view-adaptive photon budgeting).
 
-### Phase 4 — Medium Transport (not started)
+### Phase 4 — Medium Transport (done)
 
-14. **VP-01 through VP-07:** Partially started — VP-01 (volume photon SoA) done.
-15. **MT-01 through MT-08:** Not yet started (camera-side volumetric path tracing).
-16. **Build + test** — participating media not yet testable.
+14. **VP-01 through VP-07:** ✅ Done — volume photon SoA, 3D hash grid, directional histograms, kNN gather.
+15. **MT-01 through MT-08:** ✅ Done — GPU `MediumStack`, free-flight with spectral MIS, HG scatter, NEE at scatter events, volume kNN gather at terminal bounces, double-attenuation guard, in-medium RR.
+16. **Build + test** — compiles clean; 334 tests pass (same baseline).
 
 ### Phase 5 — Polish (in progress)
 

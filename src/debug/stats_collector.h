@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <fstream>
+#include <iomanip>
 
 // ── Conclusion counters (§3 of architecture doc) ────────────────────
 // C1/C6: histogram quality (few active bins)
@@ -280,4 +282,169 @@ inline void print_stats_console(const RendererStats& s) {
         std::printf("║  Denoiser: %.1f ms\n", s.timing.denoiser_ms);
 
     std::printf("╚══════════════════════════════════════════════════════╝\n\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Analysis Report — comprehensive structured data for LLM / GPU expert
+// ─────────────────────────────────────────────────────────────────────
+// Written alongside snapshot on R-key.  The JSON is designed to be
+// self-contained: paste it into the GPU-expert prompt template
+// (doc/prompts/gpu_expert_analysis.md) for automated analysis.
+
+struct AnalysisReport {
+    RendererStats stats;          // full stats snapshot
+
+    // Camera / viewport
+    float cam_pos[3]    = {};
+    float cam_lookat[3] = {};
+    float cam_fov       = 0.f;
+    float light_scale   = 1.f;
+
+    // Render progress
+    int   accumulated_spp      = 0;
+    int   cell_analysis_cells  = 0;
+    float avg_guide_fraction   = 0.f;
+    float avg_caustic_fraction = 0.f;
+
+    // Metadata
+    std::string timestamp;
+    std::string png_path;
+};
+
+// ── Write analysis JSON ──────────────────────────────────────────────
+// Emits a structured JSON file consumable by the GPU-expert LLM prompt.
+inline void write_analysis_json(const AnalysisReport& r,
+                                const std::string& path) {
+    if constexpr (!ENABLE_STATS) return;
+
+    std::ofstream f(path);
+    if (!f) return;
+    const auto& s = r.stats;
+
+    f << std::fixed << std::setprecision(6);
+    f << "{\n";
+    f << "  \"_schema\": \"photon_tracer_analysis_v1\",\n";
+    f << "  \"timestamp\": \"" << r.timestamp << "\",\n";
+    f << "  \"png_file\": \"" << r.png_path << "\",\n";
+
+    // Hardware
+    f << "  \"hardware\": {\n";
+    f << "    \"gpu_name\": \"" << s.gpu_name << "\",\n";
+    f << "    \"vram_mb\": " << (double)s.gpu_vram_bytes / (1024.0 * 1024.0) << ",\n";
+    f << "    \"sm_count\": " << s.gpu_sm_count << ",\n";
+    f << "    \"compute_capability\": \"" << s.gpu_cc_major << "." << s.gpu_cc_minor << "\"\n";
+    f << "  },\n";
+
+    // Image
+    f << "  \"image\": {\n";
+    f << "    \"width\": " << DEFAULT_IMAGE_WIDTH << ",\n";
+    f << "    \"height\": " << DEFAULT_IMAGE_HEIGHT << ",\n";
+    f << "    \"accumulated_spp\": " << r.accumulated_spp << "\n";
+    f << "  },\n";
+
+    // Camera
+    f << "  \"camera\": {\n";
+    f << "    \"position\": [" << r.cam_pos[0] << ", " << r.cam_pos[1] << ", " << r.cam_pos[2] << "],\n";
+    f << "    \"look_at\": [" << r.cam_lookat[0] << ", " << r.cam_lookat[1] << ", " << r.cam_lookat[2] << "],\n";
+    f << "    \"fov_deg\": " << r.cam_fov << ",\n";
+    f << "    \"light_scale\": " << r.light_scale << "\n";
+    f << "  },\n";
+
+    // Geometry
+    f << "  \"geometry\": {\n";
+    f << "    \"num_triangles\": " << s.num_triangles << ",\n";
+    f << "    \"num_emissive_tris\": " << s.num_emissive_tris << ",\n";
+    f << "    \"num_materials\": " << s.num_materials << "\n";
+    f << "  },\n";
+
+    // Photon mapping
+    f << "  \"photon_map\": {\n";
+    f << "    \"photons_emitted\": " << s.photons_emitted << ",\n";
+    f << "    \"photons_stored\": " << s.photons_stored << ",\n";
+    f << "    \"gather_radius\": " << s.gather_radius << ",\n";
+    f << "    \"caustic_radius\": " << s.caustic_radius << ",\n";
+    f << "    \"tag_distribution\": {\n";
+    f << "      \"global\": " << s.photons_global << ",\n";
+    f << "      \"global_caustic\": " << s.photons_global_caustic << ",\n";
+    f << "      \"targeted_caustic\": " << s.photons_targeted << "\n";
+    f << "    },\n";
+    f << "    \"flags\": {\n";
+    f << "      \"traversed_glass\": " << s.photon_flags.traversed_glass << ",\n";
+    f << "      \"caustic_glass\": " << s.photon_flags.caustic_glass << ",\n";
+    f << "      \"caustic_specular\": " << s.photon_flags.caustic_specular << ",\n";
+    f << "      \"dispersion\": " << s.photon_flags.dispersion << ",\n";
+    f << "      \"volume_scatter\": " << s.photon_flags.volume_segment << ",\n";
+    f << "      \"total\": " << s.photon_flags.total << "\n";
+    f << "    },\n";
+    f << "    \"grid\": {\n";
+    f << "      \"total_cells\": " << s.grid_occupancy.total_cells << ",\n";
+    f << "      \"populated_cells\": " << s.grid_occupancy.populated_cells << ",\n";
+    f << "      \"occupancy_pct\": " << s.grid_occupancy.occupancy_pct() << ",\n";
+    f << "      \"photons_per_cell_min\": " << s.grid_occupancy.min_photons_per_cell << ",\n";
+    f << "      \"photons_per_cell_max\": " << s.grid_occupancy.max_photons_per_cell << ",\n";
+    f << "      \"photons_per_cell_avg\": " << s.grid_occupancy.avg_photons_per_cell << "\n";
+    f << "    }\n";
+    f << "  },\n";
+
+    // Path tracing / guidance
+    f << "  \"path_tracing\": {\n";
+    f << "    \"guided_enabled\": " << (s.guided_enabled ? "true" : "false") << ",\n";
+    f << "    \"guide_fraction\": " << s.guide_fraction << ",\n";
+    f << "    \"histogram_only\": " << (s.histogram_only ? "true" : "false") << ",\n";
+    f << "    \"cell_analysis_cells\": " << r.cell_analysis_cells << ",\n";
+    f << "    \"avg_guide_fraction\": " << r.avg_guide_fraction << ",\n";
+    f << "    \"avg_caustic_fraction\": " << r.avg_caustic_fraction << ",\n";
+    if (s.conclusions.total_cells > 0) {
+        f << "    \"conclusions\": {\n";
+        f << "      \"total_cells\": " << s.conclusions.total_cells << ",\n";
+        f << "      \"c1_c6_histogram\": " << s.conclusions.c1_c6_histogram << ",\n";
+        f << "      \"c3_too_diffuse\": " << s.conclusions.c3_too_diffuse << ",\n";
+        f << "      \"c4_low_count\": " << s.conclusions.c4_low_count << ",\n";
+        f << "      \"c5_high_var\": " << s.conclusions.c5_high_var << "\n";
+        f << "    },\n";
+    }
+    if (s.guide_dist.cells_with_photons > 0) {
+        f << "    \"guide_fraction_histogram\": [";
+        for (int b = 0; b < 10; ++b) {
+            f << s.guide_dist.bins[b];
+            if (b < 9) f << ", ";
+        }
+        f << "],\n";
+        f << "    \"cells_with_photons\": " << s.guide_dist.cells_with_photons << ",\n";
+        f << "    \"cells_with_caustics\": " << s.guide_dist.cells_with_caustics << ",\n";
+    }
+    f << "    \"spp_min\": " << s.spp_min << ",\n";
+    f << "    \"spp_max\": " << s.spp_max << ",\n";
+    f << "    \"spp_avg\": " << s.spp_avg << "\n";
+    f << "  },\n";
+
+    // Timing
+    f << "  \"timing_ms\": {\n";
+    f << "    \"total_render\": " << s.timing.total_render_ms << ",\n";
+    f << "    \"photon_trace\": " << s.timing.photon_trace_ms << ",\n";
+    f << "    \"caustic_trace\": " << s.timing.caustic_trace_ms << ",\n";
+    f << "    \"targeted_trace\": " << s.timing.targeted_trace_ms << ",\n";
+    f << "    \"hash_grid_build\": " << s.timing.hash_grid_build_ms << ",\n";
+    f << "    \"cell_grid_build\": " << s.timing.cell_grid_build_ms << ",\n";
+    f << "    \"camera_pass\": " << s.timing.camera_pass_ms << ",\n";
+    f << "    \"denoiser\": " << s.timing.denoiser_ms << "\n";
+    f << "  },\n";
+
+    // Config snapshot (for reproducibility)
+    f << "  \"config\": {\n";
+    f << "    \"max_bounces_camera\": " << DEFAULT_MAX_BOUNCES_CAMERA << ",\n";
+    f << "    \"max_bounces_photon\": " << DEFAULT_PHOTON_MAX_BOUNCES << ",\n";
+    f << "    \"min_bounces_rr\": " << DEFAULT_MIN_BOUNCES_RR << ",\n";
+    f << "    \"rr_threshold\": " << DEFAULT_RR_THRESHOLD << ",\n";
+    f << "    \"default_guide_fraction\": " << DEFAULT_GUIDE_FRACTION << ",\n";
+    f << "    \"spp_target\": " << DEFAULT_SPP << ",\n";
+    f << "    \"global_photon_budget\": " << DEFAULT_GLOBAL_PHOTON_BUDGET << ",\n";
+    f << "    \"caustic_photon_budget\": " << DEFAULT_CAUSTIC_PHOTON_BUDGET << ",\n";
+    f << "    \"knn_k\": " << DEFAULT_KNN_K << ",\n";
+    f << "    \"surface_tau\": " << DEFAULT_SURFACE_TAU << ",\n";
+    f << "    \"gather_radius_cap\": " << DEFAULT_GATHER_RADIUS << ",\n";
+    f << "    \"caustic_radius_cap\": " << DEFAULT_CAUSTIC_RADIUS << "\n";
+    f << "  }\n";
+
+    f << "}\n";
 }

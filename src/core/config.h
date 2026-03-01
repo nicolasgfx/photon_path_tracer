@@ -24,6 +24,15 @@
 
 
 // =====================================================================
+//  MASTER GATE  (must precede all sections that reference it)
+// =====================================================================
+// Gate runtime statistics collection and debug file output.  When false,
+// the compiler eliminates all stats code paths (zero overhead).
+// See §10 for debug-specific flags that are subordinate to this gate.
+constexpr bool ENABLE_STATS = true;
+
+
+// =====================================================================
 //  §0  SCENE SELECTION
 // =====================================================================
 // Uncomment exactly ONE.  Runtime switching via keys 1–8 uses
@@ -176,11 +185,13 @@ constexpr bool DEFAULT_DENOISER_GUIDE_NORMAL   = true;   //     use normal guide
 constexpr float DEFAULT_DENOISER_BLEND         = 0.0f;   //     0 = fully denoised, 1 = original
 
 // Progress snapshot PNGs at power-of-2 SPP intervals (near-zero overhead).
-constexpr bool PROGRESS_SNAPSHOT_ENABLED = true;
+// Subordinate to ENABLE_STATS — snapshots are a debugging/analysis tool.
+constexpr bool PROGRESS_SNAPSHOT_ENABLED = ENABLE_STATS && true;
 constexpr int  PROGRESS_SNAPSHOT_INTERVAL = 0;        // 0 = power-of-2 only
 
 // Write per-component debug PNGs (NEE direct, photon indirect, caustic).
-constexpr bool DEBUG_COMPONENT_PNGS = false;
+// Subordinate to ENABLE_STATS.
+constexpr bool DEBUG_COMPONENT_PNGS = ENABLE_STATS && false;
 
 
 // =====================================================================
@@ -258,16 +269,13 @@ constexpr float SCENE_REF_EXTENT = 1.0f;
 //  §10  DEBUG & STATISTICS
 // =====================================================================
 
-// Gate runtime statistics collection.  When false, the compiler
-// eliminates all stats code paths (zero overhead).  When true,
-// per-cell conclusion/measure counters, photon flag tallies, and
-// timing breakdowns are collected and displayed on screen / console.
-constexpr bool ENABLE_STATS = true;
+// ENABLE_STATS is defined at the top of this file (MASTER GATE).
+// All debug flags below are subordinate to it.
 
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;     // stop photon after 1st hit
-constexpr bool DEBUG_PHOTON_INDIRECT_PNG  = false;     // emit photon-indirect preview PNGs at launch
-constexpr bool DEBUG_CAUSTIC_PNG          = false;     // emit caustic-only debug PNGs (needs above)
-constexpr bool DEBUG_COVERAGE_PNG         = false;     // emit coverage debug PNGs
+constexpr bool DEBUG_PHOTON_INDIRECT_PNG  = ENABLE_STATS && false;  // emit photon-indirect preview PNGs at launch
+constexpr bool DEBUG_CAUSTIC_PNG          = ENABLE_STATS && false;  // emit caustic-only debug PNGs (needs above)
+constexpr bool DEBUG_COVERAGE_PNG         = ENABLE_STATS && false;  // emit coverage debug PNGs
 constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses direct-only proxy
 
 // ── Dense grid toggle ───────────────────────────────────────────────

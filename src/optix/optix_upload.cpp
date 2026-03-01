@@ -91,6 +91,20 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
     d_cauchy_B_.upload(cauchy_B);
     d_mat_dispersion_.upload(mat_dispersion);
 
+    // Per-material interior medium id (-1 = no medium)
+    std::vector<int> medium_ids(num_mats);
+    for (size_t m = 0; m < num_mats; ++m)
+        medium_ids[m] = scene.materials[m].medium_id;
+    d_mat_medium_id_.upload(medium_ids);
+
+    // Interior media table (HomogeneousMedium array, indexed by medium_id)
+    if (!scene.media.empty()) {
+        d_media_.upload(scene.media);
+        std::printf("[OptiX] Uploaded %zu interior media\n", scene.media.size());
+    } else {
+        d_media_.free();
+    }
+
     // Per-material diffuse texture ID (-1 = none)
     std::vector<int> diffuse_tex(num_mats);
     for (size_t m = 0; m < num_mats; ++m)
@@ -160,6 +174,7 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
         d_roughness_.bytes + d_ior_.bytes + d_mat_type_.bytes +
         d_cauchy_A_.bytes + d_cauchy_B_.bytes + d_mat_dispersion_.bytes +
         d_diffuse_tex_.bytes + d_emission_tex_.bytes +
+        d_mat_medium_id_.bytes + d_media_.bytes +
         d_clearcoat_weight_.bytes + d_clearcoat_roughness_.bytes +
         d_sheen_.bytes + d_sheen_tint_.bytes +
         d_tex_atlas_.bytes + d_tex_descs_.bytes;
@@ -178,6 +193,11 @@ void OptixRenderer::fill_clearcoat_fabric_params(LaunchParams& lp) const {
     lp.sheen_tint          = d_sheen_tint_.d_ptr          ? const_cast<float*>(d_sheen_tint_.as<float>())          : nullptr;
     // Emissive inverse-index (O(1) light PDF lookup)
     lp.emissive_local_idx  = d_emissive_local_idx_.d_ptr  ? const_cast<int*>(d_emissive_local_idx_.as<int>())      : nullptr;
+
+    // Per-material interior medium (§7.7 Translucent)
+    lp.mat_medium_id = d_mat_medium_id_.d_ptr ? const_cast<int*>(d_mat_medium_id_.as<int>()) : nullptr;
+    lp.media         = d_media_.d_ptr ? const_cast<HomogeneousMedium*>(d_media_.as<HomogeneousMedium>()) : nullptr;
+    lp.num_media     = d_media_.d_ptr ? (int)(d_media_.bytes / sizeof(HomogeneousMedium)) : 0;
 }
 
 // =====================================================================

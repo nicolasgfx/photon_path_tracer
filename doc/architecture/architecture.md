@@ -1873,9 +1873,11 @@ Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
 
 8. **GPU k-NN bounded by max_radius.** Sparse regions may not find k photons.
 
-9. **Translucent camera shading incomplete.** Translucent materials are
-   treated as delta Fresnel bounces in the camera pass. Full NEE + photon
-   gather at translucent surfaces (dual-hemisphere gather) is TODO(D1).
+9. **Translucent camera shading.** Translucent materials now have full
+   interior medium transport (Beer–Lambert, free-flight, HG phase function,
+   `MediumStack`). Dual-hemisphere NEE + photon gather at translucent
+   surfaces is partially covered (NEE at medium scatter events); full
+   surface-level dual-gather is future work.
 
 ---
 
