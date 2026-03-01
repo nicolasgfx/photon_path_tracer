@@ -1405,6 +1405,9 @@ void run_interactive(
                 }
                 // Timing
                 rs.timing.total_render_ms = s_app.last_render_ms;
+                // Cell analysis distribution + conclusions (from gather_stats)
+                rs.guide_dist  = stats.guide_dist;
+                rs.conclusions = stats.conclusions;
                 print_stats_console(rs);
 
                 // ── Analysis report JSON (for LLM / GPU expert) ──────
@@ -1423,6 +1426,8 @@ void run_interactive(
                 report.accumulated_spp = stats.accumulated_spp;
                 // Cell analysis averages
                 report.avg_guide_fraction   = stats.avg_guide_fraction;
+                report.avg_guide_fraction_populated = stats.avg_guide_fraction_populated;
+                report.guide_populated_cells = stats.guide_populated_cells;
                 report.avg_caustic_fraction = stats.avg_caustic_fraction;
                 report.cell_analysis_cells  = stats.cell_analysis_cells;
 

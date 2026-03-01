@@ -47,9 +47,9 @@ struct CostMapParams {
     const float*   lum_sum;             ///< [W*H] pilot Σ Y
     const float*   lum_sum2;            ///< [W*H] pilot Σ Y²
     const float*   sample_counts;       ///< [W*H] samples so far
-    const float*   cell_guide_fraction; ///< [grid_cells] or nullptr
-    const float*   cell_caustic_fraction; ///< [grid_cells] or nullptr
-    const float*   cell_flux_density;   ///< [grid_cells] or nullptr
+    const float*   cell_guide_fraction; ///< [CELL_CACHE_TABLE_SIZE] or nullptr
+    const float*   cell_caustic_fraction; ///< [CELL_CACHE_TABLE_SIZE] or nullptr
+    const float*   cell_flux_density;   ///< [CELL_CACHE_TABLE_SIZE] or nullptr
     const float*   spectrum_buffer;     ///< [W*H*NUM_LAMBDA]
     int            width;
     int            height;

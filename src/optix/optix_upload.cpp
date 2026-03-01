@@ -336,7 +336,8 @@ void OptixRenderer::upload_cell_analysis(
     const CellBinGrid&   bin_grid,
     float                cell_area)
 {
-    auto analysis = build_cell_analysis(cell_cache, bin_grid, cell_area);
+    auto analysis = build_cell_analysis(cell_cache, bin_grid, cell_area,
+                                         &cell_conclusions_);
     if (analysis.empty()) {
         cell_analysis_count_ = 0;
         return;

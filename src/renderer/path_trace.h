@@ -114,9 +114,16 @@ inline CpuPathTraceResult path_trace_cpu(
                 result.nee_direct += throughput * Le;
             } else {
                 // MIS: BSDF direction hit a light.
-                float p_nee = direct_light_pdf(
-                    origin, direction, scene);
-                float w_bsdf = mis_weight_2(pdf_combined_prev, p_nee);
+                // When previous bounce was delta (specular/glass),
+                // NEE cannot sample through it → full weight to BSDF.
+                float w_bsdf;
+                if (pdf_combined_prev <= 0.f) {
+                    w_bsdf = 1.0f;
+                } else {
+                    float p_nee = direct_light_pdf(
+                        origin, direction, scene);
+                    w_bsdf = mis_weight_2(pdf_combined_prev, p_nee);
+                }
                 result.combined  += throughput * Le * w_bsdf;
                 result.nee_direct += throughput * Le * w_bsdf;
             }

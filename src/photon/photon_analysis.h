@@ -91,9 +91,12 @@ inline HD float compute_guide_fraction(
     float cv = flux_variance / fmaxf(irradiance, 1e-6f);
     p *= fmaxf(0.1f, 1.f - cv / CV_MAX);
 
-    // C3: skip when too diffuse to guide
+    // C3: For very diffuse/isotropic cells, scale down the guide fraction
+    // rather than killing it entirely.  The mixture PDF already degrades
+    // gracefully — pure BSDF sampling still benefits from even a small
+    // guide contribution in multi-bounce indirect lighting.
     if (directional_spread > 0.9f)
-        p = 0.f;
+        p *= 0.2f;  // heavily attenuate but keep non-zero
 
     return p;
 }
@@ -200,7 +203,7 @@ inline std::vector<CellAnalysis> build_cell_analysis(
                 if (cv / 2.f > 0.01f)  // any CV attenuation
                     conclusion_counters->c5_high_var++;
                 if (ci.directional_spread > 0.9f)
-                    conclusion_counters->c3_too_diffuse++;
+                    conclusion_counters->c3_too_diffuse++;  // still counted for diagnostics
             }
         }
     }

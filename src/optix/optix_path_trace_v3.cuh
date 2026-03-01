@@ -297,9 +297,17 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             } else {
                 // MIS: BSDF/guide direction hit a light.  Weight against
                 // the NEE strategy's PDF for this same emitter.
-                float p_nee = dev_light_pdf(
-                    hit.triangle_id, hit.geo_normal, direction, hit.t);
-                float w_bsdf = mis_weight_2(pdf_combined_prev, p_nee);
+                // When previous bounce was delta (specular/glass), pdf is
+                // Dirac (encoded as 0) → NEE cannot sample this path,
+                // so give full weight to the BSDF strategy.
+                float w_bsdf;
+                if (pdf_combined_prev <= 0.f) {
+                    w_bsdf = 1.0f;
+                } else {
+                    float p_nee = dev_light_pdf(
+                        hit.triangle_id, hit.geo_normal, direction, hit.t);
+                    w_bsdf = mis_weight_2(pdf_combined_prev, p_nee);
+                }
                 Spectrum Le_contrib = throughput * Le * w_bsdf;
                 result.combined  += Le_contrib;
                 result.nee_direct += Le_contrib;
@@ -368,7 +376,7 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         float p_guide = 0.f;
         if (guide_hist.valid) {
             if (params.cell_guide_fraction) {
-                int cell = dev_cell_grid_index(hit.position);
+                uint32_t cell = dev_cell_cache_index(hit.position);
                 p_guide = params.cell_guide_fraction[cell];
             } else {
                 // Fallback: simple histogram quality check

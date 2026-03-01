@@ -826,15 +826,20 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         std::printf("[Timing] Photon total:      %8.1f ms\n", total);
     }
 
+    // ── Build CPU hash grid for kNN + statistics ──────────────────────
+    // Always build the CPU-side grid so that grid occupancy stats are
+    // available for snapshot diagnostics (Bug 3 fix).  Also needed by
+    // the kNN adaptive radius path below.
+    if (stored_photons_.size() > 0) {
+        stored_grid_.build(stored_photons_, gather_radius_);
+    }
+
     // ── Adaptive gather radius (k-NN, §C2) ──────────────────────────
     // When use_knn_adaptive is set, compute a scene-representative
     // gather radius by running knn_shell_expansion() on a random sample
     // of stored photon positions and taking the median k-th distance.
     // This replaces the fixed gather_radius_ for subsequent renders.
-    // NOTE: The grid was built on GPU, so we build a CPU grid here
-    // specifically for the kNN queries (typically off-by-default path).
     if (config.use_knn_adaptive && stored_photons_.size() > 0) {
-        stored_grid_.build(stored_photons_, gather_radius_);  // CPU grid for kNN
 
         const int   k           = config.knn_k;
         const float tau         = DEFAULT_SURFACE_TAU;

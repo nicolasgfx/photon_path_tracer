@@ -38,11 +38,11 @@ constexpr bool ENABLE_STATS = true;
 // Uncomment exactly ONE.  Runtime switching via keys 1–8 uses
 // SCENE_PROFILES[] at the bottom of this file.
 
-//#define SCENE_CORNELL_BOX
+#define SCENE_CORNELL_BOX
 //#define SCENE_CORNELL_SPHERE
 //#define SCENE_CORNELL_MIRROR
 //#define SCENE_CORNELL_WATER
-#define SCENE_LIVING_ROOM
+//#define SCENE_LIVING_ROOM
 //#define SCENE_CONFERENCE
 //#define SCENE_SALLE_DE_BAIN
 //#define SCENE_MORI_KNOB
@@ -396,7 +396,7 @@ constexpr int NUM_SCENE_PROFILES = 8;
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
       {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
-    { "cornell_sphere/CornellBox-Sphere.obj",    "Cornell Sphere",    false,
+    { "cornell_translucency/cornellbox.obj",      "Cornell Translucency", false,
       {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
     { "fireplace_room/fireplace_room.obj",        "Fireplace Room",    false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },

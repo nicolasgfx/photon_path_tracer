@@ -67,6 +67,22 @@ int dev_cell_grid_index(float3 pos) {
              + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
 }
 
+// ── Cell cache lookup: world position → hash-table index ────────────
+// Mirrors CellInfoCache::cell_key() — Teschner spatial hash into a
+// fixed 65K table (CELL_CACHE_TABLE_SIZE).  Used for cell_guide_fraction,
+// cell_caustic_fraction, and cell_flux_density lookups which are indexed
+// by hash bucket, not by dense grid index.
+
+__forceinline__ __device__
+uint32_t dev_cell_cache_index(float3 pos) {
+    float cs = params.grid_cell_size;  // gather_radius * 2 (same as CellInfoCache)
+    int3 cell = make_i3(
+        (int)floorf(pos.x / cs),
+        (int)floorf(pos.y / cs),
+        (int)floorf(pos.z / cs));
+    return teschner_hash(cell, CELL_CACHE_TABLE_SIZE);
+}
+
 // ── Read histogram for a cell → total_flux + scalar_flux array ──────
 
 struct GuidedHistogram {

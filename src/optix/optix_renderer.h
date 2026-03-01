@@ -16,6 +16,7 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/cell_bin_grid.h"
+#include "debug/stats_collector.h"
 #include "optix/launch_params.h"
 
 #include <cuda_runtime.h>
@@ -314,7 +315,11 @@ public:
         // Cell analysis / guidance
         int    cell_analysis_cells  = 0;
         float  avg_guide_fraction   = 0.f;
+        float  avg_guide_fraction_populated = 0.f;  // avg over cells with photons only
+        int    guide_populated_cells = 0;            // cells with guide_fraction > 0
         float  avg_caustic_fraction = 0.f;
+        GuideFractionDist guide_dist;
+        ConclusionCounters conclusions;
 
         // Config
         int    max_bounces_camera   = 0;
@@ -547,6 +552,7 @@ private:
     DeviceBuffer d_cell_caustic_fraction_;
     DeviceBuffer d_cell_flux_density_;
     int          cell_analysis_count_ = 0;  // number of cells uploaded
+    ConclusionCounters cell_conclusions_;     // from last build_cell_analysis()
 
     // Volume photon storage + spatial indices (VP-02/03)
     PhotonSoA   volume_photons_;

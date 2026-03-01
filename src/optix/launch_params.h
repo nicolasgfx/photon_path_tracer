@@ -67,9 +67,11 @@ struct LaunchParams {
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
 
     // ── Per-cell photon analysis (precomputed, §3) ──────────────────
-    float* cell_guide_fraction;   // [grid_total_cells] precomputed p_guide
-    float* cell_caustic_fraction; // [grid_total_cells] fraction of caustic photons
-    float* cell_flux_density;     // [grid_total_cells] photon flux / cell area
+    // Indexed by Teschner hash bucket [CELL_CACHE_TABLE_SIZE], NOT dense grid index.
+    // Use dev_cell_cache_index() to look up these arrays on the GPU.
+    float* cell_guide_fraction;   // [CELL_CACHE_TABLE_SIZE] precomputed p_guide
+    float* cell_caustic_fraction; // [CELL_CACHE_TABLE_SIZE] fraction of caustic photons
+    float* cell_flux_density;     // [CELL_CACHE_TABLE_SIZE] photon flux / cell area
     int    frame_number;
     RenderMode render_mode;      // shared enum from core/types.h
     float  exposure;             // linear exposure multiplier (applied before tone mapping)

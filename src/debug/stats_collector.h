@@ -304,6 +304,8 @@ struct AnalysisReport {
     int   accumulated_spp      = 0;
     int   cell_analysis_cells  = 0;
     float avg_guide_fraction   = 0.f;
+    float avg_guide_fraction_populated = 0.f;
+    int   guide_populated_cells = 0;
     float avg_caustic_fraction = 0.f;
 
     // Metadata
@@ -393,6 +395,8 @@ inline void write_analysis_json(const AnalysisReport& r,
     f << "    \"histogram_only\": " << (s.histogram_only ? "true" : "false") << ",\n";
     f << "    \"cell_analysis_cells\": " << r.cell_analysis_cells << ",\n";
     f << "    \"avg_guide_fraction\": " << r.avg_guide_fraction << ",\n";
+    f << "    \"avg_guide_fraction_populated\": " << r.avg_guide_fraction_populated << ",\n";
+    f << "    \"guide_populated_cells\": " << r.guide_populated_cells << ",\n";
     f << "    \"avg_caustic_fraction\": " << r.avg_caustic_fraction << ",\n";
     if (s.conclusions.total_cells > 0) {
         f << "    \"conclusions\": {\n";

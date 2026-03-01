@@ -1132,13 +1132,26 @@ OptixRenderer::RenderStats OptixRenderer::gather_stats(const char* scene_name) c
         cudaMemcpy(caustic.data(), d_cell_caustic_fraction_.d_ptr,
                    cell_analysis_count_ * sizeof(float), cudaMemcpyDeviceToHost);
         float sum_g = 0.f, sum_c = 0.f;
+        int   populated = 0;
+        float sum_g_pop = 0.f;
         for (int i = 0; i < cell_analysis_count_; ++i) {
             sum_g += guide[i];
             sum_c += caustic[i];
+            if (guide[i] > 0.f) {
+                ++populated;
+                sum_g_pop += guide[i];
+                s.guide_dist.add(guide[i], caustic[i] > 0.f);
+            }
         }
         s.avg_guide_fraction   = sum_g / (float)cell_analysis_count_;
         s.avg_caustic_fraction = sum_c / (float)cell_analysis_count_;
+        s.guide_populated_cells        = populated;
+        s.avg_guide_fraction_populated = (populated > 0)
+            ? sum_g_pop / (float)populated : 0.f;
     }
+
+    // ConclusionCounters (from build_cell_analysis, stored at upload time)
+    s.conclusions = cell_conclusions_;
 
     // Config
     s.max_bounces_camera  = DEFAULT_MAX_BOUNCES_CAMERA;
