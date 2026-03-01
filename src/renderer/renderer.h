@@ -83,6 +83,11 @@ struct RenderConfig {
     float adaptive_threshold     = 0.02f; ///< relative-noise threshold to keep sampling
     int   adaptive_radius        = 1;     ///< neighbourhood half-width (pixels)
 
+    // View-adaptive photon budgeting (§8)
+    bool  view_adaptive_enabled  = false;  ///< VA-01–05
+    float view_adaptive_beta     = 0.7f;   ///< mix weight: (1-β)·p_power + β·p_view
+    int   view_adaptive_retrace  = 1;      ///< 0=no retrace, 1=single, N=progressive
+
     // Tone mapping
     float exposure           = DEFAULT_EXPOSURE;  ///< linear multiplier before tone mapping (§Q8)
 
@@ -94,6 +99,7 @@ struct RenderConfig {
 
     // Debug
     RenderMode mode          = RenderMode::Combined;
+    bool  bounce_aov_enabled = false;  ///< DB-04: per-bounce AOV diagnostic buffers
 };
 
 // ── Spectral framebuffer ────────────────────────────────────────────

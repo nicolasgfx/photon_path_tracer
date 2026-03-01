@@ -411,6 +411,130 @@ NeeResult dev_nee_direct(float3 pos, float3 normal, float3 wo_local,
     return result;
 }
 
+// ── MT-07: Volume photon kNN density estimate ────────────────────────
+// kNN gather in 3D (Euclidean distance, no normal gate) for radiance
+// estimation at terminal medium scatter events.  Uses the HG phase
+// function instead of surface BSDF.  Sphere normalisation 3/(4π r³).
+__forceinline__ __device__
+Spectrum dev_estimate_volume_photon_density(
+    float3 pos, float3 wo_world, float hg_g,
+    const HomogeneousMedium& med)
+{
+    Spectrum L = Spectrum::zero();
+    if (params.num_vol_photons == 0 || params.vol_grid_table_size == 0)
+        return L;
+
+    const float r_search = params.vol_gather_radius;
+    const float r2_search = r_search * r_search;
+
+    constexpr int KNN_K = DEFAULT_KNN_K;
+    float    knn_d2[KNN_K];
+    uint32_t knn_idx[KNN_K];
+    int      knn_count = 0;
+
+    const float cell_size = params.vol_grid_cell_size;
+    int cx0 = (int)floorf((pos.x - r_search) / cell_size);
+    int cy0 = (int)floorf((pos.y - r_search) / cell_size);
+    int cz0 = (int)floorf((pos.z - r_search) / cell_size);
+    int cx1 = (int)floorf((pos.x + r_search) / cell_size);
+    int cy1 = (int)floorf((pos.y + r_search) / cell_size);
+    int cz1 = (int)floorf((pos.z + r_search) / cell_size);
+
+    uint32_t visited_keys[27];
+    int num_visited = 0;
+
+    for (int iz = cz0; iz <= cz1; ++iz)
+    for (int iy = cy0; iy <= cy1; ++iy)
+    for (int ix = cx0; ix <= cx1; ++ix) {
+        uint32_t key = teschner_hash(make_i3(ix, iy, iz),
+                                     params.vol_grid_table_size);
+        bool already = false;
+        for (int v = 0; v < num_visited; ++v)
+            if (visited_keys[v] == key) { already = true; break; }
+        if (already) continue;
+        visited_keys[num_visited++] = key;
+
+        uint32_t start = params.vol_grid_cell_start[key];
+        uint32_t end   = params.vol_grid_cell_end[key];
+        if (start == 0xFFFFFFFF) continue;
+
+        for (uint32_t j = start; j < end; ++j) {
+            uint32_t idx = params.vol_grid_sorted_indices[j];
+            float3 pp = make_f3(
+                params.vol_photon_pos_x[idx],
+                params.vol_photon_pos_y[idx],
+                params.vol_photon_pos_z[idx]);
+            float3 diff = pos - pp;
+            float d2 = dot(diff, diff);
+            if (d2 > r2_search) continue;
+            if (knn_count >= KNN_K && d2 >= knn_d2[0]) continue;
+
+            // ── Insert into max-heap ────────────────────────────────
+            if (knn_count < KNN_K) {
+                knn_d2[knn_count]  = d2;
+                knn_idx[knn_count] = idx;
+                knn_count++;
+                int ci = knn_count - 1;
+                while (ci > 0) {
+                    int pi = (ci - 1) / 2;
+                    if (knn_d2[ci] <= knn_d2[pi]) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
+                    ci = pi;
+                }
+            } else {
+                knn_d2[0]  = d2;
+                knn_idx[0] = idx;
+                int ci = 0;
+                while (true) {
+                    int left = 2*ci+1, right = 2*ci+2, largest = ci;
+                    if (left  < KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
+                    if (right < KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
+                    if (largest == ci) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
+                    ci = largest;
+                }
+            }
+        }
+    }
+
+    if (knn_count == 0) return L;
+
+    // Adaptive radius: k-th nearest or fallback to search radius
+    float r_k2 = (knn_count >= KNN_K) ? knn_d2[0] : r2_search;
+    r_k2 = fmaxf(r_k2, 1e-12f);
+    float r_k = sqrtf(r_k2);
+
+    // 3D sphere normalisation: 3/(4π r³)
+    float inv_vol = 3.f / (4.f * PI * r_k * r_k2);
+    float inv_emitted = 1.f / (float)params.num_vol_photons_emitted;
+
+    for (int i = 0; i < knn_count; ++i) {
+        uint32_t idx = knn_idx[i];
+        float d2 = knn_d2[i];
+        if (d2 >= r_k2) continue;
+
+        // 3D Epanechnikov kernel: (1 - d²/r²)
+        float w = 1.f - d2 / r_k2;
+
+        // HG phase function evaluation
+        float3 wi_world = make_f3(
+            params.vol_photon_wi_x[idx],
+            params.vol_photon_wi_y[idx],
+            params.vol_photon_wi_z[idx]);
+        float cos_theta = dot(wo_world * (-1.f), wi_world);
+        float p_hg = henyey_greenstein_phase(cos_theta, hg_g);
+
+        // Volume photons are single-hero (flat index)
+        float p_flux = params.vol_photon_flux[idx];
+        int   bin    = (int)params.vol_photon_lambda[idx];
+        if (bin >= 0 && bin < NUM_LAMBDA)
+            L.value[bin] += p_hg * p_flux * w * inv_vol * inv_emitted;
+    }
+
+    return L;
+}
 // =====================================================================
 // dev_nee_dispatch — entry point for all NEE calls
 // =====================================================================
@@ -421,4 +545,89 @@ NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
                            float2 uv)
 {
     return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+}
+
+// =====================================================================
+// Volume NEE at medium scatter events (MT-06)
+// =====================================================================
+// Evaluates HG phase function instead of surface BSDF.
+// Applies Beer-Lambert transmittance along the shadow ray for each λ.
+
+__forceinline__ __device__
+NeeResult dev_nee_volume_scatter(float3 pos, float3 wo_world,
+                                  float hg_g, const HomogeneousMedium& med,
+                                  PCGRng& rng)
+{
+    NeeResult result;
+    result.L = Spectrum::zero();
+    result.visibility = 0.f;
+    if (params.num_emissive <= 0) return result;
+
+    // Select a light from the power-weighted CDF
+    float p_tri;
+    int local_idx = dev_nee_select_global(rng, p_tri);
+    uint32_t light_tri = params.emissive_tri_indices[local_idx];
+
+    // Sample a point on the light triangle
+    float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+    float3 lv0 = params.vertices[light_tri * 3 + 0];
+    float3 lv1 = params.vertices[light_tri * 3 + 1];
+    float3 lv2 = params.vertices[light_tri * 3 + 2];
+    float3 light_pos = lv0 * bary.x + lv1 * bary.y + lv2 * bary.z;
+
+    float3 le1 = lv1 - lv0;
+    float3 le2 = lv2 - lv0;
+    float3 light_normal = normalize(cross(le1, le2));
+    float  light_area   = length(cross(le1, le2)) * 0.5f;
+
+    // Direction and distance to light
+    float3 to_light = light_pos - pos;
+    float dist2 = dot(to_light, to_light);
+    float dist  = sqrtf(dist2);
+    float3 wi   = to_light * (1.f / dist);
+
+    // Light must face towards the scatter point
+    float cos_y = -dot(wi, light_normal);
+    if (cos_y <= 0.f) return result;
+
+    // Shadow ray (no normal offset — we're inside a volume)
+    if (!trace_shadow(pos, wi, dist))
+        return result;
+    result.visibility = 1.f;
+
+    if (p_tri <= 0.f) return result;
+
+    // Emission at light surface
+    uint32_t light_mat = params.material_ids[light_tri];
+    float2 luv0 = params.texcoords[light_tri * 3 + 0];
+    float2 luv1 = params.texcoords[light_tri * 3 + 1];
+    float2 luv2 = params.texcoords[light_tri * 3 + 2];
+    float2 light_uv = make_float2(
+        luv0.x * bary.x + luv1.x * bary.y + luv2.x * bary.z,
+        luv0.y * bary.x + luv1.y * bary.y + luv2.y * bary.z);
+    Spectrum Le = dev_get_Le(light_mat, light_uv);
+
+    // Phase function value (HG) using cos(theta) between wo and wi
+    float cos_theta = dot(wo_world * (-1.f), wi);
+    float p_hg = henyey_greenstein_phase(cos_theta, hg_g);
+
+    // PDF conversion: area → solid angle
+    float p_wi = nee_pdf_area_to_solid_angle(p_tri, 1.f / light_area, dist2, cos_y);
+
+    // MIS: NEE vs phase function sampling
+    float w_mis = 1.0f;
+    if (DEFAULT_USE_MIS) {
+        // Phase function PDF at this direction (normalised over full sphere)
+        float pdf_phase = p_hg;  // HG is already normalised over 4π
+        w_mis = mis_weight_2(p_wi, pdf_phase);
+    }
+
+    // Beer-Lambert transmittance along shadow ray (per wavelength)
+    for (int i = 0; i < NUM_LAMBDA; ++i) {
+        float T_shadow = expf(-med.sigma_t.value[i] * dist);
+        result.L.value[i] = w_mis * p_hg * Le.value[i] * T_shadow
+                           / fmaxf(p_wi, 1e-8f);
+    }
+
+    return result;
 }

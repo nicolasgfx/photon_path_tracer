@@ -106,6 +106,9 @@ extern "C" __global__ void __raygen__render() {
     Spectrum L_accum = Spectrum::zero();
     Spectrum L_nee_accum = Spectrum::zero();
     Spectrum L_photon_accum = Spectrum::zero();
+    Spectrum L_bounce_accum[MAX_AOV_BOUNCES];
+    for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
+        L_bounce_accum[b] = Spectrum::zero();
 
     long long prof_total_start = clock64();
     long long prof_ray  = 0, prof_nee  = 0;
@@ -129,6 +132,10 @@ extern "C" __global__ void __raygen__render() {
             L_accum        += ptr.combined;
             L_nee_accum    += ptr.nee_direct;
             L_photon_accum += ptr.photon_indirect;
+            if (params.bounce_aov_enabled) {
+                for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
+                    L_bounce_accum[b] += ptr.bounce_contrib[b];
+            }
             prof_ray  += ptr.clk_ray_trace;
             prof_nee  += ptr.clk_nee;
             prof_pg   += ptr.clk_photon_gather;
@@ -177,6 +184,16 @@ extern "C" __global__ void __raygen__render() {
     if (params.photon_indirect_buffer) {
         for (int i = 0; i < NUM_LAMBDA; ++i)
             params.photon_indirect_buffer[pixel_idx * NUM_LAMBDA + i] += L_photon_accum.value[i];
+    }
+
+    // Per-bounce AOV accumulation (DB-04, §10.3)
+    if (params.bounce_aov_enabled) {
+        for (int b = 0; b < MAX_AOV_BOUNCES; ++b) {
+            if (params.bounce_aov[b]) {
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    params.bounce_aov[b][pixel_idx * NUM_LAMBDA + i] += L_bounce_accum[b].value[i];
+            }
+        }
     }
 
     // Profiling accumulation (if buffers exist)

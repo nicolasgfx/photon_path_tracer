@@ -158,7 +158,7 @@ extern "C" __global__ void __raygen__photon_trace() {
                 float t_ff = -logf(fmaxf(1.f - u_ff, 1e-12f)) / sig_t_lam;
 
                 if (t_ff < seg_t) {
-                    path_flags |= 0x04;  // PHOTON_FLAG_VOLUME_SEGMENT
+                    path_flags |= 0x04;  // PHOTON_FLAG_VOLUME_SCATTER
                     float3 vol_pos = origin + direction * t_ff;
                     float sig_s_lam = med.sigma_s.value[hero_bins[0]];
                     float vol_flux = hero_flux[0] * (sig_s_lam / fmaxf(sig_t_lam, 1e-20f));

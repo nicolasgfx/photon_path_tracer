@@ -134,7 +134,9 @@ enum class RenderMode : int {
     Normals       = 4,
     MaterialID    = 5,
     Depth         = 6,
-    Coverage      = 7
+    GuideMap      = 7,    // Visualise cell-bin histogram as false-colour directional map
+    CausticOnly   = 8,    // Caustic photon density estimate only
+    Coverage      = 9     // (legacy)
 };
 
 // ── Constants ───────────────────────────────────────────────────────

@@ -336,7 +336,123 @@ struct CellBinGrid {
             }
         }
 
-        // ── 5. Compute scalar_flux and normalize directions/normals ──
+        normalize_bins();
+    }
+
+    // ── Build from volume photons (VP-03) ────────────────────────────
+    // Volumetric variant: uses 3D Euclidean distance + Epanechnikov
+    // kernel (no tangential projection — volume photons have no surface
+    // normal).  Volume photons store a single hero wavelength at flat
+    // index [i] (not [i * HERO_WAVELENGTHS + h]).
+    void build_volume(const PhotonSoA& photons, float gather_radius, int num_bins) {
+        bin_count = num_bins;
+        cell_size = gather_radius * 2.0f;
+
+        if (photons.size() == 0 || cell_size <= 0.0f) {
+            dim_x = dim_y = dim_z = 0;
+            bins.clear();
+            cell_dominant_normal.clear();
+            return;
+        }
+
+        // ── 1. Compute AABB ─────────────────────────────────────────
+        compute_grid_geometry(photons);
+
+        const size_t total = (size_t)dim_x * dim_y * dim_z;
+        const size_t total_bins = total * bin_count;
+        const size_t N = photons.size();
+        const float  r2 = gather_radius * gather_radius;
+
+        std::printf("[VolCellBinGrid] Dims %d\xc3\x97%d\xc3\x97%d = %zu cells, "
+                    "%.2f MB (%d bins/cell)\n",
+                    dim_x, dim_y, dim_z, total,
+                    (double)(total_bins * sizeof(PhotonBin)) / (1024.0 * 1024.0),
+                    bin_count);
+
+        // ── 2. Allocate and zero bins ────────────────────────────────
+        bins.resize(total_bins);
+        std::memset(bins.data(), 0, total_bins * sizeof(PhotonBin));
+        cell_dominant_normal.resize(total);
+        for (size_t c = 0; c < total; ++c)
+            cell_dominant_normal[c] = make_f3(0.f, 0.f, 0.f);
+
+        // ── 3. Accumulate with 3D Euclidean Epanechnikov kernel ──────
+        // Volume photons have single-hero data at flat index [i].
+        for (size_t i = 0; i < N; ++i) {
+            const float px = photons.pos_x[i];
+            const float py = photons.pos_y[i];
+            const float pz = photons.pos_z[i];
+            const float wi_x = photons.wi_x[i];
+            const float wi_y = photons.wi_y[i];
+            const float wi_z = photons.wi_z[i];
+
+            // Volume photons store one wavelength bin + flux at flat
+            // index i (download writes vol_count entries sequentially).
+            int lam_bin = (i < photons.lambda_bin.size())
+                            ? (int)photons.lambda_bin[i] : 0;
+            float p_flux = (i < photons.flux.size())
+                            ? photons.flux[i] : 0.f;
+            if (p_flux <= 0.f) continue;
+
+            int k = photons.bin_idx.empty() ? 0 : (int)photons.bin_idx[i];
+            if (k < 0 || k >= bin_count) k = 0;
+
+            int cx = (int)std::floor((px - min_x) / cell_size);
+            int cy = (int)std::floor((py - min_y) / cell_size);
+            int cz = (int)std::floor((pz - min_z) / cell_size);
+            cx = std::max(0, std::min(cx, dim_x - 1));
+            cy = std::max(0, std::min(cy, dim_y - 1));
+            cz = std::max(0, std::min(cz, dim_z - 1));
+
+            // ── Scatter to own cell + 26 neighbours (3×3×3) ──────────
+            for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int ncx = cx + dx;
+                const int ncy = cy + dy;
+                const int ncz = cz + dz;
+                if (ncx < 0 || ncx >= dim_x ||
+                    ncy < 0 || ncy >= dim_y ||
+                    ncz < 0 || ncz >= dim_z)
+                    continue;
+
+                // 3D Euclidean distance (no tangential projection)
+                const float cell_cx = min_x + (ncx + 0.5f) * cell_size;
+                const float cell_cy = min_y + (ncy + 0.5f) * cell_size;
+                const float cell_cz = min_z + (ncz + 0.5f) * cell_size;
+                const float dcx = px - cell_cx;
+                const float dcy = py - cell_cy;
+                const float dcz = pz - cell_cz;
+                const float d2 = dcx*dcx + dcy*dcy + dcz*dcz;
+
+                const float w = 1.f - d2 / r2;
+                if (w <= 0.f) continue;
+
+                const int flat = ncx + ncy * dim_x + ncz * dim_x * dim_y;
+                PhotonBin& b = bins[(size_t)flat * bin_count + k];
+
+                if (lam_bin >= 0 && lam_bin < NUM_LAMBDA)
+                    b.flux[lam_bin] += w * p_flux;
+
+                const float wf = w * p_flux;
+                b.dir_x  += wi_x * wf;
+                b.dir_y  += wi_y * wf;
+                b.dir_z  += wi_z * wf;
+                // No surface normal for volume photons
+                b.weight += w;
+                b.count  += 1;
+            }
+        }
+
+        normalize_bins();
+    }
+
+private:
+    // ── Shared normalization pass (surface + volume builds) ─────────
+    void normalize_bins() {
+        const size_t total = (size_t)dim_x * dim_y * dim_z;
+
+        // ── Compute scalar_flux and normalize directions/normals ──
         PhotonBinDirs fib;
         fib.init(bin_count);
 

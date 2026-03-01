@@ -34,7 +34,7 @@ enum class PhotonFilterMode : int {
     All             = 1,  // All photons (same as F1)
     TraversedGlass  = 2,  // PHOTON_FLAG_TRAVERSED_GLASS
     CausticGlass    = 3,  // PHOTON_FLAG_CAUSTIC_GLASS
-    Volume          = 4,  // PHOTON_FLAG_VOLUME_SEGMENT
+    Volume          = 4,  // PHOTON_FLAG_VOLUME_SCATTER
     Dispersion      = 5,  // PHOTON_FLAG_DISPERSION
     CausticSpecular = 6,  // PHOTON_FLAG_CAUSTIC_SPECULAR
     Count_          = 7
@@ -57,7 +57,7 @@ inline uint8_t photon_filter_flag(PhotonFilterMode m) {
     switch (m) {
         case PhotonFilterMode::TraversedGlass:  return PHOTON_FLAG_TRAVERSED_GLASS;
         case PhotonFilterMode::CausticGlass:    return PHOTON_FLAG_CAUSTIC_GLASS;
-        case PhotonFilterMode::Volume:          return PHOTON_FLAG_VOLUME_SEGMENT;
+        case PhotonFilterMode::Volume:          return PHOTON_FLAG_VOLUME_SCATTER;
         case PhotonFilterMode::Dispersion:      return PHOTON_FLAG_DISPERSION;
         case PhotonFilterMode::CausticSpecular: return PHOTON_FLAG_CAUSTIC_SPECULAR;
         default:                                return 0;  // All / Off → no bit filter
@@ -109,7 +109,7 @@ struct DebugState {
 
     void cycle_render_mode() {
         int mode = (int)current_mode;
-        mode = (mode + 1) % 7;
+        mode = (mode + 1) % 9;
         current_mode = (RenderMode)mode;
     }
 
@@ -122,6 +122,8 @@ struct DebugState {
             case RenderMode::Normals:      return "Normals";
             case RenderMode::MaterialID:   return "Material ID";
             case RenderMode::Depth:        return "Depth";
+            case RenderMode::GuideMap:     return "Guide Map";
+            case RenderMode::CausticOnly:  return "Caustic Only";
             default:                       return "Unknown";
         }
     }
@@ -264,7 +266,10 @@ inline bool handle_debug_key(int key, DebugState& state) {
             std::cout << "[Debug] F2  Photon filter: " << photon_filter_name(state.photon_filter) << "\n";
             return true;
         case KEY_F3:
-            std::cout << "[Debug] F3  (reserved)\n";
+            state.current_mode = (state.current_mode == RenderMode::GuideMap)
+                ? RenderMode::Full : RenderMode::GuideMap;
+            std::cout << "[Debug] F3  Guide visualisation: "
+                      << DebugState::render_mode_name(state.current_mode) << "\n";
             return true;
         case KEY_F4:
             state.toggle_hash_grid();

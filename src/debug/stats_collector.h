@@ -150,7 +150,7 @@ inline PhotonFlagCounts tally_photon_flags(const PhotonSoA& photons) {
         uint8_t f = photons.path_flags[i];
         if (f & PHOTON_FLAG_TRAVERSED_GLASS)  c.traversed_glass++;
         if (f & PHOTON_FLAG_CAUSTIC_GLASS)    c.caustic_glass++;
-        if (f & PHOTON_FLAG_VOLUME_SEGMENT)   c.volume_segment++;
+        if (f & PHOTON_FLAG_VOLUME_SCATTER)   c.volume_segment++;
         if (f & PHOTON_FLAG_DISPERSION)       c.dispersion++;
         if (f & PHOTON_FLAG_CAUSTIC_SPECULAR) c.caustic_specular++;
     }

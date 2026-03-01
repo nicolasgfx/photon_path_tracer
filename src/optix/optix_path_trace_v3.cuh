@@ -17,6 +17,8 @@ struct PathTraceResult {
     Spectrum combined;
     Spectrum nee_direct;
     Spectrum photon_indirect;
+    // Per-bounce radiance contributions (DB-04, §10.3)
+    Spectrum bounce_contrib[MAX_AOV_BOUNCES];
     // AOV for denoiser guide layers
     float3 first_hit_albedo;   // linear diffuse albedo at first non-specular hit
     float3 first_hit_normal;   // world-space shading normal at first non-specular hit
@@ -35,6 +37,8 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
     result.combined        = Spectrum::zero();
     result.nee_direct      = Spectrum::zero();
     result.photon_indirect = Spectrum::zero();
+    for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
+        result.bounce_contrib[b] = Spectrum::zero();
     result.first_hit_albedo = make_f3(0.f, 0.f, 0.f);
     result.first_hit_normal = make_f3(0.f, 0.f, 1.f);
     result.clk_ray_trace     = 0;
@@ -64,6 +68,127 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
 
         if (!hit.hit) break;
 
+        // ── MT-02: Free-flight sampling inside participating media ──
+        // When volume is enabled, each ray segment may scatter before
+        // reaching the surface.  Uses a reference wavelength (median
+        // bin) to sample the free-flight distance; per-wavelength
+        // throughput is weighted by spectral MIS (§9.4).
+        if (params.volume_enabled && params.volume_density > 0.f) {
+            float mid_y = origin.y + direction.y * (hit.t * 0.5f);
+            HomogeneousMedium med = make_rayleigh_medium(
+                params.volume_density, params.volume_albedo,
+                params.volume_falloff, mid_y);
+
+            // Reference wavelength for free-flight sampling
+            constexpr int REF_BIN = NUM_LAMBDA / 2;
+            float sig_t_ref = med.sigma_t.value[REF_BIN];
+
+            if (sig_t_ref > 0.f) {
+                float u_ff = rng.next_float();
+                float t_ff = -logf(fmaxf(u_ff, 1e-12f)) / sig_t_ref;
+
+                if (t_ff < hit.t) {
+                    // ── Medium scatter event ────────────────────────
+                    float3 scatter_pos = origin + direction * t_ff;
+
+                    // Spectral MIS scatter weight (§9.4):
+                    // w[i] = σ_s[i] * exp(-(σ_t[i] - σ_t_ref) * t) / σ_t_ref
+                    float inv_ref = 1.f / sig_t_ref;
+                    for (int i = 0; i < NUM_LAMBDA; ++i) {
+                        float w = med.sigma_s.value[i]
+                                * expf(-(med.sigma_t.value[i] - sig_t_ref) * t_ff)
+                                * inv_ref;
+                        throughput.value[i] *= w;
+                    }
+
+                    // ── MT-06: NEE at scatter event ─────────────────
+                    if (params.render_mode != RenderMode::IndirectOnly) {
+                        NeeResult vnee = dev_nee_volume_scatter(
+                            scatter_pos, direction, med.g, med, rng);
+                        Spectrum vnee_contrib = throughput * vnee.L;
+                        result.combined   += vnee_contrib;
+                        result.nee_direct += vnee_contrib;
+                        if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                            result.bounce_contrib[bounce] += vnee_contrib;
+                    }
+
+                    // ── MT-07: Volume photon final gather ───────────
+                    // At the terminal bounce inside media, query the
+                    // volume photon map for a kNN density estimate of
+                    // remaining in-medium radiance (analogous to
+                    // surface photon final gather at §4.2).
+                    if (bounce == max_bounces - 1 && params.photon_final_gather) {
+                        if (params.render_mode != RenderMode::DirectOnly) {
+                            Spectrum L_vol = dev_estimate_volume_photon_density(
+                                scatter_pos, direction, med.g, med);
+                            Spectrum vol_contrib = throughput * L_vol;
+                            result.combined        += vol_contrib;
+                            result.photon_indirect += vol_contrib;
+                            if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                                result.bounce_contrib[bounce] += vol_contrib;
+                        }
+                        break;
+                    }
+
+                    // ── MT-04: HG + volume photon guide mixture ─────
+                    // Read volume cell-bin histogram for guided scatter
+                    GuidedHistogram vol_hist = dev_read_vol_cell_histogram(scatter_pos);
+                    float p_vol_guide = (vol_hist.valid) ? 0.5f : 0.f;
+
+                    float3 wi_world;
+                    bool scatter_valid = false;
+
+                    if (p_vol_guide > 0.f && rng.next_float() < p_vol_guide) {
+                        // Sample from volume photon guide
+                        GuidedSample gs = dev_sample_guided_direction(
+                            vol_hist, fib, direction * (-1.f), rng);
+                        if (gs.valid) {
+                            wi_world = gs.wi_world;
+                            scatter_valid = true;
+                        }
+                    }
+
+                    if (!scatter_valid) {
+                        // ── MT-03: HG phase function sampling ───────
+                        ONB scatter_frame = ONB::from_normal(direction * (-1.f));
+                        float3 wi_local = sample_henyey_greenstein(
+                            med.g, rng.next_float(), rng.next_float());
+                        wi_world = scatter_frame.local_to_world(wi_local);
+                        scatter_valid = true;
+                    }
+
+                    // ── MT-05: Russian roulette inside media ────────
+                    if (bounce >= params.min_bounces_rr) {
+                        float max_tp = throughput.max_component();
+                        float max_albedo = med.sigma_s.value[REF_BIN]
+                                         / fmaxf(med.sigma_t.value[REF_BIN], 1e-20f);
+                        float p_survive = fminf(params.rr_threshold,
+                                                fmaxf(max_tp, max_albedo));
+                        if (p_survive < 1e-4f) break;
+                        if (rng.next_float() >= p_survive) break;
+                        float inv_survive = 1.f / p_survive;
+                        for (int i = 0; i < NUM_LAMBDA; ++i)
+                            throughput.value[i] *= inv_survive;
+                    }
+
+                    // Continue from scatter point
+                    origin    = scatter_pos;
+                    direction = wi_world;
+                    pdf_combined_prev = 0.f;  // no emission MIS after scatter
+                    continue;
+                } else {
+                    // No scatter: apply Beer-Lambert transmittance
+                    // w_transmit[i] = exp(-(σ_t[i] - σ_t_ref) * d)
+                    // Combined with the free-flight "survival" this gives
+                    // the standard exp(-σ_t[i] * d) transmittance.
+                    for (int i = 0; i < NUM_LAMBDA; ++i) {
+                        throughput.value[i] *= expf(
+                            -(med.sigma_t.value[i] - sig_t_ref) * hit.t);
+                    }
+                }
+            }
+        }
+
         uint32_t mat_id = hit.material_id;
 
         // ── Emission (MIS-weighted) ─────────────────────────────────
@@ -73,16 +198,22 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             Spectrum Le = dev_get_Le(mat_id, hit.uv);
             if (bounce == 0) {
                 // Camera sees light directly — no MIS needed
-                result.combined  += throughput * Le;
-                result.nee_direct += throughput * Le;
+                Spectrum Le_contrib = throughput * Le;
+                result.combined  += Le_contrib;
+                result.nee_direct += Le_contrib;
+                if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                    result.bounce_contrib[bounce] += Le_contrib;
             } else {
                 // MIS: BSDF/guide direction hit a light.  Weight against
                 // the NEE strategy's PDF for this same emitter.
                 float p_nee = dev_light_pdf(
                     hit.triangle_id, hit.geo_normal, direction, hit.t);
                 float w_bsdf = mis_weight_2(pdf_combined_prev, p_nee);
-                result.combined  += throughput * Le * w_bsdf;
-                result.nee_direct += throughput * Le * w_bsdf;
+                Spectrum Le_contrib = throughput * Le * w_bsdf;
+                result.combined  += Le_contrib;
+                result.nee_direct += Le_contrib;
+                if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                    result.bounce_contrib[bounce] += Le_contrib;
             }
             break;
         }
@@ -178,6 +309,8 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             Spectrum nee_contrib = throughput * nee.L;
             result.combined   += nee_contrib;
             result.nee_direct += nee_contrib;
+            if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                result.bounce_contrib[bounce] += nee_contrib;
         }
 
         // ── Photon final gather at terminal bounce ──────────────────
@@ -194,6 +327,8 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                 Spectrum photon_contrib = throughput * L_photon;
                 result.combined        += photon_contrib;
                 result.photon_indirect += photon_contrib;
+                if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                    result.bounce_contrib[bounce] += photon_contrib;
             }
             break;
         }

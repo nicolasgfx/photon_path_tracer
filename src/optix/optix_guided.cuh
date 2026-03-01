@@ -197,3 +197,44 @@ float dev_guided_pdf(
     float omega = bin_solid_angle(h.num_bins);
     return p_bin / omega;
 }
+
+// =====================================================================
+// Volume photon guide (§9.7 — VP-03/MT-04)
+// =====================================================================
+// Volume variant: reads from vol_cell_bin_grid, no normal gate.
+
+__forceinline__ __device__
+int dev_vol_cell_grid_index(float3 pos) {
+    int ix = (int)floorf((pos.x - params.vol_cell_grid_min_x) / params.vol_cell_grid_cell_size);
+    int iy = (int)floorf((pos.y - params.vol_cell_grid_min_y) / params.vol_cell_grid_cell_size);
+    int iz = (int)floorf((pos.z - params.vol_cell_grid_min_z) / params.vol_cell_grid_cell_size);
+    ix = max(0, min(ix, params.vol_cell_grid_dim_x - 1));
+    iy = max(0, min(iy, params.vol_cell_grid_dim_y - 1));
+    iz = max(0, min(iz, params.vol_cell_grid_dim_z - 1));
+    return ix + iy * params.vol_cell_grid_dim_x
+             + iz * params.vol_cell_grid_dim_x * params.vol_cell_grid_dim_y;
+}
+
+__forceinline__ __device__
+GuidedHistogram dev_read_vol_cell_histogram(float3 pos) {
+    GuidedHistogram h;
+    h.total_flux = 0.f;
+    h.num_bins   = params.photon_bin_count;
+    h.valid      = false;
+
+    if (!params.vol_cell_grid_valid || !params.vol_cell_bin_grid || h.num_bins <= 0)
+        return h;
+
+    int cell = dev_vol_cell_grid_index(pos);
+    const PhotonBin* bins = &params.vol_cell_bin_grid[cell * h.num_bins];
+
+    // No normal gate for volume photons — aggregate all bins
+    for (int k = 0; k < h.num_bins; ++k) {
+        float sf = bins[k].scalar_flux;
+        h.bin_flux[k] = (sf > 0.f) ? sf : 0.f;
+        h.total_flux += h.bin_flux[k];
+    }
+
+    h.valid = (h.total_flux > 0.f);
+    return h;
+}

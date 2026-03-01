@@ -14,7 +14,8 @@
 // ── Photon path flag bits ────────────────────────────────────────────
 constexpr uint8_t PHOTON_FLAG_TRAVERSED_GLASS    = 0x01;  // bit 0: passed through ≥1 glass interface
 constexpr uint8_t PHOTON_FLAG_CAUSTIC_GLASS      = 0x02;  // bit 1: caustic path starts with glass
-constexpr uint8_t PHOTON_FLAG_VOLUME_SEGMENT     = 0x04;  // bit 2: had a volume interaction
+constexpr uint8_t PHOTON_FLAG_VOLUME_SCATTER     = 0x04;  // bit 2: had a volume scatter event
+constexpr uint8_t PHOTON_FLAG_VOLUME_SEGMENT     = PHOTON_FLAG_VOLUME_SCATTER;  // legacy alias
 constexpr uint8_t PHOTON_FLAG_DISPERSION         = 0x08;  // bit 3: dispersion was active
 constexpr uint8_t PHOTON_FLAG_CAUSTIC_SPECULAR   = 0x10;  // bit 4: caustic from mirror/reflective surface
 

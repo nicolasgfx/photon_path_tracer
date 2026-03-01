@@ -33,6 +33,7 @@ void k_update_mask(
     const float*   lum_sum,
     const float*   lum_sum2,
     uint8_t*       active_mask,
+    const uint16_t* pixel_max_spp, // nullptr → use global max_spp
     int            width,
     int            height,
     int            min_spp,
@@ -55,8 +56,9 @@ void k_update_mask(
         return;
     }
 
-    // --- Reached the per-pixel cap ------------------------------------
-    if (n >= (float)max_spp) {
+    // --- Reached the per-pixel cap (AS-02) or global cap ─────────────
+    int effective_max = pixel_max_spp ? (int)pixel_max_spp[idx] : max_spp;
+    if (n >= (float)effective_max) {
         active_mask[idx] = 0;
         return;
     }
@@ -99,6 +101,7 @@ int adaptive_update_mask(const AdaptiveParams& p)
         p.lum_sum,
         p.lum_sum2,
         p.active_mask,
+        p.pixel_max_spp,
         p.width,
         p.height,
         p.min_spp,
@@ -114,4 +117,93 @@ int adaptive_update_mask(const AdaptiveParams& p)
     cudaFree(d_count);
 
     return h_count;
+}
+// ── AS-02: Per-pixel cost map → per-pixel max_spp budget ─────────────
+// Combines pilot-pass variance with photon analysis data to assign
+// each pixel a non-uniform SPP budget.
+
+__global__
+void k_compute_cost_map(
+    const float*   lum_sum,           // [W*H] pilot Σ Y
+    const float*   lum_sum2,          // [W*H] pilot Σ Y²
+    const float*   sample_counts,     // [W*H] samples so far
+    const float*   cell_guide_frac,   // [grid_cells] or nullptr
+    const float*   cell_caustic_frac, // [grid_cells] or nullptr
+    const float*   cell_flux_density, // [grid_cells] or nullptr
+    // cell grid params for position → cell mapping (simplified: pixel → cell)
+    const float*   spectrum_buffer,   // [W*H*NUM_LAMBDA] for position reconstruction
+    int            width,
+    int            height,
+    int            base_spp,
+    int            min_spp_clamp,     // floor on per-pixel budget
+    int            max_spp_clamp,     // ceiling on per-pixel budget
+    uint16_t*      pixel_max_spp,     // [W*H] output per-pixel budget
+    float*         d_cost_sum)        // [1] atomic sum of all pixel costs
+{
+    int px = blockIdx.x * blockDim.x + threadIdx.x;
+    int py = blockIdx.y * blockDim.y + threadIdx.y;
+    if (px >= width || py >= height) return;
+
+    int idx = py * width + px;
+    float n = sample_counts[idx];
+
+    // §7.1 Factor 1: Pilot-pass luminance variance (weight 0.6)
+    float rel_noise = pixel_relative_noise(lum_sum[idx], lum_sum2[idx], n);
+    float var_factor = fminf(rel_noise * 10.f, 1.f);  // normalize to [0,1]
+
+    // §7.1 Factor 2: Caustic fraction (weight 0.3) — sharp caustics need samples
+    // (not available per-pixel; would need first-hit → cell lookup. Use 0 as
+    // fallback when the cell analysis pointer isn't available.)
+    float caustic_factor = 0.f;
+    (void)cell_caustic_frac;  // available per-cell, not per-pixel currently
+
+    // §7.1 Factor 3: Guide quality / flux density (weight 0.1)
+    float guide_factor = 0.f;
+    (void)cell_guide_frac;
+    (void)cell_flux_density;
+
+    // Combined cost [0,1]
+    float cost = 0.6f * var_factor + 0.3f * caustic_factor + 0.1f * guide_factor;
+
+    // Per-pixel SPP budget: base * (cost / avg_cost)
+    // We store the raw cost and compute the ratio after a reduction.
+    // For now: directly map cost → spp multiplier [0.25, 4.0]
+    float multiplier = 0.25f + cost * 3.75f;  // cost=0→0.25×, cost=1→4×
+    int budget = (int)(base_spp * multiplier + 0.5f);
+    budget = max(min_spp_clamp, min(budget, max_spp_clamp));
+
+    pixel_max_spp[idx] = (uint16_t)budget;
+    atomicAdd(d_cost_sum, cost);
+}
+
+// ── Host entry point ──────────────────────────────────────────────────
+
+void compute_pixel_cost_map(const CostMapParams& p)
+{
+    dim3 block(16, 16);
+    dim3 grid((p.width  + block.x - 1) / block.x,
+              (p.height + block.y - 1) / block.y);
+
+    float* d_cost_sum = nullptr;
+    cudaMalloc(&d_cost_sum, sizeof(float));
+    cudaMemset(d_cost_sum, 0, sizeof(float));
+
+    k_compute_cost_map<<<grid, block>>>(
+        p.lum_sum,
+        p.lum_sum2,
+        p.sample_counts,
+        p.cell_guide_fraction,
+        p.cell_caustic_fraction,
+        p.cell_flux_density,
+        p.spectrum_buffer,
+        p.width,
+        p.height,
+        p.base_spp,
+        p.min_spp_clamp,
+        p.max_spp_clamp,
+        p.pixel_max_spp,
+        d_cost_sum);
+
+    cudaDeviceSynchronize();
+    cudaFree(d_cost_sum);
 }

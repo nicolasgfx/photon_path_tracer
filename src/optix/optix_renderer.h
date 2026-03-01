@@ -176,6 +176,11 @@ public:
                        float grid_radius_override = 0.f,
                        int photon_map_seed = 0);
 
+    /// VA-01/02/03: Build view-adaptive emitter CDF from stored photon
+    /// source indices and re-upload to GPU.  Returns true if the CDF
+    /// was updated (i.e. enough photons had valid source indices).
+    bool build_view_adaptive_cdf(const Scene& scene, float beta);
+
     // -- Rendering ----------------------------------------------------
 
     /// Launch a single frame of the debug viewer (1 spp, progressive)
@@ -415,6 +420,10 @@ private:
     DeviceBuffer d_lum_sum_;          // float [W*H]
     DeviceBuffer d_lum_sum2_;         // float [W*H]
     DeviceBuffer d_active_mask_;      // uint8_t [W*H]
+    DeviceBuffer d_pixel_max_spp_;    // uint16_t [W*H] — AS-02 per-pixel budget
+
+    // Per-bounce AOV buffers (DB-04, §10.3)
+    DeviceBuffer d_bounce_aov_[MAX_AOV_BOUNCES]; // float [W*H*NUM_LAMBDA] each
 
     // GPU kernel profiling buffers (long long [W*H] each)
     DeviceBuffer d_prof_total_;
@@ -535,8 +544,19 @@ private:
     DeviceBuffer d_cell_flux_density_;
     int          cell_analysis_count_ = 0;  // number of cells uploaded
 
-    // Volume photon storage
-    PhotonSoA volume_photons_;
+    // Volume photon storage + spatial indices (VP-02/03)
+    PhotonSoA   volume_photons_;
+    HashGrid    volume_grid_;          // VP-02: 3D hash grid for volume photon kNN
+    CellBinGrid vol_cell_bin_grid_;    // VP-03: directional histogram grid for volume guide
+
+    // Device-side volume cell-bin grid (VP-07)
+    DeviceBuffer d_vol_cell_bin_grid_; // PhotonBin [vol_total_cells * bin_count]
+
+    // Device-side volume photon kNN data (MT-07)
+    DeviceBuffer d_vol_photon_pos_x_, d_vol_photon_pos_y_, d_vol_photon_pos_z_;
+    DeviceBuffer d_vol_photon_wi_x_,  d_vol_photon_wi_y_,  d_vol_photon_wi_z_;
+    DeviceBuffer d_vol_photon_lambda_, d_vol_photon_flux_;
+    DeviceBuffer d_vol_grid_sorted_indices_, d_vol_grid_cell_start_, d_vol_grid_cell_end_;
 
     // SPPM per-pixel buffers (GPU side)
     DeviceBuffer d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_;
@@ -607,10 +627,15 @@ inline void OptixRenderer::resize(int w, int h) {
     d_lum_sum_.alloc(pixels * sizeof(float));
     d_lum_sum2_.alloc(pixels * sizeof(float));
     d_active_mask_.alloc(pixels * sizeof(uint8_t));
+    d_pixel_max_spp_.alloc(pixels * sizeof(uint16_t));
 
     // Component buffers
     d_nee_direct_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
     d_photon_indirect_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
+
+    // Per-bounce AOV buffers (DB-04)
+    for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
+        d_bounce_aov_[b].alloc(pixels * NUM_LAMBDA * sizeof(float));
 
     // Profiling buffers
     d_prof_total_.alloc(pixels * sizeof(long long));
@@ -631,8 +656,11 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_lum_sum_.d_ptr,          0, d_lum_sum_.bytes));
     CUDA_CHECK(cudaMemset(d_lum_sum2_.d_ptr,         0, d_lum_sum2_.bytes));
     CUDA_CHECK(cudaMemset(d_active_mask_.d_ptr,      0, d_active_mask_.bytes));
+    CUDA_CHECK(cudaMemset(d_pixel_max_spp_.d_ptr,   0, d_pixel_max_spp_.bytes));
     CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+    for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
+        CUDA_CHECK(cudaMemset(d_bounce_aov_[b].d_ptr, 0, d_bounce_aov_[b].bytes));
 
     // Profiling buffers
     CUDA_CHECK(cudaMemset(d_prof_total_.d_ptr, 0, d_prof_total_.bytes));
@@ -666,6 +694,9 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     if (d_photon_indirect_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+    for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
+        if (d_bounce_aov_[b].d_ptr)
+            CUDA_CHECK(cudaMemset(d_bounce_aov_[b].d_ptr, 0, d_bounce_aov_[b].bytes));
     if (d_prof_total_.d_ptr)
         CUDA_CHECK(cudaMemset(d_prof_total_.d_ptr, 0, d_prof_total_.bytes));
     if (d_prof_ray_trace_.d_ptr)

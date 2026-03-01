@@ -81,6 +81,8 @@ set(CORE_SOURCES
     src/optix/optix_setup.cpp
     src/optix/optix_upload.cpp
     src/optix/optix_denoiser.cpp
+    src/optix/optix_photon_trace.cpp
+    src/optix/optix_caustic_debug.cpp
 )
 
 set(CUDA_SOURCES
@@ -263,6 +265,8 @@ if(PPT_BUILD_TESTS)
         src/optix/optix_setup.cpp
         src/optix/optix_upload.cpp
         src/optix/optix_denoiser.cpp
+        src/optix/optix_photon_trace.cpp
+        src/optix/optix_caustic_debug.cpp
     )
 
     add_executable(ppt_tests

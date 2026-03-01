@@ -208,6 +208,12 @@ struct LaunchParams {
     float*   lum_sum2;      // [width * height]  Σ Y_i²
     uint8_t* active_mask;   // [width * height]  1 = trace this pixel, 0 = skip
 
+    // ── Per-bounce AOV buffers (DB-04, §10.3) ────────────────────────
+    // When enabled, capture the radiance contribution at each of the
+    // first MAX_AOV_BOUNCES bounce depths for diagnostic visualisation.
+    float*    bounce_aov[MAX_AOV_BOUNCES]; // [W*H*NUM_LAMBDA] per-bounce radiance, nullptr = disabled
+    int       bounce_aov_enabled;          // 0 = off, 1 = on
+
     // ── Participating medium (volumetric scattering) ────────────────
     int   volume_enabled;       // 0 = off, 1 = on
     float volume_density;       // base extinction scale
@@ -245,6 +251,26 @@ struct LaunchParams {
     int        vol_cell_grid_dim_x;
     int        vol_cell_grid_dim_y;
     int        vol_cell_grid_dim_z;
+
+    // ── Volume photon kNN gather data (MT-07) ────────────────────────
+    // Uploaded from volume_photons_ SoA + volume_grid_ HashGrid for
+    // GPU-side kNN density estimation at terminal scatter events.
+    float*    vol_photon_pos_x;
+    float*    vol_photon_pos_y;
+    float*    vol_photon_pos_z;
+    float*    vol_photon_wi_x;
+    float*    vol_photon_wi_y;
+    float*    vol_photon_wi_z;
+    uint16_t* vol_photon_lambda;       // [num_vol_photons] wavelength bin
+    float*    vol_photon_flux;         // [num_vol_photons] per-photon flux
+    int       num_vol_photons;
+    int       num_vol_photons_emitted; // N_emitted for density normalisation
+    uint32_t* vol_grid_sorted_indices;
+    uint32_t* vol_grid_cell_start;
+    uint32_t* vol_grid_cell_end;
+    float     vol_grid_cell_size;
+    uint32_t  vol_grid_table_size;
+    float     vol_gather_radius;       // search radius for volume kNN
 
     // ── SPPM (Stochastic Progressive Photon Mapping) ────────────────
     // Per-pixel visible-point buffers (written by camera pass, read by

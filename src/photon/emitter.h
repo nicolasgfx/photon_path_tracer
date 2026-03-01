@@ -211,7 +211,7 @@ inline void trace_photons(const Scene& scene,
             // Volume point deposits — runtime gated via config.volume_enabled.
             {
             if (volume_map && config.volume_enabled && config.volume_density > 0.f) {
-                path_flags |= PHOTON_FLAG_VOLUME_SEGMENT;
+                path_flags |= PHOTON_FLAG_VOLUME_SCATTER;
                 float seg_t = hit.t;
                 float mid_y = ray.origin.y + ray.direction.y * (seg_t * 0.5f);
                 HomogeneousMedium med = make_rayleigh_medium(

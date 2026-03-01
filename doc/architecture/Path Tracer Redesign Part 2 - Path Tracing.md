@@ -893,8 +893,8 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 | CL-13 | Add new config.h parameters (§1.2) | [x] |
 | CL-14 | Rename `dev_bsdf_pdf` → `bsdf_pdf`, `dev_bsdf_sample` → `bsdf_sample`, `DevBSDFSample` → `BSDFSample` | [x] |
 | CL-15 | Remove `dev_generate_camera_ray` wrapper | [x] |
-| CL-16 | Slim `main.cpp` to ≤ 200 lines | [ ] |
-| CL-17 | Slim `optix_renderer.cpp` to ≤ 1200 lines | [ ] |
+| CL-16 | Slim `main.cpp` to ≤ 200 lines | [x] |
+| CL-17 | Slim `optix_renderer.cpp` to ≤ 1200 lines | [x] |
 
 ### 11.2 Photon Analysis (§3)
 
@@ -937,56 +937,56 @@ Assign F3 (currently reserved) to **visualise the guided direction PDF**:
 
 | ID | Task | Status |
 |---|---|---|
-| AS-01 | Pilot pass (4 SPP uniform) with luminance moment accumulation | [ ] |
-| AS-02 | Per-pixel cost map from photon analysis + pilot variance | [ ] |
+| AS-01 | Pilot pass (4 SPP uniform) with luminance moment accumulation | [x] |
+| AS-02 | Per-pixel cost map from photon analysis + pilot variance | [x] |
 | AS-03 | Variable SPP per pixel (clamp to [1, 4×base]) | [x] |
 | AS-04 | GPU implementation of `compute_pixel_spp()` | [x] |
-| AS-05 | Progress-aware SPP tracking (partial pixels) | [ ] |
+| AS-05 | Progress-aware SPP tracking (partial pixels) | [x] |
 
 ### 11.6 View-Adaptive Budgeting (§8)
 
 | ID | Task | Status |
 |---|---|---|
-| VA-01 | Per-emitter visibility counting from pilot pass | [ ] |
-| VA-02 | `emitter_usefulness[]` aggregation from visible cells | [ ] |
-| VA-03 | Mixture CDF: $(1-\beta) \cdot p_\text{power} + \beta \cdot p_\text{view}$ | [ ] |
-| VA-04 | Re-trace photon map with updated CDF | [ ] |
-| VA-05 | Progressive re-trace option | [ ] |
+| VA-01 | Per-emitter visibility counting from pilot pass | [x] |
+| VA-02 | `emitter_usefulness[]` aggregation from visible cells | [x] |
+| VA-03 | Mixture CDF: $(1-\beta) \cdot p_\text{power} + \beta \cdot p_\text{view}$ | [x] |
+| VA-04 | Re-trace photon map with updated CDF | [x] |
+| VA-05 | Progressive re-trace option | [x] |
 
 ### 11.7 Medium Transport — Camera Side (§9)
 
 | ID | Task | Status |
 |---|---|---|
-| MT-01 | GPU MediumStack (parallel to IORStack) | [ ] |
-| MT-02 | Free-flight sampling with hero-wavelength spectral MIS | [ ] |
-| MT-03 | HG phase function scatter direction sampling | [ ] |
-| MT-04 | HG + volume photon guide mixture sampling | [ ] |
-| MT-05 | Russian roulette inside media scatter loop | [ ] |
-| MT-06 | NEE at medium scatter events (with Beer-Lambert attenuation) | [ ] |
-| MT-07 | Volume kNN density estimate at terminal scatter events | [ ] |
-| MT-08 | Volume double-attenuation guard | [ ] |
+| MT-01 | GPU MediumStack (parallel to IORStack) | [x] |
+| MT-02 | Free-flight sampling with hero-wavelength spectral MIS | [x] |
+| MT-03 | HG phase function scatter direction sampling | [x] |
+| MT-04 | HG + volume photon guide mixture sampling | [x] |
+| MT-05 | Russian roulette inside media scatter loop | [x] |
+| MT-06 | NEE at medium scatter events (with Beer-Lambert attenuation) | [x] |
+| MT-07 | Volume kNN density estimate at terminal scatter events | [x] |
+| MT-08 | Volume double-attenuation guard | [x] |
 
 ### 11.8 Medium Transport — Photon Side (Part 1 update, §9.8)
 
 | ID | Task | Status |
 |---|---|---|
 | VP-01 | Volume photon deposit at scatter events (new `volume_photons` SoA) | [x] |
-| VP-02 | 3D `volume_grid` hash grid for volume photons | [ ] |
-| VP-03 | `vol_cell_bin_grid` directional histograms from volume photons | [ ] |
-| VP-04 | Remove beam segment recording from photon bounce loop | [ ] |
-| VP-05 | Delete `photon_beam.h` placeholder | [ ] |
-| VP-06 | Replace `PHOTON_FLAG_VOLUME_SEGMENT` → `PHOTON_FLAG_VOLUME_SCATTER` | [ ] |
-| VP-07 | Upload `volume_grid`, `vol_cell_bin_grid` to GPU | [ ] |
+| VP-02 | 3D `volume_grid` hash grid for volume photons | [x] |
+| VP-03 | `vol_cell_bin_grid` directional histograms from volume photons | [x] |
+| VP-04 | Remove beam segment recording from photon bounce loop | [x] |
+| VP-05 | Delete `photon_beam.h` placeholder | [x] |
+| VP-06 | Replace `PHOTON_FLAG_VOLUME_SEGMENT` → `PHOTON_FLAG_VOLUME_SCATTER` | [x] |
+| VP-07 | Upload `volume_grid`, `vol_cell_bin_grid` to GPU | [x] |
 
 ### 11.9 Debug & Visualisation (§10)
 
 | ID | Task | Status |
 |---|---|---|
-| DB-01 | Update TAB render modes for v3 | [ ] |
-| DB-02 | Add "Guide Map" render mode | [ ] |
-| DB-03 | Add "Caustic Only" render mode | [ ] |
-| DB-04 | Per-bounce AOV buffers | [ ] |
-| DB-05 | F3 guide visualisation (hemisphere heatmap) | [ ] |
+| DB-01 | Update TAB render modes for v3 | [x] |
+| DB-02 | Add "Guide Map" render mode | [x] |
+| DB-03 | Add "Caustic Only" render mode | [x] |
+| DB-04 | Per-bounce AOV buffers | [x] |
+| DB-05 | F3 guide visualisation (hemisphere heatmap) | [x] |
 | DB-06 | Console printout of photon analysis statistics | [x] |
 
 ---

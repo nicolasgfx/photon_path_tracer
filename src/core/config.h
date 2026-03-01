@@ -142,6 +142,9 @@ constexpr bool  DEFAULT_USE_GUIDE        = true;        // [K]  enable/disable g
 constexpr int  DEFAULT_GUIDE_FALLBACK_BOUNCE = 3;       // [R]  switch to photon gather after this bounce
 constexpr bool DEFAULT_PHOTON_FINAL_GATHER   = true;    // [K]  use photon map as final gather at terminal bounces
 
+// ── Per-bounce AOV debug buffers (DB-04, §10.3) ─────────────────────
+constexpr int   MAX_AOV_BOUNCES = 4;                    // first N bounces captured
+
 // ── Legacy aliases (still referenced by SPPM, CPU renderer, NEE) ────
 constexpr int   DEFAULT_MAX_SPECULAR_CHAIN     = DEFAULT_MAX_BOUNCES_CAMERA;  // alias for SPPM camera pass
 constexpr bool  DEFAULT_USE_MIS                = true;
