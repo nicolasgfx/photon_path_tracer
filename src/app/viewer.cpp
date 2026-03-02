@@ -314,7 +314,7 @@ static void render_help_overlay(int win_w, int win_h,
     };
 
     auto line = [&](float& cy, float cx, const char* text,
-                    float r = 0.82f, float g = 0.82f, float b = 0.82f) {
+                    float r = 1.0f, float g = 1.0f, float b = 1.0f) {
         draw_shadow_text(cx * inv, cy * inv, text, r, g, b, 1.f);
         cy += line_h * 0.78f;
     };
@@ -1408,6 +1408,8 @@ void run_interactive(
                 // Cell analysis distribution + conclusions (from gather_stats)
                 rs.guide_dist  = stats.guide_dist;
                 rs.conclusions = stats.conclusions;
+                // Hash histogram multi-resolution guide stats
+                rs.hash_hist   = stats.hash_hist;
                 print_stats_console(rs);
 
                 // ── Analysis report JSON (for LLM / GPU expert) ──────

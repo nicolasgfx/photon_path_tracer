@@ -20,7 +20,7 @@ That means at any hitpoint, we sample the kNN neighbourhood for photons and anal
 
 **Target state (v3):** A photon-guided path tracer.  Every camera bounce performs:
 1. **NEE** — 1 shadow ray toward a light source, MIS-weighted against the BSDF (standard practice in all production path tracers; Veach 1997)
-2. **Photon-guided direction sampling** — the cell-bin histogram provides a directional PDF of incoming light; the next-bounce direction is drawn from a **BSDF + photon-guide mixture PDF**.  This is the core innovation: the photon map tells the path tracer *where light is coming from*, replacing blind random-walk exploration with informed importance sampling.
+2. **Photon-guided direction sampling** — the multi-resolution hash histogram provides a directional PDF of incoming light; the next-bounce direction is drawn from a **BSDF + photon-guide mixture PDF**.  This is the core innovation: the photon map tells the path tracer *where light is coming from*, replacing blind random-walk exploration with informed importance sampling.
 3. **Photon analysis** — per-cell density, variance, type, and energy drive adaptive decisions (sample count, guide fraction, caustic handling)
 
 The guide fraction (probability of picking the photon PDF vs the BSDF PDF) is always active.  In cells with no photons, it degrades gracefully to pure BSDF sampling ($\alpha = 0$).  The photon map shifts from being the *sole* indirect answer to being a **guide and fallback**: guide at every bounce, final gather at path termination, and direct density estimate for caustics.
@@ -126,7 +126,8 @@ Pass 1: Photon Tracing (updated — see §9.6 for Part 1 changes)
   ├─ Emit caustic photons   → caustic_photons (PhotonSoA)
   ├─ Volume photon deposits  → volume_photons (PhotonSoA)     [NEW]
   ├─ Build hash grids       → global_grid, caustic_grid, volume_grid
-  ├─ Build CellBinGrid      → cell_bin_grid (directional histograms)
+  ├─ Build HashHistogram     → hash_histogram (multi-res directional histograms)
+  ├─ Build CellBinGrid       → cell_bin_grid (legacy, for analysis + volume guide)
   ├─ Build VolumeCellBinGrid → vol_cell_bin_grid (3D volume)   [NEW]
   └─ Photon analysis        → per-cell density/variance/type maps  [NEW]
 
@@ -148,7 +149,7 @@ Pass 2: Camera Path Tracing (NEW — replaces NEE first-hit)
   │   │   ├─ If translucent → Fresnel R/T, push/pop medium, continue
   │   │   ├─ NEE: 1 shadow ray → direct light (MIS with BSDF)
   │   │   ├─ Sample next direction:
-  │   │   │   ├─ With probability p_guide: guided sample (cell histogram)
+  │   │   │   ├─ With probability p_guide: guided sample (hash histogram, multi-res)
   │   │   │   └─ With probability 1-p_guide: BSDF sample
   │   │   │   └─ MIS-combine both PDFs
   │   │   ├─ Russian roulette (after min bounces)
@@ -163,7 +164,7 @@ The photon map serves three distinct roles in the new architecture:
 
 | Role | When | How |
 |---|---|---|
-| **Guide** | Every non-delta surface bounce | Cell-bin histogram provides a directional PDF for importance sampling. Cheap (O(1) lookup). |
+| **Guide** | Every non-delta surface bounce | Hash histogram (multi-resolution, Teschner spatial hash) provides a directional PDF for importance sampling. Cheap (O(1) lookup per level). Coarse-to-fine selection uses the finest level with data. |
 | **Volume guide** | Every medium scatter event | Volume cell-bin grid provides directional PDF inside participating media. Same mechanism, 3D grid instead of surface grid. |
 | **Final gather** | Terminal bounce (max depth or RR termination) | Instead of returning black at path termination, query the photon map for an estimate of remaining indirect light. Reduces bias from path truncation. |
 | **Caustic capture** | Any bounce hitting a surface with caustic photons | Caustic photons carry L→S→D transport that the camera path cannot efficiently reconstruct. The photon density estimate at caustic-flagged cells is added directly. |
@@ -188,13 +189,15 @@ The photon map serves three distinct roles in the new architecture:
 
 > This section implements the four analysis dimensions from the project specification.
 
-At every non-delta camera bounce, the path tracer reads the local photon neighbourhood to make sampling decisions.  The analysis is performed on the **cell-bin grid** (O(1)) not kNN (too expensive per bounce).
+At every non-delta camera bounce, the path tracer reads the local photon neighbourhood to make sampling decisions.  Directional guidance is performed on the **hash histogram** (O(1) per level); per-cell analysis metrics (density, variance, type) are computed from the **CellInfoCache** which shares the same Teschner hash indexing.
 
 ### 3.1 Directional Analysis — "Where is the light coming from?"
 
-**Source:** CellBinGrid `bin_flux[32]` for the cell containing the hit point.
+**Source:** `HashHistogram` multi-resolution hash-indexed directional histograms (replaces the former dense `CellBinGrid` for surface guide).  At each hit point, the GPU reads `GpuGuideBin[32]` from a Teschner spatial hash table.  Multiple resolution levels (cell sizes from `gather_radius × 2` up to `gather_radius × 16`) are queried coarsest-to-finest; the finest level with non-zero `scalar_flux` is used.
 
-**Use:** The Fibonacci-sphere histogram already encodes the incoming radiance distribution.  Bins with high flux indicate dominant light directions.  The existing guided sampling (Part 1 §4) directly uses this histogram.
+> **Implementation note:** The dense `CellBinGrid` is still built for volume guide and for `build_cell_analysis()` (conclusion counters), but the camera-side surface guide sampling now reads from `HashHistogram` exclusively.
+
+**Use:** The Fibonacci-sphere histogram encodes the incoming radiance distribution.  Bins with high flux indicate dominant light directions.  The hash histogram replaces dense-grid indexing with hash-based O(1) lookup, eliminating the index-domain mismatch between CellInfoCache (hash-indexed) and CellBinGrid (dense flat index).
 
 **Enhancement for v3:**  Weight the guide fraction `p_guide` by histogram quality:
 - If `total_flux > 0` and the histogram has ≥3 non-zero bins: `p_guide = DEFAULT_GUIDE_FRACTION`
@@ -548,7 +551,7 @@ Replaces `full_path_trace()` in `optix_path_trace.cuh`.
 
 Net register delta: approximately neutral.
 
-**Memory access pattern:**  The critical new access is the cell-bin histogram read at each non-delta bounce.  This is a contiguous 32-float array per cell — 128 bytes.  On SM 8.0+, this fits in L1 cache.  For 5M photons across 64K cells at 32 bins, the total grid is 8 MB — fits comfortably in L2.
+**Memory access pattern:**  The critical new access is the hash histogram read at each non-delta bounce.  Each `GpuGuideBin` is 16 bytes (`scalar_flux`, `avg_nx/ny/nz`); 32 bins per cell = 512 bytes.  The hash table has 65,536 buckets × 32 bins × 16 bytes = 32 MB per level.  Multi-resolution uses N levels (default 1, up to 8), totalling up to 256 MB.  The GPU reads coarsest-to-finest and stops at the first populated level — typically only 1–2 cache-line reads per bounce.
 
 ### 5.2 Launch Configuration
 
@@ -564,6 +567,11 @@ float  rr_threshold;             // max survival probability
 float  guide_fraction;           // base guided/BSDF mix ratio
 int    guide_fallback_bounce;    // switch to photon gather after this
 int    photon_final_gather;      // 1 = use photon map at terminal bounce
+
+// ── Multi-Resolution Hash Histogram (surface guide) ─────────────────
+GpuGuideBin* guide_histogram[MAX_GUIDE_LEVELS]; // per-level hash tables
+float  guide_cell_size[MAX_GUIDE_LEVELS];        // cell size per level
+int    guide_num_levels;                          // active levels (1..8)
 
 // ── Photon Analysis (per-cell, precomputed) ─────────────────────────
 float* cell_caustic_fraction;    // [grid_total_cells]
@@ -599,7 +607,7 @@ Spectrum path_trace_cpu(
     const PhotonSoA& caustic_photons,
     const HashGrid& global_grid,
     const HashGrid& caustic_grid,
-    const CellBinGrid& cell_bin_grid);
+    const HashHistogram& hash_histogram);
 ```
 
 The CPU version shares:
@@ -787,14 +795,14 @@ MIS-weighted against the phase function PDF (same power heuristic as surface NEE
 
 ### 9.7 Volume Photon Guide
 
-The volume cell-bin grid (`vol_cell_bin_grid`) is a 3D hash grid of directional histograms, built from volume photon deposits.  It is the volumetric analogue of the surface `CellBinGrid`:
+The volume cell-bin grid (`vol_cell_bin_grid`) is a 3D hash grid of directional histograms, built from volume photon deposits.  It is the volumetric analogue of the surface guide (which now uses `HashHistogram`):
 
-| Surface guide | Volume guide |
+| Surface guide (HashHistogram) | Volume guide (CellBinGrid) |
 |---|---|
-| Indexed by surface cell (2.5D) | Indexed by 3D cell |
+| Indexed by Teschner hash, multi-res levels | Indexed by 3D cell (dense grid) |
 | Built from surface photon `wi` | Built from volume photon `wi` at scatter points |
 | Used at non-delta surface bounces | Used at medium scatter events |
-| Histogram: `bin_flux[32]` | Histogram: `bin_flux[32]` (same Fibonacci sphere binning) |
+| Compact `GpuGuideBin` (16 B/bin) | Full `PhotonBin` (52 B/bin) |
 
 ### 9.8 Part 1 Update: Volume Photon Deposits
 

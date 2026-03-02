@@ -230,10 +230,17 @@ struct LaunchParams {
     int   volume_samples;       // medium samples per ray segment
     float volume_max_t;         // max march distance for miss rays
 
-    // ── Dense 3D cell-bin grid (replaces per-pixel bin cache) ────────
-    // Precomputed on CPU, uploaded once.  Each grid cell contains
-    // PHOTON_BIN_COUNT directional bins with accumulated flux from
-    // the 3×3×3 photon neighbourhood.  O(1) lookup at render time.
+    // ── Multi-resolution hash histogram (replaces CellBinGrid §4) ──────
+    // Each level is a 65K Teschner-hash table of PHOTON_BIN_COUNT GpuGuideBins.
+    // GPU query: coarse-to-fine — use finest level with data for the cell.
+    GpuGuideBin* guide_histogram[MAX_GUIDE_LEVELS]; // per-level bin data [TABLE_SIZE * bin_count]
+    float         guide_cell_size[MAX_GUIDE_LEVELS]; // cell size at each level
+    int           guide_num_levels;                   // 0 = disabled
+
+    // ── Dense 3D cell-bin grid (legacy, retained for volume guide) ───
+    // Surface guided sampling now uses guide_histogram[] above.
+    // The dense grid fields below are still used by the volume photon
+    // guide path (vol_cell_bin_grid) and the use_dense_grid_gather flag.
     PhotonBin* cell_bin_grid;        // [grid_total_cells * photon_bin_count]
     int        photon_bin_count;     // runtime copy of PHOTON_BIN_COUNT
     int        cell_grid_valid;      // 1 = grid uploaded, 0 = not available

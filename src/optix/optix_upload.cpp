@@ -248,9 +248,9 @@ void OptixRenderer::upload_photon_data(
     // Copy into stored_photons_
     stored_photons_ = global_photons;
 
-    // ── Build CellBinGrid (directional histograms for guided sampling) ──
-    // Same logic as trace_photons(): precompute bin_idx, build 3D grid,
-    // upload to GPU, then build per-cell analysis.
+    // ── Build directional histograms for guided sampling ─────────────
+    // Same logic as trace_photons(): precompute bin_idx, build hash
+    // histogram + legacy CellBinGrid, upload to GPU, then analysis.
     {
         PhotonBinDirs bin_dirs;
         bin_dirs.init(PHOTON_BIN_COUNT);
@@ -262,8 +262,21 @@ void OptixRenderer::upload_photon_data(
             stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
         }
 
-        cell_bin_grid_.build(stored_photons_, gather_radius_, PHOTON_BIN_COUNT);
+        // Multi-resolution hash histogram (primary guide data)
+        hash_histogram_.build(stored_photons_, gather_radius_,
+                              PHOTON_BIN_COUNT, DEFAULT_GUIDE_NUM_LEVELS);
+        for (int lv = 0; lv < hash_histogram_.num_levels; ++lv) {
+            const auto& gpu_data = hash_histogram_.gpu_bins(lv);
+            if (!gpu_data.empty())
+                d_guide_histogram_[lv].upload(gpu_data);
+            else
+                d_guide_histogram_[lv].free();
+        }
+        for (int lv = hash_histogram_.num_levels; lv < MAX_GUIDE_LEVELS; ++lv)
+            d_guide_histogram_[lv].free();
 
+        // Legacy CellBinGrid (retained for analysis / test compat)
+        cell_bin_grid_.build(stored_photons_, gather_radius_, PHOTON_BIN_COUNT);
         if (cell_bin_grid_.total_cells() > 0 && !cell_bin_grid_.bins.empty())
             d_cell_bin_grid_.upload(cell_bin_grid_.bins);
         else

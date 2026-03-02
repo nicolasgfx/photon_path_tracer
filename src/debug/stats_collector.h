@@ -99,6 +99,32 @@ struct GuideFractionDist {
     }
 };
 
+// ── Hash histogram per-level statistics ─────────────────────────────
+struct HashHistLevelStats {
+    float cell_size          = 0.f;
+    float scale_factor       = 0.f;  // cell_size / gather_radius
+    int   table_size         = 0;
+    int   bin_count          = 0;
+    int   populated_buckets  = 0;
+    int   populated_bins     = 0;
+    float total_flux         = 0.f;
+    float min_flux           = 0.f;
+    float max_flux           = 0.f;
+    float avg_flux           = 0.f;
+    float occupancy_pct      = 0.f;
+    size_t gpu_memory_bytes  = 0;
+};
+
+struct HashHistStats {
+    int   num_levels          = 0;
+    int   photons_processed   = 0;
+    float gather_radius       = 0.f;
+    size_t total_gpu_bytes    = 0;
+    HashHistLevelStats levels[8]; // MAX_GUIDE_LEVELS
+
+    void reset() { *this = HashHistStats{}; }
+};
+
 // ── Full statistics snapshot ────────────────────────────────────────
 struct RendererStats {
     // Photon mapping
@@ -111,6 +137,7 @@ struct RendererStats {
     float gather_radius          = 0.f;
     float caustic_radius         = 0.f;
     GridOccupancy grid_occupancy;
+    HashHistStats hash_hist;
 
     // Path tracing
     int   spp_min = 0, spp_max = 0;
@@ -230,6 +257,31 @@ inline void print_stats_console(const RendererStats& s) {
                 s.grid_occupancy.min_photons_per_cell,
                 s.grid_occupancy.max_photons_per_cell,
                 s.grid_occupancy.avg_photons_per_cell);
+
+    // ── Hash Histogram (Multi-Resolution Guide) ─────────────────────
+    if (s.hash_hist.num_levels > 0) {
+        std::printf("╠──────────────────────────────────────────────────────╣\n");
+        std::printf("║ HASH HISTOGRAM (MULTI-RESOLUTION GUIDE)             ║\n");
+        std::printf("║  Levels: %d  |  Photons: %d  |  Gather radius: %.5f\n",
+                    s.hash_hist.num_levels,
+                    s.hash_hist.photons_processed,
+                    s.hash_hist.gather_radius);
+        std::printf("║  Total GPU memory: %.1f MB\n",
+                    (double)s.hash_hist.total_gpu_bytes / (1024.0 * 1024.0));
+        for (int lv = 0; lv < s.hash_hist.num_levels; ++lv) {
+            const auto& L = s.hash_hist.levels[lv];
+            std::printf("║  Level %d  cell=%.4f (%.0fx)  table=%d  bins=%d\n",
+                        lv, L.cell_size, L.scale_factor,
+                        L.table_size, L.bin_count);
+            std::printf("║    Buckets: %d/%d populated (%.1f%%)\n",
+                        L.populated_buckets, L.table_size, L.occupancy_pct);
+            std::printf("║    Bins:    %d populated\n", L.populated_bins);
+            std::printf("║    Flux:    total=%.4f  min=%.6f  max=%.4f  avg=%.6f\n",
+                        L.total_flux, L.min_flux, L.max_flux, L.avg_flux);
+            std::printf("║    GPU:     %.1f MB\n",
+                        (double)L.gpu_memory_bytes / (1024.0 * 1024.0));
+        }
+    }
 
     // ── Path Tracing ────────────────────────────────────────────────
     std::printf("╠──────────────────────────────────────────────────────╣\n");
@@ -386,6 +438,38 @@ inline void write_analysis_json(const AnalysisReport& r,
     f << "      \"photons_per_cell_max\": " << s.grid_occupancy.max_photons_per_cell << ",\n";
     f << "      \"photons_per_cell_avg\": " << s.grid_occupancy.avg_photons_per_cell << "\n";
     f << "    }\n";
+    f << "  },\n";
+
+    // Hash histogram (multi-resolution guide)
+    f << "  \"hash_histogram\": {\n";
+    f << "    \"num_levels\": " << s.hash_hist.num_levels << ",\n";
+    f << "    \"photons_processed\": " << s.hash_hist.photons_processed << ",\n";
+    f << "    \"gather_radius\": " << s.hash_hist.gather_radius << ",\n";
+    f << "    \"total_gpu_memory_bytes\": " << s.hash_hist.total_gpu_bytes << ",\n";
+    f << "    \"total_gpu_memory_mb\": " << (double)s.hash_hist.total_gpu_bytes / (1024.0 * 1024.0) << ",\n";
+    f << "    \"levels\": [\n";
+    for (int lv = 0; lv < s.hash_hist.num_levels; ++lv) {
+        const auto& L = s.hash_hist.levels[lv];
+        f << "      {\n";
+        f << "        \"level\": " << lv << ",\n";
+        f << "        \"cell_size\": " << L.cell_size << ",\n";
+        f << "        \"scale_factor\": " << L.scale_factor << ",\n";
+        f << "        \"table_size\": " << L.table_size << ",\n";
+        f << "        \"bin_count\": " << L.bin_count << ",\n";
+        f << "        \"populated_buckets\": " << L.populated_buckets << ",\n";
+        f << "        \"populated_bins\": " << L.populated_bins << ",\n";
+        f << "        \"occupancy_pct\": " << L.occupancy_pct << ",\n";
+        f << "        \"total_flux\": " << L.total_flux << ",\n";
+        f << "        \"min_flux\": " << L.min_flux << ",\n";
+        f << "        \"max_flux\": " << L.max_flux << ",\n";
+        f << "        \"avg_flux\": " << L.avg_flux << ",\n";
+        f << "        \"gpu_memory_bytes\": " << L.gpu_memory_bytes << ",\n";
+        f << "        \"gpu_memory_mb\": " << (double)L.gpu_memory_bytes / (1024.0 * 1024.0) << "\n";
+        f << "      }";
+        if (lv + 1 < s.hash_hist.num_levels) f << ",";
+        f << "\n";
+    }
+    f << "    ]\n";
     f << "  },\n";
 
     // Path tracing / guidance

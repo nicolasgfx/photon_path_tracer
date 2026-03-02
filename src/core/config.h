@@ -221,6 +221,9 @@ constexpr uint32_t CELL_CACHE_TABLE_SIZE     = 65536u;  // 64K cells
 constexpr int PHOTON_BIN_COUNT     = 32;    // runtime bin count (quasi-uniform S²)
 constexpr int MAX_PHOTON_BIN_COUNT = 64;    // compile-time upper bound for fixed arrays
 
+// ── Multi-resolution hash histogram (replaces CellBinGrid §4) ──────
+constexpr int MAX_GUIDE_LEVELS = 8;         // compile-time max resolution levels
+
 
 // ── Targeted caustic emission (§11: specular geometry sampling) ─────
 // Fraction of caustic budget directed at specular surfaces via

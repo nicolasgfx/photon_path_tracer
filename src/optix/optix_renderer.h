@@ -16,6 +16,7 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/cell_bin_grid.h"
+#include "photon/hash_histogram.h"
 #include "debug/stats_collector.h"
 #include "optix/launch_params.h"
 
@@ -321,6 +322,9 @@ public:
         GuideFractionDist guide_dist;
         ConclusionCounters conclusions;
 
+        // Hash histogram (multi-resolution guide)
+        HashHistStats hash_hist;
+
         // Config
         int    max_bounces_camera   = 0;
         int    max_bounces_photon   = 0;
@@ -544,8 +548,12 @@ private:
     // Host-side cell-bin grid (kept after build for save/test access)
     CellBinGrid cell_bin_grid_;  // empty unless dense grid is built
 
-    // Device-side cell-bin grid (for guided sampling on GPU)
+    // Device-side cell-bin grid (for volume guide / legacy dense gather)
     DeviceBuffer d_cell_bin_grid_;  // PhotonBin [total_cells * bin_count]
+
+    // ── Multi-resolution hash histogram (replaces CellBinGrid for guide) ──
+    HashHistogram hash_histogram_;
+    DeviceBuffer  d_guide_histogram_[MAX_GUIDE_LEVELS];  // GpuGuideBin per level
 
     // Per-cell photon analysis (PA-08: GPU upload buffers)
     DeviceBuffer d_cell_guide_fraction_;

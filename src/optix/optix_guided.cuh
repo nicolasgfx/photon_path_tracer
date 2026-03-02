@@ -2,13 +2,17 @@
 
 // optix_guided.cuh — §4 Photon-guided direction sampling on GPU
 //
-// At each camera bounce, the pre-built CellBinGrid (Fibonacci sphere
-// histograms, 32 bins/cell) provides an O(1) directional guide.
-// The guide direction is MIS-combined with the standard BSDF sample
+// At each camera bounce, the precomputed hash histogram (Fibonacci sphere
+// histograms, 32 bins/cell, multi-resolution) provides an O(1) directional
+// guide.  The guide direction is MIS-combined with the standard BSDF sample
 // using the balance heuristic.
 //
-// Build phase:  CellBinGrid::build() on CPU (fully implemented).
+// Build phase:  HashHistogram::build() on CPU (hash_histogram.h).
 // Query phase:  this file — called from full_path_trace().
+//
+// Multi-resolution: multiple hash tables at increasing cell sizes.
+// Coarse-to-fine selection: iterate from coarsest to finest level,
+// take the finest level that has photon data for the queried cell.
 
 // ── Fibonacci sphere bin directions (device) ────────────────────────
 // Pre-compute once and store in a small local array.
@@ -53,19 +57,9 @@ float bin_solid_angle(int num_bins) {
     return (4.0f * PI) / (float)num_bins;
 }
 
-// ── Cell lookup: world position → flat grid index ───────────────────
-
-__forceinline__ __device__
-int dev_cell_grid_index(float3 pos) {
-    int ix = (int)floorf((pos.x - params.cell_grid_min_x) / params.cell_grid_cell_size);
-    int iy = (int)floorf((pos.y - params.cell_grid_min_y) / params.cell_grid_cell_size);
-    int iz = (int)floorf((pos.z - params.cell_grid_min_z) / params.cell_grid_cell_size);
-    ix = max(0, min(ix, params.cell_grid_dim_x - 1));
-    iy = max(0, min(iy, params.cell_grid_dim_y - 1));
-    iz = max(0, min(iz, params.cell_grid_dim_z - 1));
-    return ix + iy * params.cell_grid_dim_x
-             + iz * params.cell_grid_dim_x * params.cell_grid_dim_y;
-}
+// ── Cell lookup: world position → dense grid index (volume only) ─────
+// The surface histogram now uses hash-indexed guide_histogram[].
+// This dense-grid lookup is retained only for the volume photon guide.
 
 // ── Cell cache lookup: world position → hash-table index ────────────
 // Mirrors CellInfoCache::cell_key() — Teschner spatial hash into a
@@ -83,14 +77,24 @@ uint32_t dev_cell_cache_index(float3 pos) {
     return teschner_hash(cell, CELL_CACHE_TABLE_SIZE);
 }
 
-// ── Read histogram for a cell → total_flux + scalar_flux array ──────
+// ── Read histogram: multi-res hash → total_flux + scalar_flux array ─
 
 struct GuidedHistogram {
     float bin_flux[MAX_PHOTON_BIN_COUNT];   // scalar_flux per bin
     float total_flux;                        // sum over all bins
     int   num_bins;
-    bool  valid;                             // true if grid available and total > 0
+    bool  valid;                             // true if any level has data
 };
+
+// Hash a world-space position at a given cell_size to a table bucket.
+__forceinline__ __device__
+uint32_t dev_guide_hash(float3 pos, float cell_size) {
+    int3 cell = make_i3(
+        (int)floorf(pos.x / cell_size),
+        (int)floorf(pos.y / cell_size),
+        (int)floorf(pos.z / cell_size));
+    return teschner_hash(cell, CELL_CACHE_TABLE_SIZE);
+}
 
 __forceinline__ __device__
 GuidedHistogram dev_read_cell_histogram(float3 pos, float3 normal) {
@@ -99,29 +103,46 @@ GuidedHistogram dev_read_cell_histogram(float3 pos, float3 normal) {
     h.num_bins   = params.photon_bin_count;
     h.valid      = false;
 
-    if (!params.cell_grid_valid || !params.cell_bin_grid || h.num_bins <= 0)
+    if (params.guide_num_levels <= 0 || h.num_bins <= 0)
         return h;
 
-    int cell = dev_cell_grid_index(pos);
-    const PhotonBin* bins = &params.cell_bin_grid[cell * h.num_bins];
+    // Coarse-to-fine level selection:
+    // Start at the coarsest level, iterate towards finest.
+    // Use the finest level that has any photon data (total_flux > 0).
+    for (int level = params.guide_num_levels - 1; level >= 0; --level) {
+        float cs = params.guide_cell_size[level];
+        if (cs <= 0.f || !params.guide_histogram[level]) continue;
 
-    // Sum scalar_flux over all bins, applying a hemisphere gate:
-    // only include bins whose average photon normal is compatible
-    // with the query-point normal (prevents cross-surface leakage).
-    for (int k = 0; k < h.num_bins; ++k) {
-        float sf = bins[k].scalar_flux;
-        // Normal gate: skip bins whose deposited normals face away
-        float3 avg_n = make_f3(bins[k].avg_nx, bins[k].avg_ny, bins[k].avg_nz);
-        float n_dot = dot(avg_n, normal);
-        if (n_dot < 0.1f || sf <= 0.f) {
-            h.bin_flux[k] = 0.f;
-        } else {
-            h.bin_flux[k] = sf;
-            h.total_flux += sf;
+        uint32_t bucket = dev_guide_hash(pos, cs);
+        const GpuGuideBin* bins =
+            &params.guide_histogram[level][bucket * h.num_bins];
+
+        float level_flux = 0.f;
+        float level_bins[MAX_PHOTON_BIN_COUNT];
+
+        for (int k = 0; k < h.num_bins; ++k) {
+            float sf = bins[k].scalar_flux;
+            // Normal gate: skip bins whose average normal faces away
+            float3 avg_n = make_f3(bins[k].avg_nx, bins[k].avg_ny, bins[k].avg_nz);
+            float n_dot = dot(avg_n, normal);
+            if (n_dot < 0.1f || sf <= 0.f) {
+                level_bins[k] = 0.f;
+            } else {
+                level_bins[k] = sf;
+                level_flux += sf;
+            }
+        }
+
+        if (level_flux > 0.f) {
+            // This level has data — use it (finest reliable level)
+            for (int k = 0; k < h.num_bins; ++k)
+                h.bin_flux[k] = level_bins[k];
+            h.total_flux = level_flux;
+            h.valid = true;
+            break;
         }
     }
 
-    h.valid = (h.total_flux > 0.f);
     return h;
 }
 

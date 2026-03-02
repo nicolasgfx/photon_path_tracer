@@ -56,6 +56,18 @@ Statistics are displayed in two places:
 - Gather and caustic radii
 - Hash grid: total cells, populated cells, occupancy %, photons/cell (min/max/avg)
 
+#### Hash Histogram (Multi-Resolution Guide)
+- Number of resolution levels
+- Photons processed, gather radius
+- Total GPU memory (all levels)
+- Per-level details:
+  - Cell size, scale factor (cell_size / gather_radius)
+  - Table size (buckets), bin count per bucket
+  - Populated buckets / total buckets (occupancy %)
+  - Populated bins (individual directional bins with flux > 0)
+  - Flux statistics: total, min, max, average (over populated bins)
+  - GPU memory (bytes and MB)
+
 #### Path Tracing
 - SPP: min, max, avg
 - Guide state: enabled/disabled, fraction, histogram-only mode
@@ -72,7 +84,8 @@ Statistics are displayed in two places:
 - Per-phase timing (when available): photon trace, caustic trace, targeted trace, hash grid build, cell grid build, camera pass, denoiser
 
 **Files:**
-- `src/debug/stats_collector.h` — `RendererStats`, `ConclusionCounters`, `PhotonFlagCounts`, `TimingStats`, `GridOccupancy`, `GuideFractionDist`, `print_stats_console()`
+- `src/debug/stats_collector.h` — `RendererStats`, `ConclusionCounters`, `PhotonFlagCounts`, `TimingStats`, `GridOccupancy`, `GuideFractionDist`, `HashHistStats`, `HashHistLevelStats`, `print_stats_console()`
+- `src/photon/hash_histogram.h` — `HashHistogram`, `HashHistLevel` (per-level stats computed during `finalize()`)
 - `src/photon/photon_analysis.h` — `build_cell_analysis()` now accepts optional `ConclusionCounters*`
 
 ---
@@ -150,6 +163,7 @@ path tracing, timing, config) plus camera state.
 | `camera` | Position, look_at, FOV, light scale |
 | `geometry` | Triangles, emissive tris, materials |
 | `photon_map` | Budgets, radii, flags, grid occupancy |
+| `hash_histogram` | Multi-resolution guide: num_levels, per-level occupancy/flux/memory, total GPU memory |
 | `path_tracing` | Guide state, conclusions, histogram, SPP range |
 | `timing_ms` | Per-phase breakdown |
 | `config` | Compile-time constants snapshot |

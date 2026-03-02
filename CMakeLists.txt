@@ -192,7 +192,10 @@ add_custom_command(
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/optix_device.cu"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/launch_params.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/optix/optix_guided.cuh"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/photon/photon_bins.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/config.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/hash.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/volume/medium.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/random.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/spectrum.h"

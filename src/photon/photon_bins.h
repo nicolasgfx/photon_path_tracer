@@ -32,6 +32,16 @@ struct PhotonBin {
     float avg_nz;     // average surface normal z
 };
 
+// ── Compact GPU bin (16 bytes) ──────────────────────────────────────
+// Subset of PhotonBin uploaded to the GPU for guided direction sampling.
+// Contains only the fields read by dev_read_cell_histogram():
+//   scalar_flux — importance weight for inverse-CDF sampling
+//   avg_n{x,y,z} — per-bin average normal for the hemisphere gate
+struct GpuGuideBin {
+    float scalar_flux;
+    float avg_nx, avg_ny, avg_nz;
+};
+
 // ── Fibonacci sphere bin directions ─────────────────────────────────
 // Quasi-uniform distribution of N points on S².
 // Stored in a fixed-size array (MAX_PHOTON_BIN_COUNT upper bound).

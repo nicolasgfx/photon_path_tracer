@@ -197,8 +197,26 @@ void fill_common_params(
         p.bounce_aov[b] = nullptr;
 }
 
-// fill_cell_grid_params() -- Wire CellBinGrid data into LaunchParams
+// fill_cell_grid_params() -- Wire histogram + CellBinGrid data into LaunchParams
 void OptixRenderer::fill_cell_grid_params(LaunchParams& lp) const {
+    // ── Multi-resolution hash histogram (surface guide) ──────────────
+    lp.guide_num_levels = hash_histogram_.num_levels;
+    for (int lv = 0; lv < hash_histogram_.num_levels; ++lv) {
+        if (d_guide_histogram_[lv].d_ptr) {
+            lp.guide_histogram[lv] =
+                reinterpret_cast<GpuGuideBin*>(d_guide_histogram_[lv].d_ptr);
+            lp.guide_cell_size[lv] = hash_histogram_.cell_size(lv);
+        } else {
+            lp.guide_histogram[lv] = nullptr;
+            lp.guide_cell_size[lv] = 0.f;
+        }
+    }
+    for (int lv = hash_histogram_.num_levels; lv < MAX_GUIDE_LEVELS; ++lv) {
+        lp.guide_histogram[lv] = nullptr;
+        lp.guide_cell_size[lv] = 0.f;
+    }
+
+    // ── Legacy dense CellBinGrid (retained for volume guide + tests) ─
     if (d_cell_bin_grid_.d_ptr && cell_bin_grid_.total_cells() > 0) {
         lp.cell_bin_grid       = reinterpret_cast<PhotonBin*>(d_cell_bin_grid_.d_ptr);
         lp.photon_bin_count    = cell_bin_grid_.bin_count;
@@ -1163,6 +1181,33 @@ OptixRenderer::RenderStats OptixRenderer::gather_stats(const char* scene_name) c
     s.denoiser_enabled    = denoiser_enabled_;
     s.knn_k               = DEFAULT_KNN_K;
     s.surface_tau         = DEFAULT_SURFACE_TAU;
+
+    // Hash histogram multi-resolution guide stats
+    {
+        auto& hh = s.hash_hist;
+        hh.num_levels        = hash_histogram_.num_levels;
+        hh.photons_processed = (int)stored_photons_.size();
+        hh.gather_radius     = gather_radius_;
+        hh.total_gpu_bytes   = 0;
+        for (int lv = 0; lv < hash_histogram_.num_levels; ++lv) {
+            const auto& src = hash_histogram_.levels[lv];
+            auto&       dst = hh.levels[lv];
+            dst.cell_size         = src.cell_size;
+            dst.scale_factor      = (gather_radius_ > 0.f) ? src.cell_size / gather_radius_ : 0.f;
+            dst.table_size        = (int)HashHistLevel::TABLE_SIZE;
+            dst.bin_count         = src.bin_count;
+            dst.populated_buckets = src.populated_buckets;
+            dst.populated_bins    = src.populated_bins;
+            dst.total_flux        = src.total_flux;
+            dst.min_flux          = src.min_flux;
+            dst.max_flux          = src.max_flux;
+            dst.avg_flux          = src.avg_flux;
+            dst.occupancy_pct     = (float)src.populated_buckets * 100.f
+                                  / (float)HashHistLevel::TABLE_SIZE;
+            dst.gpu_memory_bytes  = src.gpu_memory_bytes;
+            hh.total_gpu_bytes   += src.gpu_memory_bytes;
+        }
+    }
 
     // Scene
     s.scene_name          = scene_name ? scene_name : "";
