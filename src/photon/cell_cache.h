@@ -61,6 +61,12 @@ struct CellCacheInfo {
 
     // Coefficient of variation for caustic flux
     float   caustic_cv      = 0.f;  // stddev / mean of caustic flux
+
+    // Cell position (for neighbourhood queries in §3.3)
+    int3    cell_pos        = {0, 0, 0};  // integer cell coordinate
+
+    // Dominant emitter (Gap 4: source_emissive_idx with highest flux)
+    int     dominant_emitter = -1;  // local emissive index, -1 = unknown
 };
 
 // ── CellInfoCache ───────────────────────────────────────────────────
@@ -126,6 +132,7 @@ struct CellInfoCache {
 
         // ── Welford accumulators per cell ───────────────────────────
         // For running mean/variance of scalar flux and caustic flux
+        constexpr int WS_MAX_EMITTERS = 128;
         struct WelfordState {
             double mean      = 0.0;
             double M2        = 0.0;
@@ -142,6 +149,11 @@ struct CellInfoCache {
             int glass_count  = 0;
             int caustic_photon_count = 0;
             float caustic_flux_sum   = 0.f;
+            // Cell coordinate (first photon's cell coord)
+            int3 cell_pos    = {0, 0, 0};
+            bool pos_set     = false;
+            // Per-emitter flux tracking (Gap 4: dominant emitter)
+            float emitter_flux[WS_MAX_EMITTERS] = {};
         };
 
         std::vector<WelfordState> accum(CELL_CACHE_TABLE_SIZE);
@@ -170,6 +182,19 @@ struct CellInfoCache {
                 ws.mean += delta / (double)ws.n;
                 double delta2 = (double)scalar_flux - ws.mean;
                 ws.M2 += delta * delta2;
+
+                // Track cell coordinate (from first photon)
+                if (!ws.pos_set) {
+                    ws.cell_pos = cell_coord(pos);
+                    ws.pos_set  = true;
+                }
+
+                // Per-emitter flux accumulation (Gap 4)
+                if (i < photons.source_emissive_idx.size()) {
+                    uint16_t eidx = photons.source_emissive_idx[i];
+                    if (eidx != 0xFFFFu && eidx < WS_MAX_EMITTERS)
+                        ws.emitter_flux[eidx] += scalar_flux;
+                }
 
                 // Direction accumulation
                 if (i < photons.wi_x.size()) {
@@ -230,6 +255,20 @@ struct CellInfoCache {
             ci.photon_count = ws.n;
             if (ws.n == 0) continue;
             cells_with_photons++;
+
+            // Store cell position and find dominant emitter
+            ci.cell_pos = ws.cell_pos;
+            {
+                float best_flux = 0.f;
+                int   best_idx  = -1;
+                for (int e = 0; e < WS_MAX_EMITTERS; ++e) {
+                    if (ws.emitter_flux[e] > best_flux) {
+                        best_flux = ws.emitter_flux[e];
+                        best_idx  = e;
+                    }
+                }
+                ci.dominant_emitter = best_idx;
+            }
 
             // Irradiance and variance
             ci.irradiance    = (float)ws.mean;

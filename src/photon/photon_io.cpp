@@ -63,7 +63,7 @@ bool photon_cache_valid(const std::string& path, uint64_t scene_hash) {
 
     if (!ok)                                return false;
     if (hdr.magic   != PHOTON_CACHE_MAGIC)  return false;
-    if (hdr.version != PHOTON_CACHE_VERSION) return false;
+    if (hdr.version < 2u || hdr.version > PHOTON_CACHE_VERSION) return false;
     if (hdr.scene_hash != scene_hash)        return false;
     if (hdr.hero_wavelengths != HERO_WAVELENGTHS) return false;
     if (hdr.num_lambda != NUM_LAMBDA)        return false;
@@ -95,6 +95,7 @@ bool save_photon_cache(const std::string& path,
     hdr.gather_radius    = gather_radius;
     hdr.cell_size        = grid.cell_size;
     hdr.table_size       = grid.table_size;
+    hdr.has_path_data    = 1u;  // v3: path metadata present
 
     bool ok = (fwrite(&hdr, sizeof(hdr), 1, f) == 1);
 
@@ -119,6 +120,11 @@ bool save_photon_cache(const std::string& path,
     ok = ok && write_vec(f, grid.sorted_indices);
     ok = ok && write_vec(f, grid.cell_start);
     ok = ok && write_vec(f, grid.cell_end);
+
+    // v3: path metadata
+    ok = ok && write_vec(f, photons.path_flags);
+    ok = ok && write_vec(f, photons.bounce_count);
+    ok = ok && write_vec(f, photons.tri_id);
 
     fclose(f);
 
@@ -149,7 +155,8 @@ bool load_photon_cache(const std::string& path,
         return false;
     }
 
-    if (hdr.magic != PHOTON_CACHE_MAGIC || hdr.version != PHOTON_CACHE_VERSION ||
+    if (hdr.magic != PHOTON_CACHE_MAGIC ||
+        hdr.version < 2u || hdr.version > PHOTON_CACHE_VERSION ||
         hdr.hero_wavelengths != HERO_WAVELENGTHS || hdr.num_lambda != NUM_LAMBDA) {
         fclose(f);
         std::cerr << "[photon_io] Header mismatch (magic/version/spectral): " << path << "\n";
@@ -182,6 +189,18 @@ bool load_photon_cache(const std::string& path,
     ok = ok && read_vec(f, grid.sorted_indices,   N);
     ok = ok && read_vec(f, grid.cell_start,       TS);
     ok = ok && read_vec(f, grid.cell_end,         TS);
+
+    // v3: path metadata
+    if (ok && hdr.version >= 3u && hdr.has_path_data) {
+        ok = ok && read_vec(f, photons.path_flags,   N);
+        ok = ok && read_vec(f, photons.bounce_count, N);
+        ok = ok && read_vec(f, photons.tri_id,       N);
+    } else {
+        // Pre-v3 cache: fill defaults
+        photons.path_flags.assign(N, 0u);
+        photons.bounce_count.assign(N, 0u);
+        photons.tri_id.assign(N, 0xFFFFFFFFu);
+    }
 
     fclose(f);
 

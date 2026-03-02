@@ -174,6 +174,27 @@ struct HashHistLevel {
     float avg_flux           = 0.f; // mean scalar_flux of populated bins
     size_t gpu_memory_bytes  = 0;   // sizeof(GpuGuideBin) * gpu_bins.size()
 
+    // ── Per-bucket statistics (for §3 analysis: Gaps 1 & 2) ─────────
+    // Populated during finalize(); one entry per TABLE_SIZE bucket.
+    std::vector<int>   bucket_active_bins;   // non-zero bins in bucket
+    std::vector<float> bucket_total_flux;    // sum of scalar_flux
+    std::vector<float> bucket_max_flux;      // max bin scalar_flux
+
+    // Query helpers for photon_analysis.h
+    int count_active_bins(uint32_t bucket) const {
+        return (bucket < bucket_active_bins.size()) ? bucket_active_bins[bucket] : 0;
+    }
+    float get_bucket_total_flux(uint32_t bucket) const {
+        return (bucket < bucket_total_flux.size()) ? bucket_total_flux[bucket] : 0.f;
+    }
+    float get_bucket_max_flux(uint32_t bucket) const {
+        return (bucket < bucket_max_flux.size()) ? bucket_max_flux[bucket] : 0.f;
+    }
+    float get_concentration(uint32_t bucket) const {
+        float tf = get_bucket_total_flux(bucket);
+        return (tf > 0.f) ? get_bucket_max_flux(bucket) / tf : 0.f;
+    }
+
     // ── Normalize accumulators and extract compact GPU bins ──────────
     void finalize() {
         const size_t total_bins = (size_t)TABLE_SIZE * bin_count;
@@ -186,8 +207,17 @@ struct HashHistLevel {
         min_flux          = 1e30f;
         max_flux          = 0.f;
 
+        // Allocate per-bucket stats
+        bucket_active_bins.assign(TABLE_SIZE, 0);
+        bucket_total_flux.assign(TABLE_SIZE, 0.f);
+        bucket_max_flux.assign(TABLE_SIZE, 0.f);
+
         for (size_t bucket = 0; bucket < TABLE_SIZE; ++bucket) {
             bool bucket_has_data = false;
+            int  b_active = 0;
+            float b_total = 0.f;
+            float b_max   = 0.f;
+
             for (int k = 0; k < bin_count; ++k) {
                 size_t slot = bucket * bin_count + k;
                 PhotonBin& b = accum[slot];
@@ -221,8 +251,15 @@ struct HashHistLevel {
                     total_flux += sf;
                     if (sf < min_flux) min_flux = sf;
                     if (sf > max_flux) max_flux = sf;
+                    // Per-bucket stats
+                    b_active++;
+                    b_total += sf;
+                    if (sf > b_max) b_max = sf;
                 }
             }
+            bucket_active_bins[bucket] = b_active;
+            bucket_total_flux[bucket]  = b_total;
+            bucket_max_flux[bucket]    = b_max;
             if (bucket_has_data) populated_buckets++;
         }
 

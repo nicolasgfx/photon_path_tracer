@@ -76,6 +76,7 @@ set(CORE_SOURCES
     src/main.cpp
     src/app/viewer.cpp
     src/scene/obj_loader.cpp
+    src/photon/photon_io.cpp
     src/renderer/renderer.cpp
     src/optix/optix_renderer.cpp
     src/optix/optix_setup.cpp
@@ -309,4 +310,32 @@ if(PPT_BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(ppt_tests)
+endif()
+
+# -- Photon Map Analysis Tool (CPU-only, no CUDA/OptiX required) ------
+add_executable(photon_map_analysis
+    tools/photon_map_analysis/main.cpp
+    src/scene/obj_loader.cpp
+    src/photon/photon_io.cpp
+)
+target_include_directories(photon_map_analysis PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${stb_SOURCE_DIR}
+)
+target_compile_features(photon_map_analysis PRIVATE cxx_std_17)
+target_compile_definitions(photon_map_analysis PRIVATE
+    SCENES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scenes"
+)
+# CUDA vector_types.h is needed for float3 even in CPU-only code
+target_include_directories(photon_map_analysis PRIVATE
+    ${CUDAToolkit_INCLUDE_DIRS}
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(photon_map_analysis PRIVATE OpenMP::OpenMP_CXX)
+endif()
+if(MSVC)
+    target_compile_options(photon_map_analysis PRIVATE /MP /W4 /fp:fast /O2)
+else()
+    target_compile_options(photon_map_analysis PRIVATE -Wall -Wextra -O2)
 endif()

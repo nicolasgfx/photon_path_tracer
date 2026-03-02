@@ -289,7 +289,7 @@ void OptixRenderer::upload_photon_data(
         cell_cache.build(stored_photons_, empty_caustic,
                          cache_cell_size, gather_radius_);
         float cell_area = cache_cell_size * cache_cell_size;
-        upload_cell_analysis(cell_cache, cell_bin_grid_, cell_area);
+        upload_cell_analysis(cell_cache, hash_histogram_, cell_area);
     }
 }
 
@@ -346,10 +346,10 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
 // =====================================================================
 void OptixRenderer::upload_cell_analysis(
     const CellInfoCache& cell_cache,
-    const CellBinGrid&   bin_grid,
+    const HashHistogram& hash_hist,
     float                cell_area)
 {
-    auto analysis = build_cell_analysis(cell_cache, bin_grid, cell_area,
+    auto analysis = build_cell_analysis(cell_cache, hash_hist, cell_area,
                                          &cell_conclusions_);
     if (analysis.empty()) {
         cell_analysis_count_ = 0;

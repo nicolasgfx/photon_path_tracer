@@ -1,71 +1,143 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "Build (Release)",
-            "type": "shell",
-            "command": "${workspaceFolder}/build.bat",
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": [
-                "$msCompile"
-            ],
-            "presentation": {
-                "reveal": "always",
-                "panel": "shared"
-            }
-        },
-        {
-            "label": "Build (Release + Tests)",
-            "type": "shell",
-            "command": "${workspaceFolder}/build.bat",
-            "args": ["test"],
-            "group": "build",
-            "problemMatcher": [
-                "$msCompile"
-            ]
-        },
-        {
-            "label": "Run Photon Tracer",
-            "type": "shell",
-            "command": "${workspaceFolder}/build/photon_tracer.exe",
-            "dependsOn": "Build (Release)",
-            "group": {
-                "kind": "test",
-                "isDefault": true
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "Run Fast Tests",
-            "type": "shell",
-            "command": "${workspaceFolder}/build/ppt_tests.exe",
-            "args": [
-                "--gtest_filter=-*Integration*:*PixelComparison*:*GroundTruth*:*PerRay*:*SpeedTest*:*SpeedTweaks*:*CpuGpu*"
-            ],
-            "dependsOn": "Build (Release + Tests)",
-            "group": "test",
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "Run All Tests",
-            "type": "shell",
-            "command": "${workspaceFolder}/build/ppt_tests.exe",
-            "args": ["--gtest_print_time=1"],
-            "dependsOn": "Build (Release + Tests)",
-            "group": "test",
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        }
-    ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build (Release)",
+			"type": "shell",
+			"command": "${workspaceFolder}/build.bat",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared"
+			}
+		},
+		{
+			"label": "Build (Release + Tests)",
+			"type": "shell",
+			"command": "${workspaceFolder}/build.bat",
+			"args": [
+				"test"
+			],
+			"group": "build",
+			"problemMatcher": [
+				"$msCompile"
+			]
+		},
+		{
+			"label": "Run Photon Tracer",
+			"type": "shell",
+			"command": "${workspaceFolder}/build/photon_tracer.exe",
+			"dependsOn": "Build (Release)",
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "Run Fast Tests",
+			"type": "shell",
+			"command": "${workspaceFolder}/build/ppt_tests.exe",
+			"args": [
+				"--gtest_filter=-*Integration*:*PixelComparison*:*GroundTruth*:*PerRay*:*SpeedTest*:*SpeedTweaks*:*CpuGpu*"
+			],
+			"dependsOn": "Build (Release + Tests)",
+			"group": "test",
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "Run All Tests",
+			"type": "shell",
+			"command": "${workspaceFolder}/build/ppt_tests.exe",
+			"args": [
+				"--gtest_print_time=1"
+			],
+			"dependsOn": "Build (Release + Tests)",
+			"group": "test",
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "Build Analysis Tool",
+			"type": "shell",
+			"command": "d:\\Dev\\photon_path_tracer\\photon_path_tracer\\build.bat",
+			"args": [
+				"all"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build Analysis Tool Only",
+			"type": "shell",
+			"command": "d:\\Dev\\photon_path_tracer\\photon_path_tracer\\build.bat",
+			"args": [
+				"all"
+			]
+		},
+		{
+			"label": "Build All Targets",
+			"type": "shell",
+			"command": "d:\\Dev\\photon_path_tracer\\photon_path_tracer\\build.bat",
+			"args": [
+				"all"
+			]
+		},
+		{
+			"label": "Run Fast Tests",
+			"type": "shell",
+			"command": "d:\\Dev\\photon_path_tracer\\photon_path_tracer\\build\\ppt_tests.exe",
+			"args": [
+				"--gtest_filter=-*Integration*:*PixelComparison*:*GroundTruth*:*PerRay*:*SpeedTest*:*SpeedTweaks*:*CpuGpu*"
+			]
+		},
+		{
+			"label": "Build All",
+			"type": "shell",
+			"command": "${workspaceFolder}/build.bat",
+			"args": [
+				"all"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build All Targets",
+			"type": "shell",
+			"command": "${workspaceFolder}/build.bat",
+			"args": [
+				"all"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build Everything",
+			"type": "shell",
+			"command": "${workspaceFolder}/build.bat",
+			"args": [
+				"all"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Run Fast Tests Verify",
+			"type": "shell",
+			"command": "${workspaceFolder}/build/ppt_tests.exe",
+			"args": [
+				"--gtest_filter=-*Integration*:*PixelComparison*:*GroundTruth*:*PerRay*:*SpeedTest*:*SpeedTweaks*:*CpuGpu*"
+			]
+		}
+	]
 }

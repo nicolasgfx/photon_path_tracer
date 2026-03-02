@@ -7,8 +7,9 @@
 //   Offset 64  : PhotonSoA arrays in this order:
 //                pos_x, pos_y, pos_z, wi_x, wi_y, wi_z,
 //                norm_x, norm_y, norm_z, spectral_flux,
-//                lambda_bin, flux, num_hero, bin_idx
+//                lambda_bin, flux, num_hero, bin_idx, source_emissive_idx
 //   After SoA  : HashGrid vectors: sorted_indices, cell_start, cell_end
+//   v3 extras  : path_flags [N×u8], bounce_count [N×u8], tri_id [N×u32]
 // ─────────────────────────────────────────────────────────────────────
 #include "photon.h"
 #include "hash_grid.h"
@@ -27,7 +28,8 @@ struct PhotonCacheHeader {
     float    gather_radius;     // gather radius used to build the grid
     float    cell_size;         // hash grid cell_size
     uint32_t table_size;        // hash grid table_size
-    uint8_t  reserved[20];      // pad to 64 bytes
+    uint8_t  has_path_data;      // 1 if v3 path metadata is present
+    uint8_t  reserved[19];      // pad to 64 bytes
 };
 #pragma pack(pop)
 
@@ -35,7 +37,7 @@ static_assert(sizeof(PhotonCacheHeader) == 64,
               "PhotonCacheHeader must be exactly 64 bytes");
 
 constexpr uint32_t PHOTON_CACHE_MAGIC   = 0x50484F54u; // "PHOT"
-constexpr uint32_t PHOTON_CACHE_VERSION = 2u;  // v2: added source_emissive_idx
+constexpr uint32_t PHOTON_CACHE_VERSION = 3u;  // v3: added path_flags, bounce_count, tri_id
 
 // ── API ───────────────────────────────────────────────────────────────
 

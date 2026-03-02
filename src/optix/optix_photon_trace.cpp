@@ -946,6 +946,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         cell_cache.build(stored_photons_, empty_caustic,
                          cache_cell_size, gather_radius_);
         float cell_area = cache_cell_size * cache_cell_size;
-        upload_cell_analysis(cell_cache, cell_bin_grid_, cell_area);
+        upload_cell_analysis(cell_cache, hash_histogram_, cell_area);
     }
 }

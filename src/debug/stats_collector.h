@@ -28,16 +28,20 @@
 #include <iomanip>
 
 // ── Conclusion counters (§3 of architecture doc) ────────────────────
-// C1/C6: histogram quality (few active bins)
+// C1:    histogram quality (few active bins → boost guide)
+// C2:    high concentration (f_max/f_total > 0.5 → boost guide)
 // C3:    skipped — too diffuse (spread > 0.9)
 // C4:    reliability scaled by photon count
 // C5:    reduced by high variance
+// C6:    caustic-edge (high caustic CV → boost guide)
 struct ConclusionCounters {
-    int c1_c6_histogram = 0;   // bins ≤ 2 → boosted to 0.7
-    int c3_too_diffuse  = 0;   // spread > 0.9 → guide = 0
-    int c4_low_count    = 0;   // photon_count < 30 → scaled down
-    int c5_high_var     = 0;   // CV attenuated guide
-    int total_cells     = 0;   // cells evaluated
+    int c1_histogram       = 0;   // bins ≤ 2 → boosted to 0.7
+    int c2_concentrated    = 0;   // concentration > 0.5 → boosted
+    int c3_too_diffuse     = 0;   // spread > 0.9 → guide attenuated
+    int c4_low_count       = 0;   // photon_count < 30 → scaled down
+    int c5_high_var        = 0;   // CV attenuated guide
+    int c6_caustic_edge    = 0;   // caustic CV > threshold → boosted
+    int total_cells        = 0;   // cells evaluated
 
     void reset() { *this = ConclusionCounters{}; }
 };
@@ -294,12 +298,14 @@ inline void print_stats_console(const RendererStats& s) {
                 s.histogram_only ? "YES" : "no");
     if (s.conclusions.total_cells > 0) {
         std::printf("║  Conclusions (%d cells analysed):\n", s.conclusions.total_cells);
-        std::printf("║    C1/C6 histogram: %d  C3 too-diffuse: %d\n",
-                    s.conclusions.c1_c6_histogram,
+        std::printf("║    C1 histogram: %d  C2 concentrated: %d  C3 too-diffuse: %d\n",
+                    s.conclusions.c1_histogram,
+                    s.conclusions.c2_concentrated,
                     s.conclusions.c3_too_diffuse);
-        std::printf("║    C4 low-count:    %d  C5 high-var:    %d\n",
+        std::printf("║    C4 low-count: %d  C5 high-var: %d  C6 caustic-edge: %d\n",
                     s.conclusions.c4_low_count,
-                    s.conclusions.c5_high_var);
+                    s.conclusions.c5_high_var,
+                    s.conclusions.c6_caustic_edge);
     }
     if (s.guide_dist.cells_with_photons > 0) {
         std::printf("║  Guide fraction distribution:\n║    ");
@@ -485,10 +491,12 @@ inline void write_analysis_json(const AnalysisReport& r,
     if (s.conclusions.total_cells > 0) {
         f << "    \"conclusions\": {\n";
         f << "      \"total_cells\": " << s.conclusions.total_cells << ",\n";
-        f << "      \"c1_c6_histogram\": " << s.conclusions.c1_c6_histogram << ",\n";
+        f << "      \"c1_histogram\": " << s.conclusions.c1_histogram << ",\n";
+        f << "      \"c2_concentrated\": " << s.conclusions.c2_concentrated << ",\n";
         f << "      \"c3_too_diffuse\": " << s.conclusions.c3_too_diffuse << ",\n";
         f << "      \"c4_low_count\": " << s.conclusions.c4_low_count << ",\n";
-        f << "      \"c5_high_var\": " << s.conclusions.c5_high_var << "\n";
+        f << "      \"c5_high_var\": " << s.conclusions.c5_high_var << ",\n";
+        f << "      \"c6_caustic_edge\": " << s.conclusions.c6_caustic_edge << "\n";
         f << "    },\n";
     }
     if (s.guide_dist.cells_with_photons > 0) {

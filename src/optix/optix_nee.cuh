@@ -256,6 +256,166 @@ Spectrum dev_estimate_photon_density(
     return L;
 }
 
+// =====================================================================
+// dev_estimate_caustic_only -- Caustic-only photon gather (Gap 5 / M5)
+//
+// Slimmed-down version of dev_estimate_photon_density that ONLY
+// accumulates photons tagged as caustic (tag == 2).  Used at every
+// non-delta bounce for additive caustic contribution, separate from
+// the full density estimate at the terminal bounce.
+//
+// Uses the caustic gather radius and caustic normalisation factor.
+// Returns Spectrum::zero() when no dual-budget data is available.
+// =====================================================================
+__forceinline__ __device__
+Spectrum dev_estimate_caustic_only(
+    float3 pos, float3 normal,
+    float3 filter_normal,
+    float3 wo_local, uint32_t mat_id,
+    float2 uv)
+{
+    Spectrum L = Spectrum::zero();
+    if (params.num_photons == 0 || params.grid_table_size == 0) return L;
+
+    // Only useful when we have dual-budget caustic data
+    const bool dual_budget = (params.photon_is_caustic_pass != nullptr
+                              && params.num_caustic_emitted > 0);
+    if (!dual_budget) return L;
+
+    float radius  = params.caustic_gather_radius;
+    float r2_max  = radius * radius;
+    float norm_caustic = 1.f / (float)params.num_caustic_emitted;
+
+    // kNN collection — same as dev_estimate_photon_density but only tag==2
+    constexpr int KNN_K = DEFAULT_KNN_K;
+    float    knn_d2[KNN_K];
+    uint32_t knn_idx[KNN_K];
+    int      knn_count = 0;
+
+    float cell_size = params.grid_cell_size;
+    int cx0 = (int)floorf((pos.x - radius) / cell_size);
+    int cy0 = (int)floorf((pos.y - radius) / cell_size);
+    int cz0 = (int)floorf((pos.z - radius) / cell_size);
+    int cx1 = (int)floorf((pos.x + radius) / cell_size);
+    int cy1 = (int)floorf((pos.y + radius) / cell_size);
+    int cz1 = (int)floorf((pos.z + radius) / cell_size);
+
+    uint32_t visited_keys[27];
+    int num_visited = 0;
+    ONB frame = ONB::from_normal(normal);
+
+    for (int iz = cz0; iz <= cz1; ++iz)
+    for (int iy = cy0; iy <= cy1; ++iy)
+    for (int ix = cx0; ix <= cx1; ++ix) {
+        uint32_t key = teschner_hash(make_i3(ix, iy, iz), params.grid_table_size);
+
+        bool already_visited = false;
+        for (int v = 0; v < num_visited; ++v) {
+            if (visited_keys[v] == key) { already_visited = true; break; }
+        }
+        if (already_visited) continue;
+        visited_keys[num_visited++] = key;
+
+        uint32_t start = params.grid_cell_start[key];
+        uint32_t end   = params.grid_cell_end[key];
+        if (start == 0xFFFFFFFF) continue;
+
+        for (uint32_t j = start; j < end; ++j) {
+            uint32_t idx = params.grid_sorted_indices[j];
+
+            // Filter: only tag==2 (targeted caustic) photons
+            if (params.photon_is_caustic_pass[idx] != 2) continue;
+
+            float3 pp = make_f3(
+                params.photon_pos_x[idx],
+                params.photon_pos_y[idx],
+                params.photon_pos_z[idx]);
+
+            float3 diff = pos - pp;
+            float d_plane = dot(diff, filter_normal);
+            float3 v_tan = diff - filter_normal * d_plane;
+            float d_tan2 = dot(v_tan, v_tan);
+
+            if (d_tan2 > r2_max) continue;
+            if (knn_count >= KNN_K && d_tan2 >= knn_d2[0]) continue;
+            if (fabsf(d_plane) > DEFAULT_SURFACE_TAU) continue;
+
+            float3 photon_n = make_f3(
+                params.photon_norm_x[idx],
+                params.photon_norm_y[idx],
+                params.photon_norm_z[idx]);
+            if (dot(photon_n, filter_normal) <= 0.0f) continue;
+
+            float3 wi_world = make_f3(
+                params.photon_wi_x[idx],
+                params.photon_wi_y[idx],
+                params.photon_wi_z[idx]);
+            if (dot(wi_world, filter_normal) <= 0.f) continue;
+
+            // Insert into max-heap
+            if (knn_count < KNN_K) {
+                knn_d2[knn_count]  = d_tan2;
+                knn_idx[knn_count] = idx;
+                knn_count++;
+                int ci = knn_count - 1;
+                while (ci > 0) {
+                    int pi = (ci - 1) / 2;
+                    if (knn_d2[ci] <= knn_d2[pi]) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
+                    ci = pi;
+                }
+            } else {
+                knn_d2[0]  = d_tan2;
+                knn_idx[0] = idx;
+                int ci = 0;
+                while (true) {
+                    int left = 2 * ci + 1, right = 2 * ci + 2, largest = ci;
+                    if (left  < KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
+                    if (right < KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
+                    if (largest == ci) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
+                    ci = largest;
+                }
+            }
+        }
+    }
+
+    if (knn_count == 0) return L;
+
+    // Adaptive radius
+    float r_k2 = (knn_count >= KNN_K) ? knn_d2[0] : r2_max;
+    r_k2 = fmaxf(r_k2, 1e-12f);
+    float inv_area_knn = 2.f / (PI * r_k2);
+
+    // Accumulate
+    for (int i = 0; i < knn_count; ++i) {
+        uint32_t idx  = knn_idx[i];
+        float d_tan2  = knn_d2[i];
+        if (d_tan2 >= r_k2) continue;
+
+        float w = 1.0f - d_tan2 / r_k2;
+
+        float3 wi_world = make_f3(
+            params.photon_wi_x[idx],
+            params.photon_wi_y[idx],
+            params.photon_wi_z[idx]);
+        float3 wi_local = frame.world_to_local(wi_world);
+
+        Spectrum f = bsdf_evaluate_diffuse(mat_id, wo_local, wi_local, uv);
+
+        int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
+        for (int h = 0; h < n_hero; ++h) {
+            float p_flux = params.photon_flux[idx * HERO_WAVELENGTHS + h];
+            int bin = (int)params.photon_lambda[idx * HERO_WAVELENGTHS + h];
+            if (bin >= 0 && bin < NUM_LAMBDA)
+                L.value[bin] += f.value[bin] * p_flux * w * inv_area_knn * norm_caustic;
+        }
+    }
+    return L;
+}
+
 // NOTE: CDF binary search lives in core/cdf.h (host+device).
 
 // == Sample triangle barycentric (device) =============================
@@ -267,8 +427,6 @@ float3 sample_triangle_dev(float u1, float u2) {
     float gamma = 1.f - alpha - beta;
     return make_f3(alpha, beta, gamma);
 }
-
-// NOTE: CDF binary search lives in core/cdf.h (host+device).
 
 // NeeResult: returned by all NEE variants
 struct NeeResult {

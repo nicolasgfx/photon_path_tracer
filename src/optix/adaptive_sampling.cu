@@ -152,15 +152,16 @@ void k_compute_cost_map(
     float var_factor = fminf(rel_noise * 10.f, 1.f);  // normalize to [0,1]
 
     // §7.1 Factor 2: Caustic fraction (weight 0.3) — sharp caustics need samples
-    // (not available per-pixel; would need first-hit → cell lookup. Use 0 as
-    // fallback when the cell analysis pointer isn't available.)
+    // TODO(Gap 6): Wire caustic/guide data per-pixel.  Currently only
+    // available per-cell, not per-pixel.  Requires a pilot-pass buffer
+    // mapping each pixel to its first-hit cell index (pixel_cell_idx).
+    // Until then, factors 2 & 3 default to zero.
     float caustic_factor = 0.f;
-    (void)cell_caustic_frac;  // available per-cell, not per-pixel currently
+    // cell_caustic_frac available per-cell, needs pixel→cell mapping
 
     // §7.1 Factor 3: Guide quality / flux density (weight 0.1)
     float guide_factor = 0.f;
-    (void)cell_guide_frac;
-    (void)cell_flux_density;
+    // cell_guide_frac, cell_flux_density available per-cell, needs pixel→cell mapping
 
     // Combined cost [0,1]
     float cost = 0.6f * var_factor + 0.3f * caustic_factor + 0.1f * guide_factor;

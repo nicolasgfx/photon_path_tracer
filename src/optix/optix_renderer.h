@@ -158,10 +158,10 @@ public:
                             float caustic_radius,
                             int num_photons_emitted = 0);
 
-    /// Build per-cell photon analysis from CellInfoCache + CellBinGrid
+    /// Build per-cell photon analysis from CellInfoCache + HashHistogram
     /// and upload the result arrays to GPU (PA-07/PA-08).
     void upload_cell_analysis(const CellInfoCache& cell_cache,
-                              const CellBinGrid&   bin_grid,
+                              const HashHistogram& hash_hist,
                               float                cell_area);
 
     /// Upload emitter data to device (for GPU photon tracing)

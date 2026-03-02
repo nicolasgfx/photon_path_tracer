@@ -64,6 +64,9 @@ struct CellAnalysis {
 //   flux_variance      — Welford variance of flux (from CellCacheInfo)
 //   irradiance         — sum of flux (from CellCacheInfo)
 //   active_bins        — number of non-zero directional bins in histogram
+//   concentration      — f_max / f_total from histogram (C2 metric)
+//   caustic_cv         — coefficient of variation of caustic flux (C6)
+//   caustic_count      — number of caustic photons in cell (C6)
 //   base_guide_frac    — DEFAULT_GUIDE_FRACTION from config
 //
 // Returns p_guide in [0, 1].
@@ -73,14 +76,22 @@ inline HD float compute_guide_fraction(
     float flux_variance,
     float irradiance,
     int   active_bins,
+    float concentration,
+    float caustic_cv,
+    int   caustic_count,
     float base_guide_frac = DEFAULT_GUIDE_FRACTION)
 {
     if (photon_count == 0) return 0.f;
 
-    // C1/C6: histogram quality — few bins → trust guide more
+    // C1: histogram quality — few bins → trust guide more
     float p = base_guide_frac;
     if (active_bins <= 2 && active_bins > 0)
         p = 0.7f;
+
+    // C2: concentration — high f_max/f_total means a strong directional peak
+    // Boost guide fraction for concentrated distributions
+    if (concentration > 0.5f)
+        p = fmaxf(p, 0.6f + 0.3f * concentration);  // up to 0.9
 
     // C4: reliability scales with photon count (need ~30 for meaningful histogram)
     constexpr float N_RELIABLE = 30.f;
@@ -98,34 +109,57 @@ inline HD float compute_guide_fraction(
     if (directional_spread > 0.9f)
         p *= 0.2f;  // heavily attenuate but keep non-zero
 
+    // C6: Caustic-edge cells — high caustic CV with enough caustic
+    // photons indicates a sharp caustic boundary that needs careful
+    // guided sampling to reduce noise.
+    constexpr float CAUSTIC_CV_EDGE_THRESH = 0.5f;
+    constexpr int   CAUSTIC_EDGE_MIN_COUNT = 10;
+    if (caustic_count >= CAUSTIC_EDGE_MIN_COUNT &&
+        caustic_cv > CAUSTIC_CV_EDGE_THRESH) {
+        // Boost guide toward 0.7..0.8 at caustic edges
+        float edge_boost = fminf(1.f, (caustic_cv - CAUSTIC_CV_EDGE_THRESH) * 2.f);
+        p = fmaxf(p, 0.7f * edge_boost);
+    }
+
     return p;
 }
 
 #ifndef __CUDACC__
 // ── CPU-side analysis builder ────────────────────────────────────────
 // Populates a flat array of CellAnalysis from existing CellInfoCache
-// and CellBinGrid data.  Called once per photon map rebuild.
+// and HashHistogram data.  Called once per photon map rebuild.
 //
-// PA-07: Iterates all cells in CellInfoCache, reads CellBinGrid
-//        histograms, and fills the CellAnalysis array for GPU upload.
+// PA-07: Iterates all cells in CellInfoCache, reads HashHistogram
+//        per-bucket stats, and fills the CellAnalysis array for GPU upload.
+//
+// Two passes:
+//   Pass 1: Per-cell analysis (density, caustic fraction, active bins,
+//           concentration, dominant emitter, guide fraction).
+//   Pass 2: 3×3×3 neighbourhood CV (§3.3) — requires cell_pos from
+//           CellCacheInfo.  Overwrites flux_cv with neighbourhood metric.
 #include <vector>
 #include <cmath>
 
 #include "photon/cell_cache.h"
-#include "photon/cell_bin_grid.h"
+#include "photon/hash_histogram.h"
 #include "debug/stats_collector.h"
 
 inline std::vector<CellAnalysis> build_cell_analysis(
-    const CellInfoCache& cell_cache,
-    const CellBinGrid&   bin_grid,
-    float                cell_area,
-    ConclusionCounters*  conclusion_counters = nullptr)
+    const CellInfoCache&  cell_cache,
+    const HashHistogram&  hash_hist,
+    float                 cell_area,
+    ConclusionCounters*   conclusion_counters = nullptr)
 {
     const size_t N = cell_cache.cells.size();
     if (N == 0) return {};
 
     std::vector<CellAnalysis> result(N);
 
+    // Reference to level-0 hash histogram (finest resolution)
+    const bool has_hist = (hash_hist.num_levels > 0);
+    const HashHistLevel* lv0 = has_hist ? &hash_hist.levels[0] : nullptr;
+
+    // ── Pass 1: Per-cell analysis ───────────────────────────────────
     for (size_t i = 0; i < N; ++i) {
         const CellCacheInfo& ci = cell_cache.cells[i];
 
@@ -145,7 +179,7 @@ inline std::vector<CellAnalysis> build_cell_analysis(
                        ? a.total_flux / cell_area
                        : 0.f;
 
-        // §3.3 — Spatial variance (CV from Welford variance)
+        // §3.3 — Single-cell CV (will be overwritten by neighbourhood CV in Pass 2)
         a.flux_cv = (ci.irradiance > 1e-8f)
                   ? sqrtf(ci.flux_variance) / ci.irradiance
                   : 0.f;
@@ -155,33 +189,17 @@ inline std::vector<CellAnalysis> build_cell_analysis(
                            ? (float)ci.caustic_count / (float)ci.photon_count
                            : 0.f;
 
-        // §3.1 — Directional analysis: count active bins from CellBinGrid
+        // §3.1 — Directional analysis: active bins from HashHistogram (Gap 2 fix)
         a.active_bins = 0;
-        a.dominant_emitter = -1;  // not tracked in CellBinGrid; left at -1
-
-        // If the CellBinGrid has data for this cell hash, count non-zero bins
-        if (!bin_grid.bins.empty() && bin_grid.cell_size > 0.f) {
-            // CellInfoCache uses hash-based indexing while CellBinGrid uses
-            // flat 3D indexing.  We can't directly map between them without
-            // knowing the cell position.  Use CellCacheInfo's avg_normal to
-            // detect if cell has meaningful directional data, and count active
-            // bins from the grid by iterating over the bins for each cell.
-            //
-            // For a simple approach: if the CellInfoCache has directional_spread
-            // information, we can estimate active bins from it.
-            // active_bins ≈ PHOTON_BIN_COUNT × (1 − spread)² for focused hist,
-            // but a direct count is more accurate.
-            //
-            // Since we don't have a direct hash→grid mapping, approximate from
-            // CellCacheInfo directional_spread:
-            float spread = ci.directional_spread;
-            if (spread < 0.1f)
-                a.active_bins = 1;  // highly directional
-            else if (spread < 0.5f)
-                a.active_bins = (int)(spread * 10.f + 1.f);  // 1–6 bins
-            else
-                a.active_bins = (int)(spread * (float)PHOTON_BIN_COUNT);
+        float concentration = 0.f;
+        if (has_hist) {
+            uint32_t bucket = (uint32_t)i;  // CellInfoCache hash == bucket index
+            a.active_bins  = lv0->count_active_bins(bucket);
+            concentration  = lv0->get_concentration(bucket);
         }
+
+        // §3.4 — Dominant emitter (Gap 4 fix)
+        a.dominant_emitter = ci.dominant_emitter;
 
         // §3.6 M1 — Guide fraction (combines all conclusions)
         a.guide_fraction = compute_guide_fraction(
@@ -189,23 +207,65 @@ inline std::vector<CellAnalysis> build_cell_analysis(
             ci.directional_spread,
             ci.flux_variance,
             ci.irradiance,
-            a.active_bins);
+            a.active_bins,
+            concentration,
+            ci.caustic_cv,
+            ci.caustic_count);
 
         // ── Conclusion counters (gated by ENABLE_STATS) ─────────
         if constexpr (ENABLE_STATS) {
             if (conclusion_counters) {
                 conclusion_counters->total_cells++;
                 if (a.active_bins <= 2 && a.active_bins > 0)
-                    conclusion_counters->c1_c6_histogram++;
+                    conclusion_counters->c1_histogram++;
+                if (concentration > 0.5f)
+                    conclusion_counters->c2_concentrated++;
                 if (ci.photon_count < 30)
                     conclusion_counters->c4_low_count++;
                 float cv = ci.flux_variance / fmaxf(ci.irradiance, 1e-6f);
                 if (cv / 2.f > 0.01f)  // any CV attenuation
                     conclusion_counters->c5_high_var++;
                 if (ci.directional_spread > 0.9f)
-                    conclusion_counters->c3_too_diffuse++;  // still counted for diagnostics
+                    conclusion_counters->c3_too_diffuse++;
+                if (ci.caustic_count >= 10 && ci.caustic_cv > 0.5f)
+                    conclusion_counters->c6_caustic_edge++;
             }
         }
+    }
+
+    // ── Pass 2: 3×3×3 neighbourhood CV (§3.3 — Gap 3 fix) ──────────
+    // For each occupied cell, enumerate the 27 neighbour cells
+    // (using cell_pos stored in CellCacheInfo), compute CV of their
+    // irradiance values, and overwrite flux_cv.
+    for (size_t i = 0; i < N; ++i) {
+        const CellCacheInfo& ci = cell_cache.cells[i];
+        if (ci.photon_count == 0) continue;
+
+        double sum = 0.0, sum2 = 0.0;
+        int    count = 0;
+        int3   cp = ci.cell_pos;
+
+        for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            int3 nc = make_i3(cp.x + dx, cp.y + dy, cp.z + dz);
+            uint32_t nk = CellInfoCache::cell_hash(nc);
+            const CellCacheInfo& nci = cell_cache.cells[nk];
+            if (nci.photon_count == 0) continue;
+            double v = (double)nci.irradiance;
+            sum  += v;
+            sum2 += v * v;
+            count++;
+        }
+
+        if (count >= 2) {
+            double mean  = sum / count;
+            double var   = (sum2 / count) - mean * mean;
+            if (var < 0.0) var = 0.0; // numerical guard
+            double stddev = sqrt(var);
+            result[i].flux_cv = (mean > 1e-12) ? (float)(stddev / mean) : 0.f;
+        }
+        // If count < 2, keep the single-cell CV from Pass 1
     }
 
     return result;

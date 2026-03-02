@@ -21,6 +21,7 @@
 #include "optix/optix_renderer.h"
 #include "scene/scene_builder.h"
 #include "scene/obj_loader.h"
+#include "photon/photon_io.h"
 
 #include <GLFW/glfw3.h>
 
@@ -1248,17 +1249,16 @@ void run_interactive(
         if (s_app.snapshot_requested) {
             s_app.snapshot_requested = false;
 
-            // Ensure output directory exists
-            fs::create_directories("output");
-
-            // Build timestamped prefix: output/snapshot_YYYYMMDD_HHMMSS
+            // Build timestamped subfolder: output/snapshot_YYYYMMDD_HHMMSS/
             auto now_tp = std::chrono::system_clock::now();
             std::time_t now_t = std::chrono::system_clock::to_time_t(now_tp);
             std::tm tm_buf;
             localtime_s(&tm_buf, &now_t);
             char ts[64];
             std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
-            std::string prefix = std::string("output/snapshot_") + ts;
+            std::string snap_dir = std::string("output/snapshot_") + ts;
+            fs::create_directories(snap_dir);
+            std::string prefix = snap_dir + "/snapshot";
 
             // Save PNG
             std::string png_path = prefix + ".png";
@@ -1313,7 +1313,11 @@ void run_interactive(
                        << camera.position.y << ", " << camera.position.z << "],\n";
                     jf << "    \"look_at\": [" << camera.look_at.x << ", "
                        << camera.look_at.y << ", " << camera.look_at.z << "],\n";
+                    jf << "    \"up\": [" << camera.up.x << ", "
+                       << camera.up.y << ", " << camera.up.z << "],\n";
                     jf << "    \"fov_deg\": " << camera.fov_deg << ",\n";
+                    jf << "    \"width\": " << camera.width << ",\n";
+                    jf << "    \"height\": " << camera.height << ",\n";
                     jf << "    \"yaw\": " << s_app.yaw << ",\n";
                     jf << "    \"pitch\": " << s_app.pitch << "\n";
                     jf << "  },\n";
@@ -1356,6 +1360,7 @@ void run_interactive(
                     // Scene
                     jf << "  \"scene\": {\n";
                     jf << "    \"name\": \"" << stats.scene_name << "\",\n";
+                    jf << "    \"obj_path\": \"" << SCENE_OBJ_PATH << "\",\n";
                     jf << "    \"num_triangles\": " << stats.num_triangles << ",\n";
                     jf << "    \"num_emissive_tris\": " << stats.num_emissive_tris << "\n";
                     jf << "  }\n";
@@ -1436,6 +1441,43 @@ void run_interactive(
                 std::string analysis_path = prefix + "_analysis.json";
                 write_analysis_json(report, analysis_path);
                 std::cout << "  [Snapshot] " << analysis_path << " (analysis)\n";
+
+                // ── Save photon cache + launch analysis tool ─────────
+                const auto& snap_photons = optix_renderer.photons();
+                const auto& snap_grid    = optix_renderer.grid();
+                if (snap_photons.size() > 0) {
+                    std::string cache_path = snap_dir + "/photons.bin";
+                    uint64_t snap_hash = compute_scene_hash(
+                        opt.scene_file,
+                        stats.num_triangles,
+                        stats.photons_emitted,
+                        stats.gather_radius);
+                    if (save_photon_cache(cache_path, snap_photons,
+                                          snap_grid, snap_hash,
+                                          stats.gather_radius)) {
+                        std::cout << "  [Snapshot] " << cache_path
+                                  << " (photon cache, "
+                                  << snap_photons.size() << " photons)\n";
+
+                        // Launch photon_map_analysis asynchronously
+                        std::string tool_exe = "build/photon_map_analysis.exe";
+                        if (fs::exists(tool_exe)) {
+                            std::string tool_out = snap_dir + "/hierarchy_report.json";
+                            std::string cmd = "start /B \"\" \""
+                                + fs::absolute(tool_exe).string() + "\" \""
+                                + fs::absolute(cache_path).string() + "\" \""
+                                + fs::absolute(opt.scene_file).string() + "\""
+                                + " --snapshot \"" + fs::absolute(prefix + ".json").string() + "\""
+                                + " --radius " + std::to_string(stats.gather_radius)
+                                + " --output \"" + fs::absolute(tool_out).string() + "\"";
+                            std::cout << "  [Snapshot] Launching analysis tool...\n";
+                            std::system(cmd.c_str());
+                        } else {
+                            std::cout << "  [Snapshot] photon_map_analysis not found "
+                                      << "(build with 'build.bat all')\n";
+                        }
+                    }
+                }
             }
         }
 

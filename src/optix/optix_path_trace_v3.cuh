@@ -389,13 +389,19 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
 
         // ── Caustic photon contribution (additive, §4.2 / M5) ──────
         // §3.4: Caustic photons carry L→S→D transport that the camera
-        // path cannot efficiently reproduce.  Add directly rather than
-        // relying on the path tracer to discover the caustic path.
-        // This uses the existing dual-budget photon density estimator
-        // which separates caustic from global photons.
-        // Currently the caustic contribution is folded into the normal
-        // photon gather — an isolated caustic-only gather will be added
-        // in a follow-up iteration when CellAnalysis is fully wired.
+        // path cannot efficiently reproduce.  Add the targeted caustic
+        // estimate at every non-delta bounce so caustic illumination
+        // appears at all surface interactions, not just the terminal gather.
+        if (params.photon_final_gather &&
+            params.render_mode != RenderMode::DirectOnly) {
+            Spectrum L_caustic = dev_estimate_caustic_only(
+                hit.position, hit.shading_normal,
+                hit.geo_normal, wo_local, mat_id, hit.uv);
+            Spectrum caustic_contrib = throughput * L_caustic;
+            result.combined += caustic_contrib;
+            if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                result.bounce_contrib[bounce] += caustic_contrib;
+        }
 
         // ── NEE: 1 shadow ray ───────────────────────────────────────
         // §4.1: Standard Veach-style MIS: sample a light, weight against BSDF.
