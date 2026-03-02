@@ -126,11 +126,8 @@ inline HD float compute_guide_fraction(
 
 #ifndef __CUDACC__
 // ── CPU-side analysis builder ────────────────────────────────────────
-// Populates a flat array of CellAnalysis from existing CellInfoCache
-// and HashHistogram data.  Called once per photon map rebuild.
-//
-// PA-07: Iterates all cells in CellInfoCache, reads HashHistogram
-//        per-bucket stats, and fills the CellAnalysis array for GPU upload.
+// Populates a flat array of CellAnalysis from existing CellInfoCache.
+// Called once per photon map rebuild.
 //
 // Two passes:
 //   Pass 1: Per-cell analysis (density, caustic fraction, active bins,
@@ -141,12 +138,10 @@ inline HD float compute_guide_fraction(
 #include <cmath>
 
 #include "photon/cell_cache.h"
-#include "photon/hash_histogram.h"
 #include "debug/stats_collector.h"
 
 inline std::vector<CellAnalysis> build_cell_analysis(
     const CellInfoCache&  cell_cache,
-    const HashHistogram&  hash_hist,
     float                 cell_area,
     ConclusionCounters*   conclusion_counters = nullptr)
 {
@@ -154,10 +149,6 @@ inline std::vector<CellAnalysis> build_cell_analysis(
     if (N == 0) return {};
 
     std::vector<CellAnalysis> result(N);
-
-    // Reference to level-0 hash histogram (finest resolution)
-    const bool has_hist = (hash_hist.num_levels > 0);
-    const HashHistLevel* lv0 = has_hist ? &hash_hist.levels[0] : nullptr;
 
     // ── Pass 1: Per-cell analysis ───────────────────────────────────
     for (size_t i = 0; i < N; ++i) {
@@ -189,14 +180,15 @@ inline std::vector<CellAnalysis> build_cell_analysis(
                            ? (float)ci.caustic_count / (float)ci.photon_count
                            : 0.f;
 
-        // §3.1 — Directional analysis: active bins from HashHistogram (Gap 2 fix)
-        a.active_bins = 0;
-        float concentration = 0.f;
-        if (has_hist) {
-            uint32_t bucket = (uint32_t)i;  // CellInfoCache hash == bucket index
-            a.active_bins  = lv0->count_active_bins(bucket);
-            concentration  = lv0->get_concentration(bucket);
-        }
+        // §3.1 — Directional analysis: derive active_bins estimate
+        // from directional_spread (0=unidirectional, 1=isotropic).
+        // With kNN guide replacing HashHistogram, active_bins is estimated
+        // as spread * bin_count — high spread means many active bins.
+        a.active_bins = (int)(ci.directional_spread * 32.f + 0.5f);
+        if (a.active_bins < 1 && ci.photon_count > 0) a.active_bins = 1;
+        float concentration = (ci.directional_spread < 0.5f)
+                            ? 1.f - ci.directional_spread
+                            : 0.f;
 
         // §3.4 — Dominant emitter (Gap 4 fix)
         a.dominant_emitter = ci.dominant_emitter;

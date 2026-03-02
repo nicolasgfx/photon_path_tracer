@@ -883,13 +883,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         }
     }
 
-    // ── Build directional histograms for guided sampling ─────────────
-    // 1. Precompute per-photon Fibonacci sphere bin indices.
-    // 2. Build hash-indexed multi-resolution histogram (replaces CellBinGrid).
-    // 3. Also build CellBinGrid (retained for analysis / test access).
-    // 4. Upload hash histogram levels to GPU.
+    // ── Build per-photon bin indices (retained for analysis/tests) ─────
     if (stored_photons_.size() > 0) {
-        // 1. Precompute bin_idx on stored_photons_
         PhotonBinDirs bin_dirs;
         bin_dirs.init(PHOTON_BIN_COUNT);
         stored_photons_.bin_idx.resize(stored_photons_.size());
@@ -900,39 +895,9 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
             stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
         }
 
-        // 2. Build multi-resolution hash histogram
-        hash_histogram_.build(stored_photons_, gather_radius_,
-                              PHOTON_BIN_COUNT, DEFAULT_GUIDE_NUM_LEVELS);
-
-        // 3. Upload each level's compact GpuGuideBin data to GPU
-        for (int lv = 0; lv < hash_histogram_.num_levels; ++lv) {
-            const auto& gpu_data = hash_histogram_.gpu_bins(lv);
-            if (!gpu_data.empty()) {
-                d_guide_histogram_[lv].upload(gpu_data);
-                std::printf("[OptiX] Uploaded guide histogram level %d: "
-                            "%zu bins  %.1f MB\n",
-                            lv, gpu_data.size(),
-                            (double)(gpu_data.size() * sizeof(GpuGuideBin)) /
-                            (1024.0 * 1024.0));
-            } else {
-                d_guide_histogram_[lv].free();
-            }
-        }
-        // Free unused levels
-        for (int lv = hash_histogram_.num_levels; lv < MAX_GUIDE_LEVELS; ++lv)
-            d_guide_histogram_[lv].free();
-
-        // 4. Build dense CellBinGrid (retained for analysis / test compat)
-        cell_bin_grid_.build(stored_photons_, gather_radius_, PHOTON_BIN_COUNT);
-        if (cell_bin_grid_.total_cells() > 0 && !cell_bin_grid_.bins.empty()) {
-            d_cell_bin_grid_.upload(cell_bin_grid_.bins);
-        } else {
-            d_cell_bin_grid_.free();
-        }
-
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
-        std::printf("[Timing] HashHistogram + CellBinGrid build: %8.1f ms\n", ms);
+        std::printf("[Timing] Photon bin_idx precompute: %8.1f ms\n", ms);
         t_lap = t_now;
     }
 
@@ -946,6 +911,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         cell_cache.build(stored_photons_, empty_caustic,
                          cache_cell_size, gather_radius_);
         float cell_area = cache_cell_size * cache_cell_size;
-        upload_cell_analysis(cell_cache, hash_histogram_, cell_area);
+        upload_cell_analysis(cell_cache, cell_area);
     }
 }

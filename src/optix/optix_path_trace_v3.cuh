@@ -58,7 +58,9 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
     // Previous-bounce combined PDF for emission MIS (§4.3)
     float pdf_combined_prev = 0.f;
 
-    const int max_bounces = params.max_bounces_camera;
+    const int max_bounces = params.preview_mode
+        ? min(params.max_bounces_camera, 3)
+        : params.max_bounces_camera;
 
     for (int bounce = 0; bounce < max_bounces; ++bounce) {
 
@@ -365,20 +367,33 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             aov_written = true;
         }
 
-        // ── Photon analysis: read cell histogram ────────────────────
-        // §3.1: Directional analysis from cell-bin grid (O(1)).
-        GuidedHistogram guide_hist = dev_read_cell_histogram(
-            hit.position, hit.shading_normal);
+        // ── Photon analysis: kNN guide histogram ─────────────────────
+        // Per-hitpoint kNN query replaces the pre-aggregated hash histogram.
+        // Walks the photon hash grid, collects 32 nearest photons, bins
+        // their directions into Fibonacci bins weighted by flux.
+        // Skipped in preview mode — BSDF-only sampling is fast enough
+        // for interactive navigation.
+        GuidedHistogram guide_hist;
+        guide_hist.valid = false;
+        guide_hist.total_flux = 0.f;
+        guide_hist.num_bins = fib.count;
+        if (!params.preview_mode) {
+            guide_hist = dev_knn_guide_sample(
+                hit.position, hit.shading_normal, hit.geo_normal, fib);
+        }
 
         // §3.6 M1: Adaptive guide fraction.
         // Use precomputed per-cell guide fraction if available,
         // otherwise compute from histogram quality inline.
         float p_guide = 0.f;
         if (guide_hist.valid) {
+#ifndef PPT_DISABLE_CELL_GUIDE_FRACTION
             if (params.cell_guide_fraction) {
                 uint32_t cell = dev_cell_cache_index(hit.position);
                 p_guide = params.cell_guide_fraction[cell];
-            } else {
+            } else
+#endif
+            {
                 // Fallback: simple histogram quality check
                 int active_bins = 0;
                 for (int k = 0; k < guide_hist.num_bins; ++k)
@@ -392,8 +407,11 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         // path cannot efficiently reproduce.  Add the targeted caustic
         // estimate at every non-delta bounce so caustic illumination
         // appears at all surface interactions, not just the terminal gather.
+        // Skipped in preview mode (kNN caustic gather is expensive).
+#ifndef PPT_DISABLE_CAUSTIC_GATHER
         if (params.photon_final_gather &&
-            params.render_mode != RenderMode::DirectOnly) {
+            params.render_mode != RenderMode::DirectOnly &&
+            !params.preview_mode) {
             Spectrum L_caustic = dev_estimate_caustic_only(
                 hit.position, hit.shading_normal,
                 hit.geo_normal, wo_local, mat_id, hit.uv);
@@ -402,6 +420,7 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
                 result.bounce_contrib[bounce] += caustic_contrib;
         }
+#endif
 
         // ── NEE: 1 shadow ray ───────────────────────────────────────
         // §4.1: Standard Veach-style MIS: sample a light, weight against BSDF.
@@ -422,7 +441,9 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         // ── Photon final gather at terminal bounce ──────────────────
         // §4.2: At the last allowed bounce, instead of returning black,
         // query the photon map for an estimate of remaining indirect.
-        if (bounce == max_bounces - 1 && params.photon_final_gather) {
+#ifndef PPT_DISABLE_FINAL_GATHER
+        if (bounce == max_bounces - 1 && params.photon_final_gather
+            && !params.preview_mode) {
             if (params.render_mode != RenderMode::DirectOnly) {
                 long long t_pg = clock64();
                 Spectrum L_photon = dev_estimate_photon_density(
@@ -438,6 +459,7 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             }
             break;
         }
+#endif
 
         // ── Next direction: guided or BSDF (§4.3 mixture PDF) ──────
         float3 wi_world;

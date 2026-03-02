@@ -28,20 +28,24 @@
 static constexpr int scene_profile_index() {
     #if defined(SCENE_CORNELL_BOX)
         return 0;
-    #elif defined(SCENE_CORNELL_SPHERE)
-        return 1;
-    #elif defined(SCENE_CORNELL_MIRROR)
-        return 2;
-    #elif defined(SCENE_CORNELL_WATER)
-        return 3;
     #elif defined(SCENE_LIVING_ROOM)
-        return 4;
-    #elif defined(SCENE_CONFERENCE)
-        return 5;
+        return 1;
     #elif defined(SCENE_SALLE_DE_BAIN)
+        return 2;
+    #elif defined(SCENE_FIREPLACE_ROOM)
+        return 3;
+    #elif defined(SCENE_CONFERENCE)
+        return 4;
+    #elif defined(SCENE_LIVING_ROOM_2)
+        return 5;
+    #elif defined(SCENE_STAIRCASE)
         return 6;
-    #elif defined(SCENE_MORI_KNOB)
+    #elif defined(SCENE_STAIRCASE_2)
         return 7;
+    #elif defined(SCENE_BEDROOM)
+        return 8;
+    #elif defined(SCENE_BATHROOM)
+        return 9;
     #else
         return -1;
     #endif

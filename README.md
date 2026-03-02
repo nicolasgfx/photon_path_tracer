@@ -286,7 +286,7 @@ position the camera and inspect the scene before committing to a full render.
 |---|---|
 | **+ / =** | Increase light brightness (×1.25 step) |
 | **− / _** | Decrease light brightness (÷1.25 step) |
-| **1 – 8** | Switch scene (see [Scenes](#scenes)) |
+| **1 – 9, 0** | Switch scene (see [Scenes](#scenes)) |
 | **V** | Toggle participating medium *(state tracked; volume currently disabled)* |
 | **G** | Toggle dense cell-bin grid gather |
 
@@ -315,21 +315,23 @@ radius for the cell under the cursor.
 
 ## Scenes
 
-Eight bundled scenes, switchable via hotkeys **1–8**:
+Eight bundled scenes, switchable via hotkeys **1–9, 0**:
 
 | Key | Scene | Complexity | Description |
 |---|---|---|---|
 | **1** | Cornell Box | Low | Classic Cornell Box with diamond |
-| **2** | Cornell Sphere | Low | Mirror sphere + deep-green glass sphere |
-| **3** | Cornell Mirror | Low | Tall mirror box |
-| **4** | Cornell Water | Low | Refractive water surface |
-| **5** | Living Room | Medium | Furnished interior (Jay-Artist) |
-| **6** | Conference Room | Medium | Measured room (Grynberg & Ward) |
-| **7** | Salle de Bain | Medium | Bathroom scene (nacimus) |
-| **8** | Mori Knob | Medium | Reflective ornamental knob |
+| **2** | Living Room | Medium | Furnished interior (Jay-Artist) |
+| **3** | Salle de Bain | Medium | Bathroom scene (nacimus) |
+| **4** | Fire Place | Medium | Fireplace room interior |
+| **5** | Conference Room | Medium | Measured room (Grynberg & Ward) |
+| **6** | Living Room 2 | Medium | Second living room variant |
+| **7** | Staircase | Medium | Staircase interior |
+| **8** | Staircase 2 | Medium | Staircase variant |
+| **9** | Bedroom | Medium | Bedroom interior |
+| **0** | Bathroom | Medium | Bathroom interior |
 
-Additional scenes (not bound to hotkeys): Interior, Sibenik Cathedral,
-Sponza, Fireplace Room, Hairball.
+Additional scenes (not bound to hotkeys): Cornell Sphere, Cornell Mirror,
+Cornell Water, Interior, Mori Knob, Sibenik Cathedral, Sponza, Hairball.
 
 Scene files live in `scenes/<name>/`. All scenes use emissive triangles
 defined in their MTL files (`Ke` or `pb_brdf emissive`).

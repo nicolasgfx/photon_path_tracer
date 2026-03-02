@@ -197,43 +197,10 @@ void fill_common_params(
         p.bounce_aov[b] = nullptr;
 }
 
-// fill_cell_grid_params() -- Wire histogram + CellBinGrid data into LaunchParams
+// fill_cell_grid_params() -- Wire volume CellBinGrid + kNN data into LaunchParams
 void OptixRenderer::fill_cell_grid_params(LaunchParams& lp) const {
-    // ── Multi-resolution hash histogram (surface guide) ──────────────
-    lp.guide_num_levels = hash_histogram_.num_levels;
-    for (int lv = 0; lv < hash_histogram_.num_levels; ++lv) {
-        if (d_guide_histogram_[lv].d_ptr) {
-            lp.guide_histogram[lv] =
-                reinterpret_cast<GpuGuideBin*>(d_guide_histogram_[lv].d_ptr);
-            lp.guide_cell_size[lv] = hash_histogram_.cell_size(lv);
-        } else {
-            lp.guide_histogram[lv] = nullptr;
-            lp.guide_cell_size[lv] = 0.f;
-        }
-    }
-    for (int lv = hash_histogram_.num_levels; lv < MAX_GUIDE_LEVELS; ++lv) {
-        lp.guide_histogram[lv] = nullptr;
-        lp.guide_cell_size[lv] = 0.f;
-    }
-
-    // ── Legacy dense CellBinGrid (retained for volume guide + tests) ─
-    if (d_cell_bin_grid_.d_ptr && cell_bin_grid_.total_cells() > 0) {
-        lp.cell_bin_grid       = reinterpret_cast<PhotonBin*>(d_cell_bin_grid_.d_ptr);
-        lp.photon_bin_count    = cell_bin_grid_.bin_count;
-        lp.cell_grid_valid     = 1;
-        lp.cell_grid_min_x     = cell_bin_grid_.min_x;
-        lp.cell_grid_min_y     = cell_bin_grid_.min_y;
-        lp.cell_grid_min_z     = cell_bin_grid_.min_z;
-        lp.cell_grid_cell_size = cell_bin_grid_.cell_size;
-        lp.cell_grid_dim_x     = cell_bin_grid_.dim_x;
-        lp.cell_grid_dim_y     = cell_bin_grid_.dim_y;
-        lp.cell_grid_dim_z     = cell_bin_grid_.dim_z;
-    } else {
-        lp.cell_bin_grid       = nullptr;
-        lp.photon_bin_count    = PHOTON_BIN_COUNT;
-        lp.cell_grid_valid     = 0;
-    }
-    lp.use_dense_grid_gather = use_dense_grid_ ? 1 : 0;
+    // Surface guided sampling now uses per-hitpoint kNN (no histogram upload).
+    lp.photon_bin_count = PHOTON_BIN_COUNT;
 
     // â”€â”€ VP-07: Volume cell-bin grid params â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (d_vol_cell_bin_grid_.d_ptr && vol_cell_bin_grid_.total_cells() > 0) {
@@ -338,6 +305,7 @@ void OptixRenderer::render_debug_frame(
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
+    lp.preview_mode      = preview_mode_ ? 1 : 0;
     lp.frame_number      = frame_number;
     lp.render_mode       = mode;
     lp.exposure           = exposure_;
@@ -415,6 +383,7 @@ void OptixRenderer::render_one_spp(
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
+    lp.preview_mode      = 0;  // render_one_spp is always full quality
     lp.frame_number       = frame_number;
     lp.render_mode        = RenderMode::Full;
     lp.exposure           = exposure_;
@@ -1182,31 +1151,13 @@ OptixRenderer::RenderStats OptixRenderer::gather_stats(const char* scene_name) c
     s.knn_k               = DEFAULT_KNN_K;
     s.surface_tau         = DEFAULT_SURFACE_TAU;
 
-    // Hash histogram multi-resolution guide stats
+    // Hash histogram stats removed — surface guide now uses per-hitpoint kNN.
     {
         auto& hh = s.hash_hist;
-        hh.num_levels        = hash_histogram_.num_levels;
+        hh.num_levels        = 0;
         hh.photons_processed = (int)stored_photons_.size();
         hh.gather_radius     = gather_radius_;
         hh.total_gpu_bytes   = 0;
-        for (int lv = 0; lv < hash_histogram_.num_levels; ++lv) {
-            const auto& src = hash_histogram_.levels[lv];
-            auto&       dst = hh.levels[lv];
-            dst.cell_size         = src.cell_size;
-            dst.scale_factor      = (gather_radius_ > 0.f) ? src.cell_size / gather_radius_ : 0.f;
-            dst.table_size        = (int)HashHistLevel::TABLE_SIZE;
-            dst.bin_count         = src.bin_count;
-            dst.populated_buckets = src.populated_buckets;
-            dst.populated_bins    = src.populated_bins;
-            dst.total_flux        = src.total_flux;
-            dst.min_flux          = src.min_flux;
-            dst.max_flux          = src.max_flux;
-            dst.avg_flux          = src.avg_flux;
-            dst.occupancy_pct     = (float)src.populated_buckets * 100.f
-                                  / (float)HashHistLevel::TABLE_SIZE;
-            dst.gpu_memory_bytes  = src.gpu_memory_bytes;
-            hh.total_gpu_bytes   += src.gpu_memory_bytes;
-        }
     }
 
     // Scene

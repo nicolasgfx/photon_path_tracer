@@ -64,6 +64,7 @@ struct LaunchParams {
     float  guide_fraction;        // [v3] photon-guided fraction (0..1)
     int    guide_fallback_bounce; // [v3] switch to photon gather after this bounce
     int    photon_final_gather;   // [v3] 1 = use photon map at terminal bounce
+    int    preview_mode;          // 1 = fast preview (skip kNN guide/caustic/gather, 3-bounce cap)
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
 
     // ── Per-cell photon analysis (precomputed, §3) ──────────────────
@@ -230,28 +231,9 @@ struct LaunchParams {
     int   volume_samples;       // medium samples per ray segment
     float volume_max_t;         // max march distance for miss rays
 
-    // ── Multi-resolution hash histogram (replaces CellBinGrid §4) ──────
-    // Each level is a 65K Teschner-hash table of PHOTON_BIN_COUNT GpuGuideBins.
-    // GPU query: coarse-to-fine — use finest level with data for the cell.
-    GpuGuideBin* guide_histogram[MAX_GUIDE_LEVELS]; // per-level bin data [TABLE_SIZE * bin_count]
-    float         guide_cell_size[MAX_GUIDE_LEVELS]; // cell size at each level
-    int           guide_num_levels;                   // 0 = disabled
-
-    // ── Dense 3D cell-bin grid (legacy, retained for volume guide) ───
-    // Surface guided sampling now uses guide_histogram[] above.
-    // The dense grid fields below are still used by the volume photon
-    // guide path (vol_cell_bin_grid) and the use_dense_grid_gather flag.
-    PhotonBin* cell_bin_grid;        // [grid_total_cells * photon_bin_count]
+    // ── Dense 3D cell-bin grid (retained for volume guide only) ────────
+    // Surface guided sampling now uses per-hitpoint kNN (optix_guided.cuh).
     int        photon_bin_count;     // runtime copy of PHOTON_BIN_COUNT
-    int        cell_grid_valid;      // 1 = grid uploaded, 0 = not available
-    int        use_dense_grid_gather; // 1 = use cell-bin path, 0 = hash-grid walk
-    float      cell_grid_min_x;     // AABB min corner
-    float      cell_grid_min_y;
-    float      cell_grid_min_z;
-    float      cell_grid_cell_size; // cell size (2 × gather_radius)
-    int        cell_grid_dim_x;     // grid dimensions
-    int        cell_grid_dim_y;
-    int        cell_grid_dim_z;
 
     // ── Dense 3D cell-bin grid for VOLUME photons ────────────────────
     // Same structure as the surface grid but stores photons deposited

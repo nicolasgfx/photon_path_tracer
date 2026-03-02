@@ -1,13 +1,13 @@
 #pragma once
 #include <cstdint>
 // ─────────────────────────────────────────────────────────────────────
-// config.h – Central configuration for the photon-guided path tracer v3
+// config.h – Central configuration for the photon-centric renderer v2.3
 // ─────────────────────────────────────────────────────────────────────
 //
-//   Architecture: photon-guided path tracing (doc/architecture/architecture.md)
-//     Pass 1: photon tracing → photon map + cell-bin grid
-//     Pass 2: camera path tracing → iterative bounce loop with photon guide
-//     Gather → adaptive kNN on tangent plane (final gather at path termination)
+//   Architecture: photon-centric (doc/architecture/architecture.md)
+//     Camera rays  → first-hit only → NEE + photon gather
+//     Photon rays  → full path tracing from lights (the real tracers)
+//     Gather       → adaptive kNN on tangent plane, not fixed-radius 3D sphere
 //     Spatial index → KD-tree (CPU), hash grid (GPU)
 //
 //   Only scene-level and algorithm-level tunables belong here.
@@ -24,39 +24,49 @@
 
 
 // =====================================================================
-//  MASTER GATE  (must precede all sections that reference it)
-// =====================================================================
-// Gate runtime statistics collection and debug file output.  When false,
-// the compiler eliminates all stats code paths (zero overhead).
-// See §10 for debug-specific flags that are subordinate to this gate.
-constexpr bool ENABLE_STATS = true;
-
-
-// =====================================================================
 //  §0  SCENE SELECTION
 // =====================================================================
-// Uncomment exactly ONE.  Runtime switching via keys 1–8 uses
+// Uncomment exactly ONE.  Runtime switching via keys 1–9,0 uses
 // SCENE_PROFILES[] at the bottom of this file.
 
 #define SCENE_CORNELL_BOX
-//#define SCENE_CORNELL_SPHERE
-//#define SCENE_CORNELL_MIRROR
-//#define SCENE_CORNELL_WATER
 //#define SCENE_LIVING_ROOM
-//#define SCENE_CONFERENCE
 //#define SCENE_SALLE_DE_BAIN
-//#define SCENE_MORI_KNOB
+//#define SCENE_FIREPLACE_ROOM
+//#define SCENE_CONFERENCE
+//#define SCENE_LIVING_ROOM_2
+//#define SCENE_STAIRCASE
+//#define SCENE_STAIRCASE_2
+//#define SCENE_BEDROOM
+//#define SCENE_BATHROOM
 
-// ── v3 flags ────────────────────────────────────────────────────────
-// (Bresenham lobe balance removed in v3 — no per-pixel lobe balance)
+// ── Photon tracing backend ──────────────────────────────────────────
+// Set to 1 to use the CPU photon tracer (emitter.h) instead of the GPU
+// OptiX kernels.  Useful for A/B comparison; GPU rendering (camera rays,
+// gather, etc.) still runs on the GPU — only photon emission is on CPU.
+#define USE_CPU_PHOTON_TRACE 0
+
+// ── v2.2 Consistency Reset Flags ────────────────────────────────────
+// GPU photon tracing: disabled by default (CPU is ground truth until
+// a fully equivalent OptiX photon tracer exists).
+constexpr bool DEFAULT_USE_GPU_PHOTON_TRACING = false;
+
+// Bresenham per-pixel lobe balance (GPU BSDF heuristic):
+// disabled by default for CPU↔GPU consistency.  Enable only after
+// CPU has the same mechanism and equivalence tests pass.
+constexpr bool DEFAULT_ENABLE_BRESENHAM_BSDF = false;
+
+// EmitterPointSet primary emission path: disabled by default.
+// v2.2 uses alias-table + cosine hemisphere only, for consistency.
+constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 
 
 // =====================================================================
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 1920;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 1080;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 512;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
 
 
 // =====================================================================
@@ -69,19 +79,19 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 1080;           // [R]
 // Anti-aliasing + noise averaging.  This is the single biggest
 // quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
-constexpr int DEFAULT_SPP = 256;                       // [R]
+constexpr int DEFAULT_SPP = 4;                       // [R]
 
 // Sub-pixel stratified jitter grid.
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP.
-constexpr int STRATA_X = 16;                           // 4 × 4 = 16 = DEFAULT_SPP
-constexpr int STRATA_Y = 16;
+constexpr int STRATA_X = 2;                           // 4 × 4 = 16 = DEFAULT_SPP
+constexpr int STRATA_Y = 2;
 
 // ── Photon budgets ──────────────────────────────────────────────────
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 2000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 5000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -92,6 +102,14 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diff
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
 constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
+
+// ── NEE shadow rays ─────────────────────────────────────────────────
+// Shadow rays per shading point (bounce 0).  The bin/cache system
+// improves *which* emitters are chosen, but M still controls how
+// many shadow rays are cast.  See DEFAULT_NEE_DEEP_SAMPLES for
+// bounces ≥ 1.
+//   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
+constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
 
 
 // =====================================================================
@@ -105,7 +123,7 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (t
 // enter+exit) plus subsequent diffuse bounces.  4 glass layers = 8
 // transmission bounces before reaching a diffuse surface.
 //   Fast: 4–6  |  Balanced: 10  |  Quality: 12–16
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 10;        // [R]
+constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 12;        // [R]
 
 // ── Russian roulette ────────────────────────────────────────────────
 // After MIN_BOUNCES_RR guaranteed bounces, each continuation is
@@ -115,7 +133,7 @@ constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 10;        // [R]
 // should not kill photons mid-transmission through nested dielectrics.
 //   MIN_BOUNCES_RR — Fast: 3–4  |  Balanced: 8  |  Quality: 10
 //   RR_THRESHOLD   — 0.80 (aggressive) .. 0.95 (conservative)
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 8;    // [R]
+constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 10;    // [R]
 constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.90f;// [R]
 
 // ── Spectral transport (PBRT v4 §14.3) ─────────────────────────────
@@ -128,35 +146,47 @@ constexpr int HERO_WAVELENGTHS = 4;
 // 90° = full hemisphere (Lambertian).  Smaller = directional emitters.
 constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
+// ── Emission variance reduction ─────────────────────────────────────
+// Fraction of photons emitted with area-uniform (vs power-weighted)
+// triangle selection.  Helps when emitters have wildly different power.
+//   0.0 = pure power  |  0.10 = balanced  |  1.0 = pure area
+constexpr float DEFAULT_PHOTON_EMITTER_UNIFORM_MIX = 0.10f;
+
+// Hemisphere strata for cell-stratified bounce decorrelation.
+//   0 = disable (pure random BSDF)  |  32–64 = recommended
+constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
+
 // Multi-map photon re-tracing: re-trace the photon map with a new
 // RNG seed every N camera samples to decorrelate photon/camera noise.
 //   0 = single map  |  4 = balanced  |  8 = quality
+constexpr int MULTI_MAP_SPP_GROUP = 4;
 
 
 // =====================================================================
-//  §4  CAMERA PATH TRACING (v3 — Photon-Guided)
+//  §4  CAMERA RAYS & DIRECT LIGHTING
 // =====================================================================
 
-// ── Path depth ──────────────────────────────────────────────────────
-// v3: single iterative bounce loop replaces specular chain + glossy.
-constexpr int DEFAULT_MAX_BOUNCES_CAMERA = 12;         // [R]  max camera path depth
-constexpr int DEFAULT_MIN_BOUNCES_RR     = 3;          // [R]  guaranteed bounces before RR
-constexpr float DEFAULT_RR_THRESHOLD     = 0.95f;      // [R]  max survival probability
+// ── Specular chain ──────────────────────────────────────────────────
+// Camera ray follows mirror/glass bounces until hitting a diffuse
+// surface, then evaluates NEE + photon gather.
+//   Fast: 4  |  Balanced: 8  |  Quality: 12–16
+constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 12;         // [R]
 
-// ── Photon-guided sampling ──────────────────────────────────────────
-constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;       // [R]  probability of guided vs BSDF sample
-constexpr bool  DEFAULT_USE_GUIDE        = true;        // [K]  enable/disable guided sampling
+// ── Glossy continuation bounces ─────────────────────────────────────
+// After the first non-specular hit, glossy surfaces can trace extra
+// BSDF-sampled reflection bounces.
+//   0 = off  |  2 = balanced  |  3–4 = quality (expensive)
+constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 2;
 
-// ── Photon density fallback ─────────────────────────────────────────
-constexpr int  DEFAULT_GUIDE_FALLBACK_BOUNCE = 3;       // [R]  switch to photon gather after this bounce
-constexpr bool DEFAULT_PHOTON_FINAL_GATHER   = true;    // [K]  use photon map as final gather at terminal bounces
+// ── NEE emitter selection mix ───────────────────────────────────────
+// Power-weighted vs area-weighted emitter selection for shadow rays.
+//   0.0 = pure power  |  0.3 = balanced  |  1.0 = pure area
+constexpr float DEFAULT_NEE_COVERAGE_FRACTION = 0.3f; // [R]
 
-// ── Per-bounce AOV debug buffers (DB-04, §10.3) ─────────────────────
-constexpr int   MAX_AOV_BOUNCES = 4;                    // first N bounces captured
-
-// ── Legacy aliases (still referenced by SPPM, CPU renderer, NEE) ────
-constexpr int   DEFAULT_MAX_SPECULAR_CHAIN     = DEFAULT_MAX_BOUNCES_CAMERA;  // alias for SPPM camera pass
-constexpr bool  DEFAULT_USE_MIS                = true;
+// ── MIS (power heuristic) ───────────────────────────────────────────
+// Balances NEE shadow rays vs BSDF-sampled rays that hit emitters.
+// Should always be true — disabling causes double-counting on glossy.
+constexpr bool DEFAULT_USE_MIS = true;
 
 
 // =====================================================================
@@ -172,26 +202,8 @@ constexpr float LIGHT_SCALE_STEP    = 1.25f;          //      multiplicative ste
 constexpr float LIGHT_SCALE_MIN     = 0.01f;
 constexpr float LIGHT_SCALE_MAX     = 100.0f;
 
-// ── OptiX AI Denoiser ────────────────────────────────────────────────
-// When enabled, the final render applies the OptiX HDR denoiser after
-// accumulation and before tone mapping.  Requires albedo + normal AOVs
-// written during the camera pass.  Guide layers (albedo, normal) improve
-// edge preservation and detail retention.
-//   true  = denoise final render (adds ~20–50 ms overhead)
-//   false = raw Monte Carlo output (legacy behaviour)
-constexpr bool DEFAULT_DENOISER_ENABLED        = true;   // [R]
-constexpr bool DEFAULT_DENOISER_GUIDE_ALBEDO   = true;   //     use albedo guide layer
-constexpr bool DEFAULT_DENOISER_GUIDE_NORMAL   = true;   //     use normal guide layer
-constexpr float DEFAULT_DENOISER_BLEND         = 0.0f;   //     0 = fully denoised, 1 = original
-
 // Progress snapshot PNGs at power-of-2 SPP intervals (near-zero overhead).
-// Subordinate to ENABLE_STATS — snapshots are a debugging/analysis tool.
-constexpr bool PROGRESS_SNAPSHOT_ENABLED = ENABLE_STATS && true;
-constexpr int  PROGRESS_SNAPSHOT_INTERVAL = 0;        // 0 = power-of-2 only
-
-// Write per-component debug PNGs (NEE direct, photon indirect, caustic).
-// Subordinate to ENABLE_STATS.
-constexpr bool DEBUG_COMPONENT_PNGS = ENABLE_STATS && false;
+constexpr bool PROGRESS_SNAPSHOT_ENABLED = true;
 
 
 // =====================================================================
@@ -221,9 +233,15 @@ constexpr uint32_t CELL_CACHE_TABLE_SIZE     = 65536u;  // 64K cells
 constexpr int PHOTON_BIN_COUNT     = 32;    // runtime bin count (quasi-uniform S²)
 constexpr int MAX_PHOTON_BIN_COUNT = 64;    // compile-time upper bound for fixed arrays
 
-// ── Multi-resolution hash histogram (replaces CellBinGrid §4) ──────
-constexpr int MAX_GUIDE_LEVELS = 8;         // compile-time max resolution levels
+constexpr float ADAPTIVE_RADIUS_MIN_FACTOR  = 0.25f;   // never shrink below 25% of base
+constexpr float ADAPTIVE_RADIUS_MAX_FACTOR  = 2.0f;    // never grow above 200% of base
+constexpr float ADAPTIVE_RADIUS_TARGET_K    = 100.f;   // desired photons in gather disk
 
+// ── Adaptive caustic emission ───────────────────────────────────────
+constexpr float CAUSTIC_TARGETED_FRACTION   = 0.30f;   // fraction of caustic budget targeted
+constexpr int   CAUSTIC_MIN_FOR_ANALYSIS    = 10;      // min photons per cell for CV analysis
+constexpr float CAUSTIC_CV_THRESHOLD        = 0.50f;   // CV above this = "hot" cell
+constexpr int   CAUSTIC_MAX_TARGETED_ITERS  = 3;       // max adaptive refinement passes
 
 // ── Targeted caustic emission (§11: specular geometry sampling) ─────
 // Fraction of caustic budget directed at specular surfaces via
@@ -269,16 +287,13 @@ constexpr float SCENE_REF_EXTENT = 1.0f;
 
 
 // =====================================================================
-//  §10  DEBUG & STATISTICS
+//  §10  DEBUG
 // =====================================================================
 
-// ENABLE_STATS is defined at the top of this file (MASTER GATE).
-// All debug flags below are subordinate to it.
-
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;     // stop photon after 1st hit
-constexpr bool DEBUG_PHOTON_INDIRECT_PNG  = ENABLE_STATS && false;  // emit photon-indirect preview PNGs at launch
-constexpr bool DEBUG_CAUSTIC_PNG          = ENABLE_STATS && false;  // emit caustic-only debug PNGs (needs above)
-constexpr bool DEBUG_COVERAGE_PNG         = ENABLE_STATS && false;  // emit coverage debug PNGs
+constexpr bool DEBUG_PHOTON_INDIRECT_PNG  = false;     // emit photon-indirect preview PNGs at launch
+constexpr bool DEBUG_CAUSTIC_PNG          = false;     // emit caustic-only debug PNGs (needs above)
+constexpr bool DEBUG_COVERAGE_PNG         = false;     // emit coverage debug PNGs
 constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses direct-only proxy
 
 // ── Dense grid toggle ───────────────────────────────────────────────
@@ -289,9 +304,12 @@ constexpr bool DEFAULT_USE_DENSE_GRID = false;          // use cell-bin dense gr
 //  §11  LEGACY ALIASES
 // =====================================================================
 // Still referenced across the GPU pipeline and tests.
-// TODO(v3): migrate callers to canonical names, then remove.
+// TODO: migrate callers to the canonical names, then remove.
 
+constexpr int   DEFAULT_NEE_DEEP_SAMPLES = 4;         // v1 deep NEE (still wired in optix_renderer)
 constexpr int   DEFAULT_MAX_BOUNCES      = DEFAULT_PHOTON_MAX_BOUNCES;
+constexpr int   DEFAULT_MIN_BOUNCES_RR   = DEFAULT_PHOTON_MIN_BOUNCES_RR;
+constexpr float DEFAULT_RR_THRESHOLD     = DEFAULT_PHOTON_RR_THRESHOLD;
 constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
 
 
@@ -308,45 +326,9 @@ constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_FOV            = 40.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
-#elif defined(SCENE_CORNELL_SPHERE)
-  constexpr const char* SCENE_OBJ_PATH    = "cornell_sphere/CornellBox-Sphere.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Cornell Sphere";
-  constexpr bool  SCENE_IS_REFERENCE       = false;
-  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
-  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 40.0f;
-  constexpr float SCENE_CAM_SPEED          = 0.1f;
-
-#elif defined(SCENE_CORNELL_MIRROR)
-  constexpr const char* SCENE_OBJ_PATH    = "cornell_mirror/CornellBox-Mirror.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Cornell Mirror";
-  constexpr bool  SCENE_IS_REFERENCE       = false;
-  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
-  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 40.0f;
-  constexpr float SCENE_CAM_SPEED          = 0.1f;
-
-#elif defined(SCENE_CORNELL_WATER)
-  constexpr const char* SCENE_OBJ_PATH    = "cornell_water/CornellBox-Water.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Cornell Water";
-  constexpr bool  SCENE_IS_REFERENCE       = false;
-  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
-  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 40.0f;
-  constexpr float SCENE_CAM_SPEED          = 0.1f;
-
 #elif defined(SCENE_LIVING_ROOM)
   constexpr const char* SCENE_OBJ_PATH    = "living_room/living_room.obj";
   constexpr const char* SCENE_DISPLAY_NAME = "Living Room";
-  constexpr bool  SCENE_IS_REFERENCE       = false;
-  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
-  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 50.0f;
-  constexpr float SCENE_CAM_SPEED          = 0.1f;
-
-#elif defined(SCENE_CONFERENCE)
-  constexpr const char* SCENE_OBJ_PATH    = "conference/conference.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Conference Room";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
@@ -362,9 +344,63 @@ constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_FOV            = 50.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
-#elif defined(SCENE_MORI_KNOB)
-  constexpr const char* SCENE_OBJ_PATH    = "mori_knob/testObj.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Mori Knob";
+#elif defined(SCENE_FIREPLACE_ROOM)
+  constexpr const char* SCENE_OBJ_PATH    = "fireplace_room/fireplace_room.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Fire Place";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_CONFERENCE)
+  constexpr const char* SCENE_OBJ_PATH    = "conference/conference.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Conference Room";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_LIVING_ROOM_2)
+  constexpr const char* SCENE_OBJ_PATH    = "living_room_2/scene-v4.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Living Room 2";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_STAIRCASE)
+  constexpr const char* SCENE_OBJ_PATH    = "staircase/scene-v4.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Staircase";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_STAIRCASE_2)
+  constexpr const char* SCENE_OBJ_PATH    = "staircase2/scene-v4.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Staircase 2";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_BEDROOM)
+  constexpr const char* SCENE_OBJ_PATH    = "bedroom/scene-v4.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Bedroom";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 50.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
+
+#elif defined(SCENE_BATHROOM)
+  constexpr const char* SCENE_OBJ_PATH    = "bathroom/scene-v4.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Bathroom";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
@@ -394,24 +430,28 @@ struct SceneProfile {
     SceneLightMode light_mode;
 };
 
-constexpr int NUM_SCENE_PROFILES = 8;
+constexpr int NUM_SCENE_PROFILES = 10;
 
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
       {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
-    { "cornell_translucency/cornellbox.obj",      "Cornell Translucency", false,
-      {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
-    { "fireplace_room/fireplace_room.obj",        "Fireplace Room",    false,
-      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
-    { "cornell_water/CornellBox-Water.obj",      "Cornell Water",     false,
-      {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
     { "living_room/living_room.obj",             "Living Room",       false,
-      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
-    { "conference/conference.obj",               "Conference Room",   false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
     { "salle_de_bain/salle_de_bain.obj",         "Salle de Bain",     false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
-    { "mori_knob/testObj.obj",                   "Mori Knob",         false,
+    { "fireplace_room/fireplace_room.obj",       "Fire Place",        false,
+      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
+    { "conference/conference.obj",               "Conference Room",   false,
+      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
+    { "living_room_2/scene-v4.obj",              "Living Room 2",     false,
+      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
+    { "staircase/scene-v4.obj",                  "Staircase",         false,
+      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
+    { "staircase2/scene-v4.obj",                 "Staircase 2",       false,
+      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
+    { "bedroom/scene-v4.obj",                    "Bedroom",           false,
+      {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
+    { "bathroom/scene-v4.obj",                   "Bathroom",          false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
 };
 

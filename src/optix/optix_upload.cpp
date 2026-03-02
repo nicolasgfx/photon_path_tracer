@@ -249,8 +249,7 @@ void OptixRenderer::upload_photon_data(
     stored_photons_ = global_photons;
 
     // ── Build directional histograms for guided sampling ─────────────
-    // Same logic as trace_photons(): precompute bin_idx, build hash
-    // histogram + legacy CellBinGrid, upload to GPU, then analysis.
+    // Precompute bin_idx and build per-cell analysis (no histogram upload).
     {
         PhotonBinDirs bin_dirs;
         bin_dirs.init(PHOTON_BIN_COUNT);
@@ -262,26 +261,6 @@ void OptixRenderer::upload_photon_data(
             stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
         }
 
-        // Multi-resolution hash histogram (primary guide data)
-        hash_histogram_.build(stored_photons_, gather_radius_,
-                              PHOTON_BIN_COUNT, DEFAULT_GUIDE_NUM_LEVELS);
-        for (int lv = 0; lv < hash_histogram_.num_levels; ++lv) {
-            const auto& gpu_data = hash_histogram_.gpu_bins(lv);
-            if (!gpu_data.empty())
-                d_guide_histogram_[lv].upload(gpu_data);
-            else
-                d_guide_histogram_[lv].free();
-        }
-        for (int lv = hash_histogram_.num_levels; lv < MAX_GUIDE_LEVELS; ++lv)
-            d_guide_histogram_[lv].free();
-
-        // Legacy CellBinGrid (retained for analysis / test compat)
-        cell_bin_grid_.build(stored_photons_, gather_radius_, PHOTON_BIN_COUNT);
-        if (cell_bin_grid_.total_cells() > 0 && !cell_bin_grid_.bins.empty())
-            d_cell_bin_grid_.upload(cell_bin_grid_.bins);
-        else
-            d_cell_bin_grid_.free();
-
         // Build per-cell photon analysis and upload to GPU
         float cache_cell_size = gather_radius_ * 2.0f;
         CellInfoCache cell_cache;
@@ -289,7 +268,7 @@ void OptixRenderer::upload_photon_data(
         cell_cache.build(stored_photons_, empty_caustic,
                          cache_cell_size, gather_radius_);
         float cell_area = cache_cell_size * cache_cell_size;
-        upload_cell_analysis(cell_cache, hash_histogram_, cell_area);
+        upload_cell_analysis(cell_cache, cell_area);
     }
 }
 
@@ -346,10 +325,9 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
 // =====================================================================
 void OptixRenderer::upload_cell_analysis(
     const CellInfoCache& cell_cache,
-    const HashHistogram& hash_hist,
     float                cell_area)
 {
-    auto analysis = build_cell_analysis(cell_cache, hash_hist, cell_area,
+    auto analysis = build_cell_analysis(cell_cache, cell_area,
                                          &cell_conclusions_);
     if (analysis.empty()) {
         cell_analysis_count_ = 0;

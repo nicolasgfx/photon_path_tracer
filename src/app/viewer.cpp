@@ -352,7 +352,7 @@ static void render_help_overlay(int win_w, int win_h,
                  DebugState::render_mode_name(debug.current_mode));
         line(ly, lx, buf, 0.35f, 1.0f, 0.55f);
     }
-    line(ly, lx, "R       Snapshot to PNG");
+    line(ly, lx, "R       Full render + snapshot (R again to cancel)");
     line(ly, lx, "ESC     Cancel / release / quit");
 
     // -- Statistics & Guidance --
@@ -406,9 +406,10 @@ static void render_help_overlay(int win_w, int win_h,
     toggle_line(ry, rx, "G", "Dense Grid", use_dense_grid);
 
     // -- Scenes --
-    section(ry, rx, "Scenes (1-9)");
+    section(ry, rx, "Scenes (1-9, 0)");
     for (int i = 0; i < NUM_SCENE_PROFILES; ++i) {
-        snprintf(buf, sizeof(buf), "%d     %s", i + 1,
+        int display_key = (i < 9) ? (i + 1) : 0;  // keys 1-9, then 0
+        snprintf(buf, sizeof(buf), "%d     %s", display_key,
                  SCENE_PROFILES[i].display_name);
         bool active = (i == active_scene_index);
         float cr = active ? 0.35f : 0.50f;
@@ -690,10 +691,20 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // "R" -> save timestamped snapshot (PNG + JSON statistics)
+    // "R" -> snapshot + analysis only (rendering temporarily disabled)
     if (key == GLFW_KEY_R) {
+        // TEMP: skip full render, go straight to snapshot + analysis
         s_app.snapshot_requested = true;
         return;
+        // --- Original rendering logic (commented out) ---
+        // if (s_app.render_phase == RenderPhase::Preview) {
+        //     s_app.render_phase       = RenderPhase::Rendering;
+        //     s_app.render_current_spp = 0;
+        // } else {
+        //     s_app.render_phase = RenderPhase::Preview;
+        //     s_app.camera_moved = true;
+        // }
+        // return;
     }
 
     // Left-click or M to toggle mouse capture
@@ -725,9 +736,19 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // Scene switching – keys 1-9
+    // Scene switching – keys 1-9, 0
     if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
         int idx = key - GLFW_KEY_1;  // 0-8
+        if (idx < NUM_SCENE_PROFILES && idx != s_app.active_scene_index) {
+            s_app.scene_switch_requested = idx;
+            printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
+        } else if (idx < NUM_SCENE_PROFILES) {
+            printf("[Scene] Already on %s\n", SCENE_PROFILES[idx].display_name);
+        }
+        return;
+    }
+    if (key == GLFW_KEY_0) {
+        int idx = 9;  // key 0 = profile index 9 (Bathroom)
         if (idx < NUM_SCENE_PROFILES && idx != s_app.active_scene_index) {
             s_app.scene_switch_requested = idx;
             printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
@@ -1025,7 +1046,7 @@ void run_interactive(
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // ── Runtime scene switch (keys 1-8) ────────────────────────────
+        // ── Runtime scene switch (keys 1-9, 0) ──────────────────────
         if (s_app.scene_switch_requested >= 0) {
             int idx = s_app.scene_switch_requested;
             s_app.scene_switch_requested = -1;
@@ -1240,10 +1261,28 @@ void run_interactive(
 
         // Reset progressive accumulation if camera moved
         if (s_app.camera_moved) {
+            // Cancel any in-progress full render and return to preview
+            if (s_app.render_phase == RenderPhase::Rendering) {
+                s_app.render_phase = RenderPhase::Preview;
+                optix_renderer.set_preview_mode(true);
+            }
             optix_renderer.clear_buffers();
             frame = 0;
             s_app.camera_moved = false;
         }
+
+        // ── Handle Rendering phase transition (R key pressed) ─────────
+        // TEMP: rendering disabled — R key goes straight to snapshot + analysis
+        // if (s_app.render_phase == RenderPhase::Rendering &&
+        //     s_app.render_current_spp == 0) {
+        //     optix_renderer.set_preview_mode(false);
+        //     optix_renderer.clear_buffers();
+        //     frame = 0;
+        //     s_app.render_timing_active = true;
+        //     s_app.render_start_time = std::chrono::steady_clock::now();
+        //     std::cout << "[Render] Starting full-quality render ("
+        //               << s_app.render_target_spp << " SPP)...\n";
+        // }
 
         // ── Handle "R" key: save timestamped snapshot (PNG + JSON) ───
         if (s_app.snapshot_requested) {
@@ -1362,7 +1401,11 @@ void run_interactive(
                     jf << "    \"name\": \"" << stats.scene_name << "\",\n";
                     jf << "    \"obj_path\": \"" << SCENE_OBJ_PATH << "\",\n";
                     jf << "    \"num_triangles\": " << stats.num_triangles << ",\n";
-                    jf << "    \"num_emissive_tris\": " << stats.num_emissive_tris << "\n";
+                    jf << "    \"num_emissive_tris\": " << stats.num_emissive_tris << ",\n";
+                    jf << "    \"scene_aabb_min\": [" << scene.scene_bounds.mn.x << ", "
+                       << scene.scene_bounds.mn.y << ", " << scene.scene_bounds.mn.z << "],\n";
+                    jf << "    \"scene_aabb_max\": [" << scene.scene_bounds.mx.x << ", "
+                       << scene.scene_bounds.mx.y << ", " << scene.scene_bounds.mx.z << "]\n";
                     jf << "  }\n";
 
                     jf << "}\n";
@@ -1481,7 +1524,7 @@ void run_interactive(
             }
         }
 
-        // ── Preview path: continuous progressive path tracing ────────
+        // ── Render path: preview (fast) or full-quality accumulation ──
         {
             // Photon overlay mode: GL_POINTS only, no ray tracing
             if (s_app.debug.photon_overlay_active()) {
@@ -1504,10 +1547,36 @@ void run_interactive(
                         2.0f);
                 }
             } else {
-                // Normal preview (1 spp per iteration, progressive accumulation)
+                // Normal path tracing (1 spp per iteration, progressive accumulation)
                 optix_renderer.render_debug_frame(
                     camera, frame, s_app.debug.current_mode, 1);
                 optix_renderer.download_framebuffer(display_fb);
+
+                // Track SPP during Rendering phase
+                if (s_app.render_phase == RenderPhase::Rendering) {
+                    s_app.render_current_spp++;
+                    std::cout << "[Render] SPP " << s_app.render_current_spp
+                              << " / " << s_app.render_target_spp << "\n";
+
+                    if (s_app.render_current_spp >= s_app.render_target_spp) {
+                        // Full render complete — record timing
+                        auto render_end = std::chrono::steady_clock::now();
+                        s_app.last_render_ms = std::chrono::duration<double, std::milli>(
+                            render_end - s_app.render_start_time).count();
+                        s_app.render_timing_active = false;
+
+                        std::cout << "[Render] Full render complete ("
+                                  << s_app.render_current_spp << " SPP, "
+                                  << s_app.last_render_ms << " ms). Snapshotting...\n";
+
+                        // Trigger auto-snapshot, then return to preview
+                        s_app.snapshot_requested = true;
+                        s_app.render_phase = RenderPhase::Preview;
+                        optix_renderer.set_preview_mode(true);
+                        // Don't clear buffers yet — snapshot needs the accumulated result.
+                        // The next camera_moved or R press will clear.
+                    }
+                }
             }
 
             frame++;
@@ -1549,6 +1618,9 @@ void run_interactive(
 
         // Draw stats overlay (S key)
         render_stats_overlay(win_w, win_h, s_app, &optix_renderer);
+
+        // Draw rendering-phase progress banner (temporarily disabled)
+        // if (s_app.render_phase == RenderPhase::Rendering) { ... }
 
         // Draw hover-cell overlay (when map mode toggles are active and
         // mouse is released for inspection).

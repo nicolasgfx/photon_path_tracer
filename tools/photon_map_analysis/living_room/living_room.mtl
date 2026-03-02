@@ -1,0 +1,611 @@
+# MTL written from living_room.obj
+#
+# --- Photon-beam MTL extensions (pb_*) ---
+# These tokens extend classic Wavefront .mtl in a backward-compatible way.
+# Unknown keys should be ignored by legacy loaders.
+#
+# Surface model selection:
+#   pb_brdf <lambert|dielectric|conductor|clearcoat|emissive|fabric>
+#   pb_semantic <tag>                    # optional classification hint (e.g. fabric, wood_natural, wood_painted, wallpaper, stone, metal, glass, leather, ceramic, subsurface)
+#   pb_roughness <0..1>                  # microfacet roughness (GGX recommended)
+#   pb_anisotropy <0..1>                 # 0=isotropic, 1=strongly anisotropic (e.g. brushed metal)
+#   pb_roughness_x <0..1>                # optional: overrides pb_roughness for anisotropic models
+#   pb_roughness_y <0..1>
+#   pb_eta <float>                       # IOR for dielectrics (alias of Ni if present)
+#   pb_conductor_eta r g b               # conductor real IOR (approx, RGB)
+#   pb_conductor_k   r g b               # conductor imaginary IOR (approx, RGB)
+#   pb_transmission <0..1>               # dielectric transmission amount (0=opaque, 1=fully)
+#   pb_thin <0|1>                         # treat surface as thin sheet (no interior volume required)
+#   pb_thickness <float>                 # physical thickness for thin materials (in meters)
+#
+# Fabric extras (optional; used when pb_brdf = fabric):
+#   pb_sheen <0..1>                      # soft grazing reflectance
+#   pb_sheen_tint <0..1>                 # 0=white sheen, 1=tinted by albedo
+#
+# Clearcoat layering (optional; used when pb_brdf = clearcoat):
+#   pb_base_brdf <lambert|dielectric|conductor>
+#   pb_base_roughness <0..1>
+#   pb_clearcoat <0..1>                  # coat weight (default 1 if pb_brdf=clearcoat)
+#   pb_clearcoat_roughness <0..1>        # coat roughness (defaults to pb_roughness)
+#
+# Volumetric / translucency (for photon beams through participating media):
+#   pb_medium homogeneous                # enables homogeneous medium inside closed mesh
+#   pb_density <float>                   # scales sigma_a/sigma_s (1 = as-authored)
+#   pb_sigma_a r g b                     # absorption coefficient (1 / scene_length_unit)
+#   pb_sigma_s r g b                     # scattering coefficient (1 / scene_length_unit)
+#   pb_g <float>                         # Henyey-Greenstein anisotropy [-1..1]
+#
+# Optional scene scale hints (in OBJ coordinate units):
+#   pb_meters_per_unit <float>            # e.g. 1.0 if OBJ units are meters; 0.01 if centimeters
+#   pb_scene_bbox_min x y z               # optional: scene AABB min, in OBJ units
+#   pb_scene_bbox_max x y z               # optional: scene AABB max, in OBJ units
+#
+# Green apple: opaque dielectric skin with a subtle organic sub-surface glow.
+# sigma_s is kept low so no glass-like transmission occurs; sigma_a absorbs red/blue to tint green.
+newmtl Apple
+Kd 0.30 0.60 0.12
+Ns 30
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.06 0.06 0.06
+map_Kd textures\apple.jpg
+pb_brdf dielectric
+pb_semantic subsurface
+pb_roughness 0.30
+pb_transmission 0
+pb_medium homogeneous
+pb_density 0.15
+pb_sigma_s 0.8 1.5 0.5
+pb_sigma_a 3.0 0.4 4.0
+pb_g 0.65
+
+newmtl BackLight
+Kd 0.8 0.8 0.8
+Ke 1.3 1.3 1.3
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.0 0.0 0.0
+pb_brdf emissive
+
+# Fireplace stone: warm beige/sandstone Kd (OBJ mesh is named "BlackMarble" but is actually sandstone-coloured)
+newmtl BlackMarble
+Kd 0.72 0.58 0.42
+Ns 8
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.02 0.02 0.02
+pb_brdf dielectric
+pb_semantic stone
+pb_eta 1.5
+pb_roughness 0.9
+
+newmtl BlackWroughtIron
+Kd 0.08 0.06 0.055
+Ns 3
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.1 0.09 0.09
+pb_brdf conductor
+pb_semantic metal
+pb_roughness 0.7
+pb_conductor_eta 2.9 2.9 2.9
+pb_conductor_k 3.3 3.3 3.3
+
+newmtl BlindMaterial
+Kd 0.95 0.95 0.95
+Ns 1
+illum 2
+Ka 0 0 0
+Ks 0.05 0.05 0.05
+pb_brdf fabric
+pb_semantic fabric
+pb_roughness 0.90
+pb_sheen 0.55
+pb_sheen_tint 0.10
+
+# Paperback books: flat diffuse, texture carries all detail
+newmtl Books
+Kd 1 1 1
+Ns 20
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.05 0.05 0.05
+map_Kd textures\book-spines.jpg
+pb_brdf lambert
+
+newmtl CandleHolders
+Kd 0 0 0 
+Ns 15
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.2 0.2 0.2
+pb_brdf conductor
+pb_semantic metal
+pb_roughness 0.4
+pb_conductor_eta 2.9 2.9 2.9
+pb_conductor_k 3.3 3.3 3.3
+
+newmtl Carpet
+Kd 0.8 0.79136 0.8
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+map_Kd textures\carpet-text3b.jpg
+pb_brdf fabric
+pb_semantic fabric
+pb_roughness 0.95
+pb_sheen 0.65
+pb_sheen_tint 0.20
+
+newmtl CeilingLampshade
+Kd 1 1 1
+Ka 0 0 0
+Ns 8000
+d 0.5
+illum 2
+Ks 0 0 0
+map_Kd textures\Shade-paper.jpg
+pb_brdf dielectric
+pb_semantic fabric
+pb_eta 1.3
+pb_thin 1
+pb_thickness 0.001
+pb_transmission 0.5
+pb_roughness 0.8
+
+# Glass cup: refractive dielectric with light absorption
+newmtl Ceramic
+Kd 0.0 0.0 0.0
+illum 4
+Ka 0 0 0
+Ks 0.1 0.1 0.1
+Ni 1.5
+pb_brdf dielectric
+pb_semantic glass
+pb_eta 1.5
+pb_transmission 1.0
+pb_roughness 0.001
+pb_dispersion 4500.0
+pb_medium homogeneous
+pb_density 0.02
+pb_sigma_s 0 0 0
+pb_sigma_a 0.1 0.02 0.1
+pb_g 0.0
+
+newmtl Cushion
+Kd 0.8 0.79136 0.8
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+map_Kd textures\cushion-green-circles.jpg
+pb_brdf fabric
+pb_semantic fabric
+pb_roughness 0.90
+pb_sheen 0.60
+pb_sheen_tint 0.15
+
+newmtl Cushion1
+Kd 0.8 0.79136 0.8
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+map_Kd textures\cushion-stripe-purple.jpg
+pb_brdf fabric
+pb_semantic fabric
+pb_roughness 0.90
+pb_sheen 0.60
+pb_sheen_tint 0.15
+
+newmtl Cushion3
+Kd 0.8 0.79136 0.8
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+map_Kd textures\cushion-purple-yellow-stripe.jpg
+pb_brdf fabric
+pb_semantic fabric
+pb_roughness 0.90
+pb_sheen 0.60
+pb_sheen_tint 0.15
+
+newmtl Default
+Kd 0 0 0
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+
+# Brushed steel: very low diffuse (metallic), strong specular, moderate sharpness
+newmtl DullSteel
+Kd 0.02 0.02 0.02
+Ns 80
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.5 0.5 0.5
+pb_brdf conductor
+pb_semantic metal
+pb_roughness 0.25
+pb_anisotropy 0.8
+pb_roughness_x 0.12
+pb_roughness_y 0.35
+pb_conductor_eta 2.5 2.5 2.5
+pb_conductor_k 3.0 3.0 3.0
+
+newmtl Floor
+Kd 1 1 1 
+Ns 5
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.05 0.05 0.05
+map_Kd textures\wood4.jpg
+pb_brdf clearcoat
+pb_semantic wood_natural
+pb_eta 1.5
+pb_clearcoat 0.7
+pb_clearcoat_roughness 0.18
+pb_base_brdf lambert
+pb_base_roughness 0.65
+
+newmtl LampStand
+Kd 0.9 0.9 0.9
+Ns 10
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.1 0.1 0.1
+pb_brdf conductor
+pb_semantic metal
+pb_roughness 0.35
+pb_conductor_eta 2.9 2.9 2.9
+pb_conductor_k 3.3 3.3 3.3
+
+newmtl LampshaderOuter
+Kd 0.8 0.79136 0.8
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+map_Kd textures\shade-stripes.jpg
+pb_brdf fabric
+pb_semantic fabric
+pb_roughness 0.90
+pb_sheen 0.55
+pb_sheen_tint 0.15
+
+# Glass-covered picture: low specular (Fresnel ~6%), very sharp highlight
+newmtl LargePicture
+Kd 0 0 0
+Ns 1500
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.06 0.06 0.06
+map_Kd textures\pic5wide.jpg
+pb_brdf clearcoat
+pb_eta 1.5
+pb_clearcoat 1.0
+pb_clearcoat_roughness 0.02
+pb_base_brdf lambert
+pb_base_roughness 1.0
+
+newmtl LeftLight
+Ke 3.25 3.055 2.6
+Kd 0.0 0.0 0.0
+Ns 256
+Ka 0 0 0 
+Ks 0 0 0
+d 1
+illum 2
+pb_brdf emissive
+
+# Dark brownish-red book back cover
+newmtl LoveLettersBack
+Kd 0.1 0.02 0.0
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+pb_brdf lambert
+
+# Glossy magazine cover: texture-driven, minimal specular highlights
+newmtl Magazine
+Kd 0.8 0.79136 0.8
+Ns 20
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.05 0.05 0.05
+map_Kd textures\magazine.jpg
+pb_brdf lambert
+
+newmtl MiddleLight
+Ke 3.25 3.055 2.6
+Kd 0.0 0.0 0.0
+Ns 256
+Ka 0 0 0 
+Ks 0 0 0
+d 1
+illum 2
+pb_brdf emissive
+
+# Glass-covered picture: low specular (Fresnel ~6%), very sharp highlight
+newmtl Picture
+Kd 1 1 1
+Ns 1500
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.06 0.06 0.06
+map_Kd textures\picture11-vert.jpg
+pb_brdf clearcoat
+pb_eta 1.5
+pb_clearcoat 1.0
+pb_clearcoat_roughness 0.02
+pb_base_brdf lambert
+pb_base_roughness 1.0
+
+# Glass-covered picture: low specular (Fresnel ~6%), very sharp highlight
+newmtl Picture1
+Kd 1 1 1
+Ns 1500
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.06 0.06 0.06
+map_Kd textures\photo1.jpg
+pb_brdf clearcoat
+pb_eta 1.5
+pb_clearcoat 1.0
+pb_clearcoat_roughness 0.02
+pb_base_brdf lambert
+pb_base_roughness 1.0
+
+# Glass-covered picture: low specular (Fresnel ~6%), very sharp highlight
+newmtl Picture2
+Kd 1 1 1
+Ns 1500
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.06 0.06 0.06
+map_Kd textures\photo3.jpg
+pb_brdf clearcoat
+pb_eta 1.5
+pb_clearcoat 1.0
+pb_clearcoat_roughness 0.02
+pb_base_brdf lambert
+pb_base_roughness 1.0
+
+# Glass-covered picture: low specular (Fresnel ~6%), very sharp highlight
+newmtl Picture4
+Kd 1 1 1
+Ns 1500
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.06 0.06 0.06
+map_Kd textures\photo2.jpg
+pb_brdf clearcoat
+pb_eta 1.5
+pb_clearcoat 1.0
+pb_clearcoat_roughness 0.02
+pb_base_brdf lambert
+pb_base_roughness 1.0
+
+# Glass-covered picture: low specular (Fresnel ~6%), very sharp highlight
+newmtl Picture5
+Kd 1 1 1
+Ns 1500
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.06 0.06 0.06
+map_Kd textures\photo4.jpg
+pb_brdf clearcoat
+pb_eta 1.5
+pb_clearcoat 1.0
+pb_clearcoat_roughness 0.02
+pb_base_brdf lambert
+pb_base_roughness 1.0
+
+# Red painted plastic control knob
+newmtl RadiatorKnobOuter
+Kd 0.8 0.01 0.01
+Ns 10
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.1 0.1 0.1
+pb_brdf dielectric
+pb_semantic plastic
+pb_roughness 0.35
+
+# Radiator enamel: opaque white ceramic, slightly rough smooth glaze, no translucency
+newmtl RadiatorPanelsEnamel
+Kd 0.85 0.85 0.85
+Ns 200
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.08 0.08 0.08
+pb_brdf dielectric
+pb_semantic ceramic
+pb_eta 1.5
+pb_roughness 0.25
+
+# Dark interior parts visible through vents
+newmtl RadioInside
+Kd 0.2 0.2 0.2
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+pb_brdf lambert
+
+# Warm beige plastic radio casing
+newmtl RadioPlastic
+Kd 0.65 0.57 0.4
+Ns 3
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.2 0.2 0.2
+pb_brdf dielectric
+pb_semantic plastic
+pb_roughness 0.5
+
+# Dark wood-toned plastic trim around radio speaker
+newmtl RadioSurround
+Kd 0.2 0.1 0.01
+Ns 10
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.2 0.2 0.2
+pb_brdf dielectric
+pb_semantic plastic
+pb_roughness 0.45
+
+newmtl RightLight
+Ke 3.25 3.055 2.6
+Kd 0.0 0.0 0.0
+Ns 256
+Ka 0 0 0 
+Ks 0 0 0
+d 1
+illum 2
+pb_brdf emissive
+
+# Dark metal picture frame
+newmtl SmallPictureFrame
+Kd 0.0 0.0 0.0
+Ns 4
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.1 0.1 0.1
+pb_brdf conductor
+pb_semantic metal
+pb_roughness 0.55
+pb_conductor_eta 2.9 2.9 2.9
+pb_conductor_k 3.3 3.3 3.3
+
+# Natural leather: warm cream tint, soft broad sheen (Ns~30), very low specular
+newmtl SofaLeather
+Kd 0.9 0.9 0.9
+Ns 10
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.2 0.2 0.2
+pb_brdf fabric
+pb_semantic leather
+pb_eta 1.45
+pb_roughness 0.60
+pb_sheen 0.35
+pb_sheen_tint 0.15
+
+# White table: glossy shell white
+newmtl TableGlossy
+Kd 0.99 0.99 0.99
+Ks 0.1 0.1 0.1
+Ns 2048
+d 1
+illum 2
+Ka 0 0 0
+pb_brdf lambert
+
+# White painted wood trim (skirting boards, door frames)
+newmtl Trim
+Kd 0.95 0.95 0.95
+Ns 3
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.04 0.04 0.04
+pb_brdf clearcoat
+pb_semantic wood_painted
+pb_eta 1.5
+pb_clearcoat 0.5
+pb_clearcoat_roughness 0.25
+pb_base_brdf lambert
+pb_base_roughness 0.8
+
+# Dark plastic TV bezel
+newmtl TvBevel
+Kd 0 0 0
+Ns 6
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.05 0.05 0.05
+pb_brdf dielectric
+pb_semantic plastic
+pb_roughness 0.5
+
+# Turned-off TV: very dark with smooth, subtle reflections
+newmtl TvScreen
+Kd 0.01 0.01 0.01
+Ns 500
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.15 0.15 0.15
+pb_brdf clearcoat
+pb_semantic glass
+pb_eta 1.5
+pb_clearcoat 1.0
+pb_clearcoat_roughness 0.06
+pb_base_brdf dielectric
+pb_base_roughness 0.35
+
+newmtl Walls
+Kd 0.6 0.6 0.6
+Ns 256
+d 1
+illum 2
+Ka 0 0 0
+Ks 0 0 0
+pb_brdf clearcoat
+pb_semantic wood_painted
+pb_eta 1.5
+pb_clearcoat 0.2
+pb_clearcoat_roughness 0.35
+pb_base_brdf lambert
+pb_base_roughness 1.0
+
+newmtl WhitePaint
+Kd 0.95 0.95 0.95
+Ns 3
+d 1
+illum 2
+Ka 0 0 0
+Ks 0.04 0.04 0.04
+pb_brdf clearcoat
+pb_semantic wood_painted
+pb_eta 1.5
+pb_clearcoat 0.8
+pb_clearcoat_roughness 0.12
+pb_base_brdf lambert
+pb_base_roughness 0.7

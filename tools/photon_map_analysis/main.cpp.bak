@@ -1,0 +1,2028 @@
+// ─────────────────────────────────────────────────────────────────────
+// photon_map_analysis – Standalone photon map spatial hierarchy analyser
+// ─────────────────────────────────────────────────────────────────────
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+// Loads a photon cache + scene, traces CPU reference rays, queries
+// every spatial hierarchy at each non-specular hit point with ≥3 hits,
+// then writes a pretty-printed JSON comparison report.
+//
+// Usage:
+//   photon_map_analysis <cache.bin> <scene.obj>
+//       [--snapshot <snapshot.json>]    # load camera from snapshot JSON
+//       [--radius <float>]             # override gather radius
+//       [--num-rays <int>]             # number of reference rays (default 100)
+//       [--min-hits <int>]             # min non-specular hits (default 3)
+//       [--knn-k <int>]               # k for kNN queries   (default 64)
+//       [--tau <float>]               # surface filter tau   (default 0.02)
+//       [--output <path.json>]         # output file path
+// ─────────────────────────────────────────────────────────────────────
+
+#include "photon/photon_io.h"
+#include "photon/hash_grid.h"
+#include "photon/kd_tree.h"
+#include "photon/cell_bin_grid.h"
+#include "photon/hash_histogram.h"
+#include "photon/cell_cache.h"
+#include "photon/photon_analysis.h"
+#include "photon/photon_bins.h"
+#include "scene/obj_loader.h"
+#include "renderer/camera.h"
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
+#include <chrono>
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <map>
+#include <ctime>
+
+// ─────────────────────────────────────────────────────────────────────
+// Config defaults
+// ─────────────────────────────────────────────────────────────────────
+struct ToolConfig {
+    std::string cache_path;
+    std::string scene_path;         // relative to scenes/ dir
+    std::string scenes_dir;         // root scenes directory
+    std::string snapshot_path;      // optional: load camera from this
+    std::string output_path = "photon_analysis_report.json";
+
+    int   num_rays   = 100;
+    int   min_hits   = 3;        // minimum non-specular hits per ray
+    int   knn_k      = 64;
+    float tau        = 0.02f;
+    float radius_override = -1.0f;  // <0 means use from cache header
+
+    // Camera overrides (used if no snapshot JSON provided)
+    float cam_pos[3]    = {0.f, 0.f, 0.f};
+    float cam_lookat[3] = {0.f, 0.f, -1.f};
+    float cam_up[3]     = {0.f, 1.f, 0.f};
+    float cam_fov       = 40.0f;
+    int   cam_width     = 1024;
+    int   cam_height    = 768;
+    bool  cam_from_snapshot = false;
+    bool  verbose = false;  // --verbose: full per-hit output with bins[]
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// HitPoint: a single non-specular surface hit along a reference ray
+// ─────────────────────────────────────────────────────────────────────
+struct ReferenceHit {
+    float3   position;
+    float3   normal;
+    uint32_t triangle_id;
+    uint32_t material_id;
+    uint8_t  material_type;  // MaterialType enum
+    int      bounce;         // bounce index (0 = primary)
+};
+
+struct ReferenceRay {
+    int ray_index;
+    int pixel_x, pixel_y;
+    std::vector<ReferenceHit> hits;
+};
+// ─────────────────────────────────────────────────────────────────────
+// DirectionalHistogram — normalized flux fraction per Fibonacci bin
+// ─────────────────────────────────────────────────────────────────────
+// Forward-declared before GatherResult so it can be embedded there.
+struct DirectionalHistogram {
+    float bins[MAX_PHOTON_BIN_COUNT] = {};  // normalized flux fractions
+    int   num_bins     = 0;
+    int   active_bins  = 0;   // bins with fraction > 0
+    int   total_photons= 0;   // photons that contributed
+    float total_flux   = 0.f; // raw total before normalization
+
+    void normalize() {
+        active_bins = 0;
+        if (total_flux > 0.f) {
+            float inv = 1.f / total_flux;
+            for (int k = 0; k < num_bins; ++k) {
+                bins[k] *= inv;
+                if (bins[k] > 0.f) active_bins++;
+            }
+        }
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// HistogramComparison — error metrics between two histograms
+// ─────────────────────────────────────────────────────────────────────
+struct HistogramComparison {
+    float jsd = 0.f;   // Jensen-Shannon divergence (0 = identical, ln2 = max)
+    float l1  = 0.f;   // L1 distance: ½ Σ|P-Q| (0 = identical, 1 = disjoint)
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Per-hierarchy gather result at one hit point
+// ─────────────────────────────────────────────────────────────────────
+struct GatherResult {
+    std::string hierarchy_name;
+    int    photon_count    = 0;
+    float  total_flux      = 0.0f;
+    float  min_dist2       = 1e30f;
+    float  max_dist2       = 0.0f;
+    double build_ms        = 0.0;  // time to build this hierarchy (shared)
+    double query_us        = 0.0;  // time to query this single hit point
+
+    // For binned hierarchies (CellBinGrid, HashHistogram)
+    int    occupied_bins   = 0;
+    float  binned_flux     = 0.0f;
+    int    active_bins     = 0;    // bins with flux > 0
+    float  concentration   = 0.0f; // f_max / f_total
+
+    // Per-bin directional breakdown (32 bins max)
+    struct BinDetail {
+        int   idx          = 0;
+        float scalar_flux  = 0.0f;
+        float avg_nx = 0, avg_ny = 0, avg_nz = 0;
+        float dir_x  = 0, dir_y  = 0, dir_z  = 0;  // centroid direction
+        int   count        = 0;  // photon count (CellBinGrid only)
+    };
+    std::vector<BinDetail> bin_details;  // only non-zero bins
+
+    // For counting hierarchies: spatial gather statistics
+    float3 centroid          = {0.f, 0.f, 0.f};
+    float  position_spread   = 0.0f;  // RMS distance from centroid
+    float  normal_coherence  = 0.0f;  // mean dot(photon_normal, hit_normal)
+
+    // Histogram comparison (populated after all methods run)
+    DirectionalHistogram histogram;       // from kNN photons (counting) or precomputed (binned)
+    HistogramComparison  hist_error;      // vs brute-force ground truth
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Shared: build histogram from a set of photon indices
+// ─────────────────────────────────────────────────────────────────────
+// This is the SINGLE source of truth for photons → histogram conversion.
+// Used by brute force, hash grid, and kd-tree gathers.
+static DirectionalHistogram build_histogram_from_photons(
+    const PhotonSoA& photons,
+    const std::vector<uint32_t>& indices,
+    int num_bins)
+{
+    DirectionalHistogram h;
+    h.num_bins = num_bins;
+    h.total_photons = (int)indices.size();
+
+    for (uint32_t idx : indices) {
+        int bk = photons.bin_idx[idx];
+        if (bk < 0 || bk >= num_bins) continue;
+        float f = photons.total_flux(idx);
+        h.bins[bk] += f;
+        h.total_flux += f;
+    }
+    h.normalize();
+    return h;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Shared: build histogram from precomputed PhotonBin array
+// ─────────────────────────────────────────────────────────────────────
+static DirectionalHistogram build_histogram_from_precomputed(
+    const PhotonBin* bp, int num_bins)
+{
+    DirectionalHistogram h;
+    h.num_bins = num_bins;
+    for (int k = 0; k < num_bins; ++k) {
+        h.bins[k] = bp[k].scalar_flux;
+        h.total_flux += bp[k].scalar_flux;
+        h.total_photons += bp[k].count;
+    }
+    h.normalize();
+    return h;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Shared: build histogram from precomputed GpuGuideBin array
+// ─────────────────────────────────────────────────────────────────────
+static DirectionalHistogram build_histogram_from_precomputed(
+    const GpuGuideBin* gp, int num_bins)
+{
+    DirectionalHistogram h;
+    h.num_bins = num_bins;
+    for (int k = 0; k < num_bins; ++k) {
+        h.bins[k] = gp[k].scalar_flux;
+        h.total_flux += gp[k].scalar_flux;
+    }
+    h.normalize();
+    return h;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Histogram comparison: Jensen-Shannon divergence + L1 distance
+// ─────────────────────────────────────────────────────────────────────
+// JSD is symmetric, always finite, bounded [0, ln2].
+// L1 = ½ Σ|P_k - Q_k|, range [0, 1].
+static HistogramComparison histogram_error(
+    const DirectionalHistogram& truth,
+    const DirectionalHistogram& test,
+    int num_bins)
+{
+    HistogramComparison c;
+    // Both empty → identical
+    if (truth.total_flux <= 0.f && test.total_flux <= 0.f) return c;
+    // One empty → maximum divergence
+    if (truth.total_flux <= 0.f || test.total_flux <= 0.f) {
+        c.jsd = 0.693147f; // ln(2)
+        c.l1  = 1.0f;
+        return c;
+    }
+
+    double jsd_sum = 0.0;
+    double l1_sum  = 0.0;
+    for (int k = 0; k < num_bins; ++k) {
+        double p = truth.bins[k];
+        double q = test.bins[k];
+        double m = 0.5 * (p + q);
+        l1_sum += std::fabs(p - q);
+        if (m > 0.0) {
+            if (p > 0.0) jsd_sum += p * std::log(p / m);
+            if (q > 0.0) jsd_sum += q * std::log(q / m);
+        }
+    }
+    c.jsd = (float)(jsd_sum * 0.5);
+    c.l1  = (float)(l1_sum * 0.5);
+    return c;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Global Fibonacci bin directions (initialized once)
+// ─────────────────────────────────────────────────────────────────────
+static PhotonBinDirs g_bin_dirs;
+
+// ─────────────────────────────────────────────────────────────────────
+// Split photons into global + caustic by path_flags (for CellInfoCache)
+// ─────────────────────────────────────────────────────────────────────
+static void split_by_path_flags(
+    const PhotonSoA& all,
+    PhotonSoA& global_out,
+    PhotonSoA& caustic_out)
+{
+    const size_t N = all.size();
+    const bool has_flags = !all.path_flags.empty();
+
+    size_t n_global = 0, n_caustic = 0;
+    for (size_t i = 0; i < N; ++i) {
+        if (has_flags && (all.path_flags[i] & (PHOTON_FLAG_CAUSTIC_GLASS | PHOTON_FLAG_CAUSTIC_SPECULAR)))
+            n_caustic++;
+        else
+            n_global++;
+    }
+
+    global_out.reserve(n_global);
+    caustic_out.reserve(n_caustic);
+    global_out.clear();
+    caustic_out.clear();
+
+    for (size_t i = 0; i < N; ++i) {
+        bool is_caustic = has_flags &&
+            (all.path_flags[i] & (PHOTON_FLAG_CAUSTIC_GLASS | PHOTON_FLAG_CAUSTIC_SPECULAR));
+        PhotonSoA& dst = is_caustic ? caustic_out : global_out;
+        size_t di = dst.size();
+        dst.resize((uint32_t)(di + 1));
+        dst.pos_x[di] = all.pos_x[i];
+        dst.pos_y[di] = all.pos_y[i];
+        dst.pos_z[di] = all.pos_z[i];
+        dst.wi_x[di]  = all.wi_x[i];
+        dst.wi_y[di]  = all.wi_y[i];
+        dst.wi_z[di]  = all.wi_z[i];
+        dst.norm_x[di] = all.norm_x[i];
+        dst.norm_y[di] = all.norm_y[i];
+        dst.norm_z[di] = all.norm_z[i];
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            dst.spectral_flux[di * NUM_LAMBDA + b] = all.spectral_flux[i * NUM_LAMBDA + b];
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            dst.lambda_bin[di * HERO_WAVELENGTHS + h] = all.lambda_bin[i * HERO_WAVELENGTHS + h];
+            dst.flux[di * HERO_WAVELENGTHS + h] = all.flux[i * HERO_WAVELENGTHS + h];
+        }
+        dst.num_hero[di] = all.num_hero[i];
+        if (i < all.source_emissive_idx.size())
+            dst.source_emissive_idx[di] = all.source_emissive_idx[i];
+        if (i < all.bin_idx.size())
+            dst.bin_idx[di] = all.bin_idx[i];
+        if (i < all.path_flags.size())
+            dst.path_flags[di] = all.path_flags[i];
+        if (i < all.bounce_count.size())
+            dst.bounce_count[di] = all.bounce_count[i];
+        if (i < all.tri_id.size())
+            dst.tri_id[di] = all.tri_id[i];
+    }
+
+    std::printf("[tool] Photon split: %zu global + %zu caustic = %zu total\n",
+                global_out.size(), caustic_out.size(), N);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Photon type statistics from path_flags
+// ─────────────────────────────────────────────────────────────────────
+struct PhotonTypeStats {
+    size_t total            = 0;
+    size_t global_count     = 0;
+    size_t caustic_glass    = 0;
+    size_t caustic_specular = 0;
+    size_t traversed_glass  = 0;
+    size_t volume_scatter   = 0;
+    size_t dispersion       = 0;
+};
+
+static PhotonTypeStats compute_photon_type_stats(const PhotonSoA& photons) {
+    PhotonTypeStats s;
+    s.total = photons.size();
+    for (size_t i = 0; i < s.total; ++i) {
+        uint8_t f = (i < photons.path_flags.size()) ? photons.path_flags[i] : 0;
+        if (f & PHOTON_FLAG_CAUSTIC_GLASS)     s.caustic_glass++;
+        if (f & PHOTON_FLAG_CAUSTIC_SPECULAR)  s.caustic_specular++;
+        if (f & PHOTON_FLAG_TRAVERSED_GLASS)   s.traversed_glass++;
+        if (f & PHOTON_FLAG_VOLUME_SCATTER)    s.volume_scatter++;
+        if (f & PHOTON_FLAG_DISPERSION)        s.dispersion++;
+        if (!(f & (PHOTON_FLAG_CAUSTIC_GLASS | PHOTON_FLAG_CAUSTIC_SPECULAR)))
+            s.global_count++;
+    }
+    return s;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Minimal JSON string escaping
+// ─────────────────────────────────────────────────────────────────────
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Parse a simple JSON value (very minimal, no full parser needed)
+// ─────────────────────────────────────────────────────────────────────
+static bool parse_json_camera(const std::string& json_path, ToolConfig& cfg) {
+    std::ifstream f(json_path);
+    if (!f.is_open()) {
+        std::cerr << "[tool] Cannot open snapshot JSON: " << json_path << "\n";
+        return false;
+    }
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+
+    // Simple field extraction via find/sscanf patterns
+    auto extract_array3 = [&](const char* key, float out[3]) -> bool {
+        auto pos = content.find(std::string("\"") + key + "\"");
+        if (pos == std::string::npos) return false;
+        auto bracket = content.find('[', pos);
+        if (bracket == std::string::npos) return false;
+        if (sscanf(content.c_str() + bracket, "[%f, %f, %f]",
+                   &out[0], &out[1], &out[2]) == 3)
+            return true;
+        // Try with %f,%f,%f (no spaces)
+        return sscanf(content.c_str() + bracket, "[%f,%f,%f]",
+                      &out[0], &out[1], &out[2]) == 3;
+    };
+    auto extract_float = [&](const char* key, float& out) -> bool {
+        auto pos = content.find(std::string("\"") + key + "\"");
+        if (pos == std::string::npos) return false;
+        auto colon = content.find(':', pos);
+        if (colon == std::string::npos) return false;
+        return sscanf(content.c_str() + colon + 1, " %f", &out) == 1;
+    };
+    auto extract_int = [&](const char* key, int& out) -> bool {
+        auto pos = content.find(std::string("\"") + key + "\"");
+        if (pos == std::string::npos) return false;
+        auto colon = content.find(':', pos);
+        if (colon == std::string::npos) return false;
+        return sscanf(content.c_str() + colon + 1, " %d", &out) == 1;
+    };
+    auto extract_string = [&](const char* key, std::string& out) -> bool {
+        auto pos = content.find(std::string("\"") + key + "\"");
+        if (pos == std::string::npos) return false;
+        auto colon = content.find(':', pos);
+        if (colon == std::string::npos) return false;
+        auto q1 = content.find('"', colon + 1);
+        if (q1 == std::string::npos) return false;
+        auto q2 = content.find('"', q1 + 1);
+        if (q2 == std::string::npos) return false;
+        out = content.substr(q1 + 1, q2 - q1 - 1);
+        return true;
+    };
+
+    bool ok = true;
+    ok &= extract_array3("position", cfg.cam_pos);
+    ok &= extract_array3("look_at",  cfg.cam_lookat);
+    extract_array3("up", cfg.cam_up);  // optional, default (0,1,0) is fine
+    extract_float("fov_deg", cfg.cam_fov);
+    extract_int("width",  cfg.cam_width);
+    extract_int("height", cfg.cam_height);
+
+    // Try to extract scene obj_path
+    std::string obj;
+    if (extract_string("obj_path", obj) && !obj.empty()) {
+        cfg.scene_path = obj;
+    }
+
+    if (!ok) {
+        std::cerr << "[tool] Warning: could not fully parse camera from "
+                  << json_path << " (using defaults for missing fields)\n";
+    }
+    return true;  // partial parse is OK
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CPU reference ray tracer
+// ─────────────────────────────────────────────────────────────────────
+static std::vector<ReferenceRay> trace_reference_rays(
+    const Scene& scene, const Camera& camera,
+    int num_rays, int min_hits, int max_bounces = 20)
+{
+    std::vector<ReferenceRay> result;
+    result.reserve(num_rays);
+
+    // Deterministic grid sampling over image plane
+    int grid_side = (int)std::ceil(std::sqrt((double)num_rays * 4));
+    int attempts = 0;
+    int ray_idx = 0;
+    PCGRng rng = PCGRng::seed(42, 1);
+
+    for (int gy = 0; gy < grid_side && (int)result.size() < num_rays; ++gy) {
+        for (int gx = 0; gx < grid_side && (int)result.size() < num_rays; ++gx) {
+            ++attempts;
+            int px = (int)((float)(gx + 0.5f) / grid_side * camera.width);
+            int py = (int)((float)(gy + 0.5f) / grid_side * camera.height);
+            px = std::max(0, std::min(px, camera.width - 1));
+            py = std::max(0, std::min(py, camera.height - 1));
+
+            Ray ray = generate_camera_ray(
+                px, py, rng,
+                camera.width, camera.height,
+                camera.lower_left, camera.horizontal, camera.vertical,
+                camera.position, camera.u, camera.v,
+                0.0f, 0.0f, 0.0f);  // no DOF for reference rays
+
+            ReferenceRay rr;
+            rr.ray_index = ray_idx++;
+            rr.pixel_x = px;
+            rr.pixel_y = py;
+
+            for (int bounce = 0; bounce < max_bounces; ++bounce) {
+                HitRecord hit = scene.intersect(ray);
+                if (!hit.hit) break;
+
+                const Material& mat = scene.materials[hit.material_id];
+
+                // Emissive surfaces: stop tracing
+                if (mat.is_emissive()) break;
+
+                // Non-specular hit: record it
+                if (!mat.is_specular()) {
+                    ReferenceHit rh;
+                    rh.position    = hit.position;
+                    rh.normal      = hit.normal;
+                    rh.triangle_id = hit.triangle_id;
+                    rh.material_id = hit.material_id;
+                    rh.material_type = (uint8_t)mat.type;
+                    rh.bounce      = bounce;
+                    rr.hits.push_back(rh);
+                }
+
+                // Continue tracing: reflect/refract
+                // For specular surfaces, compute perfect reflection/refraction
+                // For diffuse surfaces, use cosine-weighted hemisphere sample
+                float3 new_dir;
+                if (mat.type == MaterialType::Mirror) {
+                    new_dir = ray.direction - hit.normal * (2.0f * dot(ray.direction, hit.normal));
+                } else if (mat.type == MaterialType::Glass || mat.type == MaterialType::Translucent) {
+                    // Simple refraction (Snell's law) with TIR fallback
+                    float3 n = hit.normal;
+                    float cos_i = -dot(ray.direction, n);
+                    float eta = 1.0f / mat.ior;
+                    if (cos_i < 0.f) {
+                        n = -n;
+                        cos_i = -cos_i;
+                        eta = mat.ior;
+                    }
+                    float sin2_t = eta * eta * (1.0f - cos_i * cos_i);
+                    if (sin2_t > 1.0f) {
+                        // Total internal reflection
+                        new_dir = ray.direction - n * (2.0f * dot(ray.direction, n));
+                    } else {
+                        float cos_t = std::sqrt(1.0f - sin2_t);
+                        new_dir = ray.direction * eta + n * (eta * cos_i - cos_t);
+                    }
+                } else {
+                    // Diffuse: random cosine-weighted hemisphere
+                    ONB onb = ONB::from_normal(hit.normal);
+                    float u1 = rng.next_float();
+                    float u2 = rng.next_float();
+                    float r_disk = std::sqrt(u1);
+                    float theta  = 2.0f * PI * u2;
+                    float3 local_dir = make_f3(
+                        r_disk * std::cos(theta),
+                        r_disk * std::sin(theta),
+                        std::sqrt(std::max(0.f, 1.0f - u1)));
+                    new_dir = onb.local_to_world(local_dir);
+                }
+
+                ray.origin    = hit.position + normalize(new_dir) * 1e-4f;
+                ray.direction = normalize(new_dir);
+                ray.tmin      = 1e-4f;
+                ray.tmax      = 1e20f;
+            }
+
+            // Only keep rays with enough non-specular hits
+            if ((int)rr.hits.size() >= min_hits) {
+                result.push_back(std::move(rr));
+            }
+        }
+    }
+
+    std::cout << "[tool] Traced " << attempts << " camera rays, kept "
+              << result.size() << " with >= " << min_hits
+              << " non-specular hits\n";
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Brute-force gather (ground truth)
+// ─────────────────────────────────────────────────────────────────────
+static GatherResult brute_force_gather(
+    const PhotonSoA& photons, float3 pos, float3 normal,
+    float radius, float tau)
+{
+    GatherResult gr;
+    gr.hierarchy_name = "brute_force";
+    float r2 = radius * radius;
+    const size_t N = photons.size();
+
+    // Accumulators for spatial stats
+    double cx = 0, cy = 0, cz = 0;  // centroid accumulator
+    double norm_dot_sum = 0;
+    std::vector<uint32_t> gathered_indices;
+    gathered_indices.reserve(256);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (size_t i = 0; i < N; ++i) {
+        float3 pp = make_f3(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
+        float3 diff = pos - pp;
+
+        // Tangential distance on normal plane
+        float d_plane = dot(diff, normal);
+        if (std::fabs(d_plane) > tau) continue;
+
+        float3 v_tan = diff - normal * d_plane;
+        float d_tan2 = dot(v_tan, v_tan);
+        if (d_tan2 > r2) continue;
+
+        float flux_i = photons.total_flux(i);
+        gr.photon_count++;
+        gr.total_flux += flux_i;
+        gr.min_dist2 = std::min(gr.min_dist2, d_tan2);
+        gr.max_dist2 = std::max(gr.max_dist2, d_tan2);
+
+        cx += pp.x; cy += pp.y; cz += pp.z;
+        float3 pn = make_f3(photons.norm_x[i], photons.norm_y[i], photons.norm_z[i]);
+        norm_dot_sum += std::fabs(dot(pn, normal));
+        gathered_indices.push_back((uint32_t)i);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    gr.query_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+    if (gr.photon_count == 0) {
+        gr.min_dist2 = 0.0f;
+    } else {
+        int n = gr.photon_count;
+        gr.centroid = make_f3((float)(cx / n), (float)(cy / n), (float)(cz / n));
+        gr.normal_coherence = (float)(norm_dot_sum / n);
+
+        // Position spread (RMS from centroid)
+        double spread_sum = 0;
+        for (uint32_t idx : gathered_indices) {
+            float3 pp = make_f3(photons.pos_x[idx], photons.pos_y[idx], photons.pos_z[idx]);
+            float3 dc = pp - gr.centroid;
+            spread_sum += dot(dc, dc);
+        }
+        gr.position_spread = std::sqrt((float)(spread_sum / n));
+    }
+
+    // Build ground-truth directional histogram from kNN photons
+    gr.histogram = build_histogram_from_photons(photons, gathered_indices, PHOTON_BIN_COUNT);
+    return gr;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// HashGrid gather
+// ─────────────────────────────────────────────────────────────────────
+static GatherResult hash_grid_gather(
+    const HashGrid& grid, const PhotonSoA& photons,
+    float3 pos, float3 normal, float radius, float tau)
+{
+    GatherResult gr;
+    gr.hierarchy_name = "hash_grid";
+
+    double cx = 0, cy = 0, cz = 0;
+    double norm_dot_sum = 0;
+    // Collect indices for position_spread second pass
+    std::vector<uint32_t> gathered_indices;
+    gathered_indices.reserve(256);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    grid.query_tangential(pos, normal, radius, tau, photons,
+        [&](uint32_t idx, float d_tan2) {
+            float flux_i = photons.total_flux(idx);
+            gr.photon_count++;
+            gr.total_flux += flux_i;
+            gr.min_dist2 = std::min(gr.min_dist2, d_tan2);
+            gr.max_dist2 = std::max(gr.max_dist2, d_tan2);
+            cx += photons.pos_x[idx];
+            cy += photons.pos_y[idx];
+            cz += photons.pos_z[idx];
+            float3 pn = make_f3(photons.norm_x[idx], photons.norm_y[idx], photons.norm_z[idx]);
+            norm_dot_sum += std::fabs(dot(pn, normal));
+            gathered_indices.push_back(idx);
+        });
+    auto t1 = std::chrono::high_resolution_clock::now();
+    gr.query_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+    if (gr.photon_count == 0) {
+        gr.min_dist2 = 0.0f;
+    } else {
+        int n = gr.photon_count;
+        gr.centroid = make_f3((float)(cx / n), (float)(cy / n), (float)(cz / n));
+        gr.normal_coherence = (float)(norm_dot_sum / n);
+        double spread_sum = 0;
+        for (uint32_t idx : gathered_indices) {
+            float3 pp = make_f3(photons.pos_x[idx], photons.pos_y[idx], photons.pos_z[idx]);
+            float3 dc = pp - gr.centroid;
+            spread_sum += dot(dc, dc);
+        }
+        gr.position_spread = std::sqrt((float)(spread_sum / n));
+    }
+
+    // Build directional histogram from kNN photons
+    gr.histogram = build_histogram_from_photons(photons, gathered_indices, PHOTON_BIN_COUNT);
+    return gr;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// KDTree gather
+// ─────────────────────────────────────────────────────────────────────
+static GatherResult kd_tree_gather(
+    const KDTree& tree, const PhotonSoA& photons,
+    float3 pos, float3 normal, float radius, float tau)
+{
+    GatherResult gr;
+    gr.hierarchy_name = "kd_tree";
+
+    double cx = 0, cy = 0, cz = 0;
+    double norm_dot_sum = 0;
+    std::vector<uint32_t> gathered_indices;
+    gathered_indices.reserve(256);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    tree.query_tangential(pos, normal, radius, tau, photons,
+        [&](uint32_t idx, float d_tan2) {
+            float flux_i = photons.total_flux(idx);
+            gr.photon_count++;
+            gr.total_flux += flux_i;
+            gr.min_dist2 = std::min(gr.min_dist2, d_tan2);
+            gr.max_dist2 = std::max(gr.max_dist2, d_tan2);
+            cx += photons.pos_x[idx];
+            cy += photons.pos_y[idx];
+            cz += photons.pos_z[idx];
+            float3 pn = make_f3(photons.norm_x[idx], photons.norm_y[idx], photons.norm_z[idx]);
+            norm_dot_sum += std::fabs(dot(pn, normal));
+            gathered_indices.push_back(idx);
+        });
+    auto t1 = std::chrono::high_resolution_clock::now();
+    gr.query_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+    if (gr.photon_count == 0) {
+        gr.min_dist2 = 0.0f;
+    } else {
+        int n = gr.photon_count;
+        gr.centroid = make_f3((float)(cx / n), (float)(cy / n), (float)(cz / n));
+        gr.normal_coherence = (float)(norm_dot_sum / n);
+        double spread_sum = 0;
+        for (uint32_t idx : gathered_indices) {
+            float3 pp = make_f3(photons.pos_x[idx], photons.pos_y[idx], photons.pos_z[idx]);
+            float3 dc = pp - gr.centroid;
+            spread_sum += dot(dc, dc);
+        }
+        gr.position_spread = std::sqrt((float)(spread_sum / n));
+    }
+
+    // Build directional histogram from kNN photons
+    gr.histogram = build_histogram_from_photons(photons, gathered_indices, PHOTON_BIN_COUNT);
+    return gr;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CellBinGrid gather (binned hierarchy)
+// ─────────────────────────────────────────────────────────────────────
+static GatherResult cell_bin_grid_gather(
+    const CellBinGrid& grid, float3 pos)
+{
+    GatherResult gr;
+    gr.hierarchy_name = "cell_bin_grid";
+
+    float max_flux = 0.0f;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    const PhotonBin* bp = grid.lookup(pos);
+    if (bp) {
+        for (int b = 0; b < grid.bin_count; ++b) {
+            float sf = bp[b].scalar_flux;
+            if (sf > 0.0f) {
+                gr.occupied_bins++;
+                gr.binned_flux += sf;
+                if (sf > max_flux) max_flux = sf;
+
+                GatherResult::BinDetail bd;
+                bd.idx         = b;
+                bd.scalar_flux = sf;
+                bd.avg_nx      = bp[b].avg_nx;
+                bd.avg_ny      = bp[b].avg_ny;
+                bd.avg_nz      = bp[b].avg_nz;
+                bd.dir_x       = bp[b].dir_x;
+                bd.dir_y       = bp[b].dir_y;
+                bd.dir_z       = bp[b].dir_z;
+                bd.count       = bp[b].count;
+                gr.bin_details.push_back(bd);
+            }
+        }
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    gr.query_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+    gr.active_bins = gr.occupied_bins;
+    gr.concentration = (gr.binned_flux > 0.f) ? max_flux / gr.binned_flux : 0.f;
+
+    // Build histogram from precomputed bins
+    if (bp) gr.histogram = build_histogram_from_precomputed(bp, grid.bin_count);
+
+    return gr;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// HashHistogram gather (binned hierarchy)
+// ─────────────────────────────────────────────────────────────────────
+static GatherResult hash_histogram_gather(
+    const HashHistogram& hist, float3 pos, float /*radius*/)
+{
+    GatherResult gr;
+    gr.hierarchy_name = "hash_histogram";
+
+    float max_flux = 0.0f;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    if (hist.num_levels > 0) {
+        const auto& level = hist.levels[0];  // finest level
+        uint32_t bucket = level.cell_hash(pos.x, pos.y, pos.z);
+        gr.occupied_bins = level.count_active_bins(bucket);
+        gr.binned_flux   = level.bucket_total_flux.empty() ? 0.0f
+                         : level.bucket_total_flux[bucket];
+        gr.concentration = level.get_concentration(bucket);
+
+        // Per-bin breakdown from gpu_bins
+        if (!level.gpu_bins.empty()) {
+            for (int k = 0; k < level.bin_count; ++k) {
+                size_t slot = (size_t)bucket * level.bin_count + k;
+                const GpuGuideBin& gb = level.gpu_bins[slot];
+                if (gb.scalar_flux > 0.f) {
+                    GatherResult::BinDetail bd;
+                    bd.idx         = k;
+                    bd.scalar_flux = gb.scalar_flux;
+                    bd.avg_nx      = gb.avg_nx;
+                    bd.avg_ny      = gb.avg_ny;
+                    bd.avg_nz      = gb.avg_nz;
+                    // Fibonacci direction for this bin
+                    if (k < g_bin_dirs.count) {
+                        bd.dir_x = g_bin_dirs.dirs[k].x;
+                        bd.dir_y = g_bin_dirs.dirs[k].y;
+                        bd.dir_z = g_bin_dirs.dirs[k].z;
+                    }
+                    gr.bin_details.push_back(bd);
+                    if (gb.scalar_flux > max_flux) max_flux = gb.scalar_flux;
+                }
+            }
+        }
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    gr.query_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+    gr.active_bins = (int)gr.bin_details.size();
+
+    // Build histogram from precomputed gpu_bins
+    if (hist.num_levels > 0 && !hist.levels[0].gpu_bins.empty()) {
+        const auto& level = hist.levels[0];
+        uint32_t bucket = level.cell_hash(pos.x, pos.y, pos.z);
+        const GpuGuideBin* gp = &level.gpu_bins[(size_t)bucket * level.bin_count];
+        gr.histogram = build_histogram_from_precomputed(gp, level.bin_count);
+    }
+
+    return gr;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Material type name
+// ─────────────────────────────────────────────────────────────────────
+static const char* material_type_name(uint8_t t) {
+    switch (t) {
+        case 0: return "Lambertian";
+        case 1: return "Mirror";
+        case 2: return "Glass";
+        case 3: return "GlossyMetal";
+        case 4: return "Emissive";
+        case 5: return "GlossyDielectric";
+        case 6: return "Translucent";
+        case 7: return "Clearcoat";
+        case 8: return "Fabric";
+        default: return "Unknown";
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// JSON output writer
+// ─────────────────────────────────────────────────────────────────────
+static void write_json_report(
+    const std::string& path,
+    const ToolConfig& cfg,
+    const PhotonSoA& photons,
+    float gather_radius,
+    const PhotonTypeStats& type_stats,
+    double build_hash_grid_ms,
+    double build_kd_tree_ms,
+    double build_cell_bin_grid_ms,
+    double build_hash_histogram_ms,
+    double build_cell_cache_ms,
+    double build_cell_analysis_ms,
+    const CellInfoCache& cell_cache,
+    const std::vector<CellAnalysis>& cell_analysis,
+    const std::vector<ReferenceRay>& rays,
+    const std::vector<std::vector<std::vector<GatherResult>>>& all_results,
+    bool verbose)
+    // all_results[ray_idx][hit_idx][hierarchy_idx]
+{
+    std::ofstream jf(path);
+    if (!jf.is_open()) {
+        std::cerr << "[tool] Cannot write output: " << path << "\n";
+        return;
+    }
+    jf << std::fixed << std::setprecision(6);
+
+    jf << "{\n";
+
+    // ── Generated-at timestamp (ISO 8601) ─────────────────────────
+    {
+        auto now = std::chrono::system_clock::now();
+        std::time_t tt = std::chrono::system_clock::to_time_t(now);
+        struct tm lt;
+#ifdef _WIN32
+        localtime_s(&lt, &tt);
+#else
+        localtime_r(&tt, &lt);
+#endif
+        char buf[64];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &lt);
+        jf << "  \"generated_at\": \"" << buf << "\",\n";
+    }
+
+    // ── Metadata: purpose, method descriptions, comparison methodology ──
+    jf << "  \"metadata\": {\n";
+
+    jf << "    \"purpose\": "
+       << "\"Compares five spatial photon-map hierarchies for guided path tracing. "
+       << "For each sampled surface hit, every hierarchy produces a directional flux histogram "
+       << "(normalised flux fraction per Fibonacci-sphere bin). "
+       << "Counting methods (brute_force, hash_grid, kd_tree) build histograms from individual kNN photons; "
+       << "binned methods (cell_bin_grid, hash_histogram) build histograms from precomputed per-cell directional bins. "
+       << "By comparing each method's histogram against the brute_force ground truth we quantify "
+       << "(a) spatial-index correctness for counting accelerators and "
+       << "(b) information loss from precomputation for binned methods.\",\n";
+
+    jf << "    \"hierarchies\": {\n";
+    jf << "      \"brute_force\": {\n";
+    jf << "        \"type\": \"counting\",\n";
+    jf << "        \"description\": \"Linear scan of all photons. Finds every photon within (gather_radius, tau) using tangential distance + surface filter. O(N) per query.\",\n";
+    jf << "        \"data_source\": \"per-photon kNN gather (exhaustive)\",\n";
+    jf << "        \"histogram_source\": \"Built from individual photon bin_idx (Fibonacci sphere) and spectral flux. This is the ground truth reference.\",\n";
+    jf << "        \"comparison_role\": \"ground_truth_baseline\"\n";
+    jf << "      },\n";
+    jf << "      \"hash_grid\": {\n";
+    jf << "        \"type\": \"counting\",\n";
+    jf << "        \"description\": \"Spatial hash grid accelerating the same (radius, tau) tangential gather. Should find identical photons to brute_force.\",\n";
+    jf << "        \"data_source\": \"per-photon kNN gather (hash-accelerated)\",\n";
+    jf << "        \"histogram_source\": \"Built from individual photon bin_idx — identical method to brute_force.\",\n";
+    jf << "        \"comparison_role\": \"spatial_accelerator (error ≈ 0 expected; nonzero = index bug)\"\n";
+    jf << "      },\n";
+    jf << "      \"kd_tree\": {\n";
+    jf << "        \"type\": \"counting\",\n";
+    jf << "        \"description\": \"KD-tree accelerating the same (radius, tau) tangential gather. Should find identical photons to brute_force.\",\n";
+    jf << "        \"data_source\": \"per-photon kNN gather (kd-tree-accelerated)\",\n";
+    jf << "        \"histogram_source\": \"Built from individual photon bin_idx — identical method to brute_force.\",\n";
+    jf << "        \"comparison_role\": \"spatial_accelerator (error ≈ 0 expected; nonzero = index bug)\"\n";
+    jf << "      },\n";
+    jf << "      \"cell_bin_grid\": {\n";
+    jf << "        \"type\": \"binned\",\n";
+    jf << "        \"description\": \"Uniform grid where each cell pre-aggregates photons into PHOTON_BIN_COUNT directional bins (PhotonBin). Cell size = 2 × gather_radius. Stores per-bin: scalar_flux, spectral flux, average normal, centroid direction, photon count.\",\n";
+    jf << "        \"data_source\": \"precomputed per-cell PhotonBin array (one cell lookup, no per-photon iteration at query time)\",\n";
+    jf << "        \"histogram_source\": \"Built from precomputed PhotonBin[k].scalar_flux per directional bin — this is the LOSSY approximation being evaluated.\",\n";
+    jf << "        \"comparison_role\": \"precomputed_approximation (histogram_error measures precomputation information loss)\"\n";
+    jf << "      },\n";
+    jf << "      \"hash_histogram\": {\n";
+    jf << "        \"type\": \"binned\",\n";
+    jf << "        \"description\": \"Spatial hash grid where each bucket pre-aggregates photons into PHOTON_BIN_COUNT directional bins (GpuGuideBin). Designed for GPU upload. Stores per-bin: scalar_flux, average normal. Multi-resolution (4 levels).\",\n";
+    jf << "        \"data_source\": \"precomputed per-bucket GpuGuideBin array (one hash lookup, no per-photon iteration at query time)\",\n";
+    jf << "        \"histogram_source\": \"Built from precomputed GpuGuideBin[k].scalar_flux per directional bin — this is the LOSSY approximation being evaluated.\",\n";
+    jf << "        \"comparison_role\": \"precomputed_approximation (histogram_error measures precomputation information loss)\"\n";
+    jf << "      }\n";
+    jf << "    },\n";
+
+    jf << "    \"comparison_methodology\": {\n";
+    jf << "      \"overview\": \"For each non-specular surface hit, all five hierarchies produce a directional flux histogram. The brute_force histogram (from exhaustive per-photon gather) is the ground truth. Each other method's histogram is compared against it.\",\n";
+    jf << "      \"ground_truth\": \"brute_force scans ALL photons within (gather_radius, tau). Its histogram is built from individual photon directions (bin_idx) and spectral flux. This captures the true directional light distribution at the hit point.\",\n";
+    jf << "      \"spatial_accelerators\": \"hash_grid and kd_tree use indexed lookups to find the same photon set as brute_force. Their histogram error should be ~0. Nonzero error indicates a spatial-index bug (missing photons due to hash collisions, boundary issues, etc.).\",\n";
+    jf << "      \"precomputed_methods\": \"cell_bin_grid and hash_histogram retrieve pre-aggregated directional bin data for the cell containing the hit point. Their histogram error quantifies how much directional information is lost by (1) snapping to a grid cell, (2) aggregating photons at build time rather than gathering per-query. This is the KEY comparison for guided path tracing quality.\",\n";
+    jf << "      \"flux_error_pct\": \"For binned methods: |binned_flux − brute_force.total_flux| / brute_force.total_flux × 100. Measures how much total light energy the cell approximation captures vs exact gather. Complementary to histogram_error which only measures directional shape.\",\n";
+    jf << "      \"metrics\": {\n";
+    jf << "        \"histogram_error.jsd\": \"Jensen-Shannon Divergence. Symmetric, bounded [0, ln2 ≈ 0.693]. 0 = identical distributions, ln2 = maximally different. Computed as JSD(P,Q) = ½ KL(P||M) + ½ KL(Q||M) where M = ½(P+Q). Uses natural log.\",\n";
+    jf << "        \"histogram_error.l1\": \"L1 distance = ½ Σ|P[k] − Q[k]|. Bounded [0, 1]. 0 = identical, 1 = completely disjoint support. More interpretable than JSD: a value of 0.1 means 10% of the flux is in different bins.\",\n";
+    jf << "        \"count_error_pct\": \"For counting methods: |method.photon_count − brute_force.photon_count| / brute_force.photon_count × 100.\",\n";
+    jf << "        \"flux_error_pct\": \"For counting methods: |method.total_flux − brute_force.total_flux| / brute_force.total_flux × 100. For binned methods: |binned_flux − brute_force.total_flux| / brute_force.total_flux × 100.\"\n";
+    jf << "      }\n";
+    jf << "    },\n";
+
+    jf << "    \"field_glossary\": {\n";
+    jf << "      \"photon_count\": \"Number of photons found within (gather_radius, tau) of the hit point (counting methods only).\",\n";
+    jf << "      \"total_flux\": \"Sum of scalar spectral flux of all gathered photons (counting methods). Scalar flux = sum of NUM_LAMBDA wavelength channels.\",\n";
+    jf << "      \"binned_flux\": \"Sum of precomputed scalar_flux across all directional bins in the cell (binned methods). Represents total light energy stored in the cell.\",\n";
+    jf << "      \"occupied_bins\": \"Number of directional bins with scalar_flux > 0 in the precomputed cell (binned methods).\",\n";
+    jf << "      \"active_bins\": \"Same as occupied_bins for binned methods. For cell_analysis: bins with meaningful flux.\",\n";
+    jf << "      \"concentration\": \"max_bin_flux / total_binned_flux. Range [0,1]. High values indicate strongly directional light (e.g. caustics). Low values indicate diffuse illumination.\",\n";
+    jf << "      \"position_spread\": \"RMS distance of gathered photons from their centroid. Measures spatial clustering (counting methods only).\",\n";
+    jf << "      \"normal_coherence\": \"Mean dot(photon_normal, hit_normal). Range [-1,1]. High values = photons on similar surfaces. Low = mixed geometry in gather radius.\",\n";
+    jf << "      \"query_us\": \"Wall-clock time for a single query at this hit point, in microseconds.\",\n";
+    jf << "      \"bins[].idx\": \"Fibonacci-sphere direction bin index [0, PHOTON_BIN_COUNT).\",\n";
+    jf << "      \"bins[].flux\": \"Precomputed scalar_flux in this directional bin.\",\n";
+    jf << "      \"bins[].dir\": \"Centroid direction vector [x,y,z] of this Fibonacci-sphere bin.\",\n";
+    jf << "      \"bins[].avg_normal\": \"Average surface normal of photons in this bin [nx,ny,nz].\",\n";
+    jf << "      \"bins[].count\": \"Number of photons aggregated into this bin (cell_bin_grid only; hash_histogram does not track count).\"\n";
+    jf << "    },\n";
+
+    jf << "    \"constants\": {\n";
+    jf << "      \"PHOTON_BIN_COUNT\": " << PHOTON_BIN_COUNT << ",\n";
+    jf << "      \"MAX_PHOTON_BIN_COUNT\": " << MAX_PHOTON_BIN_COUNT << ",\n";
+    jf << "      \"NUM_LAMBDA\": " << NUM_LAMBDA << ",\n";
+    jf << "      \"fibonacci_sphere\": \"Directional bins are quasi-uniform points on the unit sphere generated by the Fibonacci spiral method. Each photon's incoming direction (wi) is assigned to the nearest bin at map-build time (bin_idx = PhotonBinDirs::find_nearest(wi)). This assignment is shared by all methods for consistency.\",\n";
+    jf << "      \"tau\": \"Surface-filter half-thickness. Photons with |dot(pos - hit, normal)| > tau are rejected. Prevents light leaking through thin geometry.\",\n";
+    jf << "      \"cell_size_derivation\": \"cell_bin_grid cell_size = 2 × gather_radius (GUIDE_LEVEL_SCALES[0]). hash_histogram uses the same scale at its finest level.\"\n";
+    jf << "    }\n";
+
+    jf << "  },\n";
+
+    // ── Config ───────────────────────────────────────────────────────
+    jf << "  \"config\": {\n";
+    jf << "    \"cache_path\": \"" << json_escape(cfg.cache_path) << "\",\n";
+    jf << "    \"scene_path\": \"" << json_escape(cfg.scene_path) << "\",\n";
+    jf << "    \"num_rays_requested\": " << cfg.num_rays << ",\n";
+    jf << "    \"min_hits\": " << cfg.min_hits << ",\n";
+    jf << "    \"gather_radius\": " << gather_radius << ",\n";
+    jf << "    \"knn_k\": " << cfg.knn_k << ",\n";
+    jf << "    \"tau\": " << cfg.tau << "\n";
+    jf << "  },\n";
+
+    // ── Photon map summary with type breakdown ───────────────────────
+    jf << "  \"photon_map\": {\n";
+    jf << "    \"num_photons\": " << photons.size() << ",\n";
+    jf << "    \"global\": " << type_stats.global_count << ",\n";
+    jf << "    \"caustic_glass\": " << type_stats.caustic_glass << ",\n";
+    jf << "    \"caustic_specular\": " << type_stats.caustic_specular << ",\n";
+    jf << "    \"traversed_glass\": " << type_stats.traversed_glass << ",\n";
+    jf << "    \"volume_scatter\": " << type_stats.volume_scatter << ",\n";
+    jf << "    \"dispersion\": " << type_stats.dispersion << "\n";
+    jf << "  },\n";
+
+    // ── Build times ──────────────────────────────────────────────────
+    jf << "  \"build_times_ms\": {\n";
+    jf << "    \"hash_grid\": " << std::setprecision(3) << build_hash_grid_ms << ",\n";
+    jf << "    \"kd_tree\": " << build_kd_tree_ms << ",\n";
+    jf << "    \"cell_bin_grid\": " << build_cell_bin_grid_ms << ",\n";
+    jf << "    \"hash_histogram\": " << build_hash_histogram_ms << ",\n";
+    jf << "    \"cell_info_cache\": " << build_cell_cache_ms << ",\n";
+    jf << "    \"cell_analysis\": " << build_cell_analysis_ms << "\n";
+    jf << "  },\n";
+
+    jf << std::setprecision(6);
+
+    // ── Aggregate statistics ─────────────────────────────────────────
+    struct HierAgg {
+        std::string name;
+        double total_count_error = 0.0;
+        double total_flux_error  = 0.0;
+        int    comparisons       = 0;
+        double avg_query_us      = 0.0;
+        int    query_count       = 0;
+    };
+    HierAgg agg[5];
+    agg[0].name = "brute_force";
+    agg[1].name = "hash_grid";
+    agg[2].name = "kd_tree";
+    agg[3].name = "cell_bin_grid";
+    agg[4].name = "hash_histogram";
+
+    // Histogram error accumulators (per method, vs brute-force ground truth)
+    double sum_jsd[5] = {}, sum_l1[5] = {};
+    double max_jsd[5] = {}, max_l1[5] = {};
+    int    hist_comparisons[5] = {};
+
+    // §3 aggregate accumulators
+    double sum_guide_fraction = 0, sum_flux_cv = 0, sum_dir_spread = 0;
+    double sum_caustic_frac = 0, sum_concentration_cbg = 0, sum_concentration_hh = 0;
+    double sum_position_spread = 0, sum_normal_coherence = 0;
+    int    n_ca_hits = 0;    // hits with cell analysis data
+    int    n_caustic_hot = 0;
+    int    n_high_guide   = 0;  // guide_fraction > 0.5
+
+    for (size_t ri = 0; ri < rays.size(); ++ri) {
+        for (size_t hi = 0; hi < rays[ri].hits.size(); ++hi) {
+            if (ri >= all_results.size() || hi >= all_results[ri].size()) continue;
+            const auto& results = all_results[ri][hi];
+            if (results.size() < 5) continue;
+
+            const auto& bf = results[0];
+            for (int h = 0; h < 5; ++h) {
+                agg[h].avg_query_us += results[h].query_us;
+                agg[h].query_count++;
+            }
+
+            for (int h = 1; h <= 2; ++h) {
+                if (bf.photon_count > 0) {
+                    agg[h].total_count_error += std::fabs(
+                        (double)results[h].photon_count - bf.photon_count)
+                        / bf.photon_count;
+                    agg[h].total_flux_error += std::fabs(
+                        (double)results[h].total_flux - bf.total_flux)
+                        / std::max((double)bf.total_flux, 1e-12);
+                    agg[h].comparisons++;
+                }
+            }
+
+            // Flux error for binned methods (3=cell_bin_grid, 4=hash_histogram)
+            for (int h = 3; h <= 4; ++h) {
+                if (bf.total_flux > 0.0f) {
+                    agg[h].total_flux_error += std::fabs(
+                        (double)results[h].binned_flux - bf.total_flux)
+                        / std::max((double)bf.total_flux, 1e-12);
+                    agg[h].comparisons++;
+                }
+            }
+
+            // §3 cell analysis aggregate
+            const auto& hit = rays[ri].hits[hi];
+            uint32_t ck = cell_cache.cell_key(hit.position);
+            if (ck < cell_analysis.size()) {
+                const CellAnalysis& ca = cell_analysis[ck];
+                const CellCacheInfo& ci = cell_cache.cells[ck];
+                if (ca.has_photons) {
+                    sum_guide_fraction += ca.guide_fraction;
+                    sum_flux_cv        += ca.flux_cv;
+                    sum_dir_spread     += ci.directional_spread;
+                    sum_caustic_frac   += ca.caustic_fraction;
+                    if (ci.is_caustic_hotspot) n_caustic_hot++;
+                    if (ca.guide_fraction > 0.5f) n_high_guide++;
+                    n_ca_hits++;
+                }
+            }
+
+            // Spatial stats from brute force
+            sum_position_spread += bf.position_spread;
+            sum_normal_coherence += bf.normal_coherence;
+
+            // Concentration from binned hierarchies
+            sum_concentration_cbg += results[3].concentration;
+            sum_concentration_hh  += results[4].concentration;
+
+            // Histogram error accumulation (methods 1-4 vs brute force)
+            for (int h = 1; h < 5; ++h) {
+                float jsd = results[h].hist_error.jsd;
+                float l1  = results[h].hist_error.l1;
+                sum_jsd[h] += jsd;
+                sum_l1[h]  += l1;
+                if (jsd > max_jsd[h]) max_jsd[h] = jsd;
+                if (l1  > max_l1[h])  max_l1[h]  = l1;
+                hist_comparisons[h]++;
+            }
+        }
+    }
+
+    jf << "  \"aggregate\": {\n";
+    for (int h = 0; h < 5; ++h) {
+        jf << "    \"" << agg[h].name << "\": {\n";
+        jf << "      \"avg_query_us\": " << std::setprecision(2)
+           << (agg[h].query_count > 0 ? agg[h].avg_query_us / agg[h].query_count : 0.0) << ",\n";
+        jf << "      \"total_queries\": " << agg[h].query_count;
+        if (h >= 1 && h <= 2 && agg[h].comparisons > 0) {
+            jf << ",\n";
+            jf << "      \"mean_count_error_pct\": " << std::setprecision(4)
+               << (agg[h].total_count_error / agg[h].comparisons * 100.0) << ",\n";
+            jf << "      \"mean_flux_error_pct\": "
+               << (agg[h].total_flux_error / agg[h].comparisons * 100.0);
+        }
+        if (h >= 3 && h <= 4 && agg[h].comparisons > 0) {
+            jf << ",\n";
+            jf << "      \"mean_flux_error_pct\": " << std::setprecision(4)
+               << (agg[h].total_flux_error / agg[h].comparisons * 100.0);
+        }
+        if (h >= 1 && hist_comparisons[h] > 0) {
+            jf << ",\n";
+            jf << "      \"mean_histogram_jsd\": " << std::setprecision(6)
+               << (sum_jsd[h] / hist_comparisons[h]) << ",\n";
+            jf << "      \"mean_histogram_l1\": "
+               << (sum_l1[h] / hist_comparisons[h]) << ",\n";
+            jf << "      \"max_histogram_jsd\": " << max_jsd[h] << ",\n";
+            jf << "      \"max_histogram_l1\": " << max_l1[h];
+        }
+        jf << "\n    },\n";
+    }
+
+    // §3 cell analysis summary
+    int nq = agg[0].query_count > 0 ? agg[0].query_count : 1;
+    jf << "    \"cell_analysis_summary\": {\n";
+    jf << "      \"total_hits_analysed\": " << n_ca_hits << ",\n";
+    jf << "      \"mean_guide_fraction\": " << std::setprecision(4)
+       << (n_ca_hits > 0 ? sum_guide_fraction / n_ca_hits : 0.0) << ",\n";
+    jf << "      \"mean_flux_cv\": "
+       << (n_ca_hits > 0 ? sum_flux_cv / n_ca_hits : 0.0) << ",\n";
+    jf << "      \"mean_directional_spread\": "
+       << (n_ca_hits > 0 ? sum_dir_spread / n_ca_hits : 0.0) << ",\n";
+    jf << "      \"mean_caustic_fraction\": "
+       << (n_ca_hits > 0 ? sum_caustic_frac / n_ca_hits : 0.0) << ",\n";
+    jf << "      \"mean_concentration_cbg\": "
+       << (nq > 0 ? sum_concentration_cbg / nq : 0.0) << ",\n";
+    jf << "      \"mean_concentration_hh\": "
+       << (nq > 0 ? sum_concentration_hh / nq : 0.0) << ",\n";
+    jf << "      \"mean_position_spread\": " << std::setprecision(6)
+       << (nq > 0 ? sum_position_spread / nq : 0.0) << ",\n";
+    jf << "      \"mean_normal_coherence\": " << std::setprecision(4)
+       << (nq > 0 ? sum_normal_coherence / nq : 0.0) << ",\n";
+    jf << "      \"caustic_hotspot_hits\": " << n_caustic_hot << ",\n";
+    jf << "      \"high_guide_fraction_hits\": " << n_high_guide << "\n";
+    jf << "    }\n";
+    jf << "  },\n";
+
+    jf << std::setprecision(6);
+
+    // ── Analysis: pre-computed statistics for LLM consumption ────────
+    // Replaces the need for post-hoc Python analysis scripts.
+    {
+        // Collect flat arrays for percentile computation
+        const char* method_names[5] = {"brute_force","hash_grid","kd_tree","cell_bin_grid","hash_histogram"};
+        std::vector<double> query_times[5];
+        std::vector<double> bf_photon_counts, bf_fluxes;
+
+        // Per-material grouping
+        struct MatStats {
+            std::string name;
+            int count = 0;
+            int count_populated = 0; // bf.photon_count > 0
+            double sum_photons = 0;
+            double sum_bf_us = 0;
+            double sum_cbg_jsd = 0, sum_hh_jsd = 0;
+            int cbg_jsd_n = 0, hh_jsd_n = 0;
+        };
+        std::map<std::string, MatStats> mat_map;
+
+        // Per-bounce-depth grouping
+        struct DepthStats {
+            int count = 0;
+            double sum_bf_photons = 0, sum_bf_flux = 0;
+            double sum_us[5] = {};
+            double sum_cbg_jsd = 0, sum_hh_jsd = 0;
+            int cbg_n = 0, hh_n = 0;
+        };
+        std::map<int, DepthStats> depth_map;
+
+        // Precomputation quality arrays (only for hits where bf has photons)
+        struct PrecompHit {
+            float flux_ratio;    // binned_flux / bf.total_flux
+            float jsd;
+            float l1;
+            float concentration;
+            int   occupied_bins;
+            int   ray_index;
+            int   bounce;
+            std::string material;
+        };
+        std::vector<PrecompHit> cbg_hits, hh_hits;
+        int bf_empty_count = 0;
+        int cbg_empty_when_bf_has = 0, hh_empty_when_bf_has = 0;
+
+        // Accelerator worst-offenders
+        struct AccelOffender {
+            float count_err, flux_err, jsd;
+            int ray_index, bounce;
+            std::string material;
+        };
+        std::vector<AccelOffender> hg_offenders, kd_offenders;
+        int hg_nonzero_count = 0, kd_nonzero_count = 0;
+
+        for (size_t ri = 0; ri < rays.size(); ++ri) {
+            for (size_t hi = 0; hi < rays[ri].hits.size(); ++hi) {
+                if (ri >= all_results.size() || hi >= all_results[ri].size()) continue;
+                const auto& results = all_results[ri][hi];
+                if (results.size() < 5) continue;
+                const auto& bf = results[0];
+                const auto& hit = rays[ri].hits[hi];
+                std::string mat = material_type_name(hit.material_type);
+
+                for (int h = 0; h < 5; ++h)
+                    query_times[h].push_back(results[h].query_us);
+
+                bf_photon_counts.push_back(bf.photon_count);
+                bf_fluxes.push_back(bf.total_flux);
+
+                // Material stats
+                auto& ms = mat_map[mat];
+                ms.name = mat;
+                ms.count++;
+                ms.sum_bf_us += bf.query_us;
+                if (bf.photon_count > 0) {
+                    ms.count_populated++;
+                    ms.sum_photons += bf.photon_count;
+                }
+                if (bf.photon_count > 0 && results[3].occupied_bins > 0) {
+                    ms.sum_cbg_jsd += results[3].hist_error.jsd;
+                    ms.cbg_jsd_n++;
+                }
+                if (bf.photon_count > 0 && results[4].occupied_bins > 0) {
+                    ms.sum_hh_jsd += results[4].hist_error.jsd;
+                    ms.hh_jsd_n++;
+                }
+
+                // Depth stats
+                auto& ds = depth_map[hit.bounce];
+                ds.count++;
+                ds.sum_bf_photons += bf.photon_count;
+                ds.sum_bf_flux += bf.total_flux;
+                for (int h = 0; h < 5; ++h)
+                    ds.sum_us[h] += results[h].query_us;
+                if (bf.photon_count > 0 && results[3].occupied_bins > 0) {
+                    ds.sum_cbg_jsd += results[3].hist_error.jsd; ds.cbg_n++;
+                }
+                if (bf.photon_count > 0 && results[4].occupied_bins > 0) {
+                    ds.sum_hh_jsd += results[4].hist_error.jsd; ds.hh_n++;
+                }
+
+                // Precomputation quality (only compare when both sides have data)
+                if (bf.photon_count == 0) { bf_empty_count++; }
+                else {
+                    for (int bh = 3; bh <= 4; ++bh) {
+                        auto& vec = (bh == 3) ? cbg_hits : hh_hits;
+                        int& empty_cnt = (bh == 3) ? cbg_empty_when_bf_has : hh_empty_when_bf_has;
+                        if (results[bh].occupied_bins == 0 && bf.total_flux > 0.f) {
+                            empty_cnt++;
+                        } else if (bf.total_flux > 0.f) {
+                            PrecompHit ph;
+                            ph.flux_ratio = results[bh].binned_flux / bf.total_flux;
+                            ph.jsd = results[bh].hist_error.jsd;
+                            ph.l1 = results[bh].hist_error.l1;
+                            ph.concentration = results[bh].concentration;
+                            ph.occupied_bins = results[bh].occupied_bins;
+                            ph.ray_index = rays[ri].ray_index;
+                            ph.bounce = hit.bounce;
+                            ph.material = mat;
+                            vec.push_back(ph);
+                        }
+                    }
+                }
+
+                // Accelerator accuracy
+                for (int ah = 1; ah <= 2; ++ah) {
+                    float ce = 0.f, fe = 0.f;
+                    if (bf.photon_count > 0) {
+                        ce = std::fabs((float)results[ah].photon_count - bf.photon_count)
+                           / bf.photon_count * 100.f;
+                        fe = bf.total_flux > 0.f
+                           ? std::fabs(results[ah].total_flux - bf.total_flux)
+                             / bf.total_flux * 100.f : 0.f;
+                    }
+                    auto& vec = (ah == 1) ? hg_offenders : kd_offenders;
+                    int& nz = (ah == 1) ? hg_nonzero_count : kd_nonzero_count;
+                    if (ce > 0.f || fe > 0.f) nz++;
+                    if (ce > 0.01f || fe > 0.01f || results[ah].hist_error.jsd > 0.0001f) {
+                        AccelOffender ao;
+                        ao.count_err = ce; ao.flux_err = fe;
+                        ao.jsd = results[ah].hist_error.jsd;
+                        ao.ray_index = rays[ri].ray_index;
+                        ao.bounce = hit.bounce;
+                        ao.material = mat;
+                        vec.push_back(ao);
+                    }
+                }
+            }
+        }
+
+        // Percentile helper
+        auto percentile = [](std::vector<double>& v, double p) -> double {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            double k = (p / 100.0) * (v.size() - 1);
+            size_t lo = (size_t)k;
+            size_t hi = lo + 1 < v.size() ? lo + 1 : lo;
+            double frac = k - lo;
+            return v[lo] + frac * (v[hi] - v[lo]);
+        };
+        auto percentile_f = [](std::vector<float>& v, double p) -> float {
+            if (v.empty()) return 0.0f;
+            std::sort(v.begin(), v.end());
+            double k = (p / 100.0) * (v.size() - 1);
+            size_t lo = (size_t)k;
+            size_t hi = lo + 1 < v.size() ? lo + 1 : lo;
+            double frac = k - lo;
+            return (float)(v[lo] + frac * (v[hi] - v[lo]));
+        };
+
+        jf << "  \"analysis\": {\n";
+
+        // ── Timing percentiles ──
+        jf << "    \"timing_percentiles\": {\n";
+        for (int h = 0; h < 5; ++h) {
+            jf << "      \"" << method_names[h] << "\": {"
+               << "\"p5\": " << std::setprecision(2) << percentile(query_times[h], 5)
+               << ", \"p25\": " << percentile(query_times[h], 25)
+               << ", \"p50\": " << percentile(query_times[h], 50)
+               << ", \"p75\": " << percentile(query_times[h], 75)
+               << ", \"p95\": " << percentile(query_times[h], 95)
+               << ", \"max\": " << percentile(query_times[h], 100)
+               << "}";
+            if (h < 4) jf << ",";
+            jf << "\n";
+        }
+        jf << "    },\n";
+
+        // ── Speedup ratios vs brute_force ──
+        jf << "    \"speedup_vs_brute_force\": {\n";
+        for (int h = 1; h < 5; ++h) {
+            std::vector<double> ratios;
+            for (size_t i = 0; i < query_times[0].size(); ++i) {
+                if (query_times[h][i] > 0.0)
+                    ratios.push_back(query_times[0][i] / query_times[h][i]);
+            }
+            double mean_r = 0.0;
+            for (double r : ratios) mean_r += r;
+            mean_r = ratios.empty() ? 0.0 : mean_r / ratios.size();
+            jf << "      \"" << method_names[h] << "\": {"
+               << "\"mean\": " << std::setprecision(1) << mean_r
+               << ", \"median\": " << percentile(ratios, 50) << "}";
+            if (h < 4) jf << ",";
+            jf << "\n";
+        }
+        jf << "    },\n";
+
+        // ── Accelerator accuracy (hash_grid, kd_tree) ──
+        jf << "    \"accelerator_accuracy\": {\n";
+        const char* accel_names[2] = {"hash_grid", "kd_tree"};
+        for (int ai = 0; ai < 2; ++ai) {
+            auto& offenders = (ai == 0) ? hg_offenders : kd_offenders;
+            int nz = (ai == 0) ? hg_nonzero_count : kd_nonzero_count;
+            // Sort by max(count_err, flux_err) descending
+            std::sort(offenders.begin(), offenders.end(),
+                [](const AccelOffender& a, const AccelOffender& b) {
+                    return std::max(a.count_err, a.flux_err) > std::max(b.count_err, b.flux_err);
+                });
+            jf << "      \"" << accel_names[ai] << "\": {\n";
+            jf << "        \"nonzero_error_hits\": " << nz << ",\n";
+            jf << "        \"significant_error_hits\": " << offenders.size() << ",\n";
+            jf << "        \"worst_offenders\": [\n";
+            int max_show = std::min((int)offenders.size(), 5);
+            for (int oi = 0; oi < max_show; ++oi) {
+                const auto& o = offenders[oi];
+                jf << "          {\"ray\": " << o.ray_index << ", \"bounce\": " << o.bounce
+                   << ", \"material\": \"" << o.material << "\""
+                   << ", \"count_error_pct\": " << std::setprecision(4) << o.count_err
+                   << ", \"flux_error_pct\": " << o.flux_err
+                   << ", \"jsd\": " << std::setprecision(6) << o.jsd << "}";
+                if (oi + 1 < max_show) jf << ",";
+                jf << "\n";
+            }
+            jf << "        ]\n";
+            jf << "      }";
+            if (ai < 1) jf << ",";
+            jf << "\n";
+        }
+        jf << "    },\n";
+
+        // ── Precomputation quality (cell_bin_grid, hash_histogram) ──
+        jf << "    \"precomputation_quality\": {\n";
+        jf << "      \"total_hits\": " << (int)bf_photon_counts.size() << ",\n";
+        jf << "      \"bf_empty_hits\": " << bf_empty_count << ",\n";
+        const char* precomp_names[2] = {"cell_bin_grid", "hash_histogram"};
+        for (int pi = 0; pi < 2; ++pi) {
+            auto& hits_vec = (pi == 0) ? cbg_hits : hh_hits;
+            int empty_when_bf = (pi == 0) ? cbg_empty_when_bf_has : hh_empty_when_bf_has;
+
+            // Extract arrays for percentiles
+            std::vector<float> flux_ratios, jsds, l1s, concentrations;
+            std::vector<float> occ_bins_f;
+            for (auto& ph : hits_vec) {
+                flux_ratios.push_back(ph.flux_ratio);
+                jsds.push_back(ph.jsd);
+                l1s.push_back(ph.l1);
+                concentrations.push_back(ph.concentration);
+                occ_bins_f.push_back((float)ph.occupied_bins);
+            }
+            // Sort hits by JSD descending for worst offenders
+            std::sort(hits_vec.begin(), hits_vec.end(),
+                [](const PrecompHit& a, const PrecompHit& b) { return a.jsd > b.jsd; });
+
+            jf << "      \"" << precomp_names[pi] << "\": {\n";
+            jf << "        \"both_populated_hits\": " << hits_vec.size() << ",\n";
+            jf << "        \"empty_when_bf_has_photons\": " << empty_when_bf << ",\n";
+
+            jf << "        \"flux_ratio\": {\"description\": \"binned_flux / brute_force.total_flux\""
+               << ", \"p5\": " << std::setprecision(4) << percentile_f(flux_ratios, 5)
+               << ", \"p25\": " << percentile_f(flux_ratios, 25)
+               << ", \"p50\": " << percentile_f(flux_ratios, 50)
+               << ", \"p75\": " << percentile_f(flux_ratios, 75)
+               << ", \"p95\": " << percentile_f(flux_ratios, 95)
+               << "},\n";
+            jf << "        \"histogram_jsd\": {"
+               << "\"p50\": " << std::setprecision(6) << percentile_f(jsds, 50)
+               << ", \"p75\": " << percentile_f(jsds, 75)
+               << ", \"p90\": " << percentile_f(jsds, 90)
+               << ", \"p95\": " << percentile_f(jsds, 95)
+               << ", \"max\": " << percentile_f(jsds, 100)
+               << "},\n";
+            jf << "        \"histogram_l1\": {"
+               << "\"p50\": " << percentile_f(l1s, 50)
+               << ", \"p75\": " << percentile_f(l1s, 75)
+               << ", \"p90\": " << percentile_f(l1s, 90)
+               << ", \"p95\": " << percentile_f(l1s, 95)
+               << ", \"max\": " << percentile_f(l1s, 100)
+               << "},\n";
+            jf << "        \"concentration\": {"
+               << "\"p50\": " << std::setprecision(4) << percentile_f(concentrations, 50)
+               << ", \"p75\": " << percentile_f(concentrations, 75)
+               << ", \"p95\": " << percentile_f(concentrations, 95)
+               << "},\n";
+            jf << "        \"occupied_bins\": {"
+               << "\"p50\": " << std::setprecision(1) << percentile_f(occ_bins_f, 50)
+               << ", \"p75\": " << percentile_f(occ_bins_f, 75)
+               << ", \"p95\": " << percentile_f(occ_bins_f, 95)
+               << "},\n";
+
+            jf << std::setprecision(6);
+            jf << "        \"worst_jsd_hits\": [\n";
+            int max_worst = std::min((int)hits_vec.size(), 5);
+            for (int wi = 0; wi < max_worst; ++wi) {
+                const auto& w = hits_vec[wi];
+                jf << "          {\"ray\": " << w.ray_index << ", \"bounce\": " << w.bounce
+                   << ", \"material\": \"" << w.material << "\""
+                   << ", \"jsd\": " << w.jsd << ", \"l1\": " << w.l1
+                   << ", \"flux_ratio\": " << std::setprecision(4) << w.flux_ratio
+                   << ", \"concentration\": " << w.concentration
+                   << ", \"occupied_bins\": " << w.occupied_bins << "}";
+                if (wi + 1 < max_worst) jf << ",";
+                jf << "\n";
+                jf << std::setprecision(6);
+            }
+            jf << "        ]\n";
+            jf << "      }";
+            if (pi < 1) jf << ",";
+            jf << "\n";
+        }
+        jf << "    },\n";
+
+        // ── Per-bounce-depth breakdown ──
+        jf << "    \"per_bounce_depth\": [\n";
+        {
+            int di = 0;
+            for (auto& [depth, ds] : depth_map) {
+                double n_d = ds.count > 0 ? ds.count : 1;
+                jf << "      {\"depth\": " << depth
+                   << ", \"count\": " << ds.count
+                   << ", \"mean_bf_photons\": " << std::setprecision(1) << ds.sum_bf_photons / n_d
+                   << ", \"mean_bf_flux\": " << std::setprecision(2) << ds.sum_bf_flux / n_d
+                   << ", \"mean_bf_us\": " << ds.sum_us[0] / n_d
+                   << ", \"mean_kd_us\": " << ds.sum_us[2] / n_d
+                   << ", \"mean_cbg_us\": " << ds.sum_us[3] / n_d
+                   << ", \"mean_hh_us\": " << ds.sum_us[4] / n_d;
+                if (ds.cbg_n > 0)
+                    jf << ", \"mean_cbg_jsd\": " << std::setprecision(6) << ds.sum_cbg_jsd / ds.cbg_n;
+                if (ds.hh_n > 0)
+                    jf << ", \"mean_hh_jsd\": " << ds.sum_hh_jsd / ds.hh_n;
+                jf << "}";
+                if (++di < (int)depth_map.size()) jf << ",";
+                jf << "\n";
+            }
+        }
+        jf << "    ],\n";
+
+        // ── Per-material breakdown ──
+        jf << "    \"per_material\": [\n";
+        {
+            int mi = 0;
+            for (auto& [name, ms] : mat_map) {
+                double n_m = ms.count > 0 ? ms.count : 1;
+                double n_pop = ms.count_populated > 0 ? ms.count_populated : 1;
+                jf << "      {\"material\": \"" << ms.name << "\""
+                   << ", \"count\": " << ms.count
+                   << ", \"count_populated\": " << ms.count_populated
+                   << ", \"mean_photons\": " << std::setprecision(1) << ms.sum_photons / n_pop
+                   << ", \"mean_bf_us\": " << std::setprecision(2) << ms.sum_bf_us / n_m;
+                if (ms.cbg_jsd_n > 0)
+                    jf << ", \"mean_cbg_jsd\": " << std::setprecision(6) << ms.sum_cbg_jsd / ms.cbg_jsd_n;
+                if (ms.hh_jsd_n > 0)
+                    jf << ", \"mean_hh_jsd\": " << ms.sum_hh_jsd / ms.hh_jsd_n;
+                jf << "}";
+                if (++mi < (int)mat_map.size()) jf << ",";
+                jf << "\n";
+            }
+        }
+        jf << "    ]\n";
+
+        jf << "  },\n";
+    }
+
+    // ── Per-ray details ──────────────────────────────────────────────
+    jf << "  \"rays\": [\n";
+    for (size_t ri = 0; ri < rays.size(); ++ri) {
+        const auto& rr = rays[ri];
+        jf << "    {\n";
+        jf << "      \"ray_index\": " << rr.ray_index << ",\n";
+        jf << "      \"pixel\": [" << rr.pixel_x << ", " << rr.pixel_y << "],\n";
+        jf << "      \"num_hits\": " << rr.hits.size() << ",\n";
+
+        jf << "      \"hits\": [\n";
+        int skipped_empty = 0;
+        bool first_hit_written = false;
+        for (size_t hi = 0; hi < rr.hits.size(); ++hi) {
+            const auto& h = rr.hits[hi];
+
+            // Compact mode: skip hits where brute_force found no photons
+            if (!verbose && ri < all_results.size() && hi < all_results[ri].size()
+                && all_results[ri][hi].size() >= 1 && all_results[ri][hi][0].photon_count == 0) {
+                skipped_empty++;
+                continue;
+            }
+            if (first_hit_written) jf << ",\n";
+            first_hit_written = true;
+            jf << "        {\n";
+            jf << "          \"bounce\": " << h.bounce << ",\n";
+            if (verbose) {
+                jf << "          \"position\": [" << h.position.x << ", "
+                   << h.position.y << ", " << h.position.z << "],\n";
+                jf << "          \"normal\": [" << h.normal.x << ", "
+                   << h.normal.y << ", " << h.normal.z << "],\n";
+            }
+            jf << "          \"material\": \"" << material_type_name(h.material_type) << "\",\n";
+            if (verbose)
+                jf << "          \"triangle_id\": " << h.triangle_id << ",\n";
+
+            // ── §3 Cell Analysis ─────────────────────────────────────
+            jf << "          \"cell_analysis\": {\n";
+            uint32_t ck = cell_cache.cell_key(h.position);
+            if (ck < cell_analysis.size() && cell_analysis[ck].has_photons) {
+                const CellAnalysis& ca = cell_analysis[ck];
+                const CellCacheInfo& ci = cell_cache.cells[ck];
+                if (verbose) {
+                    jf << "            \"photon_count\": " << ci.photon_count << ",\n";
+                    jf << "            \"irradiance\": " << ci.irradiance << ",\n";
+                    jf << "            \"flux_variance\": " << ci.flux_variance << ",\n";
+                    jf << "            \"flux_density\": " << ca.flux_density << ",\n";
+                    jf << "            \"flux_cv\": " << std::setprecision(4) << ca.flux_cv << ",\n";
+                    jf << "            \"directional_spread\": " << ci.directional_spread << ",\n";
+                    jf << "            \"normal_variance\": " << ci.normal_variance << ",\n";
+                    jf << "            \"caustic_count\": " << ci.caustic_count << ",\n";
+                    jf << "            \"caustic_flux\": " << std::setprecision(6) << ci.caustic_flux << ",\n";
+                    jf << "            \"caustic_cv\": " << std::setprecision(4) << ci.caustic_cv << ",\n";
+                    jf << "            \"caustic_fraction\": " << ca.caustic_fraction << ",\n";
+                    jf << "            \"is_caustic_hotspot\": " << (ci.is_caustic_hotspot ? "true" : "false") << ",\n";
+                    jf << "            \"glass_fraction\": " << ci.glass_fraction << ",\n";
+                    jf << "            \"adaptive_radius\": " << std::setprecision(6) << ci.adaptive_radius << ",\n";
+                    jf << "            \"dominant_emitter\": " << ci.dominant_emitter << ",\n";
+                    jf << "            \"active_bins\": " << ca.active_bins << ",\n";
+                    jf << "            \"guide_fraction\": " << std::setprecision(4) << ca.guide_fraction << "\n";
+                    jf << std::setprecision(6);
+                } else {
+                    // Compact: key fields only
+                    jf << "            \"photon_count\": " << ci.photon_count
+                       << ", \"irradiance\": " << ci.irradiance
+                       << ", \"caustic_fraction\": " << std::setprecision(4) << ca.caustic_fraction
+                       << ", \"active_bins\": " << ca.active_bins << "\n";
+                    jf << std::setprecision(6);
+                }
+            } else {
+                jf << "            \"has_photons\": false\n";
+            }
+            jf << "          },\n";
+
+            // ── Gather results per hierarchy ─────────────────────────
+            jf << "          \"gather\": {\n";
+            if (ri < all_results.size() && hi < all_results[ri].size()) {
+                const auto& results = all_results[ri][hi];
+
+                // Photon-counting hierarchies (with spatial stats)
+                const char* counting_names[] = {"brute_force", "hash_grid", "kd_tree"};
+                for (int idx = 0; idx < 3 && idx < (int)results.size(); ++idx) {
+                    const auto& gr = results[idx];
+
+                    // Compact mode: for hash_grid/kd_tree, emit "ok" when error ≈ 0
+                    if (!verbose && idx > 0 && results[0].photon_count > 0) {
+                        float count_err = std::fabs((float)gr.photon_count - results[0].photon_count)
+                                        / results[0].photon_count * 100.0f;
+                        float flux_err  = results[0].total_flux > 0.0f
+                                        ? std::fabs(gr.total_flux - results[0].total_flux)
+                                          / results[0].total_flux * 100.0f : 0.0f;
+                        if (count_err < 0.01f && flux_err < 0.01f && gr.hist_error.jsd < 0.0001f) {
+                            jf << "            \"" << counting_names[idx]
+                               << "\": {\"status\": \"ok\", \"query_us\": "
+                               << std::setprecision(2) << gr.query_us << "},\n";
+                            jf << std::setprecision(6);
+                            continue;
+                        }
+                    }
+
+                    jf << "            \"" << counting_names[idx] << "\": {\n";
+                    jf << "              \"photon_count\": " << gr.photon_count << ",\n";
+                    jf << "              \"total_flux\": " << gr.total_flux << ",\n";
+                    if (verbose) {
+                        jf << "              \"min_dist\": " << std::sqrt(std::max(0.f, gr.min_dist2)) << ",\n";
+                        jf << "              \"max_dist\": " << std::sqrt(std::max(0.f, gr.max_dist2)) << ",\n";
+                        jf << "              \"centroid\": ["
+                           << gr.centroid.x << ", " << gr.centroid.y << ", " << gr.centroid.z << "],\n";
+                        jf << "              \"position_spread\": " << gr.position_spread << ",\n";
+                        jf << "              \"normal_coherence\": " << std::setprecision(4) << gr.normal_coherence << ",\n";
+                    }
+                    jf << "              \"query_us\": " << std::setprecision(2) << gr.query_us;
+                    jf << std::setprecision(6);
+                    if (idx > 0 && results[0].photon_count > 0) {
+                        float count_err = std::fabs((float)gr.photon_count - results[0].photon_count)
+                                        / results[0].photon_count * 100.0f;
+                        float flux_err  = results[0].total_flux > 0.0f
+                                        ? std::fabs(gr.total_flux - results[0].total_flux)
+                                          / results[0].total_flux * 100.0f
+                                        : 0.0f;
+                        jf << ",\n              \"count_error_pct\": " << std::setprecision(2) << count_err;
+                        jf << ",\n              \"flux_error_pct\": " << flux_err;
+                        jf << ",\n              \"histogram_error\": {\"jsd\": " << std::setprecision(6)
+                           << gr.hist_error.jsd << ", \"l1\": " << gr.hist_error.l1 << "}";
+                        jf << std::setprecision(6);
+                    }
+                    jf << "\n            },\n";
+                }
+
+                // Binned hierarchies (with per-bin breakdown)
+                const char* binned_names[] = {"cell_bin_grid", "hash_histogram"};
+                for (int idx = 3; idx < 5 && idx < (int)results.size(); ++idx) {
+                    const auto& gr = results[idx];
+                    jf << "            \"" << binned_names[idx - 3] << "\": {\n";
+                    jf << "              \"occupied_bins\": " << gr.occupied_bins << ",\n";
+                    jf << "              \"active_bins\": " << gr.active_bins << ",\n";
+                    jf << "              \"binned_flux\": " << gr.binned_flux << ",\n";
+                    // Flux error vs brute_force (magnitude comparison)
+                    if (results[0].total_flux > 0.0f) {
+                        float fe = std::fabs(gr.binned_flux - results[0].total_flux)
+                                 / results[0].total_flux * 100.0f;
+                        jf << "              \"flux_error_pct\": " << std::setprecision(2) << fe << ",\n";
+                    }
+                    jf << "              \"concentration\": " << std::setprecision(4) << gr.concentration << ",\n";
+                    jf << "              \"query_us\": " << std::setprecision(2) << gr.query_us << ",\n";
+                    jf << std::setprecision(6);
+
+                    if (verbose) {
+                        // Per-bin array (non-zero bins only)
+                        jf << "              \"bins\": [\n";
+                        for (size_t bi = 0; bi < gr.bin_details.size(); ++bi) {
+                            const auto& bd = gr.bin_details[bi];
+                            jf << "                {\"idx\": " << bd.idx
+                               << ", \"flux\": " << bd.scalar_flux
+                               << ", \"dir\": [" << std::setprecision(4)
+                               << bd.dir_x << ", " << bd.dir_y << ", " << bd.dir_z << "]"
+                               << ", \"avg_normal\": ["
+                               << bd.avg_nx << ", " << bd.avg_ny << ", " << bd.avg_nz << "]";
+                            if (bd.count > 0) jf << ", \"count\": " << bd.count;
+                            jf << "}";
+                            if (bi + 1 < gr.bin_details.size()) jf << ",";
+                            jf << "\n";
+                            jf << std::setprecision(6);
+                        }
+                        jf << "              ],\n";
+                    }
+                    jf << "              \"histogram_error\": {\"jsd\": " << std::setprecision(6)
+                       << gr.hist_error.jsd << ", \"l1\": " << gr.hist_error.l1 << "}\n";
+                    jf << "            }";
+                    if (idx < 4) jf << ",";
+                    jf << "\n";
+                }
+            }
+            jf << "          }\n";
+
+            jf << "        }";
+            jf << "\n";
+        }
+        // Emit skipped count if any
+        if (skipped_empty > 0) {
+            if (first_hit_written) jf << ",\n";
+            jf << "        {\"skipped_empty_hits\": " << skipped_empty << "}\n";
+        }
+        jf << "      ]\n";
+
+        jf << "    }";
+        if (ri + 1 < rays.size()) jf << ",";
+        jf << "\n";
+    }
+    jf << "  ]\n";
+
+    jf << "}\n";
+    std::cout << "[tool] Wrote report: " << path << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Argument parsing
+// ─────────────────────────────────────────────────────────────────────
+static void print_usage(const char* prog) {
+    std::cerr << "Usage: " << prog << " <cache.bin> <scene.obj>\n"
+              << "  [--snapshot <snapshot.json>]  Load camera from snapshot\n"
+              << "  [--radius <float>]           Override gather radius\n"
+              << "  [--num-rays <int>]           Number of reference rays (default 100)\n"
+              << "  [--min-hits <int>]           Min non-specular hits per ray (default 3)\n"
+              << "  [--knn-k <int>]              k for kNN queries (default 64)\n"
+              << "  [--tau <float>]              Surface filter tau (default 0.02)\n"
+              << "  [--output <path.json>]       Output file path\n"
+              << "  [--scenes-dir <path>]        Scenes root directory\n"
+              << "  [--verbose]                  Full per-hit output (default: compact LLM-optimized)\n";
+}
+
+static bool parse_args(int argc, char* argv[], ToolConfig& cfg) {
+    if (argc < 3) {
+        print_usage(argv[0]);
+        return false;
+    }
+    cfg.cache_path = argv[1];
+    cfg.scene_path = argv[2];
+
+    for (int i = 3; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (arg == "--snapshot" && i + 1 < argc) {
+            cfg.snapshot_path = argv[++i];
+            cfg.cam_from_snapshot = true;
+        } else if (arg == "--radius" && i + 1 < argc) {
+            cfg.radius_override = std::stof(argv[++i]);
+        } else if (arg == "--num-rays" && i + 1 < argc) {
+            cfg.num_rays = std::stoi(argv[++i]);
+        } else if (arg == "--min-hits" && i + 1 < argc) {
+            cfg.min_hits = std::stoi(argv[++i]);
+        } else if (arg == "--knn-k" && i + 1 < argc) {
+            cfg.knn_k = std::stoi(argv[++i]);
+        } else if (arg == "--tau" && i + 1 < argc) {
+            cfg.tau = std::stof(argv[++i]);
+        } else if (arg == "--output" && i + 1 < argc) {
+            cfg.output_path = argv[++i];
+        } else if (arg == "--scenes-dir" && i + 1 < argc) {
+            cfg.scenes_dir = argv[++i];
+        } else if (arg == "--verbose") {
+            cfg.verbose = true;
+        } else {
+            std::cerr << "Unknown argument: " << arg << "\n";
+            print_usage(argv[0]);
+            return false;
+        }
+    }
+
+#ifdef SCENES_DIR
+    if (cfg.scenes_dir.empty())
+        cfg.scenes_dir = SCENES_DIR;
+#endif
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────────────────────────────
+int main(int argc, char* argv[]) {
+    ToolConfig cfg;
+    if (!parse_args(argc, argv, cfg)) return 1;
+
+    // ── Parse snapshot JSON if provided ──────────────────────────────
+    if (cfg.cam_from_snapshot && !cfg.snapshot_path.empty()) {
+        parse_json_camera(cfg.snapshot_path, cfg);
+    }
+
+    // ── Load photon cache ────────────────────────────────────────────
+    std::cout << "======================================\n";
+    std::cout << "  Photon Map Analysis Tool\n";
+    std::cout << "======================================\n\n";
+
+    std::cout << "[1/6] Loading photon cache: " << cfg.cache_path << "\n";
+    PhotonSoA photons;
+    HashGrid  hash_grid;
+    float     gather_radius = 0.0f;
+
+    if (!load_photon_cache(cfg.cache_path, photons, hash_grid, gather_radius)) {
+        std::cerr << "[tool] FATAL: Failed to load photon cache\n";
+        return 1;
+    }
+
+    if (cfg.radius_override > 0.0f) {
+        std::cout << "[tool] Overriding gather_radius: " << gather_radius
+                  << " -> " << cfg.radius_override << "\n";
+        gather_radius = cfg.radius_override;
+    }
+
+    std::cout << "  Photons: " << photons.size()
+              << "  Gather radius: " << gather_radius << "\n";
+
+    // ── Initialize Fibonacci bin directions ──────────────────────────
+    g_bin_dirs.init(PHOTON_BIN_COUNT);
+
+    // ── Photon type statistics ───────────────────────────────────────
+    PhotonTypeStats type_stats = compute_photon_type_stats(photons);
+    std::printf("  Photon types: %zu global, %zu caustic_glass, %zu caustic_specular, "
+                "%zu traversed_glass, %zu volume, %zu dispersion\n",
+                type_stats.global_count, type_stats.caustic_glass,
+                type_stats.caustic_specular, type_stats.traversed_glass,
+                type_stats.volume_scatter, type_stats.dispersion);
+
+    // ── Split into global + caustic for CellInfoCache ────────────────
+    PhotonSoA global_photons, caustic_photons;
+    split_by_path_flags(photons, global_photons, caustic_photons);
+    std::cout << "\n";
+
+    // ── Load scene ───────────────────────────────────────────────────
+    std::string obj_path = cfg.scenes_dir.empty()
+        ? cfg.scene_path
+        : cfg.scenes_dir + "/" + cfg.scene_path;
+
+    std::cout << "[2/6] Loading scene: " << obj_path << "\n";
+    Scene scene;
+    if (!load_obj(obj_path, scene)) {
+        std::cerr << "[tool] FATAL: Failed to load scene: " << obj_path << "\n";
+        return 1;
+    }
+    scene.normalize_to_reference();
+    scene.build_bvh();
+    std::cout << "  Triangles: " << scene.num_triangles()
+              << "  Materials: " << scene.num_materials() << "\n\n";
+
+    // ── Set up camera ────────────────────────────────────────────────
+    Camera camera;
+    camera.position = make_f3(cfg.cam_pos[0], cfg.cam_pos[1], cfg.cam_pos[2]);
+    camera.look_at  = make_f3(cfg.cam_lookat[0], cfg.cam_lookat[1], cfg.cam_lookat[2]);
+    camera.up       = make_f3(cfg.cam_up[0], cfg.cam_up[1], cfg.cam_up[2]);
+    camera.fov_deg  = cfg.cam_fov;
+    camera.width    = cfg.cam_width;
+    camera.height   = cfg.cam_height;
+    camera.update();
+
+    std::cout << "[3/6] Tracing " << cfg.num_rays << " reference rays (min "
+              << cfg.min_hits << " non-specular hits)...\n";
+    auto rays = trace_reference_rays(scene, camera, cfg.num_rays, cfg.min_hits);
+
+    if (rays.empty()) {
+        std::cerr << "[tool] FATAL: No valid reference rays found.\n"
+                  << "  Try increasing --num-rays or decreasing --min-hits.\n";
+        return 1;
+    }
+
+    // Count total hit points
+    size_t total_hits = 0;
+    for (const auto& r : rays) total_hits += r.hits.size();
+    std::cout << "  Valid rays: " << rays.size()
+              << "  Total hit points: " << total_hits << "\n\n";
+
+    // ── Build spatial hierarchies ────────────────────────────────────
+    std::cout << "[4/6] Building spatial hierarchies...\n";
+
+    // HashGrid was already loaded from cache, but rebuild for timing
+    HashGrid fresh_grid;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    fresh_grid.build(photons, gather_radius);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double build_hash_grid_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << "  HashGrid:       " << std::setprecision(1) << std::fixed
+              << build_hash_grid_ms << " ms\n";
+
+    KDTree kd_tree;
+    t0 = std::chrono::high_resolution_clock::now();
+    kd_tree.build(photons);
+    t1 = std::chrono::high_resolution_clock::now();
+    double build_kd_tree_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << "  KDTree:         " << build_kd_tree_ms << " ms\n";
+
+    CellBinGrid cell_bin_grid;
+    t0 = std::chrono::high_resolution_clock::now();
+    cell_bin_grid.build(photons, gather_radius, PHOTON_BIN_COUNT);
+    t1 = std::chrono::high_resolution_clock::now();
+    double build_cell_bin_grid_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << "  CellBinGrid:    " << build_cell_bin_grid_ms << " ms\n";
+
+    HashHistogram hash_hist;
+    t0 = std::chrono::high_resolution_clock::now();
+    hash_hist.build(photons, gather_radius, PHOTON_BIN_COUNT, 4);  // 4 levels for multi-res analysis
+    t1 = std::chrono::high_resolution_clock::now();
+    double build_hash_histogram_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << "  HashHistogram:  " << build_hash_histogram_ms << " ms"
+              << "  (" << hash_hist.num_levels << " levels)\n";
+
+    // CellInfoCache (§3 cell metrics)
+    float cache_cell_size = gather_radius * GUIDE_LEVEL_SCALES[0];  // 2× gather_radius
+    float cell_area = cache_cell_size * cache_cell_size;
+    CellInfoCache cell_cache;
+    t0 = std::chrono::high_resolution_clock::now();
+    cell_cache.build(global_photons, caustic_photons, cache_cell_size, gather_radius);
+    t1 = std::chrono::high_resolution_clock::now();
+    double build_cell_cache_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << "  CellInfoCache:  " << build_cell_cache_ms << " ms\n";
+
+    // CellAnalysis (§3.6 conclusions)
+    t0 = std::chrono::high_resolution_clock::now();
+    std::vector<CellAnalysis> cell_analysis = build_cell_analysis(cell_cache, cell_area);
+    t1 = std::chrono::high_resolution_clock::now();
+    double build_cell_analysis_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    std::cout << "  CellAnalysis:   " << build_cell_analysis_ms << " ms\n\n";
+
+    // ── Query all hierarchies at every hit point ─────────────────────
+    std::cout << "[5/6] Querying " << total_hits << " hit points across 5 hierarchies...\n";
+
+    // all_results[ray_idx][hit_idx][hierarchy_idx]
+    std::vector<std::vector<std::vector<GatherResult>>> all_results;
+    all_results.resize(rays.size());
+
+    for (size_t ri = 0; ri < rays.size(); ++ri) {
+        all_results[ri].resize(rays[ri].hits.size());
+
+        for (size_t hi = 0; hi < rays[ri].hits.size(); ++hi) {
+            const auto& h = rays[ri].hits[hi];
+            auto& results = all_results[ri][hi];
+            results.resize(5);
+
+            // 0: Brute force (ground truth)
+            results[0] = brute_force_gather(photons, h.position, h.normal,
+                                            gather_radius, cfg.tau);
+
+            // 1: HashGrid
+            results[1] = hash_grid_gather(fresh_grid, photons, h.position,
+                                          h.normal, gather_radius, cfg.tau);
+
+            // 2: KDTree
+            results[2] = kd_tree_gather(kd_tree, photons, h.position,
+                                        h.normal, gather_radius, cfg.tau);
+
+            // 3: CellBinGrid (binned)
+            results[3] = cell_bin_grid_gather(cell_bin_grid, h.position);
+
+            // 4: HashHistogram (binned)
+            results[4] = hash_histogram_gather(hash_hist, h.position, gather_radius);
+
+            // Compute histogram error vs brute-force ground truth
+            const auto& gt = results[0].histogram;
+            for (int hi_idx = 1; hi_idx < 5; ++hi_idx) {
+                results[hi_idx].hist_error = histogram_error(
+                    gt, results[hi_idx].histogram, PHOTON_BIN_COUNT);
+            }
+        }
+    }
+
+    // Print quick summary
+    double bf_total_us = 0, hg_total_us = 0, kd_total_us = 0;
+    double cbg_total_us = 0, hh_total_us = 0;
+    for (const auto& ray_results : all_results) {
+        for (const auto& hit_results : ray_results) {
+            bf_total_us  += hit_results[0].query_us;
+            hg_total_us  += hit_results[1].query_us;
+            kd_total_us  += hit_results[2].query_us;
+            cbg_total_us += hit_results[3].query_us;
+            hh_total_us  += hit_results[4].query_us;
+        }
+    }
+    double n = (double)total_hits;
+    std::cout << "  Avg query time (us/hit):  BF=" << std::setprecision(1)
+              << bf_total_us / n << "  HG=" << hg_total_us / n
+              << "  KD=" << kd_total_us / n
+              << "  CBG=" << cbg_total_us / n
+              << "  HH=" << hh_total_us / n << "\n\n";
+
+    // ── Write JSON report ────────────────────────────────────────────
+    std::cout << "[6/6] Writing report: " << cfg.output_path << "\n";
+    write_json_report(cfg.output_path, cfg, photons, gather_radius,
+                      type_stats,
+                      build_hash_grid_ms, build_kd_tree_ms,
+                      build_cell_bin_grid_ms, build_hash_histogram_ms,
+                      build_cell_cache_ms, build_cell_analysis_ms,
+                      cell_cache, cell_analysis,
+                      rays, all_results, cfg.verbose);
+
+    std::cout << "\nDone.\n";
+    return 0;
+}

@@ -16,7 +16,6 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/cell_bin_grid.h"
-#include "photon/hash_histogram.h"
 #include "debug/stats_collector.h"
 #include "optix/launch_params.h"
 
@@ -158,10 +157,9 @@ public:
                             float caustic_radius,
                             int num_photons_emitted = 0);
 
-    /// Build per-cell photon analysis from CellInfoCache + HashHistogram
+    /// Build per-cell photon analysis from CellInfoCache
     /// and upload the result arrays to GPU (PA-07/PA-08).
     void upload_cell_analysis(const CellInfoCache& cell_cache,
-                              const HashHistogram& hash_hist,
                               float                cell_area);
 
     /// Upload emitter data to device (for GPU photon tracing)
@@ -277,6 +275,11 @@ public:
     void set_histogram_only(bool v) { histogram_only_ = v; }
     bool is_histogram_only() const  { return histogram_only_; }
 
+    /// Preview mode: skip kNN guide, caustic gather, photon final gather.
+    /// Used during interactive navigation for real-time frame rates.
+    void set_preview_mode(bool v) { preview_mode_ = v; }
+    bool is_preview_mode()  const { return preview_mode_; }
+
     /// GPU device info (populated during init()).
     const std::string& gpu_name()    const { return gpu_name_; }
     size_t  gpu_vram_total()         const { return gpu_vram_total_; }
@@ -288,7 +291,6 @@ public:
     /// Called after fill_common_params at every launch site.
     void fill_cell_grid_params(LaunchParams& lp) const;
 
-    /// Render coverage debug PNG (stub — no-op when DEBUG_COMPONENT_PNGS is false).
     template<typename CamT, typename FbT>
     void render_coverage_debug_png(const CamT&, const FbT&) {}
 
@@ -545,15 +547,11 @@ private:
     // Host-side scene triangles for debug ray picking/hover inspection.
     std::vector<Triangle> host_triangles_;
 
-    // Host-side cell-bin grid (kept after build for save/test access)
+    // Host-side cell-bin grid (kept for volume guide + tests only)
     CellBinGrid cell_bin_grid_;  // empty unless dense grid is built
 
-    // Device-side cell-bin grid (for volume guide / legacy dense gather)
+    // Device-side cell-bin grid (for volume guide only)
     DeviceBuffer d_cell_bin_grid_;  // PhotonBin [total_cells * bin_count]
-
-    // ── Multi-resolution hash histogram (replaces CellBinGrid for guide) ──
-    HashHistogram hash_histogram_;
-    DeviceBuffer  d_guide_histogram_[MAX_GUIDE_LEVELS];  // GpuGuideBin per level
 
     // Per-cell photon analysis (PA-08: GPU upload buffers)
     DeviceBuffer d_cell_guide_fraction_;
@@ -607,6 +605,7 @@ private:
     // Runtime guide fraction (T key toggle: 0 = unguided, DEFAULT = guided)
     float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
     bool  histogram_only_ = false;  // C key: use only histogram conclusions
+    bool  preview_mode_   = true;   // interactive preview: skip kNN, 3-bounce cap
 
     // GPU device info (populated in init())
     std::string gpu_name_;

@@ -3264,9 +3264,12 @@ TEST(OptiX, ResizeFramebuffer) {
     EXPECT_EQ(fb8.height, 8);
 }
 
-// -- 36.9 Cell-bin grid built by trace_photons and flags valid --------
+// -- 36.9 Surface CellBinGrid no longer built (kNN guide replaced it) -
+// The surface CellBinGrid is no longer built or uploaded to GPU.  kNN
+// guide sampling directly walks the hash grid instead.  This test
+// verifies the host-side grid accessor still works (returns empty).
 
-TEST(OptiX, CellBinGridValidAfterTracePhotons) {
+TEST(OptiX, CellBinGridNotBuiltAfterKnnGuide) {
     Scene scene = build_cornell_test_scene();
     if (scene.emissive_tri_indices.empty()) { GTEST_SKIP() << "No emitters"; }
 
@@ -3294,28 +3297,12 @@ TEST(OptiX, CellBinGridValidAfterTracePhotons) {
         cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
         cfg.gather_radius, cfg.caustic_radius);
 
-    optix_renderer.resize(8, 8);
-
-    // Cell grid should be valid after trace_photons built it via upload_photon_data
-    // (which ends with build_cell_bin_grid inside trace_photons).
-    // Render should propagate cell_grid_valid=1 to launch params.
-    optix_renderer.render_one_spp(cam, 0);
-    {
-        const LaunchParams& lp = optix_renderer.last_launch_params_for_test();
-        EXPECT_EQ(lp.cell_grid_valid, 1);
-        EXPECT_NE(lp.cell_bin_grid, nullptr);
-        EXPECT_GT(lp.cell_grid_dim_x, 0);
-        EXPECT_GT(lp.cell_grid_dim_y, 0);
-        EXPECT_GT(lp.cell_grid_dim_z, 0);
-        EXPECT_GT(lp.cell_grid_cell_size, 0.0f);
-    }
-
-    // The host-side grid should be accessible
+    // Surface grid is intentionally not built — kNN guide walks hash grid
     const CellBinGrid& grid = optix_renderer.cell_bin_grid_for_test();
-    EXPECT_GT(grid.dim_x, 0);
-    EXPECT_GT(grid.dim_y, 0);
-    EXPECT_GT(grid.dim_z, 0);
-    EXPECT_FALSE(grid.bins.empty());
+    EXPECT_EQ(grid.dim_x, 0);
+    EXPECT_EQ(grid.dim_y, 0);
+    EXPECT_EQ(grid.dim_z, 0);
+    EXPECT_TRUE(grid.bins.empty());
 }
 
 // -- 36.10 Cell-bin grid allocation is proportional to grid dims ------

@@ -30,14 +30,21 @@ struct Options {
 };
 
 // -- Application state accessible from main ---------------------------
+enum class RenderPhase { Preview, Rendering };
+
 struct AppState {
     DebugState debug;
     bool       snapshot_requested = false;  // R key: save PNG + JSON snapshot
     bool       volume_enabled   = DEFAULT_VOLUME_ENABLED;  // V key toggle
     bool       use_dense_grid   = DEFAULT_USE_DENSE_GRID;  // G key toggle
 
-    // Scene switching (keys 1-8)
-    int        scene_switch_requested = -1;  // -1 = none, 0-7 = profile index
+    // Render phase state machine (Preview = fast interactive, Rendering = full quality)
+    RenderPhase render_phase       = RenderPhase::Preview;
+    int         render_target_spp  = 256;   // samples to accumulate in Rendering phase
+    int         render_current_spp = 0;     // samples accumulated so far
+
+    // Scene switching (keys 1-9, 0)
+    int        scene_switch_requested = -1;  // -1 = none, 0-9 = profile index
     int        active_scene_index     = -1;  // currently loaded scene profile index
     float      active_cam_speed       = SCENE_CAM_SPEED; // runtime cam speed
 
