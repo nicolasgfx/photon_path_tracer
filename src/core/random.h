@@ -79,8 +79,11 @@ inline HD float3 sample_cosine_cone(float u1, float u2, float cos_theta_max) {
 // PDF for the cosine-weighted cone sampler.
 // The PDF over solid angle is:  cos(θ) / (π * (1 - cos²(θ_max)))
 // which integrates to 1 over the cone.
+// Small epsilon tolerance on the boundary prevents float-precision
+// round-trip errors (sample → ONB → dot) from zeroing the PDF of
+// a direction that was legitimately sampled from the cone.
 inline HD float cosine_cone_pdf(float cos_theta, float cos_theta_max) {
-    if (cos_theta < cos_theta_max) return 0.f;
+    if (cos_theta < cos_theta_max - 1e-5f) return 0.f;
     float denom = PI * (1.0f - cos_theta_max * cos_theta_max);
     return (denom > 0.f) ? fmaxf(0.f, cos_theta) / denom : 0.f;
 }

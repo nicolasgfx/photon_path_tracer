@@ -42,9 +42,9 @@ constexpr bool ENABLE_STATS = false;
 //#define SCENE_LIVING_ROOM
 //#define SCENE_SALLE_DE_BAIN
 //#define SCENE_FIREPLACE_ROOM
-#define SCENE_CONFERENCE
+//#define SCENE_CONFERENCE
 //#define SCENE_LIVING_ROOM_2
-//#define SCENE_STAIRCASE
+#define SCENE_STAIRCASE
 //#define SCENE_STAIRCASE_2
 //#define SCENE_BEDROOM
 //#define SCENE_BATHROOM
@@ -108,7 +108,7 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diff
 // These caps prevent pathologically large searches in sparse regions.
 // Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
-constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
+constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;      // 0.05[R]  global (diffuse) map
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
 
 // ── NEE shadow rays ─────────────────────────────────────────────────
@@ -189,7 +189,7 @@ constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 8;          // [R]
 // After the first non-specular hit, glossy surfaces can trace extra
 // BSDF-sampled reflection bounces.
 //   0 = off  |  2 = balanced  |  3–4 = quality (expensive)
-constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 4;
+constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 2;
 
 // ── NEE emitter selection mix ───────────────────────────────────────
 // Power-weighted vs area-weighted emitter selection for shadow rays.
@@ -241,7 +241,7 @@ constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;        // [R]
 // Uniform 3D grid over the photon AABB.  Each cell stores start/end
 // indices into a sorted photon array for O(1) cell lookup.
 constexpr bool  DEFAULT_USE_DENSE_GRID   = true;        // use dense grid path
-constexpr float DENSE_GRID_CELL_SIZE     = 0.01f;       // cell side-length (metres)
+constexpr float DENSE_GRID_CELL_SIZE     = 0.01f;  // 0.01f = 1cm cell side-length (metres)
 
 // ── Cell neighbourhood ──────────────────────────────────────────────
 // When true, the guided sampler picks a random photon from a 3×3×3
@@ -257,7 +257,7 @@ constexpr bool  DEFAULT_GUIDE_NEIGHBOURHOOD_3X3X3 = true; // [K]
 // direction, improving convergence.
 //   0.0  = no jitter (use photon wi exactly)
 //   0.15 = ~8.6°  balanced default
-constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
+constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // 0.15f // [R] radians
 
 // ── Firefly clamp ───────────────────────────────────────────────────
 // Safety clamp on per-bounce f·cos/pdf contribution.  Prevents residual
@@ -265,6 +265,14 @@ constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 // loss in extreme situations) but makes convergence much more robust.
 //   10–20 = aggressive  |  50 = balanced  |  200+ = nearly unbiased
 constexpr float MAX_BOUNCE_CONTRIBUTION  = 50.f;
+
+// Per-path throughput clamp.  After each bounce, the cumulative
+// throughput magnitude is capped to this value.  Prevents compounding
+// of per-bounce clamps (50² = 2500 after two clamped bounces) from
+// creating extreme NEE contributions downstream.  Slightly biased but
+// eliminates persistent fireflies visible even at high frame counts.
+//   50 = aggressive  |  100 = balanced  |  500+ = nearly unbiased
+constexpr float MAX_PATH_THROUGHPUT      = 100.f;
 
 
 // =====================================================================

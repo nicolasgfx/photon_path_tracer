@@ -412,11 +412,13 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         Spectrum f_over_pdf = Spectrum::zero();
         bool sample_valid = false;
 
-        if (p_guide > 0.f && rng.next_float() < p_guide) {
-            // ── Photon-guided sample (fused sample + PDF) ─────────────
-            // Single neighbourhood scan: picks a random eligible photon,
-            // applies cone jitter, and computes marginal guide PDF from
-            // cached wi vectors — no redundant global memory reads.
+        bool chose_guide = (p_guide > 0.f && rng.next_float() < p_guide);
+
+        if (chose_guide) {
+            // ── Photon-guided sample (fused sample + exact PDF) ────────
+            // Phase 1: reservoir-1 picks a uniformly random eligible photon.
+            // Phase 2: exact marginal PDF via full neighbourhood scan
+            //          (same computation as dev_guide_pdf_at_direction).
             float cos_half = params.guide_cone_cos_half_angle;
             GuideSamplePdfResult gs = dev_guide_sample_and_pdf_full(
                 hit.position, hit.shading_normal, cos_half, rng);
@@ -437,9 +439,14 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                     }
                 }
             }
+            // One-sample MIS: if the guide strategy was chosen but
+            // could not produce a valid sample, the correct contribution
+            // is zero — do NOT fall through to BSDF (that would cause a
+            // systematic 1/(1-p_guide) overestimate in photon-sparse regions).
+            if (!sample_valid) break;
         }
 
-        if (!sample_valid) {
+        if (!chose_guide) {
             // ── BSDF sample ─────────────────────────────────────────
             long long t_bsdf = 0;
             if constexpr (ENABLE_STATS) t_bsdf = clock64();
@@ -475,6 +482,18 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         // Update throughput
         for (int i = 0; i < NUM_LAMBDA; ++i)
             throughput.value[i] *= f_over_pdf.value[i];
+
+        // ── Path-level throughput clamp ──────────────────────────────
+        // Prevent compounding of per-bounce clamps (50² = 2500 etc.)
+        // from producing extreme NEE contributions at later bounces.
+        {
+            float max_tp = throughput.max_component();
+            if (max_tp > MAX_PATH_THROUGHPUT) {
+                float scale = MAX_PATH_THROUGHPUT / max_tp;
+                for (int i = 0; i < NUM_LAMBDA; ++i)
+                    throughput.value[i] *= scale;
+            }
+        }
 
         // ── Russian roulette (§4.1) ─────────────────────────────────
         // After min_bounces_rr guaranteed bounces, probabilistically

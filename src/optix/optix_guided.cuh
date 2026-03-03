@@ -273,15 +273,20 @@ float dev_guide_pdf_from_eligible(
     return pdf_sum / (float)n_eligible;
 }
 
+// Forward declaration — defined below, called by dev_guide_sample_and_pdf_full.
+__forceinline__ __device__
+float dev_guide_pdf_at_direction(
+    float3 pos, float3 filter_normal, float3 wi_world, float cos_half);
+
 // ── Fused guide sample + PDF (complete version) ─────────────────────
-// Combines sampling and PDF computation in a single neighbourhood scan.
-// Returns photon index, jittered wi direction, and marginal PDF.
-// Cone jitter is applied internally so the returned pdf matches wi_dir.
+// Two-phase approach:
+//   Phase 1: Single pass with reservoir-1 to pick one photon uniformly
+//            at random from all eligible photons (no first-K bias).
+//   Phase 2: Second pass to compute the EXACT marginal guide PDF at
+//            the jittered direction — identical to dev_guide_pdf_at_direction.
 //
-// Uses reservoir sampling (Algorithm R) to select uniformly from ALL
-// eligible photons — no first-K deterministic bias.  A separate
-// reservoir of K = MAX_GUIDE_PDF_PHOTONS wi vectors provides an
-// unbiased random subset for the PDF average.
+// This guarantees the PDF used for MIS weighting exactly matches the
+// sampling distribution, preventing firefly outliers from PDF mismatch.
 
 struct GuideSamplePdfResult {
     int    photon_idx;   // -1 if no eligible photon found
@@ -307,10 +312,8 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
     int cy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
     int cz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
 
-    // Single pass over all eligible photons — NO early exit.
-    // Reservoir-1: pick one photon uniformly at random (for sampling).
-    // Reservoir-K: keep a uniform random subset of wi vectors (for PDF).
-    float3   pdf_wi[MAX_GUIDE_PDF_PHOTONS];   // reservoir-K for PDF
+    // ── Phase 1: Reservoir-1 pick ────────────────────────────────────
+    // Single pass over all eligible photons to select one uniformly.
     int      picked_idx = -1;
     float3   picked_wi  = make_f3(0.f, 0.f, 1.f);
     int      n_eligible = 0;
@@ -357,16 +360,6 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
                         picked_idx = (int)idx;
                         picked_wi  = pw;
                     }
-
-                    // Reservoir-K: first K fill the array; after that,
-                    // replace a random slot with probability K/n_eligible.
-                    if (n_eligible <= MAX_GUIDE_PDF_PHOTONS) {
-                        pdf_wi[n_eligible - 1] = pw;
-                    } else {
-                        int r = (int)(rng.next_float() * (float)n_eligible);
-                        if (r < MAX_GUIDE_PDF_PHOTONS)
-                            pdf_wi[r] = pw;
-                    }
                 }
             }
         }
@@ -386,19 +379,13 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
     }
     res.wi_dir = wi_dir;
 
-    // Compute marginal PDF from the reservoir-sampled wi vectors.
-    // The reservoir gives a uniform random subset of all eligible photons,
-    // so the average cone_pdf over it is an unbiased estimator.
-    int K = (n_eligible < MAX_GUIDE_PDF_PHOTONS)
-            ? n_eligible : MAX_GUIDE_PDF_PHOTONS;
-    float pdf_sum = 0.f;
-    for (int i = 0; i < K; ++i) {
-        float cos_angle = dot(wi_dir, pdf_wi[i]);
-        pdf_sum += (cos_half < 1.f - 1e-6f)
-            ? cosine_cone_pdf(cos_angle, cos_half)
-            : INV_2PI;
-    }
-    res.pdf_guide = pdf_sum / (float)K;
+    // ── Phase 2: Exact marginal PDF ──────────────────────────────────
+    // Second pass over the same neighbourhood to compute the exact PDF
+    // at wi_dir.  This matches dev_guide_pdf_at_direction exactly,
+    // ensuring consistent MIS weights between guide and BSDF branches.
+    // Only wi (3 floats) is re-read per photon; gates re-evaluated for
+    // correctness but the branch predictor should mostly hit the cache.
+    res.pdf_guide = dev_guide_pdf_at_direction(pos, filter_normal, wi_dir, cos_half);
 
     return res;
 }
