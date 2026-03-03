@@ -150,13 +150,14 @@ def write_mtl(mtl_path: str, materials: dict[str, MtlMaterial]):
         f.write("# pb_* extensions for photon-beam renderer\n\n")
 
         for name, mat in materials.items():
-            # Comments
+            f.write(f"newmtl {name}\n")
+
+            # Comments (after newmtl for proper MTL parsing)
             for c in mat.comments:
                 f.write(f"{c}\n")
 
-            f.write(f"newmtl {name}\n")
-
             # Classic MTL
+            f.write(f"Ka 0.000000 0.000000 0.000000\n")
             f.write(f"Kd {mat.Kd[0]:.6f} {mat.Kd[1]:.6f} {mat.Kd[2]:.6f}\n")
             if any(v > 0 for v in mat.Ks):
                 f.write(f"Ks {mat.Ks[0]:.6f} {mat.Ks[1]:.6f} {mat.Ks[2]:.6f}\n")
@@ -166,6 +167,11 @@ def write_mtl(mtl_path: str, materials: dict[str, MtlMaterial]):
             f.write(f"Ni {mat.Ni:.4f}\n")
             f.write(f"d {mat.d:.4f}\n")
             f.write(f"illum {mat.illum}\n")
+
+            # Transmission filter (for glass/dielectric materials)
+            if mat.pb_brdf == 'dielectric' or mat.pb_transmission is not None:
+                t = mat.pb_transmission if mat.pb_transmission is not None else 0.0
+                f.write(f"Tf {t:.6f} {t:.6f} {t:.6f}\n")
 
             # Texture maps
             if mat.map_Kd:

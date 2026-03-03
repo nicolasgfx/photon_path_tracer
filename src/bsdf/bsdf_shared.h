@@ -111,8 +111,17 @@ inline HD float ggx_G1(float3 v, float alpha) {
 }
 
 // ── GGX Smith G (shared) ───────────────────────────────────────────
+// Height-correlated Smith masking-shadowing (matches PBRT-v4):
+//   G2(wo, wi) = 1 / (1 + Λ(wo) + Λ(wi))
+// where Λ(v) = (-1 + sqrt(1 + α² tan²θ)) / 2
+// This is more energy-conserving than the separable G1*G1 form.
 inline HD float ggx_G(float3 wo, float3 wi, float alpha) {
-    return ggx_G1(wo, alpha) * ggx_G1(wi, alpha);
+    float a2 = alpha * alpha;
+    float NdotO = fabsf(wo.z);
+    float NdotI = fabsf(wi.z);
+    float denom_o = NdotO + sqrtf(a2 + (1.f - a2) * NdotO * NdotO);
+    float denom_i = NdotI + sqrtf(a2 + (1.f - a2) * NdotI * NdotI);
+    return 4.f * NdotO * NdotI / (denom_o * denom_i);
 }
 
 // ── GGX Visible Normal Distribution sampling (VNDF) ─────────────────

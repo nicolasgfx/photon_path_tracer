@@ -28,6 +28,14 @@ CONDUCTOR_PRESETS: dict[str, tuple[list[float], list[float]]] = {
     'metal-Au-eta':  ([0.16, 0.42, 1.47],  [3.98, 2.38, 1.60]),   # gold
     'metal-Ag-eta':  ([0.05, 0.06, 0.05],  [4.28, 3.52, 2.73]),   # silver
     'metal-Fe-eta':  ([2.87, 2.95, 2.65],  [3.12, 2.93, 2.77]),   # iron
+    'metal-Ti-eta':  ([2.16, 1.93, 1.72],  [2.56, 2.37, 2.18]),   # titanium
+    'metal-Cr-eta':  ([3.11, 3.18, 2.17],  [3.31, 3.32, 3.20]),   # chromium
+    'metal-W-eta':   ([4.37, 3.31, 2.99],  [3.27, 2.69, 2.54]),   # tungsten
+    'metal-Ni-eta':  ([1.98, 1.70, 1.67],  [3.74, 3.01, 2.50]),   # nickel
+    'metal-Pt-eta':  ([2.38, 2.04, 1.69],  [4.26, 3.72, 3.13]),   # platinum
+    'metal-Co-eta':  ([2.18, 2.00, 1.55],  [4.09, 3.59, 3.36]),   # cobalt
+    'metal-Pd-eta':  ([1.66, 1.27, 0.82],  [4.33, 3.55, 2.88]),   # palladium
+    'metal-Zn-eta':  ([1.10, 0.64, 1.21],  [5.55, 4.76, 3.57]),   # zinc
 }
 
 
@@ -121,6 +129,30 @@ def roughness_to_phong(alpha: float) -> float:
     return 2.0 / (alpha * alpha) - 2.0
 
 
+def _pbrt_roughness_to_ours(roughness: float, remaproughness: bool = True) -> float:
+    """Convert PBRT roughness value to our renderer's roughness parameter.
+    
+    PBRT's roughness chain:
+      - If remaproughness=true (default):  PBRT alpha = sqrt(roughness)
+      - If remaproughness=false:            PBRT alpha = roughness
+    
+    Our renderer's chain:
+      - bsdf_roughness_to_alpha(r) = r * r    (i.e., alpha = r²)
+    
+    So we need our_roughness² = pbrt_alpha:
+      - remap=true:  our_roughness = roughness^(1/4)
+      - remap=false: our_roughness = sqrt(roughness)
+    """
+    roughness = max(roughness, 0.0)
+    if roughness < 1e-8:
+        return 0.0
+    if remaproughness:
+        return roughness ** 0.25
+    else:
+        return math.sqrt(roughness)
+    return 2.0 / (alpha * alpha) - 2.0
+
+
 # ---------------------------------------------------------------------------
 # Texture graph resolver
 # ---------------------------------------------------------------------------
@@ -184,7 +216,8 @@ def map_materials(scene: PbrtScene) -> tuple[dict[str, MtlMaterial], dict[str, R
 
     # Process named materials
     for name, pbrt_mat in scene.named_materials.items():
-        mtl = _map_one_material(name, pbrt_mat, resolver, all_textures)
+        mtl = _map_one_material(name, pbrt_mat, resolver, all_textures,
+                                named_materials=scene.named_materials)
         materials[name] = mtl
 
     # Process any inline materials from shapes that don't have a named material
@@ -265,7 +298,8 @@ def _resolve_and_register(tex_name: str, resolver: TextureResolver,
 
 def _map_one_material(name: str, pbrt_mat: PbrtMaterial,
                       resolver: TextureResolver,
-                      all_textures: dict[str, ResolvedTexture]) -> MtlMaterial:
+                      all_textures: dict[str, ResolvedTexture],
+                      named_materials: dict[str, PbrtMaterial] | None = None) -> MtlMaterial:
     """Map a single PBRT material to MtlMaterial."""
     mt = pbrt_mat.mat_type
     params = pbrt_mat.params
@@ -277,12 +311,18 @@ def _map_one_material(name: str, pbrt_mat: PbrtMaterial,
         _map_diffuse(mtl, params, resolver, all_textures)
     elif mt == 'dielectric':
         _map_dielectric(mtl, params, resolver, all_textures)
+    elif mt == 'thindielectric':
+        _map_thin_dielectric(mtl, params)
     elif mt == 'conductor':
         _map_conductor(mtl, params, resolver, all_textures)
+    elif mt == 'coatedconductor':
+        _map_coated_conductor(mtl, params, resolver, all_textures)
     elif mt == 'measured':
         _map_measured(mtl, params)
     elif mt == 'diffusetransmission':
         _map_diffuse_transmission(mtl, params, resolver, all_textures)
+    elif mt == 'mix':
+        _map_mix(mtl, params, pbrt_mat, resolver, all_textures, named_materials)
     else:
         mtl.comments.append(f"# Unknown PBRT material type: {mt}")
         mtl.pb_brdf = 'lambert'
@@ -322,15 +362,19 @@ def _map_coated_diffuse(mtl: MtlMaterial, params: list[PbrtParam],
     roughness = get_param(params, 'roughness', None)
     uroughness = get_param(params, 'uroughness', None)
     vroughness = get_param(params, 'vroughness', None)
+    remap = get_param(params, 'remaproughness', True)
 
     if uroughness is not None and vroughness is not None:
-        mtl.pb_roughness_x = float(uroughness)
-        mtl.pb_roughness_y = float(vroughness)
-        mtl.pb_clearcoat_roughness = math.sqrt(float(uroughness) * float(vroughness))
+        ur = _pbrt_roughness_to_ours(float(uroughness), remap)
+        vr = _pbrt_roughness_to_ours(float(vroughness), remap)
+        mtl.pb_roughness_x = ur
+        mtl.pb_roughness_y = vr
+        mtl.pb_clearcoat_roughness = math.sqrt(ur * vr)
         mtl.Ns = roughness_to_phong(mtl.pb_clearcoat_roughness)
     elif roughness is not None:
-        mtl.pb_clearcoat_roughness = float(roughness)
-        mtl.Ns = roughness_to_phong(float(roughness))
+        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        mtl.pb_clearcoat_roughness = our_r
+        mtl.Ns = roughness_to_phong(our_r)
     else:
         mtl.pb_clearcoat_roughness = 0.0
         mtl.Ns = 10000.0
@@ -393,9 +437,11 @@ def _map_dielectric(mtl: MtlMaterial, params: list[PbrtParam],
     mtl.Ni = float(eta)
 
     roughness = get_param(params, 'roughness', None)
+    remap = get_param(params, 'remaproughness', True)
     if roughness is not None:
-        mtl.pb_roughness = float(roughness)
-        mtl.Ns = roughness_to_phong(float(roughness))
+        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        mtl.pb_roughness = our_r
+        mtl.Ns = roughness_to_phong(our_r)
 
     # Displacement/bump (e.g., water)
     disp_type = get_param_type(params, 'displacement')
@@ -413,27 +459,194 @@ def _map_conductor(mtl: MtlMaterial, params: list[PbrtParam],
     mtl.pb_brdf = 'conductor'
     mtl.illum = 3  # mirror-like
     mtl.Kd = [0.0, 0.0, 0.0]
-    mtl.Ks = [0.9, 0.9, 0.9]
 
-    # Try to resolve named spectra
+    # Resolve conductor optical constants
     eta_val = get_param(params, 'eta')
     k_val = get_param(params, 'k')
+    eta_rgb, k_rgb = _resolve_conductor_eta_k(eta_val, k_val)
 
+    if isinstance(eta_val, str) and not any(eta_val in pn for pn in CONDUCTOR_PRESETS):
+        mtl.comments.append(f"# Unknown conductor spectrum '{eta_val}', using aluminum defaults")
+
+    mtl.pb_conductor_eta = eta_rgb
+    mtl.pb_conductor_k = k_rgb
+
+    # Compute Schlick F0 from eta/k: F0 = ((n-1)²+k²) / ((n+1)²+k²)
+    f0 = [((n - 1)**2 + k**2) / ((n + 1)**2 + k**2) for n, k in zip(eta_rgb, k_rgb)]
+    mtl.Ks = f0
+
+    roughness = get_param(params, 'roughness', None)
+    uroughness = get_param(params, 'uroughness', None)
+    vroughness = get_param(params, 'vroughness', None)
+    remap = get_param(params, 'remaproughness', True)
+
+    if uroughness is not None and vroughness is not None:
+        ur = _pbrt_roughness_to_ours(float(uroughness), remap)
+        vr = _pbrt_roughness_to_ours(float(vroughness), remap)
+        mtl.pb_roughness_x = ur
+        mtl.pb_roughness_y = vr
+        mtl.pb_roughness = math.sqrt(ur * vr)
+        mtl.Ns = roughness_to_phong(mtl.pb_roughness)
+    elif roughness is not None:
+        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        mtl.pb_roughness = our_r
+        mtl.Ns = roughness_to_phong(our_r)
+    else:
+        mtl.pb_roughness = 0.0
+        mtl.Ns = 10000.0
+
+
+def _map_coated_conductor(mtl: MtlMaterial, params: list[PbrtParam],
+                          resolver: TextureResolver,
+                          all_textures: dict[str, ResolvedTexture]):
+    """coatedconductor → clearcoat over conductor base (pb_brdf clearcoat).
+    
+    PBRT's coatedconductor has a dielectric coat over a conductor base.
+    We map it to clearcoat with the conductor's specular colour as base.
+    """
+    mtl.pb_brdf = 'clearcoat'
+    mtl.illum = 3
+    mtl.Kd = [0.0, 0.0, 0.0]
+
+    # Conductor base properties
+    eta_val = get_param(params, 'conductor.eta')
+    k_val = get_param(params, 'conductor.k')
+    if eta_val is None:
+        eta_val = get_param(params, 'eta')
+    if k_val is None:
+        k_val = get_param(params, 'k')
+
+    eta_rgb, k_rgb = _resolve_conductor_eta_k(eta_val, k_val)
+    mtl.pb_conductor_eta = eta_rgb
+    mtl.pb_conductor_k = k_rgb
+
+    # Schlick F0 as Ks for the base specular
+    f0 = [((n - 1)**2 + k**2) / ((n + 1)**2 + k**2) for n, k in zip(eta_rgb, k_rgb)]
+    mtl.Ks = f0
+
+    # Reflectance (if present, use as diffuse tint)
+    ref_type = get_param_type(params, 'reflectance')
+    if ref_type == 'texture':
+        tex_name = get_param(params, 'reflectance')
+        out = _resolve_and_register(tex_name, resolver, all_textures)
+        if out:
+            mtl.map_Kd = out
+    elif ref_type == 'rgb':
+        rgb = get_param(params, 'reflectance', [0.0, 0.0, 0.0])
+        mtl.Kd = list(rgb)
+
+    # Base roughness
+    roughness = get_param(params, 'conductor.roughness',
+                          get_param(params, 'roughness', None))
+    remap = get_param(params, 'remaproughness', True)
+    if roughness is not None:
+        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        mtl.pb_base_roughness = our_r
+    else:
+        mtl.pb_base_roughness = 0.0
+
+    # Coat properties
+    coat_eta = get_param(params, 'interface.eta', 1.5)
+    mtl.pb_eta = float(coat_eta)
+    mtl.Ni = float(coat_eta)
+
+    coat_roughness = get_param(params, 'interface.roughness', 0.0)
+    if coat_roughness is not None:
+        our_cr = _pbrt_roughness_to_ours(float(coat_roughness), remap)
+        mtl.pb_clearcoat_roughness = our_cr
+    else:
+        mtl.pb_clearcoat_roughness = 0.0
+
+    mtl.pb_clearcoat = 1.0
+    mtl.pb_base_brdf = 'conductor'
+    mtl.Ns = roughness_to_phong(mtl.pb_clearcoat_roughness or 0.001)
+
+    mtl.comments.append("# PBRT coatedconductor → clearcoat over conductor base")
+
+
+def _map_thin_dielectric(mtl: MtlMaterial, params: list[PbrtParam]):
+    """thindielectric → glass with pb_thin flag.
+    
+    PBRT's ThinDielectric represents an infinitely thin glass surface
+    (no refraction offset, just Fresnel reflection/transmission).
+    """
+    mtl.pb_brdf = 'dielectric'
+    mtl.illum = 4
+    mtl.pb_transmission = 1.0
+    mtl.pb_thin = 1
+    mtl.d = 1.0
+    mtl.Kd = [0.0, 0.0, 0.0]
+    mtl.Ks = [1.0, 1.0, 1.0]
+
+    eta = get_param(params, 'eta', 1.5)
+    mtl.pb_eta = float(eta)
+    mtl.Ni = float(eta)
+
+    # ThinDielectric has no roughness — perfectly smooth
+    mtl.pb_roughness = 0.0
+    mtl.Ns = 10000.0
+
+    mtl.comments.append("# PBRT thindielectric → thin glass (no refraction offset)")
+
+
+def _map_mix(mtl: MtlMaterial, params: list[PbrtParam],
+             pbrt_mat: PbrtMaterial,
+             resolver: TextureResolver,
+             all_textures: dict[str, ResolvedTexture],
+             named_materials: dict[str, PbrtMaterial] | None = None):
+    """mix → choose dominant material based on amount.
+    
+    PBRT's Mix material blends two sub-materials. Since our renderer
+    doesn't support material blending, we choose the dominant one
+    (amount > 0.5 → material[1], else material[0]).
+    """
+    materials_param = get_param(params, 'materials')
+    amount = get_param(params, 'amount', 0.5)
+    if isinstance(amount, list):
+        amount = amount[0]
+    amount = float(amount)
+
+    mat_names = []
+    if isinstance(materials_param, list):
+        mat_names = [str(m) for m in materials_param]
+    elif isinstance(materials_param, str):
+        mat_names = [materials_param]
+
+    # Pick dominant material
+    chosen_name = None
+    if len(mat_names) >= 2:
+        chosen_name = mat_names[1] if amount > 0.5 else mat_names[0]
+    elif len(mat_names) == 1:
+        chosen_name = mat_names[0]
+
+    if chosen_name and named_materials and chosen_name in named_materials:
+        sub_mat = named_materials[chosen_name]
+        sub_mtl = _map_one_material(mtl.name, sub_mat, resolver, all_textures,
+                                     named_materials=named_materials)
+        # Copy all fields from sub-material
+        for field_name in vars(sub_mtl):
+            setattr(mtl, field_name, getattr(sub_mtl, field_name))
+        mtl.name = mtl.name  # restore original name
+        mtl.comments.append(f"# PBRT mix material → using dominant '{chosen_name}' (amount={amount:.2f})")
+    else:
+        mtl.pb_brdf = 'lambert'
+        mtl.comments.append(f"# PBRT mix material — could not resolve sub-materials: {mat_names}")
+
+
+def _resolve_conductor_eta_k(eta_val, k_val) -> tuple[list[float], list[float]]:
+    """Resolve conductor eta/k from named spectra or raw RGB values."""
     eta_rgb = None
     k_rgb = None
 
     if isinstance(eta_val, str):
-        # Named spectrum lookup
         for preset_name, (p_eta, p_k) in CONDUCTOR_PRESETS.items():
             if eta_val in preset_name or preset_name in eta_val:
                 eta_rgb = p_eta
                 k_rgb = p_k
                 break
         if eta_rgb is None:
-            # Default to aluminum
-            eta_rgb = [1.34, 0.96, 0.50]
+            eta_rgb = [1.34, 0.96, 0.50]  # default aluminum
             k_rgb = [7.47, 6.40, 5.30]
-            mtl.comments.append(f"# Unknown conductor spectrum '{eta_val}', using aluminum defaults")
     elif isinstance(eta_val, list):
         eta_rgb = eta_val[:3]
 
@@ -452,16 +665,7 @@ def _map_conductor(mtl: MtlMaterial, params: list[PbrtParam],
     if k_rgb is None:
         k_rgb = [7.47, 6.40, 5.30]
 
-    mtl.pb_conductor_eta = eta_rgb
-    mtl.pb_conductor_k = k_rgb
-
-    roughness = get_param(params, 'roughness', None)
-    if roughness is not None:
-        mtl.pb_roughness = float(roughness)
-        mtl.Ns = roughness_to_phong(float(roughness))
-    else:
-        mtl.pb_roughness = 0.0
-        mtl.Ns = 10000.0
+    return eta_rgb, k_rgb
 
 
 def _map_measured(mtl: MtlMaterial, params: list[PbrtParam]):
@@ -491,20 +695,41 @@ def _map_measured(mtl: MtlMaterial, params: list[PbrtParam]):
 def _map_diffuse_transmission(mtl: MtlMaterial, params: list[PbrtParam],
                                resolver: TextureResolver,
                                all_textures: dict[str, ResolvedTexture]):
-    """diffusetransmission → lambert with pb_thin flag for future extension."""
+    """diffusetransmission → translucent fabric/leaf material."""
     mtl.pb_brdf = 'lambert'
     mtl.pb_semantic = 'fabric'
     mtl.pb_thin = 1
-    mtl.pb_transmission = 0.5
     mtl.illum = 1
 
-    # Reflectance texture
+    # Reflectance
     ref_type = get_param_type(params, 'reflectance')
     if ref_type == 'texture':
         tex_name = get_param(params, 'reflectance')
         out = _resolve_and_register(tex_name, resolver, all_textures)
         if out:
             mtl.map_Kd = out
+    elif ref_type == 'rgb':
+        rgb = get_param(params, 'reflectance', [0.25, 0.25, 0.25])
+        mtl.Kd = list(rgb)
+
+    # Transmittance  
+    trans_type = get_param_type(params, 'transmittance')
+    if trans_type == 'rgb':
+        transmittance = get_param(params, 'transmittance', [0.25, 0.25, 0.25])
+        # Average transmittance as transmission factor
+        if isinstance(transmittance, list):
+            mtl.pb_transmission = sum(transmittance[:3]) / len(transmittance[:3])
+        else:
+            mtl.pb_transmission = float(transmittance)
+    else:
+        # Default: PBRT diffusetransmission defaults both reflectance and
+        # transmittance to 0.25  
+        mtl.pb_transmission = 0.25
+
+    # Scale parameter  
+    scale = get_param(params, 'scale', 1.0)
+    if isinstance(scale, (int, float)) and float(scale) != 1.0:
+        mtl.pb_transmission *= float(scale)
 
     # Alpha texture (for leaf cutouts)
     alpha_type = get_param_type(params, 'alpha')

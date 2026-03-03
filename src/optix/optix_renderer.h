@@ -449,6 +449,7 @@ private:
     DeviceBuffer d_cauchy_A_;           // float  [num_materials]
     DeviceBuffer d_cauchy_B_;           // float  [num_materials]
     DeviceBuffer d_mat_dispersion_;     // uint8  [num_materials]
+    DeviceBuffer d_mat_thin_;            // uint8  [num_materials]  thin dielectric flag
     DeviceBuffer d_mat_type_;
     DeviceBuffer d_diffuse_tex_;    // int [num_materials]
     DeviceBuffer d_emission_tex_;   // int [num_materials]

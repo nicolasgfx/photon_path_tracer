@@ -90,6 +90,12 @@ void OptixRenderer::upload_scene_data(const Scene& scene) {
     d_cauchy_B_.upload(cauchy_B);
     d_mat_dispersion_.upload(mat_dispersion);
 
+    // Per-material thin dielectric flag (no refraction offset)
+    std::vector<uint8_t> mat_thin(num_mats);
+    for (size_t m = 0; m < num_mats; ++m)
+        mat_thin[m] = scene.materials[m].pb_thin ? (uint8_t)1 : (uint8_t)0;
+    d_mat_thin_.upload(mat_thin);
+
     // Per-material interior medium id (-1 = no medium)
     std::vector<int> medium_ids(num_mats);
     for (size_t m = 0; m < num_mats; ++m)
@@ -197,6 +203,9 @@ void OptixRenderer::fill_clearcoat_fabric_params(LaunchParams& lp) const {
     lp.mat_medium_id = d_mat_medium_id_.d_ptr ? const_cast<int*>(d_mat_medium_id_.as<int>()) : nullptr;
     lp.media         = d_media_.d_ptr ? const_cast<HomogeneousMedium*>(d_media_.as<HomogeneousMedium>()) : nullptr;
     lp.num_media     = d_media_.d_ptr ? (int)(d_media_.bytes / sizeof(HomogeneousMedium)) : 0;
+
+    // Per-material thin-glass flag (§ thin dielectric)
+    lp.mat_thin = d_mat_thin_.d_ptr ? const_cast<uint8_t*>(d_mat_thin_.as<uint8_t>()) : nullptr;
 }
 
 // =====================================================================

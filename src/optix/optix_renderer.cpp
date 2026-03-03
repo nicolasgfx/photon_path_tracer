@@ -296,6 +296,7 @@ void OptixRenderer::render_debug_frame(
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
+    lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
     lp.preview_mode      = preview_mode_ ? 1 : 0;
     lp.frame_number      = frame_number;
     lp.render_mode       = mode;
@@ -368,6 +369,7 @@ void OptixRenderer::render_one_spp(
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
+    lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
     lp.preview_mode      = 0;  // render_one_spp is always full quality
     lp.frame_number       = frame_number;
     lp.render_mode        = RenderMode::Full;
@@ -526,6 +528,7 @@ void OptixRenderer::render_final(
         lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
         lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
         lp.guide_fraction    = guide_fraction_;
+        lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
         lp.frame_number       = frame_number;
         lp.render_mode        = RenderMode::Full;
         lp.exposure           = exposure_;

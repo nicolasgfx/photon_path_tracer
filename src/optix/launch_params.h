@@ -96,6 +96,7 @@ struct LaunchParams {
     uint8_t*  mat_dispersion;     // [num_materials]  1 = Cauchy dispersion enabled
     float*    cauchy_A;           // [num_materials]  Cauchy A coefficient
     float*    cauchy_B;           // [num_materials]  Cauchy B coefficient
+    uint8_t*  mat_thin;           // [num_materials]  1 = thin dielectric (no refraction offset)
 
     // Per-material interior medium (§7.7 Translucent surfaces)
     int*              mat_medium_id;  // [num_materials]  medium index or -1
@@ -129,6 +130,7 @@ struct LaunchParams {
     float     dense_min_x, dense_min_y, dense_min_z;  // AABB min
     float     dense_cell_size;          // cell edge length
     int       dense_dim_x, dense_dim_y, dense_dim_z;  // grid resolution
+    float     guide_cone_cos_half_angle;  // cos(half-angle) for photon wi cone jitter (1.0 = off)
 
     // Per-triangle photon irradiance heatmap (precomputed on CPU, for preview)
     float*    tri_photon_irradiance;  // [num_triangles] accumulated scalar irradiance

@@ -89,13 +89,37 @@ def _bake_scaled_texture(src_path: str, dst_path: str, scale: float):
 
     try:
         img = Image.open(src_path)
+        src_ext = os.path.splitext(src_path)[1].lower()
+        dst_ext = os.path.splitext(dst_path)[1].lower()
+
+        # Determine if source is HDR format
+        is_hdr = src_ext in ('.exr', '.hdr', '.pfm')
+
+        if is_hdr:
+            # For HDR textures, scale in linear float space and save as EXR/HDR
+            # PIL can't handle EXR natively — just copy with a warning
+            print(f"  [WARN] HDR texture scaling not supported, copying unscaled: {os.path.basename(src_path)}")
+            shutil.copy2(src_path, dst_path)
+            return
+
         img_array = np.array(img, dtype=np.float32)
 
-        if img_array.ndim == 3 and img_array.shape[2] == 4:
-            # RGBA — scale RGB only, preserve alpha
-            img_array[:, :, :3] *= scale
-        elif img_array.ndim == 3:
-            img_array *= scale
+        # Apply scale in linear space (approximate sRGB decode → scale → encode)
+        # sRGB decode: linear = srgb^2.2  (approximate)
+        if img_array.max() > 0:
+            img_linear = np.power(img_array / 255.0, 2.2)
+
+            if img_linear.ndim == 3 and img_linear.shape[2] == 4:
+                # RGBA — scale RGB only, preserve alpha
+                img_linear[:, :, :3] *= scale
+            elif img_linear.ndim == 3:
+                img_linear *= scale
+            else:
+                img_linear *= scale
+
+            # sRGB encode back
+            img_linear = np.clip(img_linear, 0.0, 1.0)
+            img_array = np.power(img_linear, 1.0 / 2.2) * 255.0
         else:
             img_array *= scale
 

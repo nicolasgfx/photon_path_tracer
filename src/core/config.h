@@ -38,9 +38,9 @@ constexpr bool ENABLE_STATS = true;
 // Uncomment exactly ONE.  Runtime switching via keys 1–9,0 uses
 // SCENE_PROFILES[] at the bottom of this file.
 
-#define SCENE_CORNELL_BOX
+//#define SCENE_CORNELL_BOX
 //#define SCENE_LIVING_ROOM
-//#define SCENE_SALLE_DE_BAIN
+#define SCENE_SALLE_DE_BAIN
 //#define SCENE_FIREPLACE_ROOM
 //#define SCENE_CONFERENCE
 //#define SCENE_LIVING_ROOM_2
@@ -90,8 +90,7 @@ constexpr int STRATA_Y = 16;                           // 16 × 16 = 256 strata
 
 // ── Samples per pixel ───────────────────────────────────────────────
 // Anti-aliasing + noise averaging.  This is the single biggest
-// quality/speed knob.  Derived from the stratification grid so that
-// one full stratum cycle == one SPP target.
+// quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
 constexpr int DEFAULT_SPP = STRATA_X * STRATA_Y;       // [R]
 
@@ -118,7 +117,7 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (t
 // many shadow rays are cast.  See DEFAULT_NEE_DEEP_SAMPLES for
 // bounces ≥ 1.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
-constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 1;          // [R]
+constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
 
 
 // =====================================================================
@@ -132,7 +131,7 @@ constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 1;          // [R]
 // enter+exit) plus subsequent diffuse bounces.  4 glass layers = 8
 // transmission bounces before reaching a diffuse surface.
 //   Fast: 4–6  |  Balanced: 10  |  Quality: 12–16
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 10;        // [R]
+constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 12;        // [R]
 
 // ── Russian roulette ────────────────────────────────────────────────
 // After MIN_BOUNCES_RR guaranteed bounces, each continuation is
@@ -142,7 +141,7 @@ constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 10;        // [R]
 // should not kill photons mid-transmission through nested dielectrics.
 //   MIN_BOUNCES_RR — Fast: 3–4  |  Balanced: 8  |  Quality: 10
 //   RR_THRESHOLD   — 0.80 (aggressive) .. 0.95 (conservative)
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 8;    // [R]
+constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 10;    // [R]
 constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.90f;// [R]
 
 // ── Spectral transport (PBRT v4 §14.3) ─────────────────────────────
@@ -204,6 +203,13 @@ constexpr float DEFAULT_NEE_COVERAGE_FRACTION = 0.3f; // [R]
 // ── Photon-guided sampling ──────────────────────────────────────────
 constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;       // [R]  probability of guided vs BSDF sample
 constexpr bool  DEFAULT_USE_GUIDE        = true;        // [K]  enable/disable guided sampling
+
+// Cone jitter half-angle (radians) applied to photon wi when doing
+// dense-grid guided sampling.  Widens the stochastic axis around the
+// photon's incoming direction, improving convergence / reducing noise.
+//   0.0  = no jitter (use photon wi exactly)
+//   0.15 = ~8.6°  balanced default
+constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 
 // ── Camera ray max bounces (full path trace) ───────────────────────
 // Total bounce limit for camera rays in the full path-trace loop
@@ -341,8 +347,8 @@ constexpr bool DEBUG_COVERAGE_PNG         = false;     // emit coverage debug PN
 constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses direct-only proxy
 
 // ── Dense grid toggle ───────────────────────────────────────────────
-constexpr bool DEFAULT_USE_DENSE_GRID = false;          // use cell-bin dense grid path
-constexpr float DENSE_GRID_CELL_SIZE  = DEFAULT_CAUSTIC_RADIUS;  // 0.025 m cell edge
+constexpr bool  DEFAULT_USE_DENSE_GRID  = false;        // use cell-bin dense grid path
+constexpr float DENSE_GRID_CELL_SIZE    = 0.025f;       // cell side-length (metres)
 
 
 // =====================================================================

@@ -23,6 +23,13 @@ bool dev_is_glass(uint32_t mat_id) {
     return params.mat_type[mat_id] == Glass;
 }
 
+// Thin dielectric: glass that transmits without refraction offset.
+// Rays pass straight through with Fresnel attenuation only.
+__forceinline__ __device__
+bool dev_is_thin(uint32_t mat_id) {
+    return params.mat_thin && params.mat_thin[mat_id];
+}
+
 // Translucent: dielectric surface + interior participating medium.
 // NOT a pure delta specular; eligible for NEE and photon gather,
 // but still uses Fresnel reflect/refract at the boundary.
@@ -59,6 +66,41 @@ HomogeneousMedium dev_get_medium(int medium_id) {
     return params.media[medium_id];
 }
 
+// ── Bilinear atlas fetch (shared helper) ────────────────────────────
+// Reads 4 texels from the flat RGBA atlas and returns bilinearly
+// interpolated linear RGB.
+__forceinline__ __device__
+float3 dev_atlas_bilinear(const GpuTexDesc& desc, float u, float v) {
+    // Continuous texel coordinates (pixel centres at 0.5, 1.5, …)
+    float fx = u * (float)desc.width  - 0.5f;
+    float fy = v * (float)desc.height - 0.5f;
+    int ix0 = __float2int_rd(fx);
+    int iy0 = __float2int_rd(fy);
+    float sx = fx - (float)ix0;   // fractional part [0,1)
+    float sy = fy - (float)iy0;
+
+    // Wrap each corner (handles negative from the -0.5 shift)
+    int x0 = ix0 % desc.width;  if (x0 < 0) x0 += desc.width;
+    int x1 = (ix0 + 1) % desc.width;  if (x1 < 0) x1 += desc.width;
+    int y0 = iy0 % desc.height; if (y0 < 0) y0 += desc.height;
+    int y1 = (iy0 + 1) % desc.height; if (y1 < 0) y1 += desc.height;
+
+    // Fetch four texels (RGBA, stride 4)
+    int b00 = desc.offset + (y0 * desc.width + x0) * 4;
+    int b10 = desc.offset + (y0 * desc.width + x1) * 4;
+    int b01 = desc.offset + (y1 * desc.width + x0) * 4;
+    int b11 = desc.offset + (y1 * desc.width + x1) * 4;
+    float3 c00 = make_f3(params.tex_atlas[b00], params.tex_atlas[b00+1], params.tex_atlas[b00+2]);
+    float3 c10 = make_f3(params.tex_atlas[b10], params.tex_atlas[b10+1], params.tex_atlas[b10+2]);
+    float3 c01 = make_f3(params.tex_atlas[b01], params.tex_atlas[b01+1], params.tex_atlas[b01+2]);
+    float3 c11 = make_f3(params.tex_atlas[b11], params.tex_atlas[b11+1], params.tex_atlas[b11+2]);
+
+    // Bilinear blend
+    float3 top = c00 * (1.f - sx) + c10 * sx;
+    float3 bot = c01 * (1.f - sx) + c11 * sx;
+    return top * (1.f - sy) + bot * sy;
+}
+
 // Sample any texture by texture ID at the given UV.
 // Returns linear RGB (0-1).  Falls back to (1,1,1) when no texture.
 __forceinline__ __device__
@@ -70,15 +112,7 @@ float3 dev_sample_tex_by_id(int tex_id, float2 uv) {
     float u = uv.x - floorf(uv.x);
     float v = uv.y - floorf(uv.y);
     v = 1.f - v;
-    int ix = __float2int_rd(u * (float)desc.width)  % desc.width;
-    int iy = __float2int_rd(v * (float)desc.height) % desc.height;
-    if (ix < 0) ix += desc.width;
-    if (iy < 0) iy += desc.height;
-    int pixel = iy * desc.width + ix;
-    int base  = desc.offset + pixel * 4;
-    return make_f3(params.tex_atlas[base + 0],
-                   params.tex_atlas[base + 1],
-                   params.tex_atlas[base + 2]);
+    return dev_atlas_bilinear(desc, u, v);
 }
 
 // Sample the flat texture atlas at the given UV for material mat_id.
@@ -90,20 +124,10 @@ float3 dev_sample_diffuse_tex(uint32_t mat_id, float2 uv) {
         return make_f3(0.f, 0.f, 0.f);
 
     GpuTexDesc desc = params.tex_descs[tex_id];
-    // Wrap UVs to [0,1)
     float u = uv.x - floorf(uv.x);
     float v = uv.y - floorf(uv.y);
-    // Flip V (OBJ convention: V=0 at bottom)
     v = 1.f - v;
-    int ix = __float2int_rd(u * (float)desc.width)  % desc.width;
-    int iy = __float2int_rd(v * (float)desc.height) % desc.height;
-    if (ix < 0) ix += desc.width;
-    if (iy < 0) iy += desc.height;
-    int pixel = iy * desc.width + ix;
-    int base  = desc.offset + pixel * 4;
-    return make_f3(params.tex_atlas[base + 0],
-                   params.tex_atlas[base + 1],
-                   params.tex_atlas[base + 2]);
+    return dev_atlas_bilinear(desc, u, v);
 }
 
 __forceinline__ __device__

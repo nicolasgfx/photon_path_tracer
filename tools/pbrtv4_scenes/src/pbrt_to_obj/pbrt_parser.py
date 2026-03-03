@@ -56,6 +56,7 @@ class PbrtShape:
     area_light: dict | None = None   # AreaLightSource params (night-scene emissive shapes)
     group_name: str = ""
     from_instance: bool = False      # True when emitted by ObjectInstance expansion
+    reverse_orientation: bool = False # True when ReverseOrientation was active
 
 
 @dataclass
@@ -244,6 +245,10 @@ def _coerce(ptype: str, raw: list[str]) -> Any:
         return _unquote(raw[0]).lower() in ("true", "1") if raw else False
     if ptype in ("point", "point3", "vector", "vector3", "normal"):
         return [float(_unquote(v)) for v in raw]
+    if ptype in ("point2", "vector2"):
+        return [float(_unquote(v)) for v in raw]
+    if ptype in ("color",):
+        return [float(_unquote(v)) for v in raw]
     # fallback
     if len(raw) == 1:
         return _unquote(raw[0])
@@ -306,9 +311,10 @@ class PbrtParser:
         self._current_material: str | None = None
         self._current_inline_material: PbrtMaterial | None = None
         self._current_area_light: dict | None = None
+        self._reverse_orientation: bool = False
         self._in_world = False
         self._in_object: PbrtObjectTemplate | None = None
-        self._material_stack: list[tuple[str | None, PbrtMaterial | None, dict | None]] = []
+        self._material_stack: list[tuple[str | None, PbrtMaterial | None, dict | None, bool]] = []
         self._pre_world_transform = np.eye(4, dtype=np.float64)
 
     def parse_file(self, filepath: str) -> PbrtScene:
@@ -418,8 +424,8 @@ class PbrtParser:
                     vals.append(float(_unquote(tokens[pos]))); pos += 1
                 if pos < len(tokens) and tokens[pos] == ']':
                     pos += 1
-                # PBRT stores row-major in the file
-                m = np.array(vals, dtype=np.float64).reshape(4, 4)
+                # PBRT stores column-major in the file (per PBRT book B.3)
+                m = np.array(vals, dtype=np.float64).reshape(4, 4).T
                 if self._in_world:
                     self._current_transform = _mat_concat(m, self._current_transform)
                 else:
@@ -434,7 +440,8 @@ class PbrtParser:
                     vals.append(float(_unquote(tokens[pos]))); pos += 1
                 if pos < len(tokens) and tokens[pos] == ']':
                     pos += 1
-                m = np.array(vals, dtype=np.float64).reshape(4, 4)
+                # PBRT stores column-major in the file (per PBRT book B.3)
+                m = np.array(vals, dtype=np.float64).reshape(4, 4).T
                 if self._in_world:
                     self._current_transform = m
                 else:
@@ -452,7 +459,7 @@ class PbrtParser:
                 pos += 1
                 self._transform_stack.append(self._current_transform.copy())
                 self._material_stack.append(
-                    (self._current_material, self._current_inline_material, self._current_area_light)
+                    (self._current_material, self._current_inline_material, self._current_area_light, self._reverse_orientation)
                 )
 
             elif word == 'AttributeEnd':
@@ -460,7 +467,7 @@ class PbrtParser:
                 if self._transform_stack:
                     self._current_transform = self._transform_stack.pop()
                 if self._material_stack:
-                    self._current_material, self._current_inline_material, self._current_area_light = self._material_stack.pop()
+                    self._current_material, self._current_inline_material, self._current_area_light, self._reverse_orientation = self._material_stack.pop()
 
             # --- Object instancing ---
             elif word == 'ObjectBegin':
@@ -492,6 +499,7 @@ class PbrtParser:
                             area_light=tpl_shape.area_light,
                             group_name=tpl_shape.group_name,
                             from_instance=True,
+                            reverse_orientation=tpl_shape.reverse_orientation,
                         )
                         self.scene.shapes.append(s)
 
@@ -577,14 +585,20 @@ class PbrtParser:
                     inline_material=self._current_inline_material,
                     transform=self._current_transform.copy(),
                     area_light=self._current_area_light,
+                    reverse_orientation=self._reverse_orientation,
                 )
                 if self._in_object is not None:
                     self._in_object.shapes.append(shape)
                 else:
                     self.scene.shapes.append(shape)
 
-            # --- ReverseOrientation, other directives we skip ---
-            elif word in ('ReverseOrientation', 'MakeNamedMedium', 'MediumInterface',
+            # --- ReverseOrientation ---
+            elif word == 'ReverseOrientation':
+                pos += 1
+                self._reverse_orientation = not self._reverse_orientation
+
+            # --- Directives we skip ---
+            elif word in ('MakeNamedMedium', 'MediumInterface',
                           'PixelFilter', 'ColorSpace', 'Option'):
                 pos += 1
                 # skip any following params

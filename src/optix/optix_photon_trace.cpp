@@ -124,6 +124,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.cauchy_A          = d_cauchy_A_.d_ptr       ? d_cauchy_A_.as<float>()       : nullptr;
     lp.cauchy_B          = d_cauchy_B_.d_ptr       ? d_cauchy_B_.as<float>()       : nullptr;
     lp.mat_dispersion    = d_mat_dispersion_.d_ptr ? d_mat_dispersion_.as<uint8_t>() : nullptr;
+    lp.mat_thin          = d_mat_thin_.d_ptr       ? d_mat_thin_.as<uint8_t>()       : nullptr;
     lp.mat_type          = d_mat_type_.as<uint8_t>();
     lp.diffuse_tex       = d_diffuse_tex_.d_ptr ? d_diffuse_tex_.as<int>() : nullptr;
     lp.emission_tex      = d_emission_tex_.d_ptr ? d_emission_tex_.as<int>() : nullptr;

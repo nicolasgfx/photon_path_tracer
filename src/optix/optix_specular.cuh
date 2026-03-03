@@ -72,6 +72,33 @@ SpecularBounceResult dev_specular_bounce(
     r.filter = Spectrum::constant(1.0f);
 
     if (dev_is_glass(mat_id) || dev_is_translucent(mat_id)) {
+        // ── Thin dielectric shortcut ─────────────────────────────────
+        // Thin glass: no refraction direction change, no IOR stack.
+        // Stochastic reflect/transmit; transmitted rays pass straight
+        // through with Fresnel attenuation and transmission filter.
+        if (dev_is_thin(mat_id)) {
+            bool entering = dot(dir, geo_normal) < 0.f;
+            float3 outward_n   = entering ? normal : normal * (-1.f);
+            float3 outward_geo = entering ? geo_normal : geo_normal * (-1.f);
+            float cos_i = fabsf(dot(dir, outward_n));
+            float mat_ior = dev_get_ior(mat_id);
+            float eta = entering ? (1.0f / mat_ior) : mat_ior;
+            float F = fresnel_dielectric(cos_i, eta);
+
+            if (rng.next_float() < F) {
+                // Reflect
+                r.new_dir = dir - outward_n * (2.f * dot(dir, outward_n));
+                r.new_pos = pos + outward_geo * OPTIX_SCENE_EPSILON;
+            } else {
+                // Transmit straight through (no bending)
+                r.new_dir = dir;
+                r.new_pos = pos - outward_geo * OPTIX_SCENE_EPSILON;
+                Spectrum Tf = dev_get_Tf(mat_id, uv);
+                r.filter = Tf;
+            }
+            return r;
+        }
+
         // Use geometric normal for inside/outside test (immune to
         // shading-normal interpolation artefacts on curved meshes).
         bool entering = dot(dir, geo_normal) < 0.f;

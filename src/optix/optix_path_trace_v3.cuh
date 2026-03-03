@@ -405,19 +405,36 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                     params.photon_wi_x[photon_idx],
                     params.photon_wi_y[photon_idx],
                     params.photon_wi_z[photon_idx]);
-                float3 wi_local = frame.world_to_local(wi);
+
+                // ── Cone jitter: perturb photon wi within a small cone ──
+                // Builds an ONB around the photon direction and samples a
+                // cosine-weighted cone to widen the stochastic axis.
+                float cos_half = params.guide_cone_cos_half_angle;
+                float3 wi_dir = wi; // original photon direction (cone centre)
+                if (cos_half < 1.f - 1e-6f) {
+                    ONB cone_frame = ONB::from_normal(wi);
+                    float3 cone_local = sample_cosine_cone(
+                        rng.next_float(), rng.next_float(), cos_half);
+                    wi_dir = cone_frame.local_to_world(cone_local);
+                }
+
+                float3 wi_local = frame.world_to_local(wi_dir);
                 if (wi_local.z > 0.f) {
                     Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
                     float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
 
                     // Balance heuristic: 0.5 * pdf_guide + 0.5 * pdf_bsdf
-                    // Guide PDF = 1/(2π) (uniform hemisphere)
-                    combined_pdf = 0.5f * INV_2PI + 0.5f * pdf_bsdf;
+                    // Guide PDF = cosine-cone PDF centred on the photon wi
+                    float cos_cone = dot(wi_dir, wi); // angle between jittered and original
+                    float pdf_guide = (cos_half < 1.f - 1e-6f)
+                        ? cosine_cone_pdf(cos_cone, cos_half)
+                        : INV_2PI;  // fallback: no jitter → uniform hemisphere
+                    combined_pdf = 0.5f * pdf_guide + 0.5f * pdf_bsdf;
                     if (combined_pdf > 1e-8f) {
                         float cos_theta = wi_local.z;
                         for (int i = 0; i < NUM_LAMBDA; ++i)
                             f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
-                        wi_world = wi;
+                        wi_world = wi_dir;
                         sample_valid = true;
                     }
                 }

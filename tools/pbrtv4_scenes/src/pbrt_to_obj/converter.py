@@ -1,10 +1,10 @@
-"""
-Converter orchestrator — ties together parsing, PLY loading, material mapping,
+﻿"""
+Converter orchestrator â€” ties together parsing, PLY loading, material mapping,
 texture processing, OBJ writing, and camera extraction.
 
 Memory-efficient streaming OBJ writer: reads each PLY, transforms, writes
 directly to the output file, then frees the mesh data before processing
-the next shape. Peak memory ≈ one mesh at a time.
+the next shape. Peak memory â‰ˆ one mesh at a time.
 """
 
 from __future__ import annotations
@@ -87,6 +87,15 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
         if shape.area_light is not None:
             em_name = f"_emissive_{_emissive_counter}"
             em_mat = create_emissive_material(em_name, shape.area_light['params'])
+            # Preserve base material Kd if it exists (emissive shapes often
+            # have a base material whose diffuse colour we should keep)
+            base_mat_name = shape.material_name
+            if base_mat_name and base_mat_name in materials:
+                base = materials[base_mat_name]
+                if base.map_Kd:
+                    em_mat.map_Kd = base.map_Kd
+                if any(v > 0.01 for v in base.Kd):
+                    em_mat.Kd = list(base.Kd)
             materials[em_name] = em_mat
             shape.material_name = em_name
             _emissive_counter += 1
@@ -193,7 +202,7 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                     skipped += 1
                     continue
 
-                # Read PLY fresh each time (no cache — keeps peak memory to
+                # Read PLY fresh each time (no cache â€” keeps peak memory to
                 # one mesh).  Disk I/O is fast; the bottleneck is text formatting.
                 try:
                     mesh = read_ply(ply_path)
@@ -208,7 +217,8 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                 # Transform vertices: shape.transform (instance) then global_xform
                 combined_xform = global_xform @ shape.transform
                 positions, normals, faces = _transform_mesh(
-                    mesh.positions, mesh.normals, mesh.faces, combined_xform
+                    mesh.positions, mesh.normals, mesh.faces, combined_xform,
+                    reverse_orientation=shape.reverse_orientation,
                 )
                 uvs = mesh.uvs          # keep UV reference
                 del mesh                 # free raw PLY data immediately
@@ -225,17 +235,17 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                 obj_f.write(f"g {group_name}\nusemtl {mat_name}\n")
 
                 # --- Vertices: write directly to file (no BytesIO) ---
-                np.savetxt(obj_f, positions, fmt='v %.4f %.4f %.4f')
+                np.savetxt(obj_f, positions, fmt='v %.6f %.6f %.6f')
 
                 # --- Texture coordinates ---
                 has_uv = uvs is not None
                 if has_uv:
-                    np.savetxt(obj_f, uvs, fmt='vt %.4f %.4f')
+                    np.savetxt(obj_f, uvs, fmt='vt %.6f %.6f')
 
                 # --- Normals ---
                 has_n = normals is not None
                 if has_n:
-                    np.savetxt(obj_f, normals, fmt='vn %.4f %.4f %.4f')
+                    np.savetxt(obj_f, normals, fmt='vn %.6f %.6f %.6f')
 
                 # --- Faces ---
                 nv = positions.shape[0]
@@ -295,14 +305,23 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                 radius = get_param(shape.params, 'radius', 1.0)
                 combined_xform = global_xform @ shape.transform
                 center = combined_xform[:3, 3]
+                # Use geometric mean of axis scales for uniform sphere approximation
                 sx = np.linalg.norm(combined_xform[:3, 0])
+                sy = np.linalg.norm(combined_xform[:3, 1])
+                sz = np.linalg.norm(combined_xform[:3, 2])
+                scale = (sx * sy * sz) ** (1.0 / 3.0)
 
                 positions, normals, uvs, faces = generate_sphere(
                     (center[0], center[1], center[2]),
-                    float(radius * sx),
+                    float(radius * scale),
                     n_lat=12,
                     n_lon=24,
                 )
+
+                # Handle ReverseOrientation for sphere
+                if shape.reverse_orientation:
+                    faces = faces.copy()
+                    faces[:, [1, 2]] = faces[:, [2, 1]]
 
                 bbox_min = np.minimum(bbox_min, positions.min(axis=0))
                 bbox_max = np.maximum(bbox_max, positions.max(axis=0))
@@ -311,9 +330,9 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                 group_name = _unique_name(f"sphere_{mat_name}", _group_names)
 
                 obj_f.write(f"g {group_name}\nusemtl {mat_name}\n")
-                np.savetxt(obj_f, positions, fmt='v %.4f %.4f %.4f')
-                np.savetxt(obj_f, uvs, fmt='vt %.4f %.4f')
-                np.savetxt(obj_f, normals, fmt='vn %.4f %.4f %.4f')
+                np.savetxt(obj_f, positions, fmt='v %.6f %.6f %.6f')
+                np.savetxt(obj_f, uvs, fmt='vt %.6f %.6f')
+                np.savetxt(obj_f, normals, fmt='vn %.6f %.6f %.6f')
 
                 nv = positions.shape[0]
                 fi = faces.astype(np.int64)
@@ -350,6 +369,8 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                     normals = np.array(raw_N, dtype=np.float32).reshape(-1, 3)
 
                 raw_uv = get_param(shape.params, 'uv')
+                if raw_uv is None:
+                    raw_uv = get_param(shape.params, 'st')  # PBRT also uses 'st' for UVs
                 uvs = None
                 if raw_uv is not None:
                     uvs = np.array(raw_uv, dtype=np.float32).reshape(-1, 2)
@@ -357,7 +378,8 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                 # Apply transform
                 combined_xform = global_xform @ shape.transform
                 positions, normals, faces = _transform_mesh(
-                    positions, normals, faces, combined_xform
+                    positions, normals, faces, combined_xform,
+                    reverse_orientation=shape.reverse_orientation,
                 )
 
                 bbox_min = np.minimum(bbox_min, positions.min(axis=0))
@@ -367,14 +389,14 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
                 group_name = _unique_name(f"trimesh_{mat_name}", _group_names)
 
                 obj_f.write(f"g {group_name}\nusemtl {mat_name}\n")
-                np.savetxt(obj_f, positions, fmt='v %.4f %.4f %.4f')
+                np.savetxt(obj_f, positions, fmt='v %.6f %.6f %.6f')
 
                 has_uv = uvs is not None
                 has_n = normals is not None
                 if has_uv:
-                    np.savetxt(obj_f, uvs, fmt='vt %.4f %.4f')
+                    np.savetxt(obj_f, uvs, fmt='vt %.6f %.6f')
                 if has_n:
-                    np.savetxt(obj_f, normals, fmt='vn %.4f %.4f %.4f')
+                    np.savetxt(obj_f, normals, fmt='vn %.6f %.6f %.6f')
 
                 nv = positions.shape[0]
                 nf = faces.shape[0]
@@ -431,12 +453,12 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
         print(f"  Loaded {loaded} mesh(es), skipped {skipped}")
         print(f"  Total: {total_verts:,} vertices, {total_faces:,} faces")
         print(f"  Bounding box: ({bbox_min[0]:.2f}, {bbox_min[1]:.2f}, {bbox_min[2]:.2f}) "
-              f"→ ({bbox_max[0]:.2f}, {bbox_max[1]:.2f}, {bbox_max[2]:.2f})")
+              f"â†’ ({bbox_max[0]:.2f}, {bbox_max[1]:.2f}, {bbox_max[2]:.2f})")
         obj_size = os.path.getsize(obj_path)
         if obj_size > 500_000_000:
-            print(f"  OBJ: {obj_size/1e9:.2f} GB → {obj_path}")
+            print(f"  OBJ: {obj_size/1e9:.2f} GB â†’ {obj_path}")
         else:
-            print(f"  OBJ: {obj_size/1e6:.2f} MB → {obj_path}")
+            print(f"  OBJ: {obj_size/1e6:.2f} MB â†’ {obj_path}")
 
     # --- Step 5: Write MTL ---
     if verbose:
@@ -499,11 +521,12 @@ def convert_scene_folder(folder_path: str, output_base: str, *,
 def _transform_mesh(positions: np.ndarray,
                     normals: np.ndarray | None,
                     faces: np.ndarray,
-                    xform: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+                    xform: np.ndarray,
+                    reverse_orientation: bool = False) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
     """Apply 4x4 transform to mesh vertices and normals.
     
-    If the transform has a negative determinant (mirror), also reverses
-    face winding to preserve CCW orientation.
+    If the transform has a negative determinant (mirror) XOR reverse_orientation
+    is True, reverses face winding to preserve correct orientation.
     """
     n_verts = positions.shape[0]
 
@@ -524,9 +547,11 @@ def _transform_mesh(positions: np.ndarray,
         lens = np.maximum(lens, 1e-8)
         new_normals /= lens
 
-    # Check determinant — if negative, reverse face winding
+    # Check determinant â€” if negative, reverse face winding
+    # Also flip if ReverseOrientation was set (XOR logic)
     det = np.linalg.det(xform[:3, :3])
-    if det < 0:
+    flip = (det < 0) ^ reverse_orientation
+    if flip:
         # Reverse winding: swap columns 1 and 2
         faces = faces.copy()
         faces[:, [1, 2]] = faces[:, [2, 1]]
