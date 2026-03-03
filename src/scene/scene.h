@@ -67,8 +67,8 @@ struct Scene {
     void build_emissive_distribution();
 
     // ── Normalize geometry to reference frame ───────────────────────
-    // Translates scene centre to SCENE_REF_CENTER and scales the
-    // longest axis to SCENE_REF_EXTENT.  Call AFTER load, BEFORE
+    // Translates scene centre to origin and scales the
+    // longest axis to 1.0 (reference frame).  Call AFTER load, BEFORE
     // build_bvh().  Skipped when SCENE_IS_REFERENCE == true.
     void normalize_to_reference();
 
@@ -88,8 +88,8 @@ private:
 // ── Implementation ──────────────────────────────────────────────────
 
 // Normalise the scene so its bounding box matches the Cornell-Box
-// reference frame: centred at SCENE_REF_CENTER, longest axis =
-// SCENE_REF_EXTENT (1.0).  Vertex positions AND normals (normals are
+// reference frame: centred at origin, longest axis = 1.0.
+// Vertex positions AND normals (normals are
 // direction-only, so only positions are transformed).
 inline void Scene::normalize_to_reference() {
     if (triangles.empty()) return;
@@ -108,8 +108,8 @@ inline void Scene::normalize_to_reference() {
 
     if (longest < 1e-12f) return;  // degenerate
 
-    float  scale = SCENE_REF_EXTENT / longest;
-    float3 ref_c = make_f3(0.f, 0.f, 0.f);  // SCENE_REF_CENTER
+    float  scale = 1.0f / longest;
+    float3 ref_c = make_f3(0.f, 0.f, 0.f);  // reference centre
 
     std::cout << "[Scene] Normalising: centre ("
               << cur_center.x << ", " << cur_center.y << ", "

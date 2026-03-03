@@ -1359,16 +1359,14 @@ void run_interactive(
 
             if (idle_sec > IDLE_TIMEOUT_SEC && !s_app.idle_rendering_active) {
                 // Boost photon budget and re-trace for higher quality
-                opt.config.num_photons = static_cast<int>(
-                    s_app.base_num_photons * IDLE_PHOTON_BUDGET_FACTOR);
+                opt.config.num_photons = s_app.base_num_photons;
                 optix_renderer.trace_photons(
                     scene, opt.config, 0.f, s_app.idle_photon_seed++);
                 optix_renderer.set_preview_mode(false);
                 optix_renderer.clear_buffers();
                 frame = 0;
                 s_app.idle_rendering_active = true;
-                printf("[Idle] Full-quality mode (%.0fx photons)\n",
-                       IDLE_PHOTON_BUDGET_FACTOR);
+                printf("[Idle] Full-quality mode\n");
             }
         }
 

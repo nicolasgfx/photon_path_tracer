@@ -855,7 +855,7 @@ OptixRenderer::RenderStats OptixRenderer::gather_stats(const char* scene_name) c
 
     // Config
     s.max_bounces_camera  = DEFAULT_MAX_BOUNCES_CAMERA;
-    s.max_bounces_photon  = DEFAULT_PHOTON_MAX_BOUNCES;
+    s.max_bounces_photon  = DEFAULT_MAX_BOUNCES;
     s.min_bounces_rr      = DEFAULT_MIN_BOUNCES_RR;
     s.rr_threshold        = DEFAULT_RR_THRESHOLD;
     s.guide_fraction      = guide_fraction_;

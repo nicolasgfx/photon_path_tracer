@@ -28,7 +28,7 @@
 // =====================================================================
 // Gate runtime statistics collection and debug file output.  When false,
 // the compiler eliminates all stats code paths (zero overhead).
-// See §10 for debug-specific flags that are subordinate to this gate.
+// See §9 for debug-specific flags that are subordinate to this gate.
 constexpr bool ENABLE_STATS = false;
 
 
@@ -48,26 +48,6 @@ constexpr bool ENABLE_STATS = false;
 //#define SCENE_STAIRCASE_2
 //#define SCENE_BEDROOM
 //#define SCENE_BATHROOM
-
-// ── Photon tracing backend ──────────────────────────────────────────
-// Set to 1 to use the CPU photon tracer (emitter.h) instead of the GPU
-// OptiX kernels.  Useful for A/B comparison; GPU rendering (camera rays,
-// gather, etc.) still runs on the GPU — only photon emission is on CPU.
-#define USE_CPU_PHOTON_TRACE 0
-
-// ── v2.2 Consistency Reset Flags ────────────────────────────────────
-// GPU photon tracing: disabled by default (CPU is ground truth until
-// a fully equivalent OptiX photon tracer exists).
-constexpr bool DEFAULT_USE_GPU_PHOTON_TRACING = false;
-
-// Bresenham per-pixel lobe balance (GPU BSDF heuristic):
-// disabled by default for CPU↔GPU consistency.  Enable only after
-// CPU has the same mechanism and equivalence tests pass.
-constexpr bool DEFAULT_ENABLE_BRESENHAM_BSDF = false;
-
-// EmitterPointSet primary emission path: disabled by default.
-// v2.2 uses alias-table + cosine hemisphere only, for consistency.
-constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 
 
 // =====================================================================
@@ -106,18 +86,10 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diff
 // The actual gather radius per hitpoint is adaptive: the tangential
 // distance to the K-th nearest photon (see DEFAULT_KNN_K).
 // These caps prevent pathologically large searches in sparse regions.
-// Values are fractions of SCENE_REF_EXTENT (scene in [-0.5, 0.5]³).
+// Values are fractions of scene extent (scene normalised to [-0.5, 0.5]³).
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
 constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;      // 0.05[R]  global (diffuse) map
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
-
-// ── NEE shadow rays ─────────────────────────────────────────────────
-// Shadow rays per shading point (bounce 0).  The bin/cache system
-// improves *which* emitters are chosen, but M still controls how
-// many shadow rays are cast.  See DEFAULT_NEE_DEEP_SAMPLES for
-// bounces ≥ 1.
-//   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
-constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 1;          // [R]
 
 
 // =====================================================================
@@ -131,19 +103,16 @@ constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 1;          // [R]
 // enter+exit) plus subsequent diffuse bounces.  4 glass layers = 8
 // transmission bounces before reaching a diffuse surface.
 //   Fast: 4–6  |  Balanced: 10  |  Quality: 12–16
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 8;         // [R]
+constexpr int DEFAULT_MAX_BOUNCES = 8;                // [R]
 
 // ── Russian roulette ────────────────────────────────────────────────
 // After MIN_BOUNCES_RR guaranteed bounces, each continuation is
 // probabilistic: survive = min(max_spectrum(throughput), RR_THRESHOLD).
 // Throughput is divided by survival probability (unbiased).
-// Photons need enough guaranteed bounces to survive nested glass
-// stacks (3 layers × 2 = 6 bounces), but every extra forced bounce
-// wastes compute on low-contribution paths.
 //   MIN_BOUNCES_RR — Fast: 3  |  Balanced: 5  |  Quality: 8
 //   RR_THRESHOLD   — 0.80 (aggressive) .. 0.95 (conservative)
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 5;     // [R]
-constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.95f; // [R]
+constexpr int   DEFAULT_MIN_BOUNCES_RR = 5;            // [R]
+constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;        // [R]
 
 // ── Spectral transport (PBRT v4 §14.3) ─────────────────────────────
 // Hero wavelengths per photon.  4 = PBRT v4 recommended.
@@ -155,24 +124,10 @@ constexpr int HERO_WAVELENGTHS = 4;
 // 90° = full hemisphere (Lambertian).  Smaller = directional emitters.
 constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
-// ── Emission variance reduction ─────────────────────────────────────
-// Fraction of photons emitted with area-uniform (vs power-weighted)
-// triangle selection.  Helps when emitters have wildly different power.
-//   0.0 = pure power  |  0.10 = balanced  |  1.0 = pure area
-constexpr float DEFAULT_PHOTON_EMITTER_UNIFORM_MIX = 0.10f;
-
-// Hemisphere strata for cell-stratified bounce decorrelation.
-//   0 = disable (pure random BSDF)  |  32–64 = recommended
-constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
-
 // ── Idle-to-full-quality rendering ──────────────────────────────────
 // After this many seconds of no input the viewer switches from
 // 3-bounce preview to full-quality accumulation.
 constexpr float IDLE_TIMEOUT_SEC = 1.0f;
-
-// Photon budget multiplier applied when entering idle/full-quality
-// mode.  Higher = better photon density but slower re-trace.
-constexpr float IDLE_PHOTON_BUDGET_FACTOR = 1.0f;
 
 
 // =====================================================================
@@ -184,17 +139,6 @@ constexpr float IDLE_PHOTON_BUDGET_FACTOR = 1.0f;
 // surface, then evaluates NEE + photon gather.
 //   Fast: 4  |  Balanced: 8  |  Quality: 12–16
 constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 8;          // [R]
-
-// ── Glossy continuation bounces ─────────────────────────────────────
-// After the first non-specular hit, glossy surfaces can trace extra
-// BSDF-sampled reflection bounces.
-//   0 = off  |  2 = balanced  |  3–4 = quality (expensive)
-constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 2;
-
-// ── NEE emitter selection mix ───────────────────────────────────────
-// Power-weighted vs area-weighted emitter selection for shadow rays.
-//   0.0 = pure power  |  0.3 = balanced  |  1.0 = pure area
-constexpr float DEFAULT_NEE_COVERAGE_FRACTION = 0.3f; // [R]
 
 // ── Camera ray max bounces (full path trace) ───────────────────────
 // Total bounce limit for camera rays in the full path-trace loop
@@ -208,11 +152,6 @@ constexpr int DEFAULT_MAX_BOUNCES_CAMERA = 8;             // [R]
 // instead of terminating.  Improves colour bleeding at the cost of one
 // extra gather per camera ray.
 constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
-
-// ── MIS (power heuristic) ───────────────────────────────────────────
-// Balances NEE shadow rays vs BSDF-sampled rays that hit emitters.
-// Should always be true — disabling causes double-counting on glossy.
-constexpr bool DEFAULT_USE_MIS = true;
 
 
 // =====================================================================
@@ -240,16 +179,7 @@ constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;        // [R]
 // ── Dense grid ──────────────────────────────────────────────────────
 // Uniform 3D grid over the photon AABB.  Each cell stores start/end
 // indices into a sorted photon array for O(1) cell lookup.
-constexpr bool  DEFAULT_USE_DENSE_GRID   = true;        // use dense grid path
 constexpr float DENSE_GRID_CELL_SIZE     = 0.01f;  // 0.01f = 1cm cell side-length (metres)
-
-// ── Cell neighbourhood ──────────────────────────────────────────────
-// When true, the guided sampler picks a random photon from a 3×3×3
-// block of dense-grid cells around the hit point; when false, only the
-// single cell containing the hit is used.
-// 3×3×3 gives smoother guidance at the cost of sampling more distant
-// (and potentially less relevant) photons.
-constexpr bool  DEFAULT_GUIDE_NEIGHBOURHOOD_3X3X3 = true; // [K]
 
 // ── Cone jitter ─────────────────────────────────────────────────────
 // Half-angle (radians) applied to photon wi when sampling a guided
@@ -288,9 +218,6 @@ constexpr float LIGHT_SCALE_STEP    = 1.25f;          //      multiplicative ste
 constexpr float LIGHT_SCALE_MIN     = 0.01f;
 constexpr float LIGHT_SCALE_MAX     = 100.0f;
 
-// Progress snapshot PNGs at power-of-2 SPP intervals (near-zero overhead).
-constexpr bool PROGRESS_SNAPSHOT_ENABLED = true;
-
 // ── OptiX AI Denoiser ───────────────────────────────────────────────
 constexpr bool  DEFAULT_DENOISER_ENABLED       = false;   // [K]  enable OptiX denoiser
 constexpr bool  DEFAULT_DENOISER_GUIDE_ALBEDO  = true;    //      feed albedo AOV to denoiser
@@ -315,7 +242,6 @@ constexpr float PLANE_TAU_EPSILON_FACTOR   = 10.0f;   // robust τ floor = facto
 // Adaptive radius = distance to the k-th nearest photon.
 // CPU: KD-tree.  GPU: grid shell expansion (capped by MAX_GATHER_RADIUS).
 constexpr int   DEFAULT_KNN_K                = 100;
-constexpr float DEFAULT_GPU_MAX_GATHER_RADIUS = 0.5f;  // upper bound for GPU shell expansion
 
 // ── Cell cache (per-cell photon statistics) ─────────────────────────
 // Adaptive gather radius, empty-region skip, caustic hotspot detection.
@@ -325,15 +251,9 @@ constexpr uint32_t CELL_CACHE_TABLE_SIZE     = 65536u;  // 64K cells
 constexpr int PHOTON_BIN_COUNT     = 32;    // runtime bin count (quasi-uniform S²)
 constexpr int MAX_PHOTON_BIN_COUNT = 64;    // compile-time upper bound for fixed arrays
 
-constexpr float ADAPTIVE_RADIUS_MIN_FACTOR  = 0.25f;   // never shrink below 25% of base
-constexpr float ADAPTIVE_RADIUS_MAX_FACTOR  = 2.0f;    // never grow above 200% of base
-constexpr float ADAPTIVE_RADIUS_TARGET_K    = 100.f;   // desired photons in gather disk
-
 // ── Adaptive caustic emission ───────────────────────────────────────
-constexpr float CAUSTIC_TARGETED_FRACTION   = 0.30f;   // fraction of caustic budget targeted
 constexpr int   CAUSTIC_MIN_FOR_ANALYSIS    = 10;      // min photons per cell for CV analysis
 constexpr float CAUSTIC_CV_THRESHOLD        = 0.50f;   // CV above this = "hot" cell
-constexpr int   CAUSTIC_MAX_TARGETED_ITERS  = 3;       // max adaptive refinement passes
 
 // ── Targeted caustic emission (§11: specular geometry sampling) ─────
 // Fraction of caustic budget directed at specular surfaces via
@@ -356,10 +276,8 @@ constexpr float DEFAULT_DOF_FOCUS_RANGE    = 0.05f;   // [R]  fraction of focus 
 
 
 // =====================================================================
-//  §8  VOLUME RENDERING (disabled — future use)
+//  §8  VOLUME RENDERING (V key toggle, off by default)
 // =====================================================================
-// Plumbing is wired but gated behind the master switch.
-// Re-enable after surface transport is fully validated.
 
 constexpr bool  DEFAULT_VOLUME_ENABLED  = false;       // master switch
 constexpr float DEFAULT_VOLUME_DENSITY  = 0.15f;       // σ_t extinction (0.01–1.0)
@@ -370,16 +288,7 @@ constexpr float DEFAULT_VOLUME_MAX_T    = 2.0f;        // max march distance (sc
 
 
 // =====================================================================
-//  §9  SCENE NORMALIZATION
-// =====================================================================
-
-// All scenes are scaled to fit within [-0.5, 0.5]³.  Gather radii,
-// surface tau, and camera speeds are relative to this.
-constexpr float SCENE_REF_EXTENT = 1.0f;
-
-
-// =====================================================================
-//  §10  DEBUG
+//  §9  DEBUG
 // =====================================================================
 
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;     // stop photon after 1st hit
@@ -387,27 +296,11 @@ constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;     // stop photon after 1st 
 // ── Per-bounce AOV debug buffers (DB-04, §10.3) ─────────────────────
 constexpr int   MAX_AOV_BOUNCES = 4;                    // first N bounces captured
 
-constexpr bool DEBUG_PHOTON_INDIRECT_PNG  = false;     // emit photon-indirect preview PNGs at launch
-constexpr bool DEBUG_CAUSTIC_PNG          = false;     // emit caustic-only debug PNGs (needs above)
-constexpr bool DEBUG_COVERAGE_PNG         = false;     // emit coverage debug PNGs
 constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses direct-only proxy
 
 
 // =====================================================================
-//  §11  LEGACY ALIASES
-// =====================================================================
-// Still referenced across the GPU pipeline and tests.
-// TODO: migrate callers to the canonical names, then remove.
-
-constexpr int   DEFAULT_NEE_DEEP_SAMPLES = 4;         // v1 deep NEE (still wired in optix_renderer)
-constexpr int   DEFAULT_MAX_BOUNCES      = DEFAULT_PHOTON_MAX_BOUNCES;
-constexpr int   DEFAULT_MIN_BOUNCES_RR   = DEFAULT_PHOTON_MIN_BOUNCES_RR;
-constexpr float DEFAULT_RR_THRESHOLD     = DEFAULT_PHOTON_RR_THRESHOLD;
-constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
-
-
-// =====================================================================
-//  §12  SCENE PROFILES
+//  §10  SCENE PROFILES
 // =====================================================================
 
 #ifdef SCENE_CORNELL_BOX

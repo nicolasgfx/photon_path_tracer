@@ -184,7 +184,7 @@ struct PerRayDataset {
             header = TestDataHeader{};
 
             // Fallback: CPU trace
-            header.num_photons_cfg = DEFAULT_NUM_PHOTONS;
+            header.num_photons_cfg = DEFAULT_GLOBAL_PHOTON_BUDGET;
             header.gather_radius   = DEFAULT_GATHER_RADIUS;
             header.caustic_radius  = DEFAULT_CAUSTIC_RADIUS;
             header.max_bounces     = DEFAULT_MAX_BOUNCES;

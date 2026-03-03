@@ -554,7 +554,7 @@ inline void write_analysis_json(const AnalysisReport& r,
     // Config snapshot (for reproducibility)
     f << "  \"config\": {\n";
     f << "    \"max_bounces_camera\": " << DEFAULT_MAX_BOUNCES_CAMERA << ",\n";
-    f << "    \"max_bounces_photon\": " << DEFAULT_PHOTON_MAX_BOUNCES << ",\n";
+    f << "    \"max_bounces_photon\": " << DEFAULT_MAX_BOUNCES << ",\n";
     f << "    \"min_bounces_rr\": " << DEFAULT_MIN_BOUNCES_RR << ",\n";
     f << "    \"rr_threshold\": " << DEFAULT_RR_THRESHOLD << ",\n";
     f << "    \"default_guide_fraction\": " << DEFAULT_GUIDE_FRACTION << ",\n";

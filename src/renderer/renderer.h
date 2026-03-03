@@ -35,7 +35,7 @@ struct RenderConfig {
     float  rr_threshold      = DEFAULT_RR_THRESHOLD;
 
     // Photon mapping
-    int    num_photons       = DEFAULT_NUM_PHOTONS;
+    int    num_photons       = DEFAULT_GLOBAL_PHOTON_BUDGET;
     int    global_photon_budget  = DEFAULT_GLOBAL_PHOTON_BUDGET;   // §Q4
     int    caustic_photon_budget = DEFAULT_CAUSTIC_PHOTON_BUDGET;  // §Q4
     float  gather_radius     = DEFAULT_GATHER_RADIUS;

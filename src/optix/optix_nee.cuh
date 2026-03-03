@@ -134,7 +134,7 @@ NeeSampleResult dev_nee_evaluate_sample(
 
     // MIS vs BSDF sampling
     float w_mis = 1.0f;
-    if (DEFAULT_USE_MIS) {
+    {  // MIS always enabled
         float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
         w_mis = mis_weight_2(p_wi, pdf_bsdf);
     }
@@ -404,7 +404,7 @@ NeeResult dev_nee_volume_scatter(float3 pos, float3 wo_world,
 
     // MIS: NEE vs phase function sampling
     float w_mis = 1.0f;
-    if (DEFAULT_USE_MIS) {
+    {  // MIS always enabled
         // Phase function PDF at this direction (normalised over full sphere)
         float pdf_phase = p_hg;  // HG is already normalised over 4π
         w_mis = mis_weight_2(p_wi, pdf_phase);

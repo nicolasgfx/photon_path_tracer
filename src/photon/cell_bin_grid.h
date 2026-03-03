@@ -3,8 +3,7 @@
 // cell_bin_grid.h – Dense 3D grid of precomputed photon directional bins
 // ─────────────────────────────────────────────────────────────────────
 // §3.5 / §6.7 — Fast O(PHOTON_BIN_COUNT) gather replace for the hash-grid
-// per-photon walk.  Used by OptixRenderer when DEFAULT_USE_DENSE_GRID is
-// true (runtime toggle: G key).
+// per-photon walk.  Used by OptixRenderer (runtime toggle: G key).
 //
 // Build algorithm (CPU, run after hash-grid build):
 //
