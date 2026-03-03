@@ -135,9 +135,9 @@ extern "C" __global__ void __raygen__photon_trace() {
         // RNG spatial decorrelation
         {
             uint32_t cell_key = teschner_hash(make_i3(
-                (int)floorf(hit.position.x / params.grid_cell_size),
-                (int)floorf(hit.position.y / params.grid_cell_size),
-                (int)floorf(hit.position.z / params.grid_cell_size)),
+                (int)floorf(hit.position.x / params.dense_cell_size),
+                (int)floorf(hit.position.y / params.dense_cell_size),
+                (int)floorf(hit.position.z / params.dense_cell_size)),
                 0x7FFFFFFFu);
             rng.advance(cell_key * 0x9E3779B9u);
         }

@@ -300,8 +300,6 @@ struct CellInfoCache {
             ci.caustic_flux  = ws.caustic_flux_sum;
 
             // Caustic CV (coefficient of variation)
-            constexpr int   CAUSTIC_MIN_FOR_ANALYSIS = 10;
-            constexpr float CAUSTIC_CV_THRESHOLD     = 0.50f;
             if (ws.c_n >= CAUSTIC_MIN_FOR_ANALYSIS && ws.c_mean > 1e-12) {
                 double c_var = (ws.c_n >= 2)
                     ? ws.c_M2 / (double)(ws.c_n - 1)

@@ -571,7 +571,7 @@ static void render_hover_cell_overlay(
         debug.hover_y < 0 || debug.hover_y >= win_h) return;
 
     const PhotonSoA& photons = optix_renderer.photons();
-    const HashGrid& grid = optix_renderer.grid();
+    const DenseGridData& grid = optix_renderer.dense_grid();
     if (photons.size() == 0 || grid.sorted_indices.empty()) return;
 
     float s = ((float)debug.hover_x + 0.5f) / (float)win_w;
@@ -729,8 +729,7 @@ static void key_callback(GLFWwindow* window, int key,
     // Gather mode toggle – G key (dense cell-bin grid vs per-photon hash walk)
     if (key == GLFW_KEY_G) {
         s_app.use_dense_grid = !s_app.use_dense_grid;
-        if (g_active_optix_renderer)
-            g_active_optix_renderer->set_use_dense_grid(s_app.use_dense_grid);
+        // Dense grid is always active now (no hash grid fallback)
         printf("[Gather] Dense grid: %s\n", s_app.use_dense_grid ? "ON" : "OFF");
         s_app.camera_moved  = true;  // reset accumulation
         return;
@@ -996,7 +995,7 @@ void run_interactive(
 
     // Sync initial volume state from AppState into the renderer
     optix_renderer.set_volume_enabled(s_app.volume_enabled);
-    optix_renderer.set_use_dense_grid(s_app.use_dense_grid);
+    // Dense grid is always active now (no toggle needed)
 
     // Compute initial yaw/pitch from camera look direction
     {
@@ -1449,7 +1448,7 @@ void run_interactive(
                         g_active_optix_renderer->photons());
                     // Grid occupancy
                     rs.grid_occupancy = compute_grid_occupancy(
-                        g_active_optix_renderer->grid());
+                        g_active_optix_renderer->dense_grid());
                 }
                 // Timing
                 rs.timing.total_render_ms = s_app.last_render_ms;
@@ -1487,7 +1486,7 @@ void run_interactive(
 
                 // ── Save photon cache + launch analysis tool ─────────
                 const auto& snap_photons = optix_renderer.photons();
-                const auto& snap_grid    = optix_renderer.grid();
+                const auto& snap_grid    = optix_renderer.dense_grid();
                 if (snap_photons.size() > 0) {
                     std::string cache_path = snap_dir + "/photons.bin";
                     uint64_t snap_hash = compute_scene_hash(

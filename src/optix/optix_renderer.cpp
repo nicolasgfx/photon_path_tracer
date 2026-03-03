@@ -63,8 +63,6 @@ void fill_common_params(
     const DeviceBuffer& photon_norm_x, const DeviceBuffer& photon_norm_y,
     const DeviceBuffer& photon_norm_z,
     const DeviceBuffer& photon_lambda, const DeviceBuffer& photon_flux,
-    const DeviceBuffer& grid_sorted, const DeviceBuffer& grid_start,
-    const DeviceBuffer& grid_end,
     const DeviceBuffer& emissive_idx, const DeviceBuffer& emissive_cdf,
     int num_emissive, float total_emissive_power,
     OptixTraversableHandle gas_handle,
@@ -79,10 +77,7 @@ void fill_common_params(
     const DeviceBuffer& prof_bsdf,
     // â”€â”€ Volume participating-medium params â”€â”€
     bool volume_enabled, float volume_density, float volume_falloff,
-    float volume_albedo, int volume_samples, float volume_max_t,
-    // â”€â”€ Per-cell photon analysis (PA-08) â”€â”€
-    const DeviceBuffer& cell_guide, const DeviceBuffer& cell_caustic,
-    const DeviceBuffer& cell_density)
+    float volume_albedo, int volume_samples, float volume_max_t)
 {
     p.spectrum_buffer = const_cast<float*>(spectrum.as<float>());
     p.sample_counts   = const_cast<float*>(samples.as<float>());
@@ -156,23 +151,7 @@ void fill_common_params(
     p.photon_flux       = const_cast<float*>(photon_flux.as<float>());
     p.photon_num_hero   = nullptr;  // set by callers that have the buffer
 
-    p.grid_sorted_indices = const_cast<uint32_t*>(grid_sorted.as<uint32_t>());
-    p.grid_cell_start     = const_cast<uint32_t*>(grid_start.as<uint32_t>());
-    p.grid_cell_end       = const_cast<uint32_t*>(grid_end.as<uint32_t>());
     p.gather_radius       = gather_radius;
-
-    if (grid_sorted.d_ptr) {
-        p.grid_cell_size  = gather_radius * HASHGRID_CELL_FACTOR;
-        p.grid_table_size = (uint32_t)(grid_start.bytes / sizeof(uint32_t));
-    }
-
-    // Per-cell photon analysis (PA-08)
-    p.cell_guide_fraction   = cell_guide.d_ptr
-        ? const_cast<float*>(cell_guide.as<float>()) : nullptr;
-    p.cell_caustic_fraction = cell_caustic.d_ptr
-        ? const_cast<float*>(cell_caustic.as<float>()) : nullptr;
-    p.cell_flux_density     = cell_density.d_ptr
-        ? const_cast<float*>(cell_density.as<float>()) : nullptr;
 
     // Emitter data (for NEE in render and photon trace)
     p.emissive_tri_indices = const_cast<uint32_t*>(emissive_idx.as<uint32_t>());
@@ -256,6 +235,28 @@ void OptixRenderer::fill_cell_grid_params(LaunchParams& lp) const {
     }
 }
 
+// fill_dense_grid_params() -- Wire dense grid device pointers into LaunchParams
+void OptixRenderer::fill_dense_grid_params(LaunchParams& lp) const {
+    if (d_dense_sorted_indices_.d_ptr && stored_dense_grid_.total_cells() > 0) {
+        lp.dense_sorted_indices = reinterpret_cast<uint32_t*>(d_dense_sorted_indices_.d_ptr);
+        lp.dense_cell_start     = reinterpret_cast<uint32_t*>(d_dense_cell_start_.d_ptr);
+        lp.dense_cell_end       = reinterpret_cast<uint32_t*>(d_dense_cell_end_.d_ptr);
+        lp.dense_valid          = 1;
+        lp.dense_min_x          = stored_dense_grid_.min_x;
+        lp.dense_min_y          = stored_dense_grid_.min_y;
+        lp.dense_min_z          = stored_dense_grid_.min_z;
+        lp.dense_cell_size      = stored_dense_grid_.cell_size;
+        lp.dense_dim_x          = stored_dense_grid_.dim_x;
+        lp.dense_dim_y          = stored_dense_grid_.dim_y;
+        lp.dense_dim_z          = stored_dense_grid_.dim_z;
+    } else {
+        lp.dense_sorted_indices = nullptr;
+        lp.dense_cell_start     = nullptr;
+        lp.dense_cell_end       = nullptr;
+        lp.dense_valid          = 0;
+    }
+}
+
 // render_debug_frame() -- first-hit preview (v3: always traces full path)
 void OptixRenderer::render_debug_frame(
     const Camera& camera, int frame_number,
@@ -274,7 +275,6 @@ void OptixRenderer::render_debug_frame(
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
         d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
         d_photon_lambda_, d_photon_flux_,
-        d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
         gas_handle_,
@@ -284,10 +284,10 @@ void OptixRenderer::render_debug_frame(
         DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
         DeviceBuffer(), DeviceBuffer(),
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
-        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
-        d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
+        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
     fill_cell_grid_params(lp);
+    fill_dense_grid_params(lp);
 
     // Dual-budget caustic params
     lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
@@ -352,7 +352,6 @@ void OptixRenderer::render_one_spp(
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
         d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
         d_photon_lambda_, d_photon_flux_,
-        d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
         gas_handle_,
@@ -362,10 +361,10 @@ void OptixRenderer::render_one_spp(
         d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
         d_prof_photon_gather_, d_prof_bsdf_,
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
-        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T,
-        d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
+        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
     fill_cell_grid_params(lp);
+    fill_dense_grid_params(lp);
 
     // Dual-budget caustic params
     lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
@@ -516,7 +515,6 @@ void OptixRenderer::render_final(
             d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
             d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
             d_photon_lambda_, d_photon_flux_,
-            d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
             d_emissive_indices_, d_emissive_cdf_,
             num_emissive_, 0.f,
             gas_handle_,
@@ -526,10 +524,10 @@ void OptixRenderer::render_final(
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
             config.volume_enabled, config.volume_density, config.volume_falloff,
-            config.volume_albedo, config.volume_samples, config.volume_max_t,
-            d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
+            config.volume_albedo, config.volume_samples, config.volume_max_t);
         fill_clearcoat_fabric_params(lp);
         fill_cell_grid_params(lp);
+        fill_dense_grid_params(lp);
 
         // Dual-budget caustic params
         lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
@@ -664,12 +662,9 @@ void OptixRenderer::render_final(
             cp.lum_sum             = reinterpret_cast<float*>(d_lum_sum_.d_ptr);
             cp.lum_sum2            = reinterpret_cast<float*>(d_lum_sum2_.d_ptr);
             cp.sample_counts       = reinterpret_cast<float*>(d_sample_counts_.d_ptr);
-            cp.cell_guide_fraction = d_cell_guide_fraction_.d_ptr
-                ? reinterpret_cast<float*>(d_cell_guide_fraction_.d_ptr) : nullptr;
-            cp.cell_caustic_fraction = d_cell_caustic_fraction_.d_ptr
-                ? reinterpret_cast<float*>(d_cell_caustic_fraction_.d_ptr) : nullptr;
-            cp.cell_flux_density   = d_cell_flux_density_.d_ptr
-                ? reinterpret_cast<float*>(d_cell_flux_density_.d_ptr) : nullptr;
+            cp.cell_guide_fraction = nullptr;
+            cp.cell_caustic_fraction = nullptr;
+            cp.cell_flux_density   = nullptr;
             cp.spectrum_buffer     = reinterpret_cast<float*>(d_spectrum_buffer_.d_ptr);
             cp.width               = width_;
             cp.height              = height_;
@@ -830,7 +825,6 @@ void OptixRenderer::render_sppm(
                 d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
                 d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
                 d_photon_lambda_, d_photon_flux_,
-                d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
                 d_emissive_indices_, d_emissive_cdf_,
                 num_emissive_, 0.f,
                 gas_handle_,
@@ -839,10 +833,10 @@ void OptixRenderer::render_sppm(
                 d_nee_direct_buffer_, d_photon_indirect_buffer_,
                 d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
                 d_prof_photon_gather_, d_prof_bsdf_,
-                false, 0.f, 0.f, 0.f, 0, 0.f,  // volume disabled for SPPM
-                d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
+                false, 0.f, 0.f, 0.f, 0, 0.f);  // volume disabled for SPPM
             fill_clearcoat_fabric_params(lp);
             fill_cell_grid_params(lp);
+            fill_dense_grid_params(lp);
 
             // Dual-budget caustic params
             lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
@@ -921,7 +915,6 @@ void OptixRenderer::render_sppm(
                 d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
                 d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
                 d_photon_lambda_, d_photon_flux_,
-                d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
                 d_emissive_indices_, d_emissive_cdf_,
                 num_emissive_, 0.f,
                 gas_handle_,
@@ -930,10 +923,10 @@ void OptixRenderer::render_sppm(
                 d_nee_direct_buffer_, d_photon_indirect_buffer_,
                 d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
                 d_prof_photon_gather_, d_prof_bsdf_,
-                false, 0.f, 0.f, 0.f, 0, 0.f,
-                d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
+                false, 0.f, 0.f, 0.f, 0, 0.f);
             fill_clearcoat_fabric_params(lp);
             fill_cell_grid_params(lp);
+            fill_dense_grid_params(lp);
 
             // Dual-budget caustic params
             lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
@@ -1110,35 +1103,8 @@ OptixRenderer::RenderStats OptixRenderer::gather_stats(const char* scene_name) c
         else if (t == 2) ++s.caustic_stored;
     }
 
-    // Cell analysis / guidance
-    s.cell_analysis_cells   = cell_analysis_count_;
-    if (cell_analysis_count_ > 0 && d_cell_guide_fraction_.d_ptr) {
-        std::vector<float> guide(cell_analysis_count_), caustic(cell_analysis_count_);
-        cudaMemcpy(guide.data(), d_cell_guide_fraction_.d_ptr,
-                   cell_analysis_count_ * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(caustic.data(), d_cell_caustic_fraction_.d_ptr,
-                   cell_analysis_count_ * sizeof(float), cudaMemcpyDeviceToHost);
-        float sum_g = 0.f, sum_c = 0.f;
-        int   populated = 0;
-        float sum_g_pop = 0.f;
-        for (int i = 0; i < cell_analysis_count_; ++i) {
-            sum_g += guide[i];
-            sum_c += caustic[i];
-            if (guide[i] > 0.f) {
-                ++populated;
-                sum_g_pop += guide[i];
-                s.guide_dist.add(guide[i], caustic[i] > 0.f);
-            }
-        }
-        s.avg_guide_fraction   = sum_g / (float)cell_analysis_count_;
-        s.avg_caustic_fraction = sum_c / (float)cell_analysis_count_;
-        s.guide_populated_cells        = populated;
-        s.avg_guide_fraction_populated = (populated > 0)
-            ? sum_g_pop / (float)populated : 0.f;
-    }
-
-    // ConclusionCounters (from build_cell_analysis, stored at upload time)
-    s.conclusions = cell_conclusions_;
+    // Cell analysis removed (dense grid replaces hash grid)
+    s.cell_analysis_cells   = 0;
 
     // Config
     s.max_bounces_camera  = DEFAULT_MAX_BOUNCES_CAMERA;

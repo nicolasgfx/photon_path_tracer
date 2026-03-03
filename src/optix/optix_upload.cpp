@@ -6,8 +6,7 @@
 //   upload_photon_data(), upload_emitter_data()
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
-#include "photon/photon_analysis.h"   // build_cell_analysis (PA-07/PA-08)
-#include "photon/photon_bins.h"       // PhotonBinDirs, PHOTON_BIN_COUNT
+#include "photon/dense_grid.h"
 
 #include <cuda_runtime.h>
 #include <vector>
@@ -205,9 +204,7 @@ void OptixRenderer::fill_clearcoat_fabric_params(LaunchParams& lp) const {
 // =====================================================================
 void OptixRenderer::upload_photon_data(
     const PhotonSoA& global_photons,
-    const HashGrid& global_grid,
     const PhotonSoA& /*caustic_photons*/,
-    const HashGrid& /*caustic_grid*/,
     float gather_radius,
     float /*caustic_radius*/,
     int num_photons_emitted)
@@ -235,12 +232,6 @@ void OptixRenderer::upload_photon_data(
     else
         d_photon_num_hero_.free();
 
-    if (global_grid.sorted_indices.size() > 0) {
-        d_grid_sorted_indices_.upload(global_grid.sorted_indices);
-        d_grid_cell_start_.upload(global_grid.cell_start);
-        d_grid_cell_end_.upload(global_grid.cell_end);
-    }
-
     std::cout << "[OptiX] Uploaded " << global_photons.size()
               << " photons to device\n";
     gather_radius_ = gather_radius;
@@ -248,27 +239,16 @@ void OptixRenderer::upload_photon_data(
     // Copy into stored_photons_
     stored_photons_ = global_photons;
 
-    // ── Build directional histograms for guided sampling ─────────────
-    // Precompute bin_idx and build per-cell analysis (no histogram upload).
+    // ── Build and upload dense grid ───────────────────────────────────
     {
-        PhotonBinDirs bin_dirs;
-        bin_dirs.init(PHOTON_BIN_COUNT);
-        stored_photons_.bin_idx.resize(stored_photons_.size());
-        for (size_t i = 0; i < stored_photons_.size(); ++i) {
-            float3 wi = make_f3(stored_photons_.wi_x[i],
-                                stored_photons_.wi_y[i],
-                                stored_photons_.wi_z[i]);
-            stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
-        }
-
-        // Build per-cell photon analysis and upload to GPU
-        float cache_cell_size = gather_radius_ * 2.0f;
-        CellInfoCache cell_cache;
-        PhotonSoA empty_caustic;
-        cell_cache.build(stored_photons_, empty_caustic,
-                         cache_cell_size, gather_radius_);
-        float cell_area = cache_cell_size * cache_cell_size;
-        upload_cell_analysis(cell_cache, cell_area);
+        DenseGridData dg = build_dense_grid(stored_photons_, DENSE_GRID_CELL_SIZE);
+        d_dense_sorted_indices_.upload(dg.sorted_indices);
+        d_dense_cell_start_.upload(dg.cell_start);
+        d_dense_cell_end_.upload(dg.cell_end);
+        std::printf("[OptiX] Dense grid: %dx%dx%d = %d cells  (%zu photons)\n",
+                    dg.dim_x, dg.dim_y, dg.dim_z, dg.total_cells(),
+                    dg.sorted_indices.size());
+        stored_dense_grid_ = std::move(dg);
     }
 }
 
@@ -319,39 +299,4 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
                 *std::min_element(weights.begin(), weights.end()));
 }
 
-// =====================================================================
-// upload_cell_analysis() -- Build per-cell photon analysis on CPU and
-//     upload guide_fraction / caustic_fraction / flux_density to GPU.
-// =====================================================================
-void OptixRenderer::upload_cell_analysis(
-    const CellInfoCache& cell_cache,
-    float                cell_area)
-{
-    auto analysis = build_cell_analysis(cell_cache, cell_area,
-                                         &cell_conclusions_);
-    if (analysis.empty()) {
-        cell_analysis_count_ = 0;
-        return;
-    }
 
-    const size_t N = analysis.size();
-    cell_analysis_count_ = (int)N;
-
-    // Extract SoA float arrays from the CellAnalysis vector
-    std::vector<float> guide(N), caustic(N), density(N);
-    for (size_t i = 0; i < N; ++i) {
-        guide[i]   = analysis[i].guide_fraction;
-        caustic[i] = analysis[i].caustic_fraction;
-        density[i] = analysis[i].flux_density;
-    }
-
-    d_cell_guide_fraction_.upload(guide);
-    d_cell_caustic_fraction_.upload(caustic);
-    d_cell_flux_density_.upload(density);
-
-    std::printf("[OptiX] Uploaded cell analysis: %zu cells  "
-                "avg_guide=%.3f  avg_caustic=%.3f\n",
-                N,
-                std::accumulate(guide.begin(), guide.end(), 0.f) / (float)N,
-                std::accumulate(caustic.begin(), caustic.end(), 0.f) / (float)N);
-}

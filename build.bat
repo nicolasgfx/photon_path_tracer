@@ -29,8 +29,8 @@ if /I "%~1"=="test" set "BUILD_TARGET=photon_tracer ppt_tests"
 if /I "%~1"=="test" set "CMAKE_EXTRA=-DPPT_BUILD_TESTS=ON"
 if /I "%~1"=="test" echo [build.bat] Building with tests.
 if /I "%~1"=="all" set "BUILD_TARGET="
-if /I "%~1"=="all" set "CMAKE_EXTRA=-DPPT_BUILD_TESTS=ON -DPPT_CUDA_ARCH_ALL=ON"
-if /I "%~1"=="all" echo [build.bat] Full build (all archs + tests).
+if /I "%~1"=="all" set "CMAKE_EXTRA=-DPPT_BUILD_TESTS=OFF -DPPT_CUDA_ARCH_ALL=ON"
+if /I "%~1"=="all" echo [build.bat] Full build (all archs, tests disabled).
 shift
 goto :parse_args
 :args_done

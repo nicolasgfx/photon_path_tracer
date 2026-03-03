@@ -137,6 +137,22 @@ bool save_photon_cache(const std::string& path,
     return true;
 }
 
+bool save_photon_cache(const std::string& path,
+                       const PhotonSoA&      photons,
+                       const DenseGridData&  grid,
+                       uint64_t              scene_hash,
+                       float                 gather_radius)
+{
+    // Wrap DenseGridData into a temporary HashGrid for the existing format
+    HashGrid tmp;
+    tmp.cell_size  = grid.cell_size;
+    tmp.table_size = (uint32_t)grid.total_cells();
+    tmp.sorted_indices = grid.sorted_indices;
+    tmp.cell_start     = grid.cell_start;
+    tmp.cell_end       = grid.cell_end;
+    return save_photon_cache(path, photons, tmp, scene_hash, gather_radius);
+}
+
 bool load_photon_cache(const std::string& path,
                        PhotonSoA&  photons,
                        HashGrid&   grid,

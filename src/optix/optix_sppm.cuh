@@ -121,39 +121,29 @@ static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixe
     for (int i = 0; i < NUM_LAMBDA; ++i)
         tp.value[i] = params.sppm_vp_throughput[pixel_idx * NUM_LAMBDA + i];
 
-    // Hash grid query — gather photons within radius
+    // Dense grid query — gather photons within radius
     Spectrum phi = Spectrum::zero();
     int M = 0;
 
-    float cell_size = params.grid_cell_size;
-    int cx0 = (int)floorf((pos.x - radius) / cell_size);
-    int cy0 = (int)floorf((pos.y - radius) / cell_size);
-    int cz0 = (int)floorf((pos.z - radius) / cell_size);
-    int cx1 = (int)floorf((pos.x + radius) / cell_size);
-    int cy1 = (int)floorf((pos.y + radius) / cell_size);
-    int cz1 = (int)floorf((pos.z + radius) / cell_size);
+    if (params.dense_valid) {
+        float cell_size = params.dense_cell_size;
+        int cx0 = max(0, (int)floorf((pos.x - radius - params.dense_min_x) / cell_size));
+        int cy0 = max(0, (int)floorf((pos.y - radius - params.dense_min_y) / cell_size));
+        int cz0 = max(0, (int)floorf((pos.z - radius - params.dense_min_z) / cell_size));
+        int cx1 = min(params.dense_dim_x - 1, (int)floorf((pos.x + radius - params.dense_min_x) / cell_size));
+        int cy1 = min(params.dense_dim_y - 1, (int)floorf((pos.y + radius - params.dense_min_y) / cell_size));
+        int cz1 = min(params.dense_dim_z - 1, (int)floorf((pos.z + radius - params.dense_min_z) / cell_size));
 
-    uint32_t visited_keys[64];
-    int num_visited = 0;
+        for (int iz = cz0; iz <= cz1; ++iz)
+        for (int iy = cy0; iy <= cy1; ++iy)
+        for (int ix = cx0; ix <= cx1; ++ix) {
+            int cell = ix + iy * params.dense_dim_x
+                          + iz * params.dense_dim_x * params.dense_dim_y;
+            uint32_t start = params.dense_cell_start[cell];
+            uint32_t end   = params.dense_cell_end[cell];
 
-    for (int iz = cz0; iz <= cz1; ++iz)
-    for (int iy = cy0; iy <= cy1; ++iy)
-    for (int ix = cx0; ix <= cx1; ++ix) {
-        uint32_t key = teschner_hash(make_i3(ix, iy, iz), params.grid_table_size);
-
-        bool already = false;
-        for (int v = 0; v < num_visited; ++v)
-            if (visited_keys[v] == key) { already = true; break; }
-        if (already) continue;
-        if (num_visited >= 64) break;  // safety: prevent buffer overflow
-        visited_keys[num_visited++] = key;
-
-        uint32_t start = params.grid_cell_start[key];
-        uint32_t end   = params.grid_cell_end[key];
-        if (start == 0xFFFFFFFF) continue;
-
-        for (uint32_t j = start; j < end; ++j) {
-            uint32_t idx = params.grid_sorted_indices[j];
+            for (uint32_t j = start; j < end; ++j) {
+                uint32_t idx = params.dense_sorted_indices[j];
             float3 pp = make_f3(params.photon_pos_x[idx],
                                 params.photon_pos_y[idx],
                                 params.photon_pos_z[idx]);
@@ -200,6 +190,7 @@ static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixe
             ++M;
         }
     }
+    }  // if dense_valid
 
     // Apply camera throughput
     for (int i = 0; i < NUM_LAMBDA; ++i)

@@ -6,8 +6,8 @@
 #include "photon/specular_target.h"
 #include "photon/tri_photon_irradiance.h"
 #include "photon/emitter.h"
+#include "photon/dense_grid.h"
 #include "photon/hash_grid.h"
-#include "photon/cell_cache.h"
 #include "photon/photon_bins.h"
 
 #include <cuda_runtime.h>
@@ -650,77 +650,23 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         }
     }
 
-    // ── GPU-side hash grid build (CUB radix sort) ────────────────────
-    // Build the spatial hash grid entirely on the GPU.  The photon SoA
-    // is already in d_photon_* accumulation buffers from the D→D copies.
-    // This replaces the CPU par_unseq sort + H→D re-upload.
+    // ── Build dense grid on CPU from downloaded photon SoA ───────────
     {
-        const int    n          = (int)stored_count;
-        const float  cell_size  = gather_radius_ * 2.0f;
-        const uint32_t tbl_size = (uint32_t)(std::max)((int)stored_count, 1024);
+        DenseGridData dg = build_dense_grid(stored_photons_, DENSE_GRID_CELL_SIZE);
+        d_dense_sorted_indices_.upload(dg.sorted_indices);
+        d_dense_cell_start_.upload(dg.cell_start);
+        d_dense_cell_end_.upload(dg.cell_end);
 
-        // Allocate grid output + scratch buffers
-        d_grid_sorted_indices_.alloc(n * sizeof(uint32_t));
-        d_grid_cell_start_.alloc(tbl_size * sizeof(uint32_t));
-        d_grid_cell_end_.alloc(tbl_size * sizeof(uint32_t));
-        d_grid_keys_in_.alloc(n * sizeof(uint32_t));
-        d_grid_keys_out_.alloc(n * sizeof(uint32_t));
-        d_grid_indices_in_.alloc(n * sizeof(uint32_t));
-
-        // Query CUB temp storage size
-        size_t cub_temp_bytes = 0;
-        gpu_build_hash_grid(
-            (const float*)d_photon_pos_x_.d_ptr,
-            (const float*)d_photon_pos_y_.d_ptr,
-            (const float*)d_photon_pos_z_.d_ptr,
-            n, cell_size, tbl_size,
-            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
-            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
-            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
-            nullptr, cub_temp_bytes);
-
-        // Allocate CUB temp and run the full build
-        d_grid_cub_temp_.alloc(cub_temp_bytes);
-        gpu_build_hash_grid(
-            (const float*)d_photon_pos_x_.d_ptr,
-            (const float*)d_photon_pos_y_.d_ptr,
-            (const float*)d_photon_pos_z_.d_ptr,
-            n, cell_size, tbl_size,
-            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
-            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
-            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
-            d_grid_cub_temp_.d_ptr, cub_temp_bytes);
-
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Print GPU grid build timing + quality metrics (download cell arrays for logging)
-        std::vector<uint32_t> h_cell_start(tbl_size), h_cell_end(tbl_size);
-        CUDA_CHECK(cudaMemcpy(h_cell_start.data(), d_grid_cell_start_.d_ptr, tbl_size*sizeof(uint32_t), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_cell_end.data(),   d_grid_cell_end_.d_ptr,   tbl_size*sizeof(uint32_t), cudaMemcpyDeviceToHost));
-
-        int occupied_cells = 0;
-        uint32_t chain_max = 0;
-        uint64_t chain_sum = 0;
-        for (uint32_t ci = 0; ci < tbl_size; ++ci) {
-            if (h_cell_start[ci] == 0xFFFFFFFFu) continue;
-            uint32_t len = h_cell_end[ci] - h_cell_start[ci];
-            if (len > 0) {
-                ++occupied_cells;
-                chain_sum += len;
-                if (len > chain_max) chain_max = len;
-            }
-        }
-        float load_factor  = (float)occupied_cells / (float)tbl_size;
-        float mean_chain   = occupied_cells > 0 ? (float)chain_sum / (float)occupied_cells : 0.f;
-        size_t grid_mem_kb = ((size_t)n * sizeof(uint32_t)
-                             + (size_t)tbl_size * sizeof(uint32_t) * 2) / 1024;
+        size_t grid_mem_kb = (dg.sorted_indices.size() * sizeof(uint32_t)
+                             + dg.cell_start.size() * sizeof(uint32_t) * 2) / 1024;
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
-        std::printf("[Timing] GPU grid build:    %8.1f ms  "
-                    "buckets=%u  occupied=%d  load=%.2f  mean_chain=%.1f  max_chain=%u  mem=%zu KB\n",
-                    ms, tbl_size, occupied_cells, load_factor,
-                    mean_chain, chain_max, grid_mem_kb);
+        std::printf("[Timing] Dense grid build:  %8.1f ms  "
+                    "%dx%dx%d = %d cells  mem=%zu KB\n",
+                    ms, dg.dim_x, dg.dim_y, dg.dim_z, dg.total_cells(),
+                    grid_mem_kb);
         t_lap = t_now;
+        stored_dense_grid_ = std::move(dg);
     }
 
     // Build and upload per-triangle photon irradiance heatmap (for preview)
@@ -826,91 +772,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         std::printf("[Timing] Photon total:      %8.1f ms\n", total);
     }
 
-    // ── Build CPU hash grid for kNN + statistics ──────────────────────
-    // Always build the CPU-side grid so that grid occupancy stats are
-    // available for snapshot diagnostics (Bug 3 fix).  Also needed by
-    // the kNN adaptive radius path below.
-    if (stored_photons_.size() > 0) {
-        stored_grid_.build(stored_photons_, gather_radius_);
-    }
-
-    // ── Adaptive gather radius (k-NN, §C2) ──────────────────────────
-    // When use_knn_adaptive is set, compute a scene-representative
-    // gather radius by running knn_shell_expansion() on a random sample
-    // of stored photon positions and taking the median k-th distance.
-    // This replaces the fixed gather_radius_ for subsequent renders.
-    if (config.use_knn_adaptive && stored_photons_.size() > 0) {
-
-        const int   k           = config.knn_k;
-        const float tau         = DEFAULT_SURFACE_TAU;
-        const float max_radius  = DEFAULT_GPU_MAX_GATHER_RADIUS;
-        const int   num_samples = (std::min)((int)stored_photons_.size(), 256);
-        const size_t stride     = (std::max)((size_t)1,
-                                           stored_photons_.size() / num_samples);
-
-        std::vector<float> knn_radii;
-        knn_radii.reserve(num_samples);
-
-        std::vector<uint32_t> tmp_indices;
-        float tmp_max_dist2 = 0.f;
-
-        for (int s = 0; s < num_samples; ++s) {
-            size_t idx = (size_t)s * stride;
-            float3 pos    = make_f3(stored_photons_.pos_x[idx],
-                                    stored_photons_.pos_y[idx],
-                                    stored_photons_.pos_z[idx]);
-            float3 normal = make_f3(stored_photons_.norm_x[idx],
-                                    stored_photons_.norm_y[idx],
-                                    stored_photons_.norm_z[idx]);
-
-            stored_grid_.knn_shell_expansion(
-                pos, normal, k, tau,
-                stored_photons_, tmp_indices, tmp_max_dist2);
-
-            if (!tmp_indices.empty()) {
-                float r = sqrtf(fminf(tmp_max_dist2, max_radius * max_radius));
-                knn_radii.push_back(r);
-            }
-        }
-
-        if (!knn_radii.empty()) {
-            std::sort(knn_radii.begin(), knn_radii.end());
-            float median_r = knn_radii[knn_radii.size() / 2];
-            median_r = fminf(fmaxf(median_r, 1e-4f), max_radius);
-            std::printf("[k-NN] Adaptive gather radius: %.5f  (k=%d, %zu samples)\n",
-                        median_r, k, knn_radii.size());
-            gather_radius_ = median_r;
-        }
-    }
-
-    // ── Build per-photon bin indices (retained for analysis/tests) ─────
-    if (stored_photons_.size() > 0) {
-        PhotonBinDirs bin_dirs;
-        bin_dirs.init(PHOTON_BIN_COUNT);
-        stored_photons_.bin_idx.resize(stored_photons_.size());
-        for (size_t i = 0; i < stored_photons_.size(); ++i) {
-            float3 wi = make_f3(stored_photons_.wi_x[i],
-                                stored_photons_.wi_y[i],
-                                stored_photons_.wi_z[i]);
-            stored_photons_.bin_idx[i] = (uint8_t)bin_dirs.find_nearest(wi);
-        }
-
-        auto t_now = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
-        std::printf("[Timing] Photon bin_idx precompute: %8.1f ms\n", ms);
-        t_lap = t_now;
-    }
-
-    // ── PA-08: Build per-cell photon analysis and upload to GPU ──────
-    // Build a CellInfoCache from the downloaded photon data, then call
-    // upload_cell_analysis() to extract guide/caustic/density arrays.
-    if (stored_photons_.size() > 0) {
-        float cache_cell_size = gather_radius_ * 2.0f;
-        CellInfoCache cell_cache;
-        PhotonSoA empty_caustic;
-        cell_cache.build(stored_photons_, empty_caustic,
-                         cache_cell_size, gather_radius_);
-        float cell_area = cache_cell_size * cache_cell_size;
-        upload_cell_analysis(cell_cache, cell_area);
-    }
+    // Dense grid replaces hash grid + kNN + cell analysis.
+    // No CPU hash grid build or bin_idx precompute needed.
 }

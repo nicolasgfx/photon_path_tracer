@@ -24,6 +24,15 @@
 
 
 // =====================================================================
+//  MASTER GATE  (must precede all sections that reference it)
+// =====================================================================
+// Gate runtime statistics collection and debug file output.  When false,
+// the compiler eliminates all stats code paths (zero overhead).
+// See §10 for debug-specific flags that are subordinate to this gate.
+constexpr bool ENABLE_STATS = true;
+
+
+// =====================================================================
 //  §0  SCENE SELECTION
 // =====================================================================
 // Uncomment exactly ONE.  Runtime switching via keys 1–9,0 uses
@@ -65,8 +74,8 @@ constexpr bool DEFAULT_USE_EMITTER_POINT_SET = false;
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 512;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 512;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 1920;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 1024;           // [R]
 
 
 // =====================================================================
@@ -90,8 +99,8 @@ constexpr int STRATA_Y = 2;
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 5000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 5000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 2000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -109,7 +118,7 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (t
 // many shadow rays are cast.  See DEFAULT_NEE_DEEP_SAMPLES for
 // bounces ≥ 1.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
-constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
+constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 1;          // [R]
 
 
 // =====================================================================
@@ -123,7 +132,7 @@ constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
 // enter+exit) plus subsequent diffuse bounces.  4 glass layers = 8
 // transmission bounces before reaching a diffuse surface.
 //   Fast: 4–6  |  Balanced: 10  |  Quality: 12–16
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 12;        // [R]
+constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 10;        // [R]
 
 // ── Russian roulette ────────────────────────────────────────────────
 // After MIN_BOUNCES_RR guaranteed bounces, each continuation is
@@ -133,7 +142,7 @@ constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 12;        // [R]
 // should not kill photons mid-transmission through nested dielectrics.
 //   MIN_BOUNCES_RR — Fast: 3–4  |  Balanced: 8  |  Quality: 10
 //   RR_THRESHOLD   — 0.80 (aggressive) .. 0.95 (conservative)
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 10;    // [R]
+constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 8;    // [R]
 constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.90f;// [R]
 
 // ── Spectral transport (PBRT v4 §14.3) ─────────────────────────────
@@ -183,6 +192,22 @@ constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 2;
 //   0.0 = pure power  |  0.3 = balanced  |  1.0 = pure area
 constexpr float DEFAULT_NEE_COVERAGE_FRACTION = 0.3f; // [R]
 
+// ── Photon-guided sampling ──────────────────────────────────────────
+constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;       // [R]  probability of guided vs BSDF sample
+constexpr bool  DEFAULT_USE_GUIDE        = true;        // [K]  enable/disable guided sampling
+
+// ── Camera ray max bounces (full path trace) ───────────────────────
+// Total bounce limit for camera rays in the full path-trace loop
+// (specular chain + glossy continuation + final gather).
+//   Fast: 6  |  Balanced: 12  |  Quality: 16–20
+constexpr int DEFAULT_MAX_BOUNCES_CAMERA = 12;            // [R]
+
+// ── Final gather ────────────────────────────────────────────────────
+// When true, the last diffuse bounce performs a photon density estimate
+// instead of terminating.  Improves colour bleeding at the cost of one
+// extra gather per camera ray.
+constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
+
 // ── MIS (power heuristic) ───────────────────────────────────────────
 // Balances NEE shadow rays vs BSDF-sampled rays that hit emitters.
 // Should always be true — disabling causes double-counting on glossy.
@@ -204,6 +229,12 @@ constexpr float LIGHT_SCALE_MAX     = 100.0f;
 
 // Progress snapshot PNGs at power-of-2 SPP intervals (near-zero overhead).
 constexpr bool PROGRESS_SNAPSHOT_ENABLED = true;
+
+// ── OptiX AI Denoiser ───────────────────────────────────────────────
+constexpr bool  DEFAULT_DENOISER_ENABLED       = false;   // [K]  enable OptiX denoiser
+constexpr bool  DEFAULT_DENOISER_GUIDE_ALBEDO  = true;    //      feed albedo AOV to denoiser
+constexpr bool  DEFAULT_DENOISER_GUIDE_NORMAL  = true;    //      feed normal AOV to denoiser
+constexpr float DEFAULT_DENOISER_BLEND         = 0.0f;    // [R]  0 = full denoise, 1 = no denoise
 
 
 // =====================================================================
@@ -291,6 +322,10 @@ constexpr float SCENE_REF_EXTENT = 1.0f;
 // =====================================================================
 
 constexpr bool DEBUG_PHOTON_SINGLE_BOUNCE = false;     // stop photon after 1st hit
+
+// ── Per-bounce AOV debug buffers (DB-04, §10.3) ─────────────────────
+constexpr int   MAX_AOV_BOUNCES = 4;                    // first N bounces captured
+
 constexpr bool DEBUG_PHOTON_INDIRECT_PNG  = false;     // emit photon-indirect preview PNGs at launch
 constexpr bool DEBUG_CAUSTIC_PNG          = false;     // emit caustic-only debug PNGs (needs above)
 constexpr bool DEBUG_COVERAGE_PNG         = false;     // emit coverage debug PNGs
@@ -298,6 +333,7 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
 
 // ── Dense grid toggle ───────────────────────────────────────────────
 constexpr bool DEFAULT_USE_DENSE_GRID = false;          // use cell-bin dense grid path
+constexpr float DENSE_GRID_CELL_SIZE  = DEFAULT_CAUSTIC_RADIUS;  // 0.025 m cell edge
 
 
 // =====================================================================
@@ -327,7 +363,7 @@ constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
 #elif defined(SCENE_LIVING_ROOM)
-  constexpr const char* SCENE_OBJ_PATH    = "living_room/living_room.obj";
+  constexpr const char* SCENE_OBJ_PATH    = "living_room/scene-v4.obj";
   constexpr const char* SCENE_DISPLAY_NAME = "Living Room";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
@@ -435,7 +471,7 @@ constexpr int NUM_SCENE_PROFILES = 10;
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
       {0,0,0}, {0,0,-1}, 40.f, 0.1f, SceneLightMode::FromMTL },
-    { "living_room/living_room.obj",             "Living Room",       false,
+    { "living_room/scene-v4.obj",                "Living Room",       false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },
     { "salle_de_bain/salle_de_bain.obj",         "Salle de Bain",     false,
       {0,0,0}, {0,0,-1}, 50.f, 0.1f, SceneLightMode::FromMTL },

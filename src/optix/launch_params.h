@@ -67,12 +67,6 @@ struct LaunchParams {
     int    preview_mode;          // 1 = fast preview (skip kNN guide/caustic/gather, 3-bounce cap)
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
 
-    // ── Per-cell photon analysis (precomputed, §3) ──────────────────
-    // Indexed by Teschner hash bucket [CELL_CACHE_TABLE_SIZE], NOT dense grid index.
-    // Use dev_cell_cache_index() to look up these arrays on the GPU.
-    float* cell_guide_fraction;   // [CELL_CACHE_TABLE_SIZE] precomputed p_guide
-    float* cell_caustic_fraction; // [CELL_CACHE_TABLE_SIZE] fraction of caustic photons
-    float* cell_flux_density;     // [CELL_CACHE_TABLE_SIZE] photon flux / cell area
     int    frame_number;
     RenderMode render_mode;      // shared enum from core/types.h
     float  exposure;             // linear exposure multiplier (applied before tone mapping)
@@ -126,17 +120,18 @@ struct LaunchParams {
     uint16_t* photon_lambda;   // [num_photons * HERO_WAVELENGTHS] wavelength bins
     float*    photon_flux;     // [num_photons * HERO_WAVELENGTHS] per-hero flux
     uint8_t*  photon_num_hero; // [num_photons] valid hero count per photon
-    uint8_t*  photon_bin_idx;      // [num_photons] precomputed Fibonacci bin index
     int       num_photons;
     int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
     int       photon_map_seed;     // RNG seed offset for multi-map re-tracing
 
-    // Hash grid (device pointers)
-    uint32_t* grid_sorted_indices;
-    uint32_t* grid_cell_start;
-    uint32_t* grid_cell_end;
-    float     grid_cell_size;
-    uint32_t  grid_table_size;
+    // ── Dense 3D grid (surface photon lookup) ────────────────────────
+    uint32_t* dense_sorted_indices;     // [num_photons] sorted by cell
+    uint32_t* dense_cell_start;         // [total_cells]
+    uint32_t* dense_cell_end;           // [total_cells]
+    int       dense_valid;              // 1 = built, 0 = not available
+    float     dense_min_x, dense_min_y, dense_min_z;  // AABB min
+    float     dense_cell_size;          // cell edge length
+    int       dense_dim_x, dense_dim_y, dense_dim_z;  // grid resolution
 
     // Per-triangle photon irradiance heatmap (precomputed on CPU, for preview)
     float*    tri_photon_irradiance;  // [num_triangles] accumulated scalar irradiance

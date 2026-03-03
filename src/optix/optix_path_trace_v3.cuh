@@ -3,13 +3,12 @@
 // ─────────────────────────────────────────────────────────────────────
 // optix_path_trace_v3.cuh — Photon-Guided Path Tracer (v3)
 // ─────────────────────────────────────────────────────────────────────
-// Part 2 §4: Single iterative bounce loop with:
+// Single iterative bounce loop with:
 //   1. NEE — 1 shadow ray, MIS-weighted against BSDF (Veach 1997)
-//   2. Photon-guided direction sampling — cell-bin histogram provides
-//      directional PDF mixed with BSDF (§4.3 mixture PDF)
-//   3. Russian roulette after MIN_BOUNCES_RR guaranteed bounces (§4.1)
-//   4. Photon caustic additive contribution at caustic cells (§4.2)
-//   5. Photon final gather at terminal bounce (§4.2)
+//   2. Dense-grid photon guide — 50/50 balanced: pick a random photon
+//      from the hitpoint's cell and bounce in its wi direction, OR
+//      sample the BSDF.  MIS-weighted via balance heuristic.
+//   3. Russian roulette after MIN_BOUNCES_RR guaranteed bounces
 // ─────────────────────────────────────────────────────────────────────
 
 // ── PathTraceResult ─────────────────────────────────────────────────
@@ -367,60 +366,11 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             aov_written = true;
         }
 
-        // ── Photon analysis: kNN guide histogram ─────────────────────
-        // Per-hitpoint kNN query replaces the pre-aggregated hash histogram.
-        // Walks the photon hash grid, collects 32 nearest photons, bins
-        // their directions into Fibonacci bins weighted by flux.
-        // Skipped in preview mode — BSDF-only sampling is fast enough
-        // for interactive navigation.
-        GuidedHistogram guide_hist;
-        guide_hist.valid = false;
-        guide_hist.total_flux = 0.f;
-        guide_hist.num_bins = fib.count;
-        if (!params.preview_mode) {
-            guide_hist = dev_knn_guide_sample(
-                hit.position, hit.shading_normal, hit.geo_normal, fib);
-        }
-
-        // §3.6 M1: Adaptive guide fraction.
-        // Use precomputed per-cell guide fraction if available,
-        // otherwise compute from histogram quality inline.
-        float p_guide = 0.f;
-        if (guide_hist.valid) {
-#ifndef PPT_DISABLE_CELL_GUIDE_FRACTION
-            if (params.cell_guide_fraction) {
-                uint32_t cell = dev_cell_cache_index(hit.position);
-                p_guide = params.cell_guide_fraction[cell];
-            } else
-#endif
-            {
-                // Fallback: simple histogram quality check
-                int active_bins = 0;
-                for (int k = 0; k < guide_hist.num_bins; ++k)
-                    if (guide_hist.bin_flux[k] > 0.f) active_bins++;
-                p_guide = (active_bins <= 2) ? 0.7f : params.guide_fraction;
-            }
-        }
-
-        // ── Caustic photon contribution (additive, §4.2 / M5) ──────
-        // §3.4: Caustic photons carry L→S→D transport that the camera
-        // path cannot efficiently reproduce.  Add the targeted caustic
-        // estimate at every non-delta bounce so caustic illumination
-        // appears at all surface interactions, not just the terminal gather.
-        // Skipped in preview mode (kNN caustic gather is expensive).
-#ifndef PPT_DISABLE_CAUSTIC_GATHER
-        if (params.photon_final_gather &&
-            params.render_mode != RenderMode::DirectOnly &&
-            !params.preview_mode) {
-            Spectrum L_caustic = dev_estimate_caustic_only(
-                hit.position, hit.shading_normal,
-                hit.geo_normal, wo_local, mat_id, hit.uv);
-            Spectrum caustic_contrib = throughput * L_caustic;
-            result.combined += caustic_contrib;
-            if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
-                result.bounce_contrib[bounce] += caustic_contrib;
-        }
-#endif
+        // ── Dense-grid photon guide probability ─────────────────────
+        // 50/50 balanced: either pick a random photon from the cell
+        // and bounce in its wi direction, or sample the BSDF.
+        // Dense grid lookup is O(1); no preview_mode guard needed.
+        float p_guide = params.dense_valid ? 0.5f : 0.f;
 
         // ── NEE: 1 shadow ray ───────────────────────────────────────
         // §4.1: Standard Veach-style MIS: sample a light, weight against BSDF.
@@ -438,52 +388,36 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                 result.bounce_contrib[bounce] += nee_contrib;
         }
 
-        // ── Photon final gather at terminal bounce ──────────────────
-        // §4.2: At the last allowed bounce, instead of returning black,
-        // query the photon map for an estimate of remaining indirect.
-#ifndef PPT_DISABLE_FINAL_GATHER
-        if (bounce == max_bounces - 1 && params.photon_final_gather
-            && !params.preview_mode) {
-            if (params.render_mode != RenderMode::DirectOnly) {
-                long long t_pg = clock64();
-                Spectrum L_photon = dev_estimate_photon_density(
-                    hit.position, hit.shading_normal, hit.geo_normal,
-                    wo_local, mat_id, params.gather_radius, hit.uv);
-                result.clk_photon_gather += clock64() - t_pg;
-
-                Spectrum photon_contrib = throughput * L_photon;
-                result.combined        += photon_contrib;
-                result.photon_indirect += photon_contrib;
-                if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
-                    result.bounce_contrib[bounce] += photon_contrib;
-            }
-            break;
-        }
-#endif
-
-        // ── Next direction: guided or BSDF (§4.3 mixture PDF) ──────
+        // ── Next direction: dense-grid guided or BSDF ───────────────
         float3 wi_world;
         float combined_pdf = 0.f;
         Spectrum f_over_pdf = Spectrum::zero();
         bool sample_valid = false;
 
         if (p_guide > 0.f && rng.next_float() < p_guide) {
-            // ── Guided sample ───────────────────────────────────────
-            GuidedSample gs = dev_sample_guided_direction(
-                guide_hist, fib, hit.shading_normal, rng);
-            if (gs.valid) {
-                float3 wi_local = frame.world_to_local(gs.wi_world);
+            // ── Photon-guided sample ────────────────────────────────
+            // Pick a random photon from the hitpoint's dense grid cell;
+            // bounce the ray in the photon's incoming direction (wi).
+            int photon_idx = dev_random_photon_in_cell(
+                hit.position, hit.shading_normal, rng);
+            if (photon_idx >= 0) {
+                float3 wi = make_f3(
+                    params.photon_wi_x[photon_idx],
+                    params.photon_wi_y[photon_idx],
+                    params.photon_wi_z[photon_idx]);
+                float3 wi_local = frame.world_to_local(wi);
                 if (wi_local.z > 0.f) {
                     Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
                     float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
 
-                    // Mixture PDF: p_guide * pdf_guide + (1 - p_guide) * pdf_bsdf
-                    combined_pdf = p_guide * gs.pdf + (1.f - p_guide) * pdf_bsdf;
+                    // Balance heuristic: 0.5 * pdf_guide + 0.5 * pdf_bsdf
+                    // Guide PDF = 1/(2π) (uniform hemisphere)
+                    combined_pdf = 0.5f * INV_2PI + 0.5f * pdf_bsdf;
                     if (combined_pdf > 1e-8f) {
                         float cos_theta = wi_local.z;
                         for (int i = 0; i < NUM_LAMBDA; ++i)
                             f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
-                        wi_world = gs.wi_world;
+                        wi_world = wi;
                         sample_valid = true;
                     }
                 }
@@ -501,10 +435,9 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             wi_world = frame.local_to_world(bs.wi);
             float cos_theta = bs.wi.z;
 
-            // Mixture PDF: apply MIS when guide is available
+            // MIS: when dense grid is active, combine with guide PDF
             if (p_guide > 0.f) {
-                float pdf_guide = dev_guided_pdf(guide_hist, fib, wi_world);
-                combined_pdf = (1.f - p_guide) * bs.pdf + p_guide * pdf_guide;
+                combined_pdf = 0.5f * bs.pdf + 0.5f * INV_2PI;
             } else {
                 combined_pdf = bs.pdf;
             }

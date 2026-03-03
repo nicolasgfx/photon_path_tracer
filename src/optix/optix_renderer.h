@@ -16,6 +16,7 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/cell_bin_grid.h"
+#include "photon/dense_grid.h"
 #include "debug/stats_collector.h"
 #include "optix/launch_params.h"
 
@@ -150,17 +151,10 @@ public:
     void fill_clearcoat_fabric_params(LaunchParams& lp) const;
 
     void upload_photon_data(const PhotonSoA& global_photons,
-                            const HashGrid& global_grid,
                             const PhotonSoA& caustic_photons,
-                            const HashGrid& caustic_grid,
                             float gather_radius,
                             float caustic_radius,
                             int num_photons_emitted = 0);
-
-    /// Build per-cell photon analysis from CellInfoCache
-    /// and upload the result arrays to GPU (PA-07/PA-08).
-    void upload_cell_analysis(const CellInfoCache& cell_cache,
-                              float                cell_area);
 
     /// Upload emitter data to device (for GPU photon tracing)
     void upload_emitter_data(const Scene& scene);
@@ -263,9 +257,7 @@ public:
     void set_denoiser_enabled(bool v) { denoiser_enabled_ = v; }
     bool is_denoiser_enabled() const  { return denoiser_enabled_; }
 
-    /// Toggle dense cell-bin grid path vs hash-grid walk.
-    void set_use_dense_grid(bool v) { use_dense_grid_ = v; }
-    bool is_use_dense_grid() const  { return use_dense_grid_; }
+
 
     /// Runtime guide fraction (T key: toggle guided/unguided).
     void set_guide_fraction(float f) { guide_fraction_ = f; }
@@ -290,6 +282,9 @@ public:
     /// Fill CellBinGrid / guidance params into LaunchParams.
     /// Called after fill_common_params at every launch site.
     void fill_cell_grid_params(LaunchParams& lp) const;
+
+    /// Fill dense grid params into LaunchParams.
+    void fill_dense_grid_params(LaunchParams& lp) const;
 
     template<typename CamT, typename FbT>
     void render_coverage_debug_png(const CamT&, const FbT&) {}
@@ -350,7 +345,7 @@ public:
     /// Access the stored photon data and hash grid (available after
     /// trace_photons() completes)
     const PhotonSoA& photons() const { return stored_photons_; }
-    const HashGrid&  grid()    const { return stored_grid_; }
+    const DenseGridData& dense_grid() const { return stored_dense_grid_; }
 
     /// Cell-bin grid test accessors (returns empty grid when dense grid is disabled)
     const CellBinGrid& cell_bin_grid_for_test() const { return cell_bin_grid_; }
@@ -487,12 +482,8 @@ private:
     DeviceBuffer d_photon_lambda_, d_photon_flux_;
     DeviceBuffer d_photon_num_hero_;  // uint8_t [num_photons] hero count per photon
     DeviceBuffer d_photon_is_caustic_pass_;  // uint8_t [num_photons] 0=global, 1=caustic-targeted
-    DeviceBuffer d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_;
-
-    // GPU hash grid build scratch buffers (CUB radix sort)
-    DeviceBuffer d_grid_keys_in_, d_grid_keys_out_;
-    DeviceBuffer d_grid_indices_in_;
-    DeviceBuffer d_grid_cub_temp_;
+    // Dense grid device buffers
+    DeviceBuffer d_dense_sorted_indices_, d_dense_cell_start_, d_dense_cell_end_;
 
     // Emitter data (device -- for GPU photon tracing)
     DeviceBuffer d_emissive_indices_;
@@ -539,9 +530,9 @@ private:
     // Launch params (on device)
     DeviceBuffer d_launch_params_;
 
-    // Stored photon data & hash grid (CPU side, after trace_photons())
+    // Stored photon data & dense grid (CPU side, after trace_photons())
     PhotonSoA stored_photons_;
-    HashGrid  stored_grid_;
+    DenseGridData stored_dense_grid_;
     std::vector<uint8_t> caustic_flags_;  // per-photon caustic flag (downloaded from GPU)
 
     // Host-side scene triangles for debug ray picking/hover inspection.
@@ -553,12 +544,7 @@ private:
     // Device-side cell-bin grid (for volume guide only)
     DeviceBuffer d_cell_bin_grid_;  // PhotonBin [total_cells * bin_count]
 
-    // Per-cell photon analysis (PA-08: GPU upload buffers)
-    DeviceBuffer d_cell_guide_fraction_;
-    DeviceBuffer d_cell_caustic_fraction_;
-    DeviceBuffer d_cell_flux_density_;
-    int          cell_analysis_count_ = 0;  // number of cells uploaded
-    ConclusionCounters cell_conclusions_;     // from last build_cell_analysis()
+
 
     // Volume photon storage + spatial indices (VP-02/03)
     PhotonSoA   volume_photons_;
@@ -596,7 +582,7 @@ private:
     std::vector<uint8_t> caustic_pass_flags_;  // per-photon: 0=global, 1=caustic-targeted
     bool runtime_volume_enabled_ = DEFAULT_VOLUME_ENABLED;  // toggled via V key
     bool show_photon_heatmap_    = false;                    // toggled via F-key
-    bool use_dense_grid_         = false;                    // dense cell-bin grid path
+
     bool denoiser_enabled_       = DEFAULT_DENOISER_ENABLED; // OptiX AI denoiser
     float gather_radius_ = DEFAULT_GATHER_RADIUS;
     float caustic_radius_ = DEFAULT_CAUSTIC_RADIUS;   // tighter radius for caustic gather

@@ -33,6 +33,7 @@
 #include <iomanip>
 #include <random>
 #include <numeric>
+#include <set>
 
 // ─────────────────────────────────────────────────────────────────────
 // Config
@@ -358,6 +359,137 @@ static SceneAABB compute_photon_aabb(const PhotonSoA& photons) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Cell occupancy statistics (shared by hash grid and dense grid)
+// ─────────────────────────────────────────────────────────────────────
+struct CellStats {
+    size_t total_occupied  = 0;
+    size_t total_empty     = 0;
+    double mean_per_cell   = 0.0;
+    double median_per_cell = 0.0;
+    double max_per_cell    = 0.0;
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Dense 3D grid — collision-free flat AABB indexing
+// ─────────────────────────────────────────────────────────────────────
+struct DenseGrid {
+    float  cell_size = 0.f;
+    float  min_x = 0.f, min_y = 0.f, min_z = 0.f;
+    int    dim_x = 0, dim_y = 0, dim_z = 0;
+
+    std::vector<uint32_t> sorted_indices;  // [num_photons] sorted by flat cell
+    std::vector<uint32_t> cell_start;      // [total_cells] start offset
+    std::vector<uint32_t> cell_end;        // [total_cells] end offset
+
+    int total_cells() const { return dim_x * dim_y * dim_z; }
+
+    int cell_index(float px, float py, float pz) const {
+        int ix = (int)std::floor((px - min_x) / cell_size);
+        int iy = (int)std::floor((py - min_y) / cell_size);
+        int iz = (int)std::floor((pz - min_z) / cell_size);
+        ix = std::max(0, std::min(ix, dim_x - 1));
+        iy = std::max(0, std::min(iy, dim_y - 1));
+        iz = std::max(0, std::min(iz, dim_z - 1));
+        return ix + iy * dim_x + iz * dim_x * dim_y;
+    }
+
+    void build(const PhotonSoA& photons, float cs, const SceneAABB& aabb) {
+        cell_size = cs;
+        // Pad AABB slightly so boundary photons don't fall outside
+        float pad = cs * 0.001f;
+        min_x = aabb.lo.x - pad;
+        min_y = aabb.lo.y - pad;
+        min_z = aabb.lo.z - pad;
+        dim_x = std::max(1, (int)std::ceil((aabb.hi.x + pad - min_x) / cs));
+        dim_y = std::max(1, (int)std::ceil((aabb.hi.y + pad - min_y) / cs));
+        dim_z = std::max(1, (int)std::ceil((aabb.hi.z + pad - min_z) / cs));
+
+        size_t n = photons.size();
+        int tc = total_cells();
+
+        // Compute flat cell key per photon
+        std::vector<uint32_t> keys(n);
+        sorted_indices.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            keys[i] = (uint32_t)cell_index(photons.pos_x[i], photons.pos_y[i], photons.pos_z[i]);
+            sorted_indices[i] = (uint32_t)i;
+        }
+
+        // Sort indices by cell key
+        std::sort(sorted_indices.begin(), sorted_indices.end(),
+                  [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
+
+        // Build cell_start / cell_end boundary arrays
+        cell_start.assign(tc, 0xFFFFFFFFu);
+        cell_end.assign(tc, 0);
+
+        for (size_t s = 0; s < n; ++s) {
+            uint32_t k = keys[sorted_indices[s]];
+            if (s == 0 || k != keys[sorted_indices[s - 1]])
+                cell_start[k] = (uint32_t)s;
+            cell_end[k] = (uint32_t)(s + 1);
+        }
+    }
+};
+
+static CellStats compute_dense_cell_stats(const DenseGrid& grid) {
+    CellStats cs;
+    std::vector<uint32_t> counts;
+    int tc = grid.total_cells();
+    counts.reserve(tc / 4);
+
+    for (int k = 0; k < tc; ++k) {
+        if (grid.cell_start[k] == 0xFFFFFFFFu) {
+            cs.total_empty++;
+            continue;
+        }
+        uint32_t c = grid.cell_end[k] - grid.cell_start[k];
+        if (c > 0) {
+            counts.push_back(c);
+            cs.total_occupied++;
+        } else {
+            cs.total_empty++;
+        }
+    }
+
+    if (!counts.empty()) {
+        double sum = 0;
+        for (auto c : counts) sum += c;
+        cs.mean_per_cell = sum / counts.size();
+        std::sort(counts.begin(), counts.end());
+        cs.median_per_cell = counts[counts.size() / 2];
+        cs.max_per_cell    = counts.back();
+    }
+    return cs;
+}
+
+// Random photon from dense grid cell — zero hash collisions
+static PhotonResult random_photon_in_dense_cell(
+    const DenseGrid& grid, const PhotonSoA& photons,
+    float3 pos, std::mt19937& rng)
+{
+    PhotonResult res;
+    int cell = grid.cell_index(pos.x, pos.y, pos.z);
+    if (grid.cell_start[cell] == 0xFFFFFFFFu) return res;
+    uint32_t start = grid.cell_start[cell];
+    uint32_t end   = grid.cell_end[cell];
+    if (start >= end) return res;
+
+    std::uniform_int_distribution<uint32_t> dist(start, end - 1);
+    uint32_t idx = grid.sorted_indices[dist(rng)];
+
+    float3 ppos = make_f3(photons.pos_x[idx], photons.pos_y[idx], photons.pos_z[idx]);
+    float3 diff = pos - ppos;
+
+    res.found    = true;
+    res.index    = (int)idx;
+    res.distance = std::sqrt(dot(diff, diff));
+    res.wi       = make_f3(photons.wi_x[idx], photons.wi_y[idx], photons.wi_z[idx]);
+    res.flux     = photons.total_flux(idx);
+    return res;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Print a percentile row
 // ─────────────────────────────────────────────────────────────────────
 static void print_percentile_row(
@@ -382,16 +514,8 @@ static void print_percentile_row(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Cell occupancy statistics for a grid
+// Cell occupancy statistics for hash grid
 // ─────────────────────────────────────────────────────────────────────
-struct CellStats {
-    size_t total_occupied  = 0;
-    size_t total_empty     = 0;
-    double mean_per_cell   = 0.0;
-    double median_per_cell = 0.0;
-    double max_per_cell    = 0.0;
-};
-
 static CellStats compute_cell_stats(const HashGrid& grid) {
     CellStats cs;
     std::vector<uint32_t> counts;
@@ -515,7 +639,71 @@ static ResolutionResult run_resolution(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Print results for one resolution
+// Run comparison for one cell size using the DenseGrid
+// ─────────────────────────────────────────────────────────────────────
+static ResolutionResult run_dense_resolution(
+    float cell_size, const SceneAABB& aabb,
+    const PhotonSoA& photons,
+    const std::vector<ReferenceRay>& rays,
+    const std::vector<std::vector<PhotonResult>>& bf_nearest)
+{
+    ResolutionResult rr;
+    rr.cell_size = cell_size;
+    rr.resolution = 0;  // N/A for dense grid — dims are per-axis
+
+    DenseGrid grid;
+    auto t0 = std::chrono::high_resolution_clock::now();
+    grid.build(photons, cell_size, aabb);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    rr.build_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    rr.resolution = std::max({grid.dim_x, grid.dim_y, grid.dim_z});
+    rr.cell_stats = compute_dense_cell_stats(grid);
+
+    for (size_t ri = 0; ri < rays.size(); ++ri) {
+        for (size_t hi = 0; hi < rays[ri].hits.size(); ++hi) {
+            const auto& h  = rays[ri].hits[hi];
+            const auto& bf = bf_nearest[ri][hi];
+
+            rr.total_hits++;
+
+            int cell = grid.cell_index(h.position.x, h.position.y, h.position.z);
+            bool nonempty = (grid.cell_start[cell] != 0xFFFFFFFFu &&
+                             grid.cell_end[cell] > grid.cell_start[cell]);
+            if (nonempty) rr.hits_bucket_nonempty++;
+
+            std::mt19937 rng((uint32_t)(ri * 10000 + hi));
+            PhotonResult random = random_photon_in_dense_cell(grid, photons, h.position, rng);
+
+            if (random.found) {
+                rr.hits_with_photon++;
+
+                if (bf.found && bf.distance > 0.f) {
+                    rr.dist_nearest.push_back(bf.distance);
+                    rr.dist_random.push_back(random.distance);
+                    rr.dist_error_abs.push_back(std::fabs(random.distance - bf.distance));
+                    rr.dist_ratio.push_back(random.distance / bf.distance);
+
+                    float d = dot(bf.wi, random.wi);
+                    d = std::max(-1.f, std::min(1.f, d));
+                    double angle = std::acos((double)d) * 180.0 / 3.14159265358979;
+                    rr.angle_error_deg.push_back(angle);
+
+                    if (bf.flux > 0.f) {
+                        double fe = std::fabs((double)random.flux - bf.flux) / bf.flux * 100.0;
+                        rr.flux_error_pct.push_back(fe);
+                    }
+                }
+            }
+            // No collision tracking for dense grid (collisions impossible)
+        }
+    }
+
+    return rr;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Print results for one resolution (works for both hash and dense)
 // ─────────────────────────────────────────────────────────────────────
 static void print_resolution(const ResolutionResult& rr) {
     std::printf("\n");
@@ -841,84 +1029,123 @@ int main(int argc, char* argv[]) {
     bf_nearest = std::move(filtered_bf);
     total_hits = filtered_hits;
 
-    // ── [4/4] Compare at density-based grid resolutions ────────────
-    // Build a coarse pilot grid (cell_size = gather_radius) to measure the
-    // actual per-cell density distribution.  This captures caustic hotspots
-    // instead of assuming photons are uniformly distributed in the AABB.
-    float pilot_cs = std::max(gather_radius, 0.01f);
-    int   pilot_res = std::max(1, (int)std::round(extent / pilot_cs));
-    HashGrid pilot_grid;
-    pilot_grid.build(photons, pilot_cs / 2.0f);
+    // ── [4/4] Compare hash grid vs dense grid at multiple cell sizes ──
+    // The dense grid uses AABB-based flat indexing (zero hash collisions).
+    // The hash grid uses Teschner hashing (table_size = N).
+    // We sweep cell sizes from coarse (2× gather_radius) to fine (caustic_radius/2)
+    // and show side-by-side results for both.
 
-    // Collect occupied-cell photon counts (true spatial cells, not hash buckets)
-    // Use a coarse grid where hash collisions are negligible.
-    std::vector<uint32_t> occ_counts;
-    occ_counts.reserve(pilot_grid.table_size / 4);
-    for (uint32_t k = 0; k < pilot_grid.table_size; ++k) {
-        if (pilot_grid.cell_start[k] == 0xFFFFFFFFu) continue;
-        uint32_t c = pilot_grid.cell_end[k] - pilot_grid.cell_start[k];
-        if (c > 0) occ_counts.push_back(c);
-    }
-    std::sort(occ_counts.begin(), occ_counts.end());
+    float caustic_radius = gather_radius * 0.5f;  // default: 0.025m
+    float renderer_cs    = gather_radius * 2.0f;   // current renderer cell_size
 
-    auto pctl_u32 = [&](double p) -> double {
-        if (occ_counts.empty()) return 0.0;
-        double k = (p / 100.0) * (occ_counts.size() - 1);
-        size_t lo = (size_t)k;
-        size_t hi = std::min(lo + 1, occ_counts.size() - 1);
-        double frac = k - lo;
-        return occ_counts[lo] + frac * (occ_counts[hi] - occ_counts[lo]);
-    };
-
-    double pilot_cell_vol = (double)pilot_cs * pilot_cs * pilot_cs;
-    double dens_p50 = pctl_u32(50) / pilot_cell_vol;  // photons / m^3
-    double dens_p90 = pctl_u32(90) / pilot_cell_vol;
-    double dens_p99 = pctl_u32(99) / pilot_cell_vol;
-    double dens_max = pctl_u32(100) / pilot_cell_vol;
-
-    float vol_x = aabb.hi.x - aabb.lo.x;
-    float vol_y = aabb.hi.y - aabb.lo.y;
-    float vol_z = aabb.hi.z - aabb.lo.z;
-    double scene_volume = (double)vol_x * vol_y * vol_z;
-    double mean_density = photons.size() / scene_volume;
-
-    std::printf("[4/4] Comparing random-in-cell across resolution sweep...\n");
-    std::printf("  Pilot grid: cell_size=%.5f m (%d^3)  occupied=%zu cells\n",
-                pilot_cs, pilot_res, occ_counts.size());
-    std::printf("  Scene volume: %.6f m^3  Mean density: %.0f /m^3\n", scene_volume, mean_density);
-    std::printf("  Local density (occupied cells): P50=%.0f  P90=%.0f  P99=%.0f  max=%.0f /m^3\n\n",
-                dens_p50, dens_p90, dens_p99, dens_max);
-
-    // Sweep cell sizes targeting different local-density regimes.
-    // For each density, cell_size = cbrt(target_per_cell / density)
-    // We test: 10 photons/cell at P50, P90, P99, and max density.
-    // This ensures caustic hotspots (P99/max) get appropriately fine cells.
-    struct DensitySweepEntry {
+    struct SweepEntry {
         const char* label;
-        double density;
-        double target_per_cell;
+        float cell_size;
     };
-    DensitySweepEntry sweep[] = {
-        {"P50 density, 10/cell", dens_p50, 10.0},
-        {"P90 density, 10/cell", dens_p90, 10.0},
-        {"P99 density, 10/cell", dens_p99, 10.0},
-        {"Max density, 10/cell", dens_max, 10.0},
-        {"P50 density, 1/cell",  dens_p50, 1.0},
-        {"P99 density, 1/cell",  dens_p99, 1.0},
-    };
+
+    std::vector<SweepEntry> sweep;
+    sweep.push_back({"Renderer (2x radius)",     renderer_cs});
+    sweep.push_back({"1x gather_radius",         gather_radius});
+    sweep.push_back({"Caustic radius",           caustic_radius});
+    sweep.push_back({"0.5x caustic_radius",      caustic_radius * 0.5f});
+    sweep.push_back({"0.25x caustic_radius",     caustic_radius * 0.25f});
+
+    // Sort coarse → fine
+    std::sort(sweep.begin(), sweep.end(),
+              [](const SweepEntry& a, const SweepEntry& b) { return a.cell_size > b.cell_size; });
+
+    std::printf("[4/4] Comparing HASH GRID vs DENSE GRID across cell sizes...\n\n");
+    std::printf("  Renderer cell_size = 2 x gather_radius = %.6f m\n", renderer_cs);
+    std::printf("  Caustic radius = %.6f m\n", caustic_radius);
+    std::printf("  Hash table_size = max(N, 1024) = %zu\n", photons.size());
+    std::printf("  Photon AABB: (%.4f,%.4f,%.4f)-(%.4f,%.4f,%.4f)\n",
+                aabb.lo.x, aabb.lo.y, aabb.lo.z, aabb.hi.x, aabb.hi.y, aabb.hi.z);
+    std::printf("  Max extent: %.4f m\n\n", extent);
 
     for (const auto& entry : sweep) {
-        if (entry.density <= 0.0) continue;
-        double cs = std::cbrt(entry.target_per_cell / entry.density);
-        int res = std::max(1, std::min(100000, (int)std::round(extent / cs)));
+        int hash_res = std::max(1, std::min(100000, (int)std::round(extent / entry.cell_size)));
+        double cells_possible = (double)hash_res * hash_res * hash_res;
 
-        std::printf("  --- %s -> density=%.0f /m^3  cell_size=%.6f m  resolution=%d ---\n",
-                    entry.label, entry.density, cs, res);
-        ResolutionResult rr = run_resolution(res, extent, photons, rays, bf_nearest);
-        print_resolution(rr);
+        std::printf("  ╔══════════════════════════════════════════════════════════════╗\n");
+        std::printf("  ║  %s -> cell_size = %.6f m\n", entry.label, entry.cell_size);
+        std::printf("  ╚══════════════════════════════════════════════════════════════╝\n");
+
+        // ── Dense grid ───────────────────────────────────────────────
+        ResolutionResult dense = run_dense_resolution(entry.cell_size, aabb, photons, rays, bf_nearest);
+        std::printf("\n  ── DENSE GRID (%dx%dx%d = %d cells) ──\n",
+                    0, 0, 0, 0);  // placeholder, fill from grid
+        // We need the grid dims — let's compute them
+        {
+            float pad = entry.cell_size * 0.001f;
+            float lo_x = aabb.lo.x - pad, lo_y = aabb.lo.y - pad, lo_z = aabb.lo.z - pad;
+            int dx = std::max(1, (int)std::ceil((aabb.hi.x + pad - lo_x) / entry.cell_size));
+            int dy = std::max(1, (int)std::ceil((aabb.hi.y + pad - lo_y) / entry.cell_size));
+            int dz = std::max(1, (int)std::ceil((aabb.hi.z + pad - lo_z) / entry.cell_size));
+            std::printf("\r  ── DENSE GRID (%dx%dx%d = %d cells)  Build: %.1f ms ──\n",
+                        dx, dy, dz, dx*dy*dz, dense.build_ms);
+        }
+        auto& dcs = dense.cell_stats;
+        std::printf("  Cells: %zu occupied, %zu empty\n", dcs.total_occupied, dcs.total_empty);
+        std::printf("  Photons/cell: mean=%.1f  median=%.0f  max=%.0f\n",
+                    dcs.mean_per_cell, dcs.median_per_cell, dcs.max_per_cell);
+        std::printf("  Coverage: %zu / %zu (%.1f%%)\n",
+                    dense.hits_with_photon, dense.total_hits,
+                    dense.total_hits > 0 ? 100.0 * dense.hits_with_photon / dense.total_hits : 0.0);
+        std::printf("  Hash collisions: NONE (dense grid)\n");
+        {
+            auto dn = dense.dist_nearest, dr = dense.dist_random;
+            auto de = dense.dist_error_abs, drat = dense.dist_ratio;
+            auto ae = dense.angle_error_deg, fe = dense.flux_error_pct;
+            print_percentile_row("Distance nearest (m)",  dn,   "m");
+            print_percentile_row("Distance random (m)",   dr,   "m");
+            print_percentile_row("Distance ratio r/n",    drat, "x");
+            print_percentile_row("Direction error",       ae,   "deg");
+            print_percentile_row("Flux error",            fe,   "%");
+        }
+
+        // ── Hash grid ────────────────────────────────────────────────
+        ResolutionResult hash = run_resolution(hash_res, extent, photons, rays, bf_nearest);
+        std::printf("\n  ── HASH GRID (resolution %d^3, table_size=%zu)  Build: %.1f ms ──\n",
+                    hash_res, photons.size(), hash.build_ms);
+        auto& hcs = hash.cell_stats;
+        std::printf("  Cells: %zu occupied, %zu empty\n", hcs.total_occupied, hcs.total_empty);
+        std::printf("  Photons/cell: mean=%.1f  median=%.0f  max=%.0f\n",
+                    hcs.mean_per_cell, hcs.median_per_cell, hcs.max_per_cell);
+        std::printf("  Coverage: %zu / %zu (%.1f%%)\n",
+                    hash.hits_with_photon, hash.total_hits,
+                    hash.total_hits > 0 ? 100.0 * hash.hits_with_photon / hash.total_hits : 0.0);
+        if (hash.hits_bucket_nonempty > 0) {
+            std::printf("  Hash collisions: %zu bucket-nonempty, %zu collision-only (%.1f%% collision rate)\n",
+                        hash.hits_bucket_nonempty, hash.hits_collision_only,
+                        100.0 * hash.hits_collision_only / hash.hits_bucket_nonempty);
+        }
+        {
+            auto dn = hash.dist_nearest, dr = hash.dist_random;
+            auto de = hash.dist_error_abs, drat = hash.dist_ratio;
+            auto ae = hash.angle_error_deg, fe = hash.flux_error_pct;
+            print_percentile_row("Distance nearest (m)",  dn,   "m");
+            print_percentile_row("Distance random (m)",   dr,   "m");
+            print_percentile_row("Distance ratio r/n",    drat, "x");
+            print_percentile_row("Direction error",       ae,   "deg");
+            print_percentile_row("Flux error",            fe,   "%");
+        }
+
+        // ── Summary comparison ───────────────────────────────────────
+        std::printf("\n  >> COMPARISON: dense coverage=%.1f%% vs hash coverage=%.1f%%",
+                    dense.total_hits > 0 ? 100.0 * dense.hits_with_photon / dense.total_hits : 0.0,
+                    hash.total_hits > 0  ? 100.0 * hash.hits_with_photon  / hash.total_hits  : 0.0);
+        if (!dense.dist_ratio.empty() && !hash.dist_ratio.empty()) {
+            auto med = [](std::vector<double> v) {
+                std::sort(v.begin(), v.end());
+                return v[v.size() / 2];
+            };
+            std::printf("  |  dense dist_ratio_P50=%.2f vs hash=%.2f",
+                        med(dense.dist_ratio), med(hash.dist_ratio));
+        }
+        std::printf("\n\n");
     }
 
-    std::printf("\n===========================================================\n");
+    std::printf("===========================================================\n");
     std::printf("  Done.\n");
     std::printf("===========================================================\n");
     return 0;

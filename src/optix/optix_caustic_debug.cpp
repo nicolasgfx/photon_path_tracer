@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
 #include "core/config.h"
+#include "photon/dense_grid.h"
 #include "renderer/tonemap.h"
 
 #include <cuda_runtime.h>
@@ -41,8 +42,6 @@ void fill_common_params(
     const DeviceBuffer& photon_norm_x, const DeviceBuffer& photon_norm_y,
     const DeviceBuffer& photon_norm_z,
     const DeviceBuffer& photon_lambda, const DeviceBuffer& photon_flux,
-    const DeviceBuffer& grid_sorted, const DeviceBuffer& grid_start,
-    const DeviceBuffer& grid_end,
     const DeviceBuffer& emissive_idx, const DeviceBuffer& emissive_cdf,
     int num_emissive, float total_emissive_power,
     OptixTraversableHandle gas_handle,
@@ -56,9 +55,7 @@ void fill_common_params(
     const DeviceBuffer& prof_photon_gather,
     const DeviceBuffer& prof_bsdf,
     bool volume_enabled, float volume_density, float volume_falloff,
-    float volume_albedo, int volume_samples, float volume_max_t,
-    const DeviceBuffer& cell_guide, const DeviceBuffer& cell_caustic,
-    const DeviceBuffer& cell_density);
+    float volume_albedo, int volume_samples, float volume_max_t);
 
 // =====================================================================
 // render_caustic_debug_pass() -- re-render using only caustic photons
@@ -152,9 +149,15 @@ void OptixRenderer::render_caustic_debug_pass(
     d_photon_lambda_.upload(caustic_soa.lambda_bin);
     d_photon_flux_.upload(caustic_soa.flux);
     d_photon_num_hero_.upload(caustic_soa.num_hero);
-    d_grid_sorted_indices_.upload(caustic_grid.sorted_indices);
-    d_grid_cell_start_.upload(caustic_grid.cell_start);
-    d_grid_cell_end_.upload(caustic_grid.cell_end);
+
+    // Build and upload dense grid for the caustic-only set
+    {
+        DenseGridData dg = build_dense_grid(caustic_soa, DENSE_GRID_CELL_SIZE);
+        d_dense_sorted_indices_.upload(dg.sorted_indices);
+        d_dense_cell_start_.upload(dg.cell_start);
+        d_dense_cell_end_.upload(dg.cell_end);
+        stored_dense_grid_ = std::move(dg);
+    }
 
     auto t_setup = std::chrono::high_resolution_clock::now();
     double ms_setup = std::chrono::duration<double, std::milli>(t_setup - t_start).count();
@@ -184,7 +187,6 @@ void OptixRenderer::render_caustic_debug_pass(
             d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
             d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
             d_photon_lambda_, d_photon_flux_,
-            d_grid_sorted_indices_, d_grid_cell_start_, d_grid_cell_end_,
             d_emissive_indices_, d_emissive_cdf_,
             num_emissive_, 0.f,
             gas_handle_,
@@ -194,10 +196,10 @@ void OptixRenderer::render_caustic_debug_pass(
             d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
             d_prof_photon_gather_, d_prof_bsdf_,
             config.volume_enabled, config.volume_density, config.volume_falloff,
-            config.volume_albedo, config.volume_samples, config.volume_max_t,
-            d_cell_guide_fraction_, d_cell_caustic_fraction_, d_cell_flux_density_);
+            config.volume_albedo, config.volume_samples, config.volume_max_t);
         fill_clearcoat_fabric_params(lp);
         fill_cell_grid_params(lp);
+        fill_dense_grid_params(lp);
 
         // Disable dual-budget for this debug pass — all photons are
         // tag-2 caustic, so single-budget gather with N_caustic is correct.
@@ -259,36 +261,13 @@ void OptixRenderer::render_caustic_debug_pass(
         d_photon_num_hero_.upload(stored_photons_.num_hero);
     d_photon_is_caustic_pass_.upload(caustic_pass_flags_);
 
-    // Re-build GPU hash grid for the restored full photon set
+    // Re-build dense grid for the restored full photon set
     {
-        const int    n         = (int)stored_photons_.size();
-        const float  cell_size = gather_radius_ * 2.0f;
-        const uint32_t tbl_sz  = (uint32_t)(std::max)(n, 1024);
-
-        d_grid_sorted_indices_.alloc(n * sizeof(uint32_t));
-        d_grid_cell_start_.alloc(tbl_sz * sizeof(uint32_t));
-        d_grid_cell_end_.alloc(tbl_sz * sizeof(uint32_t));
-        d_grid_keys_in_.alloc(n * sizeof(uint32_t));
-        d_grid_keys_out_.alloc(n * sizeof(uint32_t));
-        d_grid_indices_in_.alloc(n * sizeof(uint32_t));
-
-        size_t cub_tmp = 0;
-        gpu_build_hash_grid(
-            d_photon_pos_x_.as<float>(), d_photon_pos_y_.as<float>(), d_photon_pos_z_.as<float>(),
-            n, cell_size, tbl_sz,
-            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
-            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
-            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
-            nullptr, cub_tmp);
-        d_grid_cub_temp_.alloc(cub_tmp);
-        gpu_build_hash_grid(
-            d_photon_pos_x_.as<float>(), d_photon_pos_y_.as<float>(), d_photon_pos_z_.as<float>(),
-            n, cell_size, tbl_sz,
-            d_grid_keys_in_.as<uint32_t>(), d_grid_keys_out_.as<uint32_t>(),
-            d_grid_indices_in_.as<uint32_t>(), d_grid_sorted_indices_.as<uint32_t>(),
-            d_grid_cell_start_.as<uint32_t>(), d_grid_cell_end_.as<uint32_t>(),
-            d_grid_cub_temp_.d_ptr, cub_tmp);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        DenseGridData dg = build_dense_grid(stored_photons_, DENSE_GRID_CELL_SIZE);
+        d_dense_sorted_indices_.upload(dg.sorted_indices);
+        d_dense_cell_start_.upload(dg.cell_start);
+        d_dense_cell_end_.upload(dg.cell_end);
+        stored_dense_grid_ = std::move(dg);
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();

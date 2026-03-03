@@ -1,19 +1,14 @@
 #pragma once
 
-// optix_guided.cuh — §4 Photon-guided direction sampling on GPU
+// optix_guided.cuh — Photon-guided direction sampling on GPU
 //
-// At each camera bounce, a per-hitpoint kNN query of the photon hash grid
-// builds a local directional histogram (Fibonacci sphere, 32 bins).
-// The guide direction is MIS-combined with the standard BSDF sample
-// using the balance heuristic.
-//
-// Build phase:  Hash grid already built by photon trace (hash_grid.h).
-// Query phase:  dev_knn_guide_sample() — per-hitpoint kNN from hash grid.
-// Sample phase: dev_sample_guided_direction() — inverse-CDF over bins.
+// Surface path: Dense-grid cell lookup → random photon pick → bounce in wi.
+// Volume path:  Cell-bin histogram → Fibonacci inverse-CDF sampling (unchanged).
 
 // ── Fibonacci sphere bin directions (device) ────────────────────────
 // Pre-compute once and store in a small local array.
 // Matches PhotonBinDirs::init(n) on CPU.
+// Used by volume guide path only (surface path uses dense grid random pick).
 
 struct DevPhotonBinDirs {
     float3 dirs[MAX_PHOTON_BIN_COUNT];
@@ -46,34 +41,122 @@ struct DevPhotonBinDirs {
 };
 
 // ── Approximate solid angle per Fibonacci bin ───────────────────────
-// For N quasi-uniform bins on S²: Ω_bin ≈ 4π/N.
-// This is exact in the limit; sufficiently accurate for MIS with N=32.
-
 __forceinline__ __device__
 float bin_solid_angle(int num_bins) {
     return (4.0f * PI) / (float)num_bins;
 }
 
-// ── Cell lookup ─────────────────────────────────────────────────────
-// Dense-grid lookup is retained only for the volume photon guide.
-
-// ── Cell cache lookup: world position → hash-table index ────────────
-// Mirrors CellInfoCache::cell_key() — Teschner spatial hash into a
-// fixed 65K table (CELL_CACHE_TABLE_SIZE).  Used for cell_guide_fraction,
-// cell_caustic_fraction, and cell_flux_density lookups which are indexed
-// by hash bucket, not by dense grid index.
+// =====================================================================
+// Dense grid cell lookup (surface photon guide)
+// =====================================================================
 
 __forceinline__ __device__
-uint32_t dev_cell_cache_index(float3 pos) {
-    float cs = params.grid_cell_size;  // gather_radius * 2 (same as CellInfoCache)
-    int3 cell = make_i3(
-        (int)floorf(pos.x / cs),
-        (int)floorf(pos.y / cs),
-        (int)floorf(pos.z / cs));
-    return teschner_hash(cell, CELL_CACHE_TABLE_SIZE);
+int dev_dense_cell_index(float3 pos) {
+    int ix = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
+    int iy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
+    int iz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
+    ix = max(0, min(ix, params.dense_dim_x - 1));
+    iy = max(0, min(iy, params.dense_dim_y - 1));
+    iz = max(0, min(iz, params.dense_dim_z - 1));
+    return ix + iy * params.dense_dim_x
+             + iz * params.dense_dim_x * params.dense_dim_y;
+}
+
+// ── Pick a random photon from the 3x3x3 dense cell neighbourhood ────
+// Returns the photon index, or -1 if all cells are empty / filtered.
+// Applies normal gate, surface tau filter, and wi hemisphere gate.
+__forceinline__ __device__
+int dev_random_photon_in_cell(float3 pos, float3 filter_normal, PCGRng& rng) {
+    if (!params.dense_valid || params.num_photons == 0)
+        return -1;
+
+    // Centre cell coordinates
+    int cx = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
+    int cy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
+    int cz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
+
+    // Count total photons in the 3x3x3 neighbourhood
+    uint32_t total_count = 0;
+    for (int dz = -1; dz <= 1; ++dz) {
+        int iz = cz + dz;
+        if (iz < 0 || iz >= params.dense_dim_z) continue;
+        for (int dy = -1; dy <= 1; ++dy) {
+            int iy = cy + dy;
+            if (iy < 0 || iy >= params.dense_dim_y) continue;
+            for (int dx = -1; dx <= 1; ++dx) {
+                int ix = cx + dx;
+                if (ix < 0 || ix >= params.dense_dim_x) continue;
+                int cell = ix + iy * params.dense_dim_x
+                             + iz * params.dense_dim_x * params.dense_dim_y;
+                total_count += params.dense_cell_end[cell]
+                             - params.dense_cell_start[cell];
+            }
+        }
+    }
+    if (total_count == 0) return -1;
+
+    // Try up to 8 random picks from the neighbourhood pool
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        uint32_t flat = (uint32_t)(rng.next_float() * (float)total_count);
+        if (flat >= total_count) flat = total_count - 1;
+
+        // Walk the 3x3x3 to locate which cell owns this flat index
+        uint32_t acc = 0;
+        uint32_t idx = 0;
+        bool found = false;
+        for (int dz = -1; dz <= 1 && !found; ++dz) {
+            int iz = cz + dz;
+            if (iz < 0 || iz >= params.dense_dim_z) continue;
+            for (int dy = -1; dy <= 1 && !found; ++dy) {
+                int iy = cy + dy;
+                if (iy < 0 || iy >= params.dense_dim_y) continue;
+                for (int dx = -1; dx <= 1 && !found; ++dx) {
+                    int ix = cx + dx;
+                    if (ix < 0 || ix >= params.dense_dim_x) continue;
+                    int cell = ix + iy * params.dense_dim_x
+                                 + iz * params.dense_dim_x * params.dense_dim_y;
+                    uint32_t cs = params.dense_cell_start[cell];
+                    uint32_t ce = params.dense_cell_end[cell];
+                    uint32_t cnt = ce - cs;
+                    if (flat < acc + cnt) {
+                        idx = params.dense_sorted_indices[cs + (flat - acc)];
+                        found = true;
+                    }
+                    acc += cnt;
+                }
+            }
+        }
+        if (!found) continue;
+
+        // Normal gate
+        float3 photon_n = make_f3(
+            params.photon_norm_x[idx],
+            params.photon_norm_y[idx],
+            params.photon_norm_z[idx]);
+        if (dot(photon_n, filter_normal) <= 0.0f) continue;
+
+        // Surface tau (plane-distance) gate
+        float3 pp = make_f3(
+            params.photon_pos_x[idx],
+            params.photon_pos_y[idx],
+            params.photon_pos_z[idx]);
+        float d_plane = fabsf(dot(pos - pp, filter_normal));
+        if (d_plane > DEFAULT_SURFACE_TAU) continue;
+
+        // Wi direction gate: photon must arrive from upper hemisphere
+        float3 wi = make_f3(
+            params.photon_wi_x[idx],
+            params.photon_wi_y[idx],
+            params.photon_wi_z[idx]);
+        if (dot(wi, filter_normal) <= 0.f) continue;
+
+        return (int)idx;
+    }
+    return -1;
 }
 
 // ── Guided histogram: directional bin data for guide sampling ────────
+// Used by volume guide path (and kept for API compatibility).
 
 struct GuidedHistogram {
     float bin_flux[MAX_PHOTON_BIN_COUNT];   // scalar_flux per bin
@@ -82,169 +165,7 @@ struct GuidedHistogram {
     bool  valid;                             // true if any data found
 };
 
-// =====================================================================
-// dev_knn_guide_sample — Per-hitpoint kNN guided direction histogram
-//
-// Replaces the pre-aggregated HashHistogram with an exact per-hitpoint
-// kNN query.  Walks the hash grid, collects the GUIDE_KNN_K nearest
-// photons (tangential-disk metric), and bins their incident directions
-// into Fibonacci bins weighted by scalar flux.
-//
-// The result is a GuidedHistogram identical in layout to the old
-// dev_read_cell_histogram() output — consumed by dev_sample_guided_direction()
-// and dev_guided_pdf() without changes.
-//
-// Cost: ~same as dev_estimate_caustic_only() but with smaller K.
-// =====================================================================
-
-constexpr int GUIDE_KNN_K = 32;   // neighbours for guide histogram
-
-__forceinline__ __device__
-GuidedHistogram dev_knn_guide_sample(
-    float3 pos, float3 normal,
-    float3 filter_normal,
-    const DevPhotonBinDirs& fib)
-{
-    GuidedHistogram h;
-    h.num_bins   = fib.count;
-    h.total_flux = 0.f;
-    h.valid      = false;
-    for (int k = 0; k < h.num_bins; ++k)
-        h.bin_flux[k] = 0.f;
-
-    if (params.num_photons == 0 || params.grid_table_size == 0)
-        return h;
-
-    // Search radius: use the main gather radius (kNN will tighten adaptively)
-    float radius = params.gather_radius;
-    float r2_max = radius * radius;
-
-    // ── Phase 1: kNN candidate collection via hash grid ──────────────
-    float    knn_d2[GUIDE_KNN_K];
-    uint32_t knn_idx[GUIDE_KNN_K];
-    int      knn_count = 0;
-
-    float cell_size = params.grid_cell_size;
-    int cx0 = (int)floorf((pos.x - radius) / cell_size);
-    int cy0 = (int)floorf((pos.y - radius) / cell_size);
-    int cz0 = (int)floorf((pos.z - radius) / cell_size);
-    int cx1 = (int)floorf((pos.x + radius) / cell_size);
-    int cy1 = (int)floorf((pos.y + radius) / cell_size);
-    int cz1 = (int)floorf((pos.z + radius) / cell_size);
-
-    uint32_t visited_keys[27];
-    int num_visited = 0;
-
-    for (int iz = cz0; iz <= cz1; ++iz)
-    for (int iy = cy0; iy <= cy1; ++iy)
-    for (int ix = cx0; ix <= cx1; ++ix) {
-        uint32_t key = teschner_hash(make_i3(ix, iy, iz), params.grid_table_size);
-
-        bool already_visited = false;
-        for (int v = 0; v < num_visited; ++v) {
-            if (visited_keys[v] == key) { already_visited = true; break; }
-        }
-        if (already_visited) continue;
-        visited_keys[num_visited++] = key;
-
-        uint32_t start = params.grid_cell_start[key];
-        uint32_t end   = params.grid_cell_end[key];
-        if (start == 0xFFFFFFFF) continue;
-
-        for (uint32_t j = start; j < end; ++j) {
-            uint32_t idx = params.grid_sorted_indices[j];
-            float3 pp = make_f3(
-                params.photon_pos_x[idx],
-                params.photon_pos_y[idx],
-                params.photon_pos_z[idx]);
-
-            float3 diff = pos - pp;
-
-            // Tangential-disk distance metric (§7.1)
-            float d_plane = dot(diff, filter_normal);
-            float3 v_tan = diff - filter_normal * d_plane;
-            float d_tan2 = dot(v_tan, v_tan);
-
-            if (d_tan2 > r2_max) continue;
-            if (knn_count >= GUIDE_KNN_K && d_tan2 >= knn_d2[0]) continue;
-            if (fabsf(d_plane) > DEFAULT_SURFACE_TAU) continue;
-
-            // Normal gate
-            float3 photon_n = make_f3(
-                params.photon_norm_x[idx],
-                params.photon_norm_y[idx],
-                params.photon_norm_z[idx]);
-            if (dot(photon_n, filter_normal) <= 0.0f) continue;
-
-            // Wi direction gate
-            float3 wi_world = make_f3(
-                params.photon_wi_x[idx],
-                params.photon_wi_y[idx],
-                params.photon_wi_z[idx]);
-            if (dot(wi_world, filter_normal) <= 0.f) continue;
-
-            // ── Insert into max-heap ────────────────────────────────
-            if (knn_count < GUIDE_KNN_K) {
-                knn_d2[knn_count]  = d_tan2;
-                knn_idx[knn_count] = idx;
-                knn_count++;
-                int ci = knn_count - 1;
-                while (ci > 0) {
-                    int pi = (ci - 1) / 2;
-                    if (knn_d2[ci] <= knn_d2[pi]) break;
-                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
-                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
-                    ci = pi;
-                }
-            } else {
-                knn_d2[0]  = d_tan2;
-                knn_idx[0] = idx;
-                int ci = 0;
-                while (true) {
-                    int left = 2 * ci + 1, right = 2 * ci + 2, largest = ci;
-                    if (left  < GUIDE_KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
-                    if (right < GUIDE_KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
-                    if (largest == ci) break;
-                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
-                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
-                    ci = largest;
-                }
-            }
-        }
-    }
-
-    if (knn_count == 0) return h;
-
-    // ── Phase 2: Bin photon directions by Fibonacci bin ──────────────
-    // Weight each photon's contribution by its scalar flux (sum of hero
-    // wavelength fluxes) so the guide PDF is proportional to radiant flux.
-    for (int i = 0; i < knn_count; ++i) {
-        uint32_t idx = knn_idx[i];
-
-        float3 wi_world = make_f3(
-            params.photon_wi_x[idx],
-            params.photon_wi_y[idx],
-            params.photon_wi_z[idx]);
-
-        int bin = fib.find_nearest(wi_world);
-
-        // Scalar flux = sum of hero wavelength fluxes
-        int n_hero = params.photon_num_hero ? (int)params.photon_num_hero[idx] : 1;
-        float scalar_flux = 0.f;
-        for (int hh = 0; hh < n_hero; ++hh)
-            scalar_flux += params.photon_flux[idx * HERO_WAVELENGTHS + hh];
-
-        if (scalar_flux > 0.f) {
-            h.bin_flux[bin] += scalar_flux;
-            h.total_flux    += scalar_flux;
-        }
-    }
-
-    h.valid = (h.total_flux > 0.f);
-    return h;
-}
-
-// ── Sample a guided direction from the histogram ────────────────────
+// ── Sample a guided direction from the histogram (volume only) ──────
 // Returns: world-space direction, PDF in solid angle, sampled bin index.
 
 struct GuidedSample {
