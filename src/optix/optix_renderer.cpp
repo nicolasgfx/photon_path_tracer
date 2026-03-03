@@ -1173,3 +1173,265 @@ HitRecord OptixRenderer::trace_single_ray(float3 origin, float3 direction) const
 
     return hit;
 }
+
+// =====================================================================
+// Incremental SPPM helpers (one iteration per frame for interactive idle-refine)
+// =====================================================================
+
+// ── fill_sppm_lp_buffers() ─────────────────────────────────────────
+// Wires the per-pixel SPPM device buffers into an already-filled
+// LaunchParams.  Avoids duplicating 30 lines in camera/gather passes.
+static void fill_sppm_lp_buffers(
+    LaunchParams& lp,
+    const DeviceBuffer& vp_pos_x,  const DeviceBuffer& vp_pos_y,  const DeviceBuffer& vp_pos_z,
+    const DeviceBuffer& vp_norm_x, const DeviceBuffer& vp_norm_y, const DeviceBuffer& vp_norm_z,
+    const DeviceBuffer& vp_wo_x,   const DeviceBuffer& vp_wo_y,   const DeviceBuffer& vp_wo_z,
+    const DeviceBuffer& vp_mat_id,
+    const DeviceBuffer& vp_uv_u,   const DeviceBuffer& vp_uv_v,
+    const DeviceBuffer& vp_throughput, const DeviceBuffer& vp_valid,
+    const DeviceBuffer& radius,    const DeviceBuffer& N,
+    const DeviceBuffer& tau,       const DeviceBuffer& L_direct,
+    const DeviceBuffer& photon_num_hero,
+    const DeviceBuffer& photon_is_caustic_pass,
+    int num_caustic_emitted, float caustic_radius)
+{
+    lp.sppm_vp_pos_x     = const_cast<float*>(vp_pos_x.as<float>());
+    lp.sppm_vp_pos_y     = const_cast<float*>(vp_pos_y.as<float>());
+    lp.sppm_vp_pos_z     = const_cast<float*>(vp_pos_z.as<float>());
+    lp.sppm_vp_norm_x    = const_cast<float*>(vp_norm_x.as<float>());
+    lp.sppm_vp_norm_y    = const_cast<float*>(vp_norm_y.as<float>());
+    lp.sppm_vp_norm_z    = const_cast<float*>(vp_norm_z.as<float>());
+    lp.sppm_vp_wo_x      = const_cast<float*>(vp_wo_x.as<float>());
+    lp.sppm_vp_wo_y      = const_cast<float*>(vp_wo_y.as<float>());
+    lp.sppm_vp_wo_z      = const_cast<float*>(vp_wo_z.as<float>());
+    lp.sppm_vp_mat_id    = const_cast<uint32_t*>(vp_mat_id.as<uint32_t>());
+    lp.sppm_vp_uv_u      = const_cast<float*>(vp_uv_u.as<float>());
+    lp.sppm_vp_uv_v      = const_cast<float*>(vp_uv_v.as<float>());
+    lp.sppm_vp_throughput = const_cast<float*>(vp_throughput.as<float>());
+    lp.sppm_vp_valid      = const_cast<uint8_t*>(vp_valid.as<uint8_t>());
+    lp.sppm_radius        = const_cast<float*>(radius.as<float>());
+    lp.sppm_N             = const_cast<float*>(N.as<float>());
+    lp.sppm_tau           = const_cast<float*>(tau.as<float>());
+    lp.sppm_L_direct      = const_cast<float*>(L_direct.as<float>());
+
+    lp.photon_num_hero = photon_num_hero.d_ptr
+        ? const_cast<uint8_t*>(photon_num_hero.as<uint8_t>()) : nullptr;
+    lp.photon_is_caustic_pass = photon_is_caustic_pass.d_ptr
+        ? const_cast<uint8_t*>(photon_is_caustic_pass.as<uint8_t>()) : nullptr;
+    lp.num_caustic_emitted   = num_caustic_emitted;
+    lp.caustic_gather_radius = caustic_radius;
+}
+
+// ── init_sppm_buffers() ────────────────────────────────────────────
+void OptixRenderer::init_sppm_buffers(int w, int h, float initial_radius)
+{
+    resize(w, h);
+    const size_t pixels = (size_t)w * h;
+
+    d_sppm_vp_pos_x_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_pos_y_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_pos_z_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_norm_x_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_norm_y_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_norm_z_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_wo_x_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_wo_y_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_wo_z_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_mat_id_.alloc_zero(pixels * sizeof(uint32_t));
+    d_sppm_vp_uv_u_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_uv_v_.alloc_zero(pixels * sizeof(float));
+    d_sppm_vp_throughput_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
+    d_sppm_vp_valid_.alloc_zero(pixels * sizeof(uint8_t));
+    d_sppm_N_.alloc_zero(pixels * sizeof(float));
+    d_sppm_tau_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
+    d_sppm_L_direct_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
+
+    // Initialise per-pixel radius
+    {
+        std::vector<float> init_r(pixels, initial_radius);
+        d_sppm_radius_.upload(init_r);
+    }
+
+    sppm_buffers_live_ = true;
+    std::cout << "[SPPM-incr] Buffers allocated (" << w << "x" << h << ")\n";
+}
+
+// ── free_sppm_buffers() ────────────────────────────────────────────
+void OptixRenderer::free_sppm_buffers()
+{
+    d_sppm_vp_pos_x_.free();   d_sppm_vp_pos_y_.free();   d_sppm_vp_pos_z_.free();
+    d_sppm_vp_norm_x_.free();  d_sppm_vp_norm_y_.free();  d_sppm_vp_norm_z_.free();
+    d_sppm_vp_wo_x_.free();    d_sppm_vp_wo_y_.free();    d_sppm_vp_wo_z_.free();
+    d_sppm_vp_mat_id_.free();
+    d_sppm_vp_uv_u_.free();    d_sppm_vp_uv_v_.free();
+    d_sppm_vp_throughput_.free();
+    d_sppm_vp_valid_.free();
+    d_sppm_radius_.free();
+    d_sppm_N_.free();
+    d_sppm_tau_.free();
+    d_sppm_L_direct_.free();
+
+    sppm_buffers_live_ = false;
+}
+
+// ── sppm_camera_pass() ─────────────────────────────────────────────
+void OptixRenderer::sppm_camera_pass(
+    const Camera& camera, int iteration, const RenderConfig& config)
+{
+    LaunchParams lp = {};
+    fill_common_params(lp,
+        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+        width_, height_, camera,
+        d_vertices_, d_normals_, d_texcoords_,
+        d_material_ids_,
+        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
+        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
+        d_photon_lambda_, d_photon_flux_,
+        d_emissive_indices_, d_emissive_cdf_,
+        num_emissive_, 0.f,
+        gas_handle_,
+        gather_radius_,
+        num_photons_emitted_,
+        d_nee_direct_buffer_, d_photon_indirect_buffer_,
+        d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
+        d_prof_photon_gather_, d_prof_bsdf_,
+        false, 0.f, 0.f, 0.f, 0, 0.f);
+    fill_clearcoat_fabric_params(lp);
+    fill_cell_grid_params(lp);
+    fill_dense_grid_params(lp);
+
+    fill_sppm_lp_buffers(lp,
+        d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_,
+        d_sppm_vp_norm_x_, d_sppm_vp_norm_y_, d_sppm_vp_norm_z_,
+        d_sppm_vp_wo_x_,   d_sppm_vp_wo_y_,   d_sppm_vp_wo_z_,
+        d_sppm_vp_mat_id_,
+        d_sppm_vp_uv_u_,   d_sppm_vp_uv_v_,
+        d_sppm_vp_throughput_, d_sppm_vp_valid_,
+        d_sppm_radius_,    d_sppm_N_,
+        d_sppm_tau_,       d_sppm_L_direct_,
+        d_photon_num_hero_, d_photon_is_caustic_pass_,
+        num_caustic_emitted_, caustic_radius_);
+
+    lp.sppm_mode             = 1;  // camera pass
+    lp.sppm_iteration        = iteration;
+    lp.sppm_photons_per_iter = config.num_photons;
+    lp.sppm_alpha            = config.sppm_alpha;
+    lp.sppm_min_radius       = config.sppm_min_radius;
+    lp.max_bounces           = config.max_bounces;
+    lp.max_bounces_camera    = DEFAULT_MAX_BOUNCES_CAMERA;
+    lp.min_bounces_rr        = DEFAULT_MIN_BOUNCES_RR;
+    lp.rr_threshold          = DEFAULT_RR_THRESHOLD;
+    lp.guide_fraction        = guide_fraction_;
+    lp.samples_per_pixel     = 1;
+    lp.frame_number          = iteration;
+    lp.exposure              = exposure_;
+
+    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
+    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
+    last_launch_params_host_ = lp;
+
+    OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
+        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+        sizeof(LaunchParams), &sbt_,
+        width_, height_, 1));
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// ── sppm_photon_pass() ─────────────────────────────────────────────
+void OptixRenderer::sppm_photon_pass(
+    const Scene& scene, const RenderConfig& config,
+    float max_radius, int seed)
+{
+    trace_photons(scene, config, max_radius, seed);
+}
+
+// ── sppm_gather_pass() ─────────────────────────────────────────────
+void OptixRenderer::sppm_gather_pass(
+    const Camera& camera, int iteration, const RenderConfig& config)
+{
+    LaunchParams lp = {};
+    fill_common_params(lp,
+        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+        width_, height_, camera,
+        d_vertices_, d_normals_, d_texcoords_,
+        d_material_ids_,
+        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
+        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
+        d_photon_lambda_, d_photon_flux_,
+        d_emissive_indices_, d_emissive_cdf_,
+        num_emissive_, 0.f,
+        gas_handle_,
+        gather_radius_,
+        num_photons_emitted_,
+        d_nee_direct_buffer_, d_photon_indirect_buffer_,
+        d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
+        d_prof_photon_gather_, d_prof_bsdf_,
+        false, 0.f, 0.f, 0.f, 0, 0.f);
+    fill_clearcoat_fabric_params(lp);
+    fill_cell_grid_params(lp);
+    fill_dense_grid_params(lp);
+
+    fill_sppm_lp_buffers(lp,
+        d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_,
+        d_sppm_vp_norm_x_, d_sppm_vp_norm_y_, d_sppm_vp_norm_z_,
+        d_sppm_vp_wo_x_,   d_sppm_vp_wo_y_,   d_sppm_vp_wo_z_,
+        d_sppm_vp_mat_id_,
+        d_sppm_vp_uv_u_,   d_sppm_vp_uv_v_,
+        d_sppm_vp_throughput_, d_sppm_vp_valid_,
+        d_sppm_radius_,    d_sppm_N_,
+        d_sppm_tau_,       d_sppm_L_direct_,
+        d_photon_num_hero_, d_photon_is_caustic_pass_,
+        num_caustic_emitted_, caustic_radius_);
+
+    lp.sppm_mode             = 2;  // gather pass
+    lp.sppm_iteration        = iteration;
+    lp.sppm_photons_per_iter = config.num_photons;
+    lp.sppm_alpha            = config.sppm_alpha;
+    lp.sppm_min_radius       = config.sppm_min_radius;
+    lp.samples_per_pixel     = 1;
+    lp.exposure              = exposure_;
+
+    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
+    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
+    last_launch_params_host_ = lp;
+
+    OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
+        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+        sizeof(LaunchParams), &sbt_,
+        width_, height_, 1));
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// ── download_hdr_buffer() ──────────────────────────────────────────
+void OptixRenderer::download_hdr_buffer(
+    std::vector<float>& out, bool convert_from_spectrum)
+{
+    const size_t pixels = (size_t)width_ * height_;
+
+    // Ensure the HDR device buffer exists
+    d_hdr_buffer_.alloc(pixels * 4 * sizeof(float));
+
+    if (convert_from_spectrum) {
+        launch_spectrum_to_hdr_kernel(
+            d_spectrum_buffer_.as<float>(),
+            d_sample_counts_.as<float>(),
+            reinterpret_cast<float*>(d_hdr_buffer_.d_ptr),
+            width_, height_, exposure_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    out.resize(pixels * 4);
+    CUDA_CHECK(cudaMemcpy(out.data(), d_hdr_buffer_.d_ptr,
+                          pixels * 4 * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+}

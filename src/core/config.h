@@ -88,19 +88,19 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 1024;           // [R]
 // Anti-aliasing + noise averaging.  This is the single biggest
 // quality/speed knob.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64  |  Final: 128–256
-constexpr int DEFAULT_SPP = 4;                       // [R]
+constexpr int DEFAULT_SPP = 256;                       // [R]
 
 // Sub-pixel stratified jitter grid.
 // Constraint: STRATA_X × STRATA_Y == DEFAULT_SPP.
-constexpr int STRATA_X = 2;                           // 4 × 4 = 16 = DEFAULT_SPP
-constexpr int STRATA_Y = 2;
+constexpr int STRATA_X = 16;                           // 4 × 4 = 16 = DEFAULT_SPP
+constexpr int STRATA_Y = 16;
 
 // ── Photon budgets ──────────────────────────────────────────────────
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 2000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -118,7 +118,7 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (t
 // many shadow rays are cast.  See DEFAULT_NEE_DEEP_SAMPLES for
 // bounces ≥ 1.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
-constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 1;          // [R]
+constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
 
 
 // =====================================================================
@@ -167,8 +167,15 @@ constexpr int DEFAULT_PHOTON_BOUNCE_STRATA = 64;
 
 // Multi-map photon re-tracing: re-trace the photon map with a new
 // RNG seed every N camera samples to decorrelate photon/camera noise.
-//   0 = single map  |  4 = balanced  |  8 = quality
+//   0 = single map  |  1 = every frame  |  4 = balanced  |  8 = quality
 constexpr int MULTI_MAP_SPP_GROUP = 4;
+
+// ── Interactive SPPM idle-refinement ────────────────────────────────
+// When the user stops interacting (no mouse/keyboard for SPPM_IDLE_TIMEOUT_SEC),
+// the viewer automatically enters incremental SPPM mode.  Moving the
+// mouse or pressing any navigation key cancels SPPM and returns to preview.
+constexpr float SPPM_IDLE_TIMEOUT_SEC = 0.5f;           // seconds of inactivity before SPPM starts
+constexpr float PREVIEW_PHOTON_BUDGET_FRACTION = 0.25f;  // preview uses 25% of full photon budget
 
 
 // =====================================================================

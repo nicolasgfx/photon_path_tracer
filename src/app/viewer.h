@@ -78,6 +78,14 @@ struct AppState {
     double     last_mx = 0.0, last_my = 0.0;
     bool       first_mouse = true;
     bool       camera_moved = false;  // flag to reset accumulation
+
+    // ── Interactive SPPM state ──────────────────────────────────────
+    std::chrono::steady_clock::time_point last_input_time;   // timestamp of last user interaction
+    bool       sppm_active            = false;   // true = SPPM refinement running
+    int        sppm_iteration         = 0;       // current SPPM iteration count
+    bool       sppm_buffers_allocated = false;   // GPU SPPM buffers live?
+    int        sppm_photon_maps_built = 0;       // photon maps built in this session
+    std::chrono::steady_clock::time_point sppm_start_time;   // when SPPM started (for timing)
 };
 
 // Global application state — shared between main() and viewer internals

@@ -60,6 +60,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
+# tinyexr for HDR/EXR output
+FetchContent_Declare(
+    tinyexr
+    GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
+    GIT_TAG        v1.0.9
+)
+FetchContent_MakeAvailable(tinyexr)
+
 # -- CUDA architecture -------------------------------------------------
 # Dev builds: compile only for the local GPU (fast).  Set PPT_CUDA_ARCH_ALL=ON
 # for release builds targeting multiple GPU generations.
@@ -126,6 +134,8 @@ target_include_directories(photon_tracer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${stb_SOURCE_DIR}
+    ${tinyexr_SOURCE_DIR}
+    ${tinyexr_SOURCE_DIR}/deps/miniz
     ${OptiX_INCLUDE_DIR}
 )
 

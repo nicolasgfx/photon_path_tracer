@@ -11,6 +11,11 @@
 //   - run_interactive() event loop (debug preview + progressive render)
 // ---------------------------------------------------------------------
 
+// Prevent Windows min/max macros from interfering with std::numeric_limits
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "app/viewer.h"
 
 #include "core/config.h"
@@ -35,6 +40,12 @@
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+
+// tinyexr for HDR EXR output — use stb zlib (already linked from stb_image)
+#define TINYEXR_USE_MINIZ (0)
+#define TINYEXR_USE_STB_ZLIB (1)
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
 
 // stb_easy_font for debug overlay text
 #include "stb_easy_font.h"
@@ -191,6 +202,63 @@ bool write_png(const std::string& filename, const FrameBuffer& fb) {
         std::cerr << "[Output] Failed to write " << filename << "\n";
     }
     return ok != 0;
+}
+
+// -- EXR (HDR) output ------------------------------------------------
+bool write_exr(const std::string& filename,
+               const std::vector<float>& hdr_rgba,
+               int width, int height)
+{
+    namespace fs = std::filesystem;
+    fs::path p(filename);
+    if (p.has_parent_path()) fs::create_directories(p.parent_path());
+
+    // tinyexr expects separate R, G, B channels (bottom-to-top)
+    std::vector<float> r(width * height), g(width * height), b(width * height);
+    for (int y = 0; y < height; ++y) {
+        int src_y = height - 1 - y;   // flip vertically (same as PNG path)
+        for (int x = 0; x < width; ++x) {
+            int si = (src_y * width + x) * 4;
+            int di = y * width + x;
+            r[di] = hdr_rgba[si + 0];
+            g[di] = hdr_rgba[si + 1];
+            b[di] = hdr_rgba[si + 2];
+        }
+    }
+
+    const float* channels[] = { b.data(), g.data(), r.data() };   // EXR is BGR
+
+    EXRHeader header;
+    InitEXRHeader(&header);
+    EXRImage image;
+    InitEXRImage(&image);
+    image.num_channels = 3;
+    image.images       = (unsigned char**)channels;
+    image.width        = width;
+    image.height       = height;
+
+    header.num_channels = 3;
+    std::vector<EXRChannelInfo> ch(3);
+    strncpy(ch[0].name, "B", 255); ch[0].name[strlen("B")] = '\0';
+    strncpy(ch[1].name, "G", 255); ch[1].name[strlen("G")] = '\0';
+    strncpy(ch[2].name, "R", 255); ch[2].name[strlen("R")] = '\0';
+    header.channels = ch.data();
+
+    std::vector<int> pixel_types(3, TINYEXR_PIXELTYPE_FLOAT);
+    std::vector<int> requested(3, TINYEXR_PIXELTYPE_FLOAT);
+    header.pixel_types           = pixel_types.data();
+    header.requested_pixel_types = requested.data();
+
+    const char* err = nullptr;
+    int ret = SaveEXRImageToFile(&image, &header, filename.c_str(), &err);
+    if (ret != TINYEXR_SUCCESS) {
+        std::cerr << "[EXR] Failed to write " << filename;
+        if (err) { std::cerr << ": " << err; FreeEXRErrorMessage(err); }
+        std::cerr << "\n";
+        return false;
+    }
+    std::cout << "[Output] Wrote " << filename << " (" << width << "x" << height << " HDR)\n";
+    return true;
 }
 
 // -- Debug overlay (stb_easy_font) ------------------------------------
@@ -1033,6 +1101,13 @@ void run_interactive(
     int frame = 0;
     auto last_time = std::chrono::high_resolution_clock::now();
 
+    // Initialise idle-SPPM state
+    s_app.last_input_time = std::chrono::steady_clock::now();
+    s_app.sppm_active = false;
+    s_app.sppm_iteration = 0;
+    s_app.sppm_buffers_allocated = false;
+    s_app.sppm_photon_maps_built = 0;
+
     // Original emission spectra (for light brightness scaling)
     std::vector<Spectrum> original_Le;
     auto capture_original_Le = [&]() {
@@ -1220,6 +1295,7 @@ void run_interactive(
                 constexpr float MAX_PITCH = 89.f * PI / 180.f;
                 s_app.pitch = fmaxf(-MAX_PITCH, fminf(MAX_PITCH, s_app.pitch));
                 s_app.camera_moved = true;
+                s_app.last_input_time = std::chrono::steady_clock::now();
             }
         }
 
@@ -1249,6 +1325,7 @@ void run_interactive(
             if (move.x != 0.f || move.y != 0.f || move.z != 0.f) {
                 camera.position = camera.position + move;
                 s_app.camera_moved = true;
+                s_app.last_input_time = std::chrono::steady_clock::now();
             }
 
             // Update look_at from yaw/pitch
@@ -1265,9 +1342,44 @@ void run_interactive(
                 s_app.render_phase = RenderPhase::Preview;
                 optix_renderer.set_preview_mode(true);
             }
+            // Tear down incremental SPPM if active
+            if (s_app.sppm_active) {
+                s_app.sppm_active = false;
+                s_app.sppm_iteration = 0;
+                s_app.sppm_photon_maps_built = 0;
+                if (s_app.sppm_buffers_allocated) {
+                    optix_renderer.free_sppm_buffers();
+                    s_app.sppm_buffers_allocated = false;
+                }
+                optix_renderer.set_preview_mode(true);
+                std::cout << "[SPPM-incr] Cancelled (camera moved)\n";
+            }
             optix_renderer.clear_buffers();
             frame = 0;
             s_app.camera_moved = false;
+        }
+
+        // ── Idle detection → SPPM transition ────────────────────────
+        if (!s_app.sppm_active && !s_app.camera_moved
+            && s_app.render_phase == RenderPhase::Preview) {
+            auto idle_now = std::chrono::steady_clock::now();
+            float idle_sec = std::chrono::duration<float>(
+                idle_now - s_app.last_input_time).count();
+            if (idle_sec >= SPPM_IDLE_TIMEOUT_SEC) {
+                s_app.sppm_active = true;
+                s_app.sppm_iteration = 0;
+                s_app.sppm_photon_maps_built = 0;
+                s_app.sppm_start_time = std::chrono::steady_clock::now();
+
+                if (!s_app.sppm_buffers_allocated) {
+                    optix_renderer.init_sppm_buffers(
+                        win_w, win_h, opt.config.sppm_initial_radius);
+                    s_app.sppm_buffers_allocated = true;
+                }
+                optix_renderer.clear_buffers();
+                frame = 0;
+                std::cout << "[SPPM-incr] Activated (idle " << idle_sec << "s)\n";
+            }
         }
 
         // ── Handle Rendering phase transition (R key pressed) ─────────
@@ -1302,6 +1414,14 @@ void run_interactive(
             std::string png_path = prefix + ".png";
             optix_renderer.download_framebuffer(display_fb);
             write_png(png_path, display_fb);
+
+            // Save HDR EXR (linear, no tone mapping)
+            {
+                std::vector<float> hdr_data;
+                optix_renderer.download_hdr_buffer(hdr_data, /*convert_from_spectrum=*/true);
+                std::string exr_path = prefix + ".exr";
+                write_exr(exr_path, hdr_data, display_fb.width, display_fb.height);
+            }
 
             // Save raw (un-denoised) version when denoiser is active
             std::string raw_path;
@@ -1394,6 +1514,17 @@ void run_interactive(
                     jf << "    \"surface_tau\": " << stats.surface_tau << ",\n";
                     jf << "    \"light_scale\": " << s_app.light_scale << "\n";
                     jf << "  },\n";
+
+                    // SPPM status (if active during snapshot)
+                    if (s_app.sppm_active) {
+                        jf << "  \"sppm_interactive\": {\n";
+                        jf << "    \"iterations\": " << s_app.sppm_iteration << ",\n";
+                        jf << "    \"photon_maps_built\": " << s_app.sppm_photon_maps_built << ",\n";
+                        auto sppm_elapsed = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - s_app.sppm_start_time).count();
+                        jf << "    \"elapsed_sec\": " << sppm_elapsed << "\n";
+                        jf << "  },\n";
+                    }
 
                     // Scene
                     jf << "  \"scene\": {\n";
@@ -1545,6 +1676,31 @@ void run_interactive(
                         flag,
                         2.0f);
                 }
+            } else if (s_app.sppm_active) {
+                // ── Incremental SPPM (one iteration per frame) ──────
+                int k = s_app.sppm_iteration;
+
+                // 1. Camera pass: store visible points per pixel
+                optix_renderer.sppm_camera_pass(camera, k, opt.config);
+
+                // 2. Photon pass: rebuild photon map
+                float max_radius = opt.config.sppm_initial_radius;
+                optix_renderer.sppm_photon_pass(scene, opt.config, max_radius, k);
+                s_app.sppm_photon_maps_built++;
+
+                // 3. Gather pass: progressive radius refinement
+                optix_renderer.sppm_gather_pass(camera, k, opt.config);
+
+                // Download tonemapped result for display
+                optix_renderer.download_framebuffer(display_fb);
+
+                s_app.sppm_iteration++;
+
+                // Power-of-2 auto-snapshot (iteration 1,2,4,8,16,...)
+                if (k > 0 && (k & (k - 1)) == 0) {
+                    std::cout << "[SPPM-incr] Auto-snapshot at iteration " << k << "\n";
+                    s_app.snapshot_requested = true;
+                }
             } else {
                 // Normal path tracing (1 spp per iteration, progressive accumulation)
                 optix_renderer.render_debug_frame(
@@ -1629,6 +1785,22 @@ void run_interactive(
             s_app.debug,
             optix_renderer,
             s_app.mouse_captured);
+
+        // ── Title-bar status update ─────────────────────────────────
+        {
+            char title[256];
+            if (s_app.sppm_active) {
+                auto sppm_elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - s_app.sppm_start_time).count();
+                std::snprintf(title, sizeof(title),
+                    "Photon Tracer  [SPPM iter %d | %.1fs]",
+                    s_app.sppm_iteration, sppm_elapsed);
+            } else {
+                std::snprintf(title, sizeof(title),
+                    "Photon Tracer  [Preview SPP %d]", frame);
+            }
+            glfwSetWindowTitle(window, title);
+        }
 
         glfwSwapBuffers(window);
     }

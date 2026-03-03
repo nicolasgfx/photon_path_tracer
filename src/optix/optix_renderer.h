@@ -197,6 +197,32 @@ public:
                      const Scene& scene,
                      std::function<void(int, const FrameBuffer&)> iter_callback = {});
 
+    // ── Incremental SPPM (one iteration per frame, for interactive idle-refine) ──
+
+    /// Allocate SPPM per-pixel GPU buffers and initialise radii.
+    /// Call once when transitioning from Preview → SPPM.
+    void init_sppm_buffers(int w, int h, float initial_radius);
+
+    /// Free all SPPM per-pixel GPU buffers.
+    /// Call when transitioning from SPPM → Preview.
+    void free_sppm_buffers();
+
+    /// SPPM camera pass: trace camera rays, store visible points per pixel.
+    void sppm_camera_pass(const Camera& camera, int iteration,
+                          const RenderConfig& config);
+
+    /// SPPM photon pass: re-trace photon map with given seed.
+    void sppm_photon_pass(const Scene& scene, const RenderConfig& config,
+                          float max_radius, int seed);
+
+    /// SPPM gather pass: query hash grid per pixel, progressive radius update.
+    void sppm_gather_pass(const Camera& camera, int iteration,
+                          const RenderConfig& config);
+
+    /// Download the linear HDR float4 buffer from GPU.
+    /// If convert_from_spectrum is true, runs spectrum→HDR conversion first.
+    void download_hdr_buffer(std::vector<float>& out, bool convert_from_spectrum = true);
+
     /// Launch a single sample of full path tracing (progressive)
     void render_one_spp(const Camera& camera, int frame_number,
                         int max_bounces = DEFAULT_MAX_BOUNCES);
@@ -592,6 +618,7 @@ private:
     float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
     bool  histogram_only_ = false;  // C key: use only histogram conclusions
     bool  preview_mode_   = true;   // interactive preview: skip kNN, 3-bounce cap
+    bool  sppm_buffers_live_ = false;  // true = SPPM per-pixel buffers are allocated
 
     // GPU device info (populated in init())
     std::string gpu_name_;
