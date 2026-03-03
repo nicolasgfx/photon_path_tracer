@@ -367,10 +367,10 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         }
 
         // ── Dense-grid photon guide probability ─────────────────────
-        // 50/50 balanced: either pick a random photon from the cell
-        // and bounce in its wi direction, or sample the BSDF.
-        // Dense grid lookup is O(1); no preview_mode guard needed.
-        float p_guide = params.dense_valid ? 0.5f : 0.f;
+        // Guided / BSDF one-sample MIS: either pick a random photon
+        // from the dense grid and bounce in its wi direction, or sample
+        // the BSDF.  p_guide = probability of choosing the guide strategy.
+        float p_guide = params.dense_valid ? params.guide_fraction : 0.f;
 
         // ── NEE: 1 shadow ray ───────────────────────────────────────
         // §4.1: Standard Veach-style MIS: sample a light, weight against BSDF.
@@ -423,17 +423,18 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                     Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
                     float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
 
-                    // Balance heuristic: 0.5 * pdf_guide + 0.5 * pdf_bsdf
-                    // Guide PDF = cosine-cone PDF centred on the photon wi
-                    float cos_cone = dot(wi_dir, wi); // angle between jittered and original
-                    float pdf_guide = (cos_half < 1.f - 1e-6f)
-                        ? cosine_cone_pdf(cos_cone, cos_half)
-                        : INV_2PI;  // fallback: no jitter → uniform hemisphere
-                    combined_pdf = 0.5f * pdf_guide + 0.5f * pdf_bsdf;
+                    // Marginal guide PDF: average cosine-cone PDF over all
+                    // eligible photons in the neighbourhood (not just the
+                    // one we picked).  Correct MIS requires this.
+                    float pdf_guide = dev_guide_pdf_at_direction(
+                        hit.position, hit.shading_normal, wi_dir, cos_half);
+                    combined_pdf = p_guide * pdf_guide + (1.f - p_guide) * pdf_bsdf;
                     if (combined_pdf > 1e-8f) {
                         float cos_theta = wi_local.z;
-                        for (int i = 0; i < NUM_LAMBDA; ++i)
+                        for (int i = 0; i < NUM_LAMBDA; ++i) {
                             f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
+                            f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
+                        }
                         wi_world = wi_dir;
                         sample_valid = true;
                     }
@@ -452,16 +453,22 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             wi_world = frame.local_to_world(bs.wi);
             float cos_theta = bs.wi.z;
 
-            // MIS: when dense grid is active, combine with guide PDF
+            // MIS: when dense grid is active, evaluate the true guide
+            // PDF at the BSDF-sampled direction so MIS weights are correct.
             if (p_guide > 0.f) {
-                combined_pdf = 0.5f * bs.pdf + 0.5f * INV_2PI;
+                float pdf_guide = dev_guide_pdf_at_direction(
+                    hit.position, hit.shading_normal, wi_world,
+                    params.guide_cone_cos_half_angle);
+                combined_pdf = p_guide * pdf_guide + (1.f - p_guide) * bs.pdf;
             } else {
                 combined_pdf = bs.pdf;
             }
             if (combined_pdf < 1e-8f) break;
 
-            for (int i = 0; i < NUM_LAMBDA; ++i)
+            for (int i = 0; i < NUM_LAMBDA; ++i) {
                 f_over_pdf.value[i] = bs.f.value[i] * cos_theta / combined_pdf;
+                f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
+            }
             sample_valid = true;
         }
 

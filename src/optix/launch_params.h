@@ -131,6 +131,7 @@ struct LaunchParams {
     float     dense_cell_size;          // cell edge length
     int       dense_dim_x, dense_dim_y, dense_dim_z;  // grid resolution
     float     guide_cone_cos_half_angle;  // cos(half-angle) for photon wi cone jitter (1.0 = off)
+    int       guide_use_neighbourhood;    // 0 = single cell, 1 = 3×3×3 neighbourhood
 
     // Per-triangle photon irradiance heatmap (precomputed on CPU, for preview)
     float*    tri_photon_irradiance;  // [num_triangles] accumulated scalar irradiance

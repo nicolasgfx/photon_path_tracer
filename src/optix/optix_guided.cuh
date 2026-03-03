@@ -155,6 +155,83 @@ int dev_random_photon_in_cell(float3 pos, float3 filter_normal, PCGRng& rng) {
     return -1;
 }
 
+// ── Evaluate the marginal guide PDF at a given world-space direction ─
+// Loops over eligible photons in the dense-grid neighbourhood and
+// computes:  pdf = (1/N) Σᵢ cosine_cone_pdf(cos∠(ω, wᵢ), cos_half)
+// where N = number of eligible photons.  Returns 0 when no photons
+// pass the normal / tau / hemisphere gates.
+// Cap the loop at MAX_GUIDE_PDF_PHOTONS to keep cost bounded.
+
+constexpr int MAX_GUIDE_PDF_PHOTONS = 64;
+
+__forceinline__ __device__
+float dev_guide_pdf_at_direction(
+    float3 pos, float3 filter_normal, float3 wi_world, float cos_half)
+{
+    if (!params.dense_valid || params.num_photons == 0)
+        return 0.f;
+
+    const int R = params.guide_use_neighbourhood ? 1 : 0;
+
+    int cx = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
+    int cy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
+    int cz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
+
+    float  pdf_sum   = 0.f;
+    int    n_eligible = 0;
+
+    for (int dz = -R; dz <= R; ++dz) {
+        int iz = cz + dz;
+        if (iz < 0 || iz >= params.dense_dim_z) continue;
+        for (int dy = -R; dy <= R; ++dy) {
+            int iy = cy + dy;
+            if (iy < 0 || iy >= params.dense_dim_y) continue;
+            for (int dx = -R; dx <= R; ++dx) {
+                int ix = cx + dx;
+                if (ix < 0 || ix >= params.dense_dim_x) continue;
+                int cell = ix + iy * params.dense_dim_x
+                             + iz * params.dense_dim_x * params.dense_dim_y;
+                uint32_t cs = params.dense_cell_start[cell];
+                uint32_t ce = params.dense_cell_end[cell];
+                for (uint32_t j = cs; j < ce; ++j) {
+                    if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto done;
+                    uint32_t idx = params.dense_sorted_indices[j];
+
+                    // Normal gate
+                    float3 pn = make_f3(
+                        params.photon_norm_x[idx],
+                        params.photon_norm_y[idx],
+                        params.photon_norm_z[idx]);
+                    if (dot(pn, filter_normal) <= 0.f) continue;
+
+                    // Surface-tau gate
+                    float3 pp = make_f3(
+                        params.photon_pos_x[idx],
+                        params.photon_pos_y[idx],
+                        params.photon_pos_z[idx]);
+                    if (fabsf(dot(pos - pp, filter_normal)) > DEFAULT_SURFACE_TAU)
+                        continue;
+
+                    // Wi hemisphere gate
+                    float3 pw = make_f3(
+                        params.photon_wi_x[idx],
+                        params.photon_wi_y[idx],
+                        params.photon_wi_z[idx]);
+                    if (dot(pw, filter_normal) <= 0.f) continue;
+
+                    ++n_eligible;
+                    float cos_angle = dot(wi_world, pw);
+                    pdf_sum += (cos_half < 1.f - 1e-6f)
+                        ? cosine_cone_pdf(cos_angle, cos_half)
+                        : INV_2PI;
+                }
+            }
+        }
+    }
+done:
+    return (n_eligible > 0) ? pdf_sum / (float)n_eligible : 0.f;
+}
+
 // ── Guided histogram: directional bin data for guide sampling ────────
 // Used by volume guide path (and kept for API compatibility).
 

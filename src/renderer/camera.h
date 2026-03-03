@@ -133,7 +133,7 @@ struct Camera {
         cam.position = make_f3(0.0f, 0.0f, 2.5f);
         cam.look_at  = make_f3(0.0f, 0.0f, 0.0f);
         cam.up       = make_f3(0.0f, 1.0f, 0.0f);
-        cam.fov_deg  = 40.0f;
+        cam.fov_deg  = 70.0f;
         cam.width    = w;
         cam.height   = h;
         cam.update();

@@ -1370,13 +1370,6 @@ void run_interactive(
                 printf("[Idle] Full-quality mode (%.0fx photons)\n",
                        IDLE_PHOTON_BUDGET_FACTOR);
             }
-
-            // Periodic photon re-trace during idle accumulation
-            if (s_app.idle_rendering_active && frame > 0 &&
-                (frame % MULTI_MAP_SPP_GROUP) == 0) {
-                optix_renderer.trace_photons(
-                    scene, opt.config, 0.f, s_app.idle_photon_seed++);
-            }
         }
 
         // ── Handle "R" key: save timestamped snapshot (PNG + EXR) ───
