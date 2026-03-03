@@ -162,7 +162,8 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
     obj_path = os.path.join(output_dir, f"{scene_name}.obj")
     mtl_path = os.path.join(output_dir, f"{scene_name}.mtl")
 
-    global_xform = scene.global_transform  # e.g. Scale -1 1 1
+    global_xform = np.eye(4, dtype=np.float64)  # leave geometry in PBRT world space;
+    # the camera extractor derives eye/target from the pre-WorldBegin transform.
     bbox_min = np.array([1e30, 1e30, 1e30])
     bbox_max = np.array([-1e30, -1e30, -1e30])
 

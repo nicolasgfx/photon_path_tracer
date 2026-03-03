@@ -42,12 +42,12 @@ constexpr bool ENABLE_STATS = false;
 //#define SCENE_LIVING_ROOM
 //#define SCENE_SALLE_DE_BAIN
 //#define SCENE_FIREPLACE_ROOM
-//#define SCENE_CONFERENCE
+#define SCENE_CONFERENCE
 //#define SCENE_LIVING_ROOM_2
 //#define SCENE_STAIRCASE
 //#define SCENE_STAIRCASE_2
 //#define SCENE_BEDROOM
-#define SCENE_BATHROOM
+//#define SCENE_BATHROOM
 
 // ── Photon tracing backend ──────────────────────────────────────────
 // Set to 1 to use the CPU photon tracer (emitter.h) instead of the GPU
@@ -98,8 +98,8 @@ constexpr int DEFAULT_SPP = STRATA_X * STRATA_Y;       // [R]
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 2000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 2000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -117,7 +117,7 @@ constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (t
 // many shadow rays are cast.  See DEFAULT_NEE_DEEP_SAMPLES for
 // bounces ≥ 1.
 //   Fast: 4–8  |  Balanced: 16  |  Quality: 32–64
-constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
+constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 1;          // [R]
 
 
 // =====================================================================
@@ -131,18 +131,19 @@ constexpr int DEFAULT_NEE_LIGHT_SAMPLES = 4;          // [R]
 // enter+exit) plus subsequent diffuse bounces.  4 glass layers = 8
 // transmission bounces before reaching a diffuse surface.
 //   Fast: 4–6  |  Balanced: 10  |  Quality: 12–16
-constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 12;        // [R]
+constexpr int DEFAULT_PHOTON_MAX_BOUNCES = 8;         // [R]
 
 // ── Russian roulette ────────────────────────────────────────────────
 // After MIN_BOUNCES_RR guaranteed bounces, each continuation is
 // probabilistic: survive = min(max_spectrum(throughput), RR_THRESHOLD).
 // Throughput is divided by survival probability (unbiased).
-// Set high to guarantee photon survival through glass stacks — RR
-// should not kill photons mid-transmission through nested dielectrics.
-//   MIN_BOUNCES_RR — Fast: 3–4  |  Balanced: 8  |  Quality: 10
+// Photons need enough guaranteed bounces to survive nested glass
+// stacks (3 layers × 2 = 6 bounces), but every extra forced bounce
+// wastes compute on low-contribution paths.
+//   MIN_BOUNCES_RR — Fast: 3  |  Balanced: 5  |  Quality: 8
 //   RR_THRESHOLD   — 0.80 (aggressive) .. 0.95 (conservative)
-constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 10;    // [R]
-constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.90f;// [R]
+constexpr int   DEFAULT_PHOTON_MIN_BOUNCES_RR = 5;     // [R]
+constexpr float DEFAULT_PHOTON_RR_THRESHOLD   = 0.95f; // [R]
 
 // ── Spectral transport (PBRT v4 §14.3) ─────────────────────────────
 // Hero wavelengths per photon.  4 = PBRT v4 recommended.
@@ -182,7 +183,7 @@ constexpr float IDLE_PHOTON_BUDGET_FACTOR = 1.0f;
 // Camera ray follows mirror/glass bounces until hitting a diffuse
 // surface, then evaluates NEE + photon gather.
 //   Fast: 4  |  Balanced: 8  |  Quality: 12–16
-constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 12;         // [R]
+constexpr int DEFAULT_MAX_SPECULAR_CHAIN = 8;          // [R]
 
 // ── Glossy continuation bounces ─────────────────────────────────────
 // After the first non-specular hit, glossy surfaces can trace extra
@@ -195,34 +196,12 @@ constexpr int DEFAULT_MAX_GLOSSY_BOUNCES = 4;
 //   0.0 = pure power  |  0.3 = balanced  |  1.0 = pure area
 constexpr float DEFAULT_NEE_COVERAGE_FRACTION = 0.3f; // [R]
 
-// ── Photon-guided sampling ──────────────────────────────────────────
-constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;       // [R]  probability of guided vs BSDF sample
-constexpr bool  DEFAULT_USE_GUIDE        = true;        // [K]  enable/disable guided sampling
-
-// Photon guide cell neighbourhood: when true, the guided sampler picks
-// a random photon from a 3×3×3 block of dense-grid cells around the
-// hit point; when false, only the single cell containing the hit is used.
-// 3×3×3 gives smoother guidance at the cost of sampling more distant
-// (and potentially less relevant) photons.
-constexpr bool  DEFAULT_GUIDE_NEIGHBOURHOOD_3X3X3 = true; // [K]
-
-// Cone jitter half-angle (radians) applied to photon wi when doing
-// dense-grid guided sampling.  Widens the stochastic axis around the
-// photon's incoming direction, improving convergence / reducing noise.
-//   0.0  = no jitter (use photon wi exactly)
-//   0.15 = ~8.6°  balanced default
-constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
-
-// Safety clamp on per-bounce f*cos/pdf contribution.  Prevents residual
-// firefly outliers from numerical edge cases.  Slightly biased (energy
-// loss in extreme situations) but makes convergence much more robust.
-constexpr float MAX_BOUNCE_CONTRIBUTION = 50.f;
-
 // ── Camera ray max bounces (full path trace) ───────────────────────
 // Total bounce limit for camera rays in the full path-trace loop
 // (specular chain + glossy continuation + final gather).
-//   Fast: 6  |  Balanced: 12  |  Quality: 16–20
-constexpr int DEFAULT_MAX_BOUNCES_CAMERA = 12;            // [R]
+// With RR starting at bounce 3, most energy is captured in 6–8 bounces.
+//   Fast: 6  |  Balanced: 8  |  Quality: 12–16
+constexpr int DEFAULT_MAX_BOUNCES_CAMERA = 8;             // [R]
 
 // ── Final gather ────────────────────────────────────────────────────
 // When true, the last diffuse bounce performs a photon density estimate
@@ -234,6 +213,58 @@ constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
 // Balances NEE shadow rays vs BSDF-sampled rays that hit emitters.
 // Should always be true — disabling causes double-counting on glossy.
 constexpr bool DEFAULT_USE_MIS = true;
+
+
+// =====================================================================
+//  §4a  PHOTON-GUIDED PATH TRACING (one-sample MIS)
+// =====================================================================
+// Dense-grid guided sampling: at each non-delta camera bounce, a coin
+// flip (p = guide_fraction) chooses between picking a photon direction
+// from the dense grid ("guide") and a normal BSDF importance sample.
+// One-sample MIS (balance heuristic) weights the result using the
+// marginal PDF over all eligible photons.
+//
+// All constants below control this subsystem.  The dense grid itself
+// is built from the merged photon SoA (global + caustic + targeted)
+// after every photon trace pass.
+
+// Master switch — disables the entire guide path when false.
+constexpr bool  DEFAULT_USE_GUIDE = true;        // [K]
+
+constexpr int MAX_GUIDE_PDF_PHOTONS = 32; // was 64
+
+// Probability of choosing the guided strategy vs pure BSDF.
+//   0.0 = BSDF only  |  0.5 = balanced  |  1.0 = guide only
+constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;        // [R]
+
+// ── Dense grid ──────────────────────────────────────────────────────
+// Uniform 3D grid over the photon AABB.  Each cell stores start/end
+// indices into a sorted photon array for O(1) cell lookup.
+constexpr bool  DEFAULT_USE_DENSE_GRID   = true;        // use dense grid path
+constexpr float DENSE_GRID_CELL_SIZE     = 0.01f;       // cell side-length (metres)
+
+// ── Cell neighbourhood ──────────────────────────────────────────────
+// When true, the guided sampler picks a random photon from a 3×3×3
+// block of dense-grid cells around the hit point; when false, only the
+// single cell containing the hit is used.
+// 3×3×3 gives smoother guidance at the cost of sampling more distant
+// (and potentially less relevant) photons.
+constexpr bool  DEFAULT_GUIDE_NEIGHBOURHOOD_3X3X3 = true; // [K]
+
+// ── Cone jitter ─────────────────────────────────────────────────────
+// Half-angle (radians) applied to photon wi when sampling a guided
+// direction.  Widens the stochastic axis around the photon's incoming
+// direction, improving convergence.
+//   0.0  = no jitter (use photon wi exactly)
+//   0.15 = ~8.6°  balanced default
+constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
+
+// ── Firefly clamp ───────────────────────────────────────────────────
+// Safety clamp on per-bounce f·cos/pdf contribution.  Prevents residual
+// firefly outliers from numerical edge cases.  Slightly biased (energy
+// loss in extreme situations) but makes convergence much more robust.
+//   10–20 = aggressive  |  50 = balanced  |  200+ = nearly unbiased
+constexpr float MAX_BOUNCE_CONTRIBUTION  = 50.f;
 
 
 // =====================================================================
@@ -353,10 +384,6 @@ constexpr bool DEBUG_CAUSTIC_PNG          = false;     // emit caustic-only debu
 constexpr bool DEBUG_COVERAGE_PNG         = false;     // emit coverage debug PNGs
 constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses direct-only proxy
 
-// ── Dense grid toggle ───────────────────────────────────────────────
-constexpr bool  DEFAULT_USE_DENSE_GRID  = true;        // use cell-bin dense grid path
-constexpr float DENSE_GRID_CELL_SIZE    = 0.05f;       // cell side-length (metres)
-
 
 // =====================================================================
 //  §11  LEGACY ALIASES
@@ -435,7 +462,7 @@ constexpr int   DEFAULT_NUM_PHOTONS      = DEFAULT_GLOBAL_PHOTON_BUDGET;
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 70.0f;
+  constexpr float SCENE_CAM_FOV            = 100.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
 #elif defined(SCENE_STAIRCASE_2)

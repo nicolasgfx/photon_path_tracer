@@ -43,7 +43,15 @@ inline HD float3 cross(float3 a, float3 b) {
 }
 inline HD float  length(float3 v)     { return sqrtf(dot(v, v)); }
 inline HD float  length_sq(float3 v)  { return dot(v, v); }
-inline HD float3 normalize(float3 v)  { float l = length(v); return (l > 0.f) ? v / l : make_f3(0,0,0); }
+inline HD float3 normalize(float3 v) {
+    float d = dot(v, v);
+    if (d <= 0.f) return make_f3(0,0,0);
+#ifdef __CUDA_ARCH__
+    return v * rsqrtf(d);
+#else
+    return v * (1.f / sqrtf(d));
+#endif
+}
 
 inline HD float3 fminf3(float3 a, float3 b) {
     return {fminf(a.x,b.x), fminf(a.y,b.y), fminf(a.z,b.z)};

@@ -21,7 +21,7 @@ struct PathTraceResult {
     // AOV for denoiser guide layers
     float3 first_hit_albedo;   // linear diffuse albedo at first non-specular hit
     float3 first_hit_normal;   // world-space shading normal at first non-specular hit
-    // Kernel profiling clocks (accumulated across bounces)
+    // Kernel profiling clocks (only populated when ENABLE_STATS is true)
     long long clk_ray_trace;
     long long clk_nee;
     long long clk_photon_gather;
@@ -40,19 +40,24 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         result.bounce_contrib[b] = Spectrum::zero();
     result.first_hit_albedo = make_f3(0.f, 0.f, 0.f);
     result.first_hit_normal = make_f3(0.f, 0.f, 1.f);
-    result.clk_ray_trace     = 0;
-    result.clk_nee           = 0;
-    result.clk_photon_gather = 0;
-    result.clk_bsdf          = 0;
+    if constexpr (ENABLE_STATS) {
+        result.clk_ray_trace     = 0;
+        result.clk_nee           = 0;
+        result.clk_photon_gather = 0;
+        result.clk_bsdf          = 0;
+    }
 
     Spectrum throughput = Spectrum::constant(1.0f);
     IORStack ior_stack;
     MediumStack medium_stack;  // per-material interior medium tracking (§7.10)
     bool aov_written = false;
 
-    // Fibonacci sphere directions for cell-bin histogram sampling
+    // Fibonacci sphere directions for cell-bin histogram sampling (volume only)
     DevPhotonBinDirs fib;
-    fib.init(params.photon_bin_count);
+    if (params.vol_cell_grid_valid)
+        fib.init(params.photon_bin_count);
+    else
+        fib.count = 0;
 
     // Previous-bounce combined PDF for emission MIS (§4.3)
     float pdf_combined_prev = 0.f;
@@ -64,9 +69,10 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
     for (int bounce = 0; bounce < max_bounces; ++bounce) {
 
         // ── Trace ray ───────────────────────────────────────────────
-        long long t0 = clock64();
+        long long t0 = 0;
+        if constexpr (ENABLE_STATS) t0 = clock64();
         TraceResult hit = trace_radiance(origin, direction);
-        result.clk_ray_trace += clock64() - t0;
+        if constexpr (ENABLE_STATS) result.clk_ray_trace += clock64() - t0;
 
         if (!hit.hit) break;
 
@@ -351,9 +357,20 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         }
 
         // ── Non-delta surface: shading ──────────────────────────────
+        // Faceforward: flip shading normal if it faces away from the camera.
+        // This handles meshes with inverted normals (e.g. from negative-
+        // determinant transforms) instead of killing the entire path.
         ONB frame = ONB::from_normal(hit.shading_normal);
         float3 wo_local = frame.world_to_local(direction * (-1.f));
-        if (wo_local.z <= 0.f) break;
+        if (wo_local.z < 0.f) {
+            // Negate ONB axes instead of reconstructing from scratch
+            hit.shading_normal = hit.shading_normal * (-1.f);
+            frame.u = frame.u * (-1.f);
+            frame.v = frame.v * (-1.f);
+            frame.w = hit.shading_normal;
+            wo_local = make_f3(-wo_local.x, -wo_local.y, -wo_local.z);
+        }
+        if (wo_local.z <= 0.f) break;  // grazing angle — still reject
 
         // AOV: capture albedo + normal at first non-specular hit
         if (!aov_written) {
@@ -375,11 +392,12 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         // ── NEE: 1 shadow ray ───────────────────────────────────────
         // §4.1: Standard Veach-style MIS: sample a light, weight against BSDF.
         if (params.render_mode != RenderMode::IndirectOnly) {
-            long long t_nee = clock64();
+            long long t_nee = 0;
+            if constexpr (ENABLE_STATS) t_nee = clock64();
             NeeResult nee = dev_nee_dispatch(
                 hit.position, hit.shading_normal, wo_local,
                 mat_id, rng, bounce, hit.uv);
-            result.clk_nee += clock64() - t_nee;
+            if constexpr (ENABLE_STATS) result.clk_nee += clock64() - t_nee;
 
             Spectrum nee_contrib = throughput * nee.L;
             result.combined   += nee_contrib;
@@ -395,47 +413,26 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         bool sample_valid = false;
 
         if (p_guide > 0.f && rng.next_float() < p_guide) {
-            // ── Photon-guided sample ────────────────────────────────
-            // Pick a random photon from the hitpoint's dense grid cell;
-            // bounce the ray in the photon's incoming direction (wi).
-            int photon_idx = dev_random_photon_in_cell(
-                hit.position, hit.shading_normal, rng);
-            if (photon_idx >= 0) {
-                float3 wi = make_f3(
-                    params.photon_wi_x[photon_idx],
-                    params.photon_wi_y[photon_idx],
-                    params.photon_wi_z[photon_idx]);
-
-                // ── Cone jitter: perturb photon wi within a small cone ──
-                // Builds an ONB around the photon direction and samples a
-                // cosine-weighted cone to widen the stochastic axis.
-                float cos_half = params.guide_cone_cos_half_angle;
-                float3 wi_dir = wi; // original photon direction (cone centre)
-                if (cos_half < 1.f - 1e-6f) {
-                    ONB cone_frame = ONB::from_normal(wi);
-                    float3 cone_local = sample_cosine_cone(
-                        rng.next_float(), rng.next_float(), cos_half);
-                    wi_dir = cone_frame.local_to_world(cone_local);
-                }
-
-                float3 wi_local = frame.world_to_local(wi_dir);
+            // ── Photon-guided sample (fused sample + PDF) ─────────────
+            // Single neighbourhood scan: picks a random eligible photon,
+            // applies cone jitter, and computes marginal guide PDF from
+            // cached wi vectors — no redundant global memory reads.
+            float cos_half = params.guide_cone_cos_half_angle;
+            GuideSamplePdfResult gs = dev_guide_sample_and_pdf_full(
+                hit.position, hit.shading_normal, cos_half, rng);
+            if (gs.photon_idx >= 0) {
+                float3 wi_local = frame.world_to_local(gs.wi_dir);
                 if (wi_local.z > 0.f) {
                     Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
                     float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
-
-                    // Marginal guide PDF: average cosine-cone PDF over all
-                    // eligible photons in the neighbourhood (not just the
-                    // one we picked).  Correct MIS requires this.
-                    float pdf_guide = dev_guide_pdf_at_direction(
-                        hit.position, hit.shading_normal, wi_dir, cos_half);
-                    combined_pdf = p_guide * pdf_guide + (1.f - p_guide) * pdf_bsdf;
+                    combined_pdf = p_guide * gs.pdf_guide + (1.f - p_guide) * pdf_bsdf;
                     if (combined_pdf > 1e-8f) {
                         float cos_theta = wi_local.z;
                         for (int i = 0; i < NUM_LAMBDA; ++i) {
                             f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
                             f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
                         }
-                        wi_world = wi_dir;
+                        wi_world = gs.wi_dir;
                         sample_valid = true;
                     }
                 }
@@ -444,9 +441,10 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
 
         if (!sample_valid) {
             // ── BSDF sample ─────────────────────────────────────────
-            long long t_bsdf = clock64();
+            long long t_bsdf = 0;
+            if constexpr (ENABLE_STATS) t_bsdf = clock64();
             BSDFSample bs = bsdf_sample(mat_id, wo_local, hit.uv, rng, pixel_idx);
-            result.clk_bsdf += clock64() - t_bsdf;
+            if constexpr (ENABLE_STATS) result.clk_bsdf += clock64() - t_bsdf;
 
             if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
 

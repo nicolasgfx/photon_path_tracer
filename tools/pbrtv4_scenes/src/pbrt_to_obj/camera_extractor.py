@@ -31,21 +31,37 @@ def extract_camera_json(scene: PbrtScene, output_path: str,
     """
     cam = scene.camera
     film = scene.film
-    gt = scene.global_transform   # Scale -1 1 1
 
     # --- Position and look-at ---
+    # Geometry stays in PBRT world space (converter no longer applies the
+    # pre-WorldBegin transform).  Derive camera entirely from the scene
+    # description rather than baking it into geometry.
     if cam.look_at is not None:
+        # LookAt eye/target/up are already in world space.
         eye, target, up = cam.look_at
-        # Apply global transform (Scale -1 1 1 → negate X)
-        eye = _apply_global(gt, eye)
-        target = _apply_global(gt, target)
-        # Up vector: only negate X component for the direction
         up_transformed = up.copy()
-        up_transformed[0] *= gt[0, 0]  # negate if Scale -1
     else:
-        eye = np.array([0.0, 0.0, 0.0])
-        target = np.array([0.0, 0.0, -1.0])
-        up_transformed = np.array([0.0, 1.0, 0.0])
+        # No LookAt — derive camera from the pre-WorldBegin Transform.
+        # That matrix is the world-to-camera transform M_w2c.
+        # Camera-to-world = inv(M_w2c); eye = last column, forward = -Z col.
+        M_w2c = cam.pre_transform
+        if not np.allclose(M_w2c, np.eye(4)):
+            M_c2w = np.linalg.inv(M_w2c)
+            eye = M_c2w[:3, 3].copy()
+            forward = -M_c2w[:3, 2]
+            mag = np.linalg.norm(forward)
+            if mag > 1e-12:
+                forward /= mag
+            up_raw = M_c2w[:3, 1]
+            mag2 = np.linalg.norm(up_raw)
+            if mag2 > 1e-12:
+                up_raw /= mag2
+            target = eye + forward
+            up_transformed = up_raw
+        else:
+            eye = np.array([0.0, 0.0, 0.0])
+            target = np.array([0.0, 0.0, -1.0])
+            up_transformed = np.array([0.0, 1.0, 0.0])
 
     # --- FOV ---
     fov = get_param(cam.params, 'fov', 45.0)
@@ -94,7 +110,7 @@ def extract_camera_json(scene: PbrtScene, output_path: str,
     # Check shapes with area_light for emissive geometry
     for shape in scene.shapes:
         if shape.area_light:
-            light_info = _extract_area_light(shape, gt)
+            light_info = _extract_area_light(shape)
             if light_info:
                 lights_array.append(light_info)
 
@@ -178,7 +194,7 @@ def _extract_env_rotation(transform: np.ndarray) -> list[float]:
     return [round(math.degrees(z), 2), round(math.degrees(y), 2), round(math.degrees(x), 2)]
 
 
-def _extract_area_light(shape: PbrtShape, global_transform: np.ndarray) -> dict | None:
+def _extract_area_light(shape: PbrtShape) -> dict | None:
     """Extract area light info from a shape with an attached AreaLightSource."""
     al = shape.area_light
     if al is None:
@@ -191,10 +207,8 @@ def _extract_area_light(shape: PbrtShape, global_transform: np.ndarray) -> dict 
         "type": shape.shape_type,  # "sphere" or "plymesh"
     }
 
-    # Extract position from transform
+    # Extract position from transform (already in world space)
     pos = np.array([xform[0, 3], xform[1, 3], xform[2, 3]])
-    # Apply global transform
-    pos = _apply_global(global_transform, pos)
     light_info["position"] = [round(v, 6) for v in pos.tolist()]
 
     # Sphere radius

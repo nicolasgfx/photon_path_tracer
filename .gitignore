@@ -66,3 +66,4 @@ tests/data/cornell_box.bin
 # Debug data
 output/
 scenes/*.json
+tools/

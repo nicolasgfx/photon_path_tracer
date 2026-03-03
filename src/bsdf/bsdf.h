@@ -219,8 +219,8 @@ inline HD BSDFSample glossy_sample(const Spectrum& Kd, const Spectrum& Ks,
         float geo = ggx_G(wo, s.wi, alpha);
         float VdotH = fabsf(dot(wo, h));
 
-        // Specular PDF (from GGX halfvector)
-        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        // Specular PDF (VNDF)
+        float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
         float diff_pdf = cosine_hemisphere_pdf(s.wi.z);
         s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 
@@ -249,7 +249,7 @@ inline HD BSDFSample glossy_sample(const Spectrum& Kd, const Spectrum& Ks,
         float3 h = normalize(wo + s.wi);
         float ndf = ggx_D(h, alpha);
         float VdotH = fabsf(dot(wo, h));
-        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
 
         s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 
@@ -308,7 +308,7 @@ inline HD BSDFSample glossy_dielectric_sample(const Spectrum& Kd, const Spectrum
         float geo = ggx_G(wo, s.wi, alpha);
         float VdotH = fabsf(dot(wo, h));
 
-        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
         float diff_pdf = cosine_hemisphere_pdf(s.wi.z);
         s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 
@@ -336,7 +336,7 @@ inline HD BSDFSample glossy_dielectric_sample(const Spectrum& Kd, const Spectrum
         float3 h = normalize(wo + s.wi);
         float ndf = ggx_D(h, alpha);
         float VdotH = fabsf(dot(wo, h));
-        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
 
         s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 
@@ -388,7 +388,7 @@ inline HD BSDFSample clearcoat_sample(const Material& mat, float3 wo, PCGRng& rn
         float Fr = fresnel_schlick(VdotH, coat_F0);
         float ndf_c = ggx_D(h, coat_alpha);
         float geo_c = ggx_G(wo, s.wi, coat_alpha);
-        float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf_c * ggx_G1(wo, coat_alpha) / (4.f * fabsf(wo.z) + EPSILON);
         float diff_pdf = cosine_hemisphere_pdf(s.wi.z);
         s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
 
@@ -410,7 +410,7 @@ inline HD BSDFSample clearcoat_sample(const Material& mat, float3 wo, PCGRng& rn
         float3 h = normalize(wo + s.wi);
         float ndf_c = ggx_D(h, coat_alpha);
         float VdotH = fabsf(dot(wo, h));
-        float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf_c * ggx_G1(wo, coat_alpha) / (4.f * fabsf(wo.z) + EPSILON);
         s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
 
         float Fr = fresnel_schlick(VdotH, coat_F0);
@@ -597,8 +597,7 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
             float diff_pdf = cosine_hemisphere_pdf(wi.z);
             float3 h = normalize(wo + wi);
             float ndf = ggx_D(h, alpha);
-            float VdotH = fabsf(dot(wo, h));
-            float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
 
             return p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
         }
@@ -616,8 +615,7 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
             float diff_pdf = cosine_hemisphere_pdf(wi.z);
             float3 h = normalize(wo + wi);
             float ndf = ggx_D(h, alpha);
-            float VdotH = fabsf(dot(wo, h));
-            float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
 
             return p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
         }
@@ -635,8 +633,7 @@ inline HD float pdf(const Material& mat, float3 wo, float3 wi) {
             float diff_pdf = cosine_hemisphere_pdf(wi.z);
             float3 h = normalize(wo + wi);
             float ndf_c = ggx_D(h, coat_alpha);
-            float VdotH = fabsf(dot(wo, h));
-            float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            float spec_pdf = ndf_c * ggx_G1(wo, coat_alpha) / (4.f * fabsf(wo.z) + EPSILON);
             return p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
         }
 

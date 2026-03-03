@@ -88,6 +88,7 @@ extern "C" __global__ void __raygen__render() {
     long long prof_total_start = clock64();
     long long prof_ray  = 0, prof_nee  = 0;
     long long prof_pg   = 0, prof_bsdf = 0;
+    (void)prof_ray; (void)prof_nee; (void)prof_pg; (void)prof_bsdf;
 
     for (int s = 0; s < params.samples_per_pixel; ++s) {
         PCGRng rng = PCGRng::seed(
@@ -111,10 +112,12 @@ extern "C" __global__ void __raygen__render() {
                 for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
                     L_bounce_accum[b] += ptr.bounce_contrib[b];
             }
-            prof_ray  += ptr.clk_ray_trace;
-            prof_nee  += ptr.clk_nee;
-            prof_pg   += ptr.clk_photon_gather;
-            prof_bsdf += ptr.clk_bsdf;
+            if constexpr (ENABLE_STATS) {
+                prof_ray  += ptr.clk_ray_trace;
+                prof_nee  += ptr.clk_nee;
+                prof_pg   += ptr.clk_photon_gather;
+                prof_bsdf += ptr.clk_bsdf;
+            }
 
             // AOV: write denoiser guide layers on first sample of first frame
             if (s == 0 && params.frame_number == 0) {

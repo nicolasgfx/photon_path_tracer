@@ -44,10 +44,10 @@ inline HD float nee_pdf_area_to_solid_angle(
     return pdf_tri * pdf_pos * dist_squared / cos_emitter;
 }
 
-// ── Balance heuristic MIS weight (2-way) — use mis_weight_2() from
+// ── Power heuristic MIS weight (2-way) — use mis_weight_2() from
 // bsdf/bsdf_shared.h for the shared HD version.
 
-// ── Balance heuristic MIS weight (3-way) ────────────────────────────
+// ── Power heuristic MIS weight (3-way) ─────────────────────────────
 inline HD float nee_mis_weight_3(float pdf_a, float pdf_b, float pdf_c) {
     float a2 = pdf_a * pdf_a;
     float b2 = pdf_b * pdf_b;

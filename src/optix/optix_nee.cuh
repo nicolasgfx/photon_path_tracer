@@ -93,14 +93,17 @@ NeeSampleResult dev_nee_evaluate_sample(
 
     float3 le1 = lv1 - lv0;
     float3 le2 = lv2 - lv0;
-    float3 light_normal = normalize(cross(le1, le2));
-    float  light_area   = length(cross(le1, le2)) * 0.5f;
+    float3 cross_e = cross(le1, le2);
+    float  cross_inv_len = rsqrtf(dot(cross_e, cross_e) + 1e-30f);
+    float3 light_normal  = cross_e * cross_inv_len;
+    float  light_area    = (1.f / cross_inv_len) * 0.5f;
 
     // Direction, distance, cosines
     float3 to_light = light_pos - pos;
-    float dist2 = dot(to_light, to_light);
-    float dist  = sqrtf(dist2);
-    float3 wi   = to_light * (1.f / dist);
+    float dist2    = dot(to_light, to_light);
+    float inv_dist = rsqrtf(dist2 + 1e-30f);
+    float dist     = dist2 * inv_dist;
+    float3 wi      = to_light * inv_dist;
 
     float cos_x = dot(wi, normal);
     float cos_y = -dot(wi, light_normal);
@@ -359,14 +362,17 @@ NeeResult dev_nee_volume_scatter(float3 pos, float3 wo_world,
 
     float3 le1 = lv1 - lv0;
     float3 le2 = lv2 - lv0;
-    float3 light_normal = normalize(cross(le1, le2));
-    float  light_area   = length(cross(le1, le2)) * 0.5f;
+    float3 cross_e = cross(le1, le2);
+    float  cross_inv_len = rsqrtf(dot(cross_e, cross_e) + 1e-30f);
+    float3 light_normal  = cross_e * cross_inv_len;
+    float  light_area    = (1.f / cross_inv_len) * 0.5f;
 
     // Direction and distance to light
     float3 to_light = light_pos - pos;
-    float dist2 = dot(to_light, to_light);
-    float dist  = sqrtf(dist2);
-    float3 wi   = to_light * (1.f / dist);
+    float dist2    = dot(to_light, to_light);
+    float inv_dist = rsqrtf(dist2 + 1e-30f);
+    float dist     = dist2 * inv_dist;
+    float3 wi      = to_light * inv_dist;
 
     // Light must face towards the scatter point
     float cos_y = -dot(wi, light_normal);

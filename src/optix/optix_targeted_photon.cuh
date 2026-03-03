@@ -264,6 +264,11 @@ extern "C" __global__ void __raygen__targeted_photon_trace() {
         if (dev_is_any_glossy(hit_mat)) {
             ONB bounce_frame = ONB::from_normal(hit.shading_normal);
             float3 wo_local = bounce_frame.world_to_local(-direction);
+            if (wo_local.z < 0.f) {
+                hit.shading_normal = hit.shading_normal * (-1.f);
+                bounce_frame = ONB::from_normal(hit.shading_normal);
+                wo_local = bounce_frame.world_to_local(-direction);
+            }
             if (wo_local.z <= 0.f) break;
             BSDFSample bs = bsdf_sample(hit_mat, wo_local, hit.uv, rng);
             if (bs.pdf <= 0.f || bs.wi.z <= 0.f) break;

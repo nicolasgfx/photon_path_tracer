@@ -111,10 +111,10 @@ inline HD float ggx_G1(float3 v, float alpha) {
 }
 
 // ── GGX Smith G (shared) ───────────────────────────────────────────
-// Height-correlated Smith masking-shadowing (matches PBRT-v4):
-//   G2(wo, wi) = 1 / (1 + Λ(wo) + Λ(wi))
-// where Λ(v) = (-1 + sqrt(1 + α² tan²θ)) / 2
-// This is more energy-conserving than the separable G1*G1 form.
+// Separable Smith masking-shadowing:
+//   G(wo, wi) = G1(wo) × G1(wi)
+// Slightly more conservative than the height-correlated form used in
+// PBRT-v4, but well-established and straightforward.
 inline HD float ggx_G(float3 wo, float3 wi, float alpha) {
     float a2 = alpha * alpha;
     float NdotO = fabsf(wo.z);
@@ -137,8 +137,15 @@ inline HD float3 ggx_sample_halfvector(float3 wo, float alpha, float u1, float u
     // Uniform disk sample
     float r   = sqrtf(u1);
     float phi = TWO_PI * u2;
-    float p1  = r * cosf(phi);
-    float p2  = r * sinf(phi);
+    float sp, cp;
+#ifdef __CUDA_ARCH__
+    sincosf(phi, &sp, &cp);
+#else
+    sp = sinf(phi);
+    cp = cosf(phi);
+#endif
+    float p1  = r * cp;
+    float p2  = r * sp;
     float s   = 0.5f * (1.f + wh.z);
     p2 = (1.f - s) * sqrtf(fmaxf(0.f, 1.f - p1*p1)) + s * p2;
 

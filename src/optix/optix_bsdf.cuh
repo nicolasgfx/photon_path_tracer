@@ -107,7 +107,7 @@ float bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
         float3 h = normalize(wo + wi);
         float ndf_c = ggx_D(h, coat_alpha);
         float VdotH = fabsf(dot(wo, h));
-        float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf_c * ggx_G1(wo, coat_alpha) / (4.f * fabsf(wo.z) + EPSILON);
         return p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
     }
 
@@ -146,7 +146,7 @@ float bsdf_pdf(uint32_t mat_id, float3 wo, float3 wi) {
     float3 h = normalize(wo + wi);
     float ndf = ggx_D(h, alpha);
     float VdotH = fabsf(dot(wo, h));
-    float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+    float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
 
     return p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 }
@@ -199,7 +199,7 @@ BSDFSample bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
             float Fr = fresnel_schlick(VdotH, coat_F0);
             float ndf_c = ggx_D(h, coat_alpha);
             float geo_c = ggx_G(wo, s.wi, coat_alpha);
-            float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            float spec_pdf = ndf_c * ggx_G1(wo, coat_alpha) / (4.f * fabsf(wo.z) + EPSILON);
             float diff_pdf = fmaxf(0.f, s.wi.z) * INV_PI;
             s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
 
@@ -216,7 +216,7 @@ BSDFSample bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
             float3 h = normalize(wo + s.wi);
             float ndf_c = ggx_D(h, coat_alpha);
             float VdotH = fabsf(dot(wo, h));
-            float spec_pdf = ndf_c * fabsf(h.z) / (4.f * VdotH + EPSILON);
+            float spec_pdf = ndf_c * ggx_G1(wo, coat_alpha) / (4.f * fabsf(wo.z) + EPSILON);
             s.pdf = p_coat * spec_pdf + (1.f - p_coat) * diff_pdf;
 
             float Fr = fresnel_schlick(VdotH, coat_F0);
@@ -308,7 +308,7 @@ BSDFSample bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
         float geo = ggx_G(wo, s.wi, alpha);
         float VdotH = fabsf(dot(wo, h));
 
-        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
         float diff_pdf = fmaxf(0.f, s.wi.z) * INV_PI;
         s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 
@@ -341,7 +341,7 @@ BSDFSample bsdf_sample(uint32_t mat_id, float3 wo, float2 uv,
         float3 h = normalize(wo + s.wi);
         float ndf = ggx_D(h, alpha);
         float VdotH = fabsf(dot(wo, h));
-        float spec_pdf = ndf * fabsf(h.z) / (4.f * VdotH + EPSILON);
+        float spec_pdf = ndf * ggx_G1(wo, alpha) / (4.f * fabsf(wo.z) + EPSILON);
 
         s.pdf = p_spec * spec_pdf + (1.f - p_spec) * diff_pdf;
 
