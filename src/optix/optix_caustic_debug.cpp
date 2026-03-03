@@ -41,7 +41,6 @@ void fill_common_params(
     const DeviceBuffer& photon_wi_z,
     const DeviceBuffer& photon_norm_x, const DeviceBuffer& photon_norm_y,
     const DeviceBuffer& photon_norm_z,
-    const DeviceBuffer& photon_lambda, const DeviceBuffer& photon_flux,
     const DeviceBuffer& emissive_idx, const DeviceBuffer& emissive_cdf,
     int num_emissive, float total_emissive_power,
     OptixTraversableHandle gas_handle,
@@ -146,9 +145,6 @@ void OptixRenderer::render_caustic_debug_pass(
     d_photon_norm_x_.upload(caustic_soa.norm_x);
     d_photon_norm_y_.upload(caustic_soa.norm_y);
     d_photon_norm_z_.upload(caustic_soa.norm_z);
-    d_photon_lambda_.upload(caustic_soa.lambda_bin);
-    d_photon_flux_.upload(caustic_soa.flux);
-    d_photon_num_hero_.upload(caustic_soa.num_hero);
 
     // Build and upload dense grid for the caustic-only set
     {
@@ -186,7 +182,6 @@ void OptixRenderer::render_caustic_debug_pass(
             d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
             d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
             d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-            d_photon_lambda_, d_photon_flux_,
             d_emissive_indices_, d_emissive_cdf_,
             num_emissive_, 0.f,
             gas_handle_,
@@ -203,12 +198,10 @@ void OptixRenderer::render_caustic_debug_pass(
 
         // Disable dual-budget for this debug pass — all photons are
         // tag-2 caustic, so single-budget gather with N_caustic is correct.
-        lp.photon_is_caustic_pass = nullptr;
         lp.num_caustic_emitted    = 0;
         lp.caustic_gather_radius  = caustic_radius_;
 
         lp.volume_enabled     = (int)runtime_volume_enabled_;
-        lp.photon_num_hero    = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
         lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
@@ -255,11 +248,6 @@ void OptixRenderer::render_caustic_debug_pass(
     d_photon_norm_x_.upload(stored_photons_.norm_x);
     d_photon_norm_y_.upload(stored_photons_.norm_y);
     d_photon_norm_z_.upload(stored_photons_.norm_z);
-    d_photon_lambda_.upload(stored_photons_.lambda_bin);
-    d_photon_flux_.upload(stored_photons_.flux);
-    if (!stored_photons_.num_hero.empty())
-        d_photon_num_hero_.upload(stored_photons_.num_hero);
-    d_photon_is_caustic_pass_.upload(caustic_pass_flags_);
 
     // Re-build dense grid for the restored full photon set
     {

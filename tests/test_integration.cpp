@@ -995,8 +995,7 @@ TEST_F(CpuGpuTest, NeeDirectPsnrAbove25dB) {
 
     // Upload zero photons (direct-only render will rely on NEE)
     PhotonSoA empty_p;
-    HashGrid  empty_g;
-    gpu.upload_photon_data(empty_p, empty_g, empty_p, empty_g,
+    gpu.upload_photon_data(empty_p, empty_p,
                            cfg.gather_radius, cfg.caustic_radius, 1);
 
     for (int s = 0; s < cfg.samples_per_pixel; ++s)
@@ -1056,8 +1055,7 @@ TEST_F(CpuGpuTest, CombinedPsnrAbove20dB) {
     gpu.resize(W, H);
     gpu.clear_buffers();
     gpu.upload_photon_data(
-        global_photons(), global_grid(),
-        caustic_photons(), caustic_grid(),
+        global_photons(), caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius,
         cfg.num_photons);
 
@@ -1127,8 +1125,7 @@ TEST_F(CpuGpuTest, EnergyConservation) {
     gpu.resize(W, H);
     gpu.clear_buffers();
     gpu.upload_photon_data(
-        global_photons(), global_grid(),
-        caustic_photons(), caustic_grid(),
+        global_photons(), caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius,
         cfg.num_photons);
 
@@ -1217,8 +1214,7 @@ TEST_F(CpuGpuTest, NoNegativeValues) {
     gpu.resize(W, H);
     gpu.clear_buffers();
     gpu.upload_photon_data(
-        global_photons(), global_grid(),
-        caustic_photons(), caustic_grid(),
+        global_photons(), caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius,
         cfg.num_photons);
 

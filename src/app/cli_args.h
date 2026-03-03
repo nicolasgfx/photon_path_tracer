@@ -38,14 +38,7 @@ inline Options parse_args(int argc, char* argv[]) {
             else if (mode == "depth")    opt.config.mode = RenderMode::Depth;
         } else if (arg == "--save-test-data" && i + 1 < argc) {
             opt.save_test_data_file = argv[++i];
-        } else if (arg == "--sppm") {
-            opt.config.sppm_enabled = true;
-        } else if (arg == "--sppm-iterations" && i + 1 < argc) {
-            opt.config.sppm_iterations = std::stoi(argv[++i]);
-            opt.config.sppm_enabled = true;
-        } else if (arg == "--sppm-radius" && i + 1 < argc) {
-            opt.config.sppm_initial_radius = std::stof(argv[++i]);
-            opt.config.sppm_enabled = true;
+
         } else if (arg == "--global-photons" && i + 1 < argc) {
             opt.config.global_photon_budget = std::stoi(argv[++i]);
             opt.config.num_photons = opt.config.global_photon_budget;

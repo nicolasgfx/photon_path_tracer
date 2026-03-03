@@ -44,7 +44,6 @@ struct Photon {
 
     // ── Path metadata ────────────────────────────────────────────────────
     uint8_t  path_flags   = 0;     // PHOTON_FLAG_* bit field
-    uint8_t  bounce_count = 0;     // total bounces at deposit
 };
 
 // ── SoA layout for GPU storage ──────────────────────────────────────
@@ -89,7 +88,6 @@ struct PhotonSoA {
 
     // Path metadata
     std::vector<uint8_t>  path_flags;      // PHOTON_FLAG_* bit field
-    std::vector<uint8_t>  bounce_count;     // total bounces at deposit
 
     // Directional bin index (for cell-bin grid)
     std::vector<uint8_t>  bin_idx;          // precomputed directional bin
@@ -127,7 +125,6 @@ struct PhotonSoA {
         source_emissive_idx.reserve(n);
         tri_id.reserve(n);
         path_flags.reserve(n);
-        bounce_count.reserve(n);
         bin_idx.reserve(n);
     }
 
@@ -150,7 +147,6 @@ struct PhotonSoA {
         source_emissive_idx.insert(source_emissive_idx.end(), other.source_emissive_idx.begin(), other.source_emissive_idx.end());
         tri_id.insert(tri_id.end(), other.tri_id.begin(), other.tri_id.end());
         path_flags.insert(path_flags.end(), other.path_flags.begin(), other.path_flags.end());
-        bounce_count.insert(bounce_count.end(), other.bounce_count.begin(), other.bounce_count.end());
         bin_idx.insert(bin_idx.end(), other.bin_idx.begin(), other.bin_idx.end());
     }
 
@@ -165,7 +161,6 @@ struct PhotonSoA {
         source_emissive_idx.resize(n, 0xFFFFu);
         tri_id.resize(n, 0xFFFFFFFFu);
         path_flags.resize(n, 0);
-        bounce_count.resize(n, 0);
         bin_idx.resize(n, 0);
     }
 
@@ -189,7 +184,6 @@ struct PhotonSoA {
         source_emissive_idx.push_back(p.source_emissive_idx);
         tri_id.push_back(p.triangle_id);
         path_flags.push_back(p.path_flags);
-        bounce_count.push_back(p.bounce_count);
         bin_idx.push_back(0);  // default bin; caller can overwrite
     }
 
@@ -209,7 +203,6 @@ struct PhotonSoA {
                               ? source_emissive_idx[i] : (uint16_t)0xFFFFu;
         p.triangle_id  = (tri_id.size() > i)        ? tri_id[i]        : 0xFFFFFFFFu;
         p.path_flags   = (path_flags.size() > i)   ? path_flags[i]   : (uint8_t)0;
-        p.bounce_count = (bounce_count.size() > i) ? bounce_count[i] : (uint8_t)0;
         return p;
     }
 
@@ -224,7 +217,6 @@ struct PhotonSoA {
         source_emissive_idx.clear();
         tri_id.clear();
         path_flags.clear();
-        bounce_count.clear();
         bin_idx.clear();
     }
 };

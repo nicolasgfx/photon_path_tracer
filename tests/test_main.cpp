@@ -59,7 +59,6 @@
 #include "photon/emitter.h"
 #include "photon/photon_bins.h"
 #include "photon/cell_bin_grid.h"
-#include "renderer/sppm.h"
 
 // ---------------------------------------------------------------------
 // Helpers
@@ -3056,8 +3055,7 @@ TEST(OptiX, PhotonDataUpload) {
     optix_renderer.upload_scene_data(scene);
 
     EXPECT_NO_THROW(optix_renderer.upload_photon_data(
-        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
-        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cpu_renderer.global_photons(), cpu_renderer.caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius))
         << "upload_photon_data should complete without error";
 }
@@ -3088,8 +3086,7 @@ TEST(OptiX, DebugFrameNonZero) {
     optix_renderer.upload_scene_data(scene);
     optix_renderer.upload_emitter_data(scene);
     optix_renderer.upload_photon_data(
-        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
-        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cpu_renderer.global_photons(), cpu_renderer.caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius);
 
     optix_renderer.resize(8, 8);
@@ -3139,8 +3136,7 @@ TEST(OptiX, NormalsDebugMode) {
     optix_renderer.build_accel(scene);
     optix_renderer.upload_scene_data(scene);
     optix_renderer.upload_photon_data(
-        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
-        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cpu_renderer.global_photons(), cpu_renderer.caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius);
 
     optix_renderer.resize(16, 16);
@@ -3191,8 +3187,7 @@ TEST(OptiX, FinalRenderProducesValid) {
     optix_renderer.upload_scene_data(scene);
     optix_renderer.upload_emitter_data(scene);
     optix_renderer.upload_photon_data(
-        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
-        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cpu_renderer.global_photons(), cpu_renderer.caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius);
 
     optix_renderer.render_final(cam, cfg, scene);
@@ -3241,8 +3236,7 @@ TEST(OptiX, ResizeFramebuffer) {
     optix_renderer.build_accel(scene);
     optix_renderer.upload_scene_data(scene);
     optix_renderer.upload_photon_data(
-        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
-        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cpu_renderer.global_photons(), cpu_renderer.caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius);
 
     // Render at 16x16
@@ -3293,8 +3287,7 @@ TEST(OptiX, CellBinGridNotBuiltAfterKnnGuide) {
     optix_renderer.upload_scene_data(scene);
     optix_renderer.upload_emitter_data(scene);
     optix_renderer.upload_photon_data(
-        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
-        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cpu_renderer.global_photons(), cpu_renderer.caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius);
 
     // Surface grid is intentionally not built — kNN guide walks hash grid
@@ -3331,8 +3324,7 @@ TEST(OptiX, CellBinGridAllocationMatchesDimensions) {
     optix_renderer.upload_scene_data(scene);
     optix_renderer.upload_emitter_data(scene);
     optix_renderer.upload_photon_data(
-        cpu_renderer.global_photons(), cpu_renderer.global_grid(),
-        cpu_renderer.caustic_photons(), cpu_renderer.caustic_grid(),
+        cpu_renderer.global_photons(), cpu_renderer.caustic_photons(),
         cfg.gather_radius, cfg.caustic_radius);
 
     const CellBinGrid& grid = optix_renderer.cell_bin_grid_for_test();
@@ -4790,292 +4782,6 @@ TEST(CellBinGrid, NormalGate_FluxConservation_SingleSurface) {
 
     EXPECT_NEAR(total_flux, ref_total, 1e-2f)
         << "Total flux should match reference implementation";
-}
-
-// =====================================================================
-//  SECTION – SPPM Progressive Photon Mapping (sppm.h)
-// =====================================================================
-
-// ── SPPMPixel initialization ────────────────────────────────────────
-
-TEST(SPPM, PixelInit) {
-    SPPMPixel p;
-    p.init(0.25f);
-
-    EXPECT_FLOAT_EQ(p.radius, 0.25f);
-    EXPECT_FLOAT_EQ(p.N, 0.f);
-    EXPECT_FALSE(p.valid);
-    EXPECT_EQ(p.M_count, 0);
-
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        EXPECT_FLOAT_EQ(p.tau.value[i], 0.f);
-        EXPECT_FLOAT_EQ(p.throughput.value[i], 0.f);
-        EXPECT_FLOAT_EQ(p.L_direct.value[i], 0.f);
-    }
-}
-
-// ── Progressive update: no photons → no change ─────────────────────
-
-TEST(SPPM, UpdateZeroPhotons) {
-    SPPMPixel p;
-    p.init(0.5f);
-    p.N = 10.f;  // some prior accumulated photons
-
-    Spectrum phi = Spectrum::constant(1.0f);
-    sppm_progressive_update(p, phi, 0);  // M = 0
-
-    // Nothing should change
-    EXPECT_FLOAT_EQ(p.radius, 0.5f);
-    EXPECT_FLOAT_EQ(p.N, 10.f);
-    for (int i = 0; i < NUM_LAMBDA; ++i)
-        EXPECT_FLOAT_EQ(p.tau.value[i], 0.f);
-}
-
-// ── Progressive update: radius shrinks monotonically ────────────────
-
-TEST(SPPM, RadiusShrinks) {
-    SPPMPixel p;
-    p.init(1.0f);
-
-    Spectrum phi = Spectrum::constant(1.0f);
-    float prev_radius = p.radius;
-
-    for (int iter = 0; iter < 20; ++iter) {
-        sppm_progressive_update(p, phi, 10);  // 10 photons per iter
-        EXPECT_LT(p.radius, prev_radius)
-            << "Radius must shrink each iteration (iter=" << iter << ")";
-        prev_radius = p.radius;
-    }
-}
-
-// ── Progressive update: N accumulates correctly with alpha ──────────
-
-TEST(SPPM, NAccumulation) {
-    SPPMPixel p;
-    p.init(1.0f);
-
-    float alpha = 0.7f;
-
-    // Iteration 1: N = 0 + alpha * M = 0.7 * 5 = 3.5
-    sppm_progressive_update(p, Spectrum::constant(1.0f), 5, alpha);
-    EXPECT_NEAR(p.N, alpha * 5.f, 1e-5f);
-
-    // Iteration 2: N = 3.5 + 0.7 * 8 = 3.5 + 5.6 = 9.1
-    sppm_progressive_update(p, Spectrum::constant(1.0f), 8, alpha);
-    EXPECT_NEAR(p.N, 3.5f + alpha * 8.f, 1e-4f);
-}
-
-// ── Progressive update: radius formula verification ─────────────────
-
-TEST(SPPM, RadiusFormula) {
-    SPPMPixel p;
-    float r0 = 0.5f;
-    p.init(r0);
-    float alpha = DEFAULT_SPPM_ALPHA;
-    int M = 12;
-
-    sppm_progressive_update(p, Spectrum::constant(1.0f), M, alpha);
-
-    // Expected: N_new = 0 + alpha * M = alpha * M
-    // ratio = N_new / (0 + M) = alpha
-    // r_new = r0 * sqrt(alpha)
-    float expected_r = r0 * sqrtf(alpha);
-    EXPECT_NEAR(p.radius, expected_r, 1e-5f);
-}
-
-// ── Progressive update: flux scales with area ratio ─────────────────
-
-TEST(SPPM, FluxAreaRatio) {
-    SPPMPixel p;
-    float r0 = 1.0f;
-    p.init(r0);
-    float alpha = DEFAULT_SPPM_ALPHA;
-
-    Spectrum phi;
-    for (int i = 0; i < NUM_LAMBDA; ++i)
-        phi.value[i] = (float)(i + 1);  // distinct values
-
-    sppm_progressive_update(p, phi, 10, alpha);
-
-    // area_ratio = (r_new/r_old)^2 = ratio = alpha * 10 / (0 + 10) = alpha
-    // tau = (0 + phi) * area_ratio = phi * alpha
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        float expected = phi.value[i] * alpha;
-        EXPECT_NEAR(p.tau.value[i], expected, 1e-4f)
-            << "tau[" << i << "] should be phi * alpha on first iteration";
-    }
-}
-
-// ── Progressive update: minimum radius clamp ────────────────────────
-
-TEST(SPPM, MinRadiusClamp) {
-    SPPMPixel p;
-    float min_r = 0.01f;
-    p.init(min_r * 0.5f);  // start below minimum
-    p.N = 1000.f;          // many prior photons to force small ratio
-
-    Spectrum phi = Spectrum::constant(0.001f);
-    sppm_progressive_update(p, phi, 1000, 0.1f, min_r);
-
-    EXPECT_GE(p.radius, min_r)
-        << "Radius should be clamped at min_radius";
-}
-
-// ── Reconstruction: invalid pixel returns zero ──────────────────────
-
-TEST(SPPM, ReconstructInvalidPixel) {
-    SPPMPixel p;
-    p.init(0.5f);
-    p.valid = false;
-
-    Spectrum L = sppm_reconstruct(p, 10, 1000);
-    for (int i = 0; i < NUM_LAMBDA; ++i)
-        EXPECT_FLOAT_EQ(L.value[i], 0.f);
-}
-
-// ── Reconstruction: zero iterations returns zero ────────────────────
-
-TEST(SPPM, ReconstructZeroIterations) {
-    SPPMPixel p;
-    p.init(0.5f);
-    p.valid = true;
-    p.tau = Spectrum::constant(100.f);
-
-    Spectrum L = sppm_reconstruct(p, 0, 1000);
-    for (int i = 0; i < NUM_LAMBDA; ++i)
-        EXPECT_FLOAT_EQ(L.value[i], 0.f);
-}
-
-// ── Reconstruction: formula verification ────────────────────────────
-
-TEST(SPPM, ReconstructFormula) {
-    SPPMPixel p;
-    float r = 0.1f;
-    p.init(r);
-    p.valid = true;
-
-    // Set known tau and L_direct
-    float tau_val = 100.f;
-    float direct_val = 50.f;
-    p.tau = Spectrum::constant(tau_val);
-    p.L_direct = Spectrum::constant(direct_val);
-
-    int k = 10;      // iterations
-    int N_p = 5000;   // photons per iteration
-
-    Spectrum L = sppm_reconstruct(p, k, N_p);
-
-    // Expected: L_indirect = tau / (0.5 * pi * r^2 * k * N_p)  [Epanechnikov]
-    //           L_direct_avg = L_direct / k
-    float denom = 0.5f * PI * r * r * (float)k * (float)N_p;
-    float expected_indirect = tau_val / denom;
-    float expected_direct   = direct_val / (float)k;
-    float expected_total    = expected_indirect + expected_direct;
-
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        EXPECT_NEAR(L.value[i], expected_total, expected_total * 1e-4f)
-            << "Reconstruction formula incorrect at bin " << i;
-    }
-}
-
-// ── SPPMBuffer initialization ───────────────────────────────────────
-
-TEST(SPPM, BufferResize) {
-    SPPMBuffer buf;
-    buf.resize(32, 16, 0.3f);
-
-    EXPECT_EQ(buf.width, 32);
-    EXPECT_EQ(buf.height, 16);
-    EXPECT_EQ((int)buf.pixels.size(), 32 * 16);
-
-    for (int y = 0; y < 16; ++y) {
-        for (int x = 0; x < 32; ++x) {
-            const auto& p = buf.at(x, y);
-            EXPECT_FLOAT_EQ(p.radius, 0.3f);
-            EXPECT_FLOAT_EQ(p.N, 0.f);
-            EXPECT_FALSE(p.valid);
-        }
-    }
-}
-
-// ── Multi-iteration convergence: radius decreases, N increases ──────
-
-TEST(SPPM, MultiIterationConvergence) {
-    SPPMPixel p;
-    p.init(0.5f);
-
-    float alpha = DEFAULT_SPPM_ALPHA;
-    Spectrum phi = Spectrum::constant(2.0f);
-
-    float prev_r = p.radius;
-    float prev_N = p.N;
-
-    for (int iter = 0; iter < 100; ++iter) {
-        sppm_progressive_update(p, phi, 5, alpha);
-
-        EXPECT_LE(p.radius, prev_r) << "radius must not increase";
-        EXPECT_GE(p.N, prev_N) << "N must not decrease";
-
-        prev_r = p.radius;
-        prev_N = p.N;
-    }
-
-    // After many iterations, radius should be significantly smaller
-    EXPECT_LT(p.radius, 0.5f * 0.5f)
-        << "After 100 iterations, radius should be < 50% of initial";
-    EXPECT_GT(p.N, 0.f)
-        << "N should have accumulated";
-}
-
-// ── sppm_gather: verify photon counting and flux accumulation ───────
-
-TEST(SPPM, GatherBasic) {
-    // Create a simple photon set and test sppm_gather
-    PhotonSoA photons;
-    const int N = 5;
-    photons.resize(N);
-
-    // Place all photons at origin, facing +Y surface
-    for (int i = 0; i < N; ++i) {
-        photons.pos_x[i] = 0.01f * (float)i;
-        photons.pos_y[i] = 0.f;
-        photons.pos_z[i] = 0.f;
-        photons.wi_x[i] = 0.f;
-        photons.wi_y[i] = 1.f;   // coming from below
-        photons.wi_z[i] = 0.f;
-        photons.norm_x[i] = 0.f;
-        photons.norm_y[i] = 1.f;
-        photons.norm_z[i] = 0.f;
-        // Set uniform spectral flux for this photon
-        Spectrum sf = Spectrum::constant(10.f);
-        for (int b = 0; b < NUM_LAMBDA; ++b)
-            photons.spectral_flux[i * NUM_LAMBDA + b] = sf.value[b];
-    }
-
-    // Build hash grid
-    HashGrid grid;
-    grid.build(photons, 0.5f);
-
-    // Create a simple diffuse material
-    Material mat;
-    mat.type = MaterialType::Lambertian;
-    mat.Kd   = Spectrum::constant(0.8f);
-
-    // Setup hit point: at origin, normal +Y, looking down from above
-    float3 hit_pos = make_f3(0, 0, 0);
-    float3 hit_normal = make_f3(0, 1, 0);
-    float3 hit_wo = make_f3(0, 0, 1);  // outgoing direction in local frame
-
-    int M_out = 0;
-    Spectrum phi = sppm_gather(
-        hit_pos, hit_normal, hit_wo,
-        mat,
-        photons, grid, 0.5f,
-        DEFAULT_SURFACE_TAU,
-        M_out);
-
-    EXPECT_GT(M_out, 0) << "Should find at least some photons";
-    EXPECT_GT(phi.value[0], 0.f) << "Flux in bin 0 should be positive";
 }
 
 // =====================================================================

@@ -58,7 +58,7 @@ Small, single-function files that fracture a concept across multiple locations.
 | `cdf.h` (24 lines, 1 function) | `random.h` | `binary_search_cdf()` is a sampling utility |
 | `adaptive_emission.h` (26 lines, 1 struct) | `emitter.h` | Stub wrapper around an alias table — already consumed there |
 | `medium.h` + `phase_function.h` | → `volume/medium.h` | Participating medium + its phase functions are one concept |
-| `sppm.h` | consider → `renderer/sppm.h` | SPPM is a rendering algorithm, not a core primitive |
+| `sppm.h` | _(removed)_ | SPPM was subsequently removed from the codebase |
 
 Also rename after merge: `nee_shared.h` ← (was `nee_sampling.h` + `nee_shared.h`). No remaining ambiguity.
 
@@ -76,7 +76,7 @@ The monolithic GPU kernel file makes reasoning about any single subsystem imposs
 | `optix_path_trace.cuh` | ~270 | `full_path_trace()` |
 | `optix_photon_trace.cuh` | ~300 | `__raygen__photon_trace` bounce loop body |
 | `optix_targeted_photon.cuh` | ~270 | `__raygen__targeted_photon_trace` |
-| `optix_sppm.cuh` | ~240 | SPPM camera pass + gather kernel |
+| `optix_sppm.cuh` | _(removed)_ | SPPM was subsequently removed from the codebase |
 | `optix_debug.cuh` | ~250 | `debug_first_hit`, heatmap overlays |
 
 Non-goal: these are compilation-unit includes (`#include` inside the `.cu`), not separately compiled translation units. OptiX requires a single module per pipeline.
@@ -177,7 +177,7 @@ src/
     optix_path_trace.cuh            ← full_path_trace()
     optix_photon_trace.cuh          ← __raygen__photon_trace bounce loop
     optix_specular.cuh              ← Dispersion, Fresnel dielectric, specular bounce
-    optix_sppm.cuh                  ← SPPM camera + gather
+    optix_sppm.cuh                  ← *(removed — SPPM deleted from codebase)*
     optix_targeted_photon.cuh       ← __raygen__targeted_photon_trace
     optix_utils.cuh                 ← CIE LUT (→ delete, share spectrum.h), float↔uint
     optix_renderer.h                ← Host pipeline class
@@ -205,7 +205,7 @@ src/
     direct_light.h                  ← CPU NEE (coverage-aware)
     nee_shared.h                    ← HD NEE math (absorb nee_sampling.h)
     pixel_lighting.h                ← Per-pixel AOV decomposition
-    sppm.h                          ← MOVED from core/
+    sppm.h                          ← *(removed — SPPM deleted from codebase)*
     emitter_points.h                ← MOVED from core/
     light_cache.h                   ← MOVED from core/ (use core/hash.h)
     tonemap.cu                      ← MOVED from hash_grid.cu
@@ -824,7 +824,7 @@ $$p_\text{HG}(\cos\theta, g) = \frac{1 - g^2}{4\pi\left(1 + g^2 - 2g\cos\theta\r
 
 $g = 0$ is isotropic, $g > 0$ is forward-scattering, $g < 0$ is back-scattering.
 
-**Code:** The surface BSDF uses `glass_sample()` (CPU) or `dev_specular_bounce()` (GPU). Medium tracking uses the shared `MediumStack` struct in `volume/medium.h` (HD — used by both CPU and GPU). CPU: `emitter.h` trace loops. GPU: `optix_path_trace_v3.cuh` (full free-flight + spectral MIS + HG + NEE), `optix_photon_trace.cuh` / `optix_targeted_photon.cuh` / `optix_sppm.cuh` (Beer–Lambert). Per-material media are uploaded via `optix_upload.cpp` (`mat_medium_id[]` + `media[]`). `HomogeneousMedium` is defined in `medium.h`.
+**Code:** The surface BSDF uses `glass_sample()` (CPU) or `dev_specular_bounce()` (GPU). Medium tracking uses the shared `MediumStack` struct in `volume/medium.h` (HD — used by both CPU and GPU). CPU: `emitter.h` trace loops. GPU: `optix_path_trace_v3.cuh` (full free-flight + spectral MIS + HG + NEE), `optix_photon_trace.cuh` / `optix_targeted_photon.cuh` (Beer–Lambert). Per-material media are uploaded via `optix_upload.cpp` (`mat_medium_id[]` + `media[]`). `HomogeneousMedium` is defined in `medium.h`.
 
 ---
 
@@ -1330,7 +1330,7 @@ A comprehensive checklist covering every documented rule and behaviour. Each ite
 |---|---|---|
 | §1.1 Delete dead code | 9/11 | `CAUSTIC_MIN_FOR_ANALYSIS` + `CAUSTIC_CV_THRESHOLD` still in `cell_cache.h` (used by hotspot detection). `photon_bins.h` intentionally retained (used by `cell_bin_grid.h`). `MULTI_MAP_SPP_GROUP` residue in test file only. |
 | §1.2 Move files | 7/7 | All files in correct directories. `emitter_points.h` was absorbed (no separate file). |
-| §1.3 Merge files | 5/5 | `nee_sampling.h` → `nee_shared.h`, `cdf.h` → `random.h`, `adaptive_emission.h` → `emitter.h`, `medium.h` + `phase_function.h` → `volume/medium.h`, `sppm.h` → `renderer/`. |
+| §1.3 Merge files | 5/5 | `nee_sampling.h` → `nee_shared.h`, `cdf.h` → `random.h`, `adaptive_emission.h` → `emitter.h`, `medium.h` + `phase_function.h` → `volume/medium.h`. `sppm.h` subsequently removed. |
 | §1.4 Decompose `optix_device.cu` | 10/10 | All 10 `.cuh` includes created. Additional `optix_camera.cuh`, `optix_guided.cuh`, `optix_nee_dispatch.cuh` beyond plan. |
 | §1.5 Eliminate CPU↔GPU duplication | 5/6 | `hash.h`, `ior_stack.h`, `bsdf_shared.h` shared HD. `DevONB` deleted. `spectrum.h` HD. Camera: `dev_generate_camera_ray` wrapper still exists (thin shim calling shared `generate_camera_ray`). |
 | §1.6 Renames | 5/7 | `DevONB`, `DevMaterialType`, `dev_fresnel_schlick`, `dev_ggx_*` cleaned up. `RENDER_MODE_*` → enum. `tonemap` moved. **Remaining:** `dev_bsdf_pdf`, `dev_bsdf_sample`, `DevBSDFSample` still use `dev_`/`Dev` prefix in `optix_bsdf.cuh`. |

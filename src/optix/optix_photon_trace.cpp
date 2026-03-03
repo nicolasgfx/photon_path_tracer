@@ -44,7 +44,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     auto t_phase_start = std::chrono::high_resolution_clock::now();
     auto t_lap = t_phase_start;
 
-    // Use override radius for the hash grid if provided (SPPM mode).
+    // Use override radius for the hash grid if provided.
     // The member gather_radius_ drives both grid build AND fill_common_params.
     gather_radius_ = (grid_radius_override > 0.f)
                          ? grid_radius_override
@@ -55,10 +55,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     int max_stored  = num_photons * DEFAULT_MAX_BOUNCES; // upper bound on stored photons
     num_photons_emitted_ = num_photons;  // record N_emitted for density normalisation
 
-    // Estimate GPU buffer footprint (bytes per photon: 9 float pos/wi/norm + Hero*(uint16+float) + 1 uint8)
-    size_t bytes_per_photon = 9 * sizeof(float)
-                             + HERO_WAVELENGTHS * (sizeof(uint16_t) + sizeof(float))
-                             + sizeof(uint8_t);
+    // Estimate GPU buffer footprint (bytes per photon: 9 float pos/wi/norm)
+    size_t bytes_per_photon = 9 * sizeof(float);
     double buf_mb = (double)(max_stored * bytes_per_photon) / (1024.0 * 1024.0);
     std::printf("[OptiX] Tracing %d photons  max_stored=%d  buf=%.1f MB  radius=%.5f  bounces=%d\n",
                 num_photons, max_stored, buf_mb, gather_radius_, config.max_bounces);
@@ -108,10 +106,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_photon_norm_x_.alloc(max_total * sizeof(float));
     d_photon_norm_y_.alloc(max_total * sizeof(float));
     d_photon_norm_z_.alloc(max_total * sizeof(float));
-    d_photon_lambda_.alloc(max_total * HERO_WAVELENGTHS * sizeof(uint16_t));
-    d_photon_flux_.alloc(max_total * HERO_WAVELENGTHS * sizeof(float));
-    d_photon_num_hero_.alloc(max_total * sizeof(uint8_t));
-    d_photon_is_caustic_pass_.alloc(max_total * sizeof(uint8_t));
 
     // Build launch params for photon trace
     LaunchParams lp = {};
@@ -264,9 +258,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     CUDA_CHECK(cudaMemcpy(d_photon_norm_x_.d_ptr, d_out_photon_norm_x_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemcpy(d_photon_norm_y_.d_ptr, d_out_photon_norm_y_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemcpy(d_photon_norm_z_.d_ptr, d_out_photon_norm_z_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
-    CUDA_CHECK(cudaMemcpy(d_photon_lambda_.d_ptr,     d_out_photon_lambda_.d_ptr, stored_count*HERO_WAVELENGTHS*sizeof(uint16_t), cudaMemcpyDeviceToDevice));
-    CUDA_CHECK(cudaMemcpy(d_photon_flux_.d_ptr,       d_out_photon_flux_.d_ptr,   stored_count*HERO_WAVELENGTHS*sizeof(float), cudaMemcpyDeviceToDevice));
-    CUDA_CHECK(cudaMemcpy(d_photon_num_hero_.d_ptr,   d_out_photon_num_hero_.d_ptr, stored_count*sizeof(uint8_t), cudaMemcpyDeviceToDevice));
 
     // Download photon data to CPU (still needed for diagnostics, irradiance
     // heatmap, and k-NN adaptive radius).
@@ -390,7 +381,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
             // D→D copy caustic photons into accumulation buffers at offset
             {
                 size_t boff  = global_count;
-                size_t hoff  = global_count * HERO_WAVELENGTHS;
                 auto   d2d   = cudaMemcpyDeviceToDevice;
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_x_.d_ptr  + boff, d_out_photon_pos_x_.d_ptr,  caustic_stored*sizeof(float), d2d));
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_y_.d_ptr  + boff, d_out_photon_pos_y_.d_ptr,  caustic_stored*sizeof(float), d2d));
@@ -401,9 +391,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_x_.d_ptr + boff, d_out_photon_norm_x_.d_ptr, caustic_stored*sizeof(float), d2d));
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_y_.d_ptr + boff, d_out_photon_norm_y_.d_ptr, caustic_stored*sizeof(float), d2d));
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_z_.d_ptr + boff, d_out_photon_norm_z_.d_ptr, caustic_stored*sizeof(float), d2d));
-                CUDA_CHECK(cudaMemcpy((uint16_t*)d_photon_lambda_.d_ptr + hoff, d_out_photon_lambda_.d_ptr, caustic_stored*HERO_WAVELENGTHS*sizeof(uint16_t), d2d));
-                CUDA_CHECK(cudaMemcpy((float*)d_photon_flux_.d_ptr      + hoff, d_out_photon_flux_.d_ptr,   caustic_stored*HERO_WAVELENGTHS*sizeof(float), d2d));
-                CUDA_CHECK(cudaMemcpy((uint8_t*)d_photon_num_hero_.d_ptr + boff, d_out_photon_num_hero_.d_ptr, caustic_stored*sizeof(uint8_t), d2d));
             }
 
             // Update stored_count to include caustic photons
@@ -543,7 +530,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
                     // D→D copy targeted photons into accumulation buffers at offset
                     {
                         size_t boff = stored_count;
-                        size_t hoff = stored_count * HERO_WAVELENGTHS;
                         auto   d2d  = cudaMemcpyDeviceToDevice;
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_x_.d_ptr  + boff, d_out_photon_pos_x_.d_ptr,  targeted_stored*sizeof(float), d2d));
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_pos_y_.d_ptr  + boff, d_out_photon_pos_y_.d_ptr,  targeted_stored*sizeof(float), d2d));
@@ -554,9 +540,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_x_.d_ptr + boff, d_out_photon_norm_x_.d_ptr, targeted_stored*sizeof(float), d2d));
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_y_.d_ptr + boff, d_out_photon_norm_y_.d_ptr, targeted_stored*sizeof(float), d2d));
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_z_.d_ptr + boff, d_out_photon_norm_z_.d_ptr, targeted_stored*sizeof(float), d2d));
-                        CUDA_CHECK(cudaMemcpy((uint16_t*)d_photon_lambda_.d_ptr + hoff, d_out_photon_lambda_.d_ptr, targeted_stored*HERO_WAVELENGTHS*sizeof(uint16_t), d2d));
-                        CUDA_CHECK(cudaMemcpy((float*)d_photon_flux_.d_ptr      + hoff, d_out_photon_flux_.d_ptr,   targeted_stored*HERO_WAVELENGTHS*sizeof(float), d2d));
-                        CUDA_CHECK(cudaMemcpy((uint8_t*)d_photon_num_hero_.d_ptr + boff, d_out_photon_num_hero_.d_ptr, targeted_stored*sizeof(uint8_t), d2d));
                     }
 
                     stored_count = (unsigned int)total;
@@ -610,12 +593,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     }
     if (stored_count > global_count)
         std::fill(caustic_pass_flags_.begin() + global_count, caustic_pass_flags_.end(), (uint8_t)2);
-
-    // Upload tags to the pre-allocated GPU buffer
-    CUDA_CHECK(cudaMemcpy(d_photon_is_caustic_pass_.d_ptr,
-                           caustic_pass_flags_.data(),
-                           stored_count * sizeof(uint8_t),
-                           cudaMemcpyHostToDevice));
 
     // ── Diagnostic: tag distribution ─────────────────────────────────
     {

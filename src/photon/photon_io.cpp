@@ -123,7 +123,6 @@ bool save_photon_cache(const std::string& path,
 
     // v3: path metadata
     ok = ok && write_vec(f, photons.path_flags);
-    ok = ok && write_vec(f, photons.bounce_count);
     ok = ok && write_vec(f, photons.tri_id);
 
     fclose(f);
@@ -206,15 +205,18 @@ bool load_photon_cache(const std::string& path,
     ok = ok && read_vec(f, grid.cell_start,       TS);
     ok = ok && read_vec(f, grid.cell_end,         TS);
 
-    // v3: path metadata
+    // v3/v4: path metadata
     if (ok && hdr.version >= 3u && hdr.has_path_data) {
         ok = ok && read_vec(f, photons.path_flags,   N);
-        ok = ok && read_vec(f, photons.bounce_count, N);
+        if (hdr.version == 3u) {
+            // v3 had bounce_count between path_flags and tri_id — skip it
+            std::vector<uint8_t> dummy;
+            ok = ok && read_vec(f, dummy, N);
+        }
         ok = ok && read_vec(f, photons.tri_id,       N);
     } else {
         // Pre-v3 cache: fill defaults
         photons.path_flags.assign(N, 0u);
-        photons.bounce_count.assign(N, 0u);
         photons.tri_id.assign(N, 0xFFFFFFFFu);
     }
 

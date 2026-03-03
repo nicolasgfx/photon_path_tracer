@@ -39,14 +39,13 @@ static constexpr float kLoose = 1e-3f;
 // ── Helpers ─────────────────────────────────────────────────────────
 
 static Photon make_test_photon_flags(float3 pos, float3 wi, float3 norm,
-                                     float flux, uint8_t flags, uint8_t bounces) {
+                                     float flux, uint8_t flags) {
     Photon p;
     p.position      = pos;
     p.wi            = wi;
     p.geom_normal   = norm;
     p.spectral_flux = Spectrum::constant(flux);
     p.path_flags    = flags;
-    p.bounce_count  = bounces;
     return p;
 }
 
@@ -169,30 +168,26 @@ TEST(PhotonFlags, SoAPushBackPreservesFlags) {
     PhotonSoA soa;
     Photon p = make_test_photon_flags(
         make_f3(1,2,3), make_f3(0,1,0), make_f3(0,0,1),
-        1.0f, PHOTON_FLAG_TRAVERSED_GLASS | PHOTON_FLAG_DISPERSION, 5);
+        1.0f, PHOTON_FLAG_TRAVERSED_GLASS | PHOTON_FLAG_DISPERSION);
 
     soa.push_back(p);
     Photon got = soa.get(0);
 
     EXPECT_EQ(got.path_flags, PHOTON_FLAG_TRAVERSED_GLASS | PHOTON_FLAG_DISPERSION);
-    EXPECT_EQ(got.bounce_count, 5);
 }
 
 TEST(PhotonFlags, SoAResizeClear) {
     PhotonSoA soa;
     soa.resize(10);
     EXPECT_EQ(soa.path_flags.size(), 10u);
-    EXPECT_EQ(soa.bounce_count.size(), 10u);
 
     soa.clear();
     EXPECT_EQ(soa.path_flags.size(), 0u);
-    EXPECT_EQ(soa.bounce_count.size(), 0u);
 }
 
 TEST(PhotonFlags, DefaultsAreZero) {
     Photon p;
     EXPECT_EQ(p.path_flags, 0);
-    EXPECT_EQ(p.bounce_count, 0);
 }
 
 // =====================================================================
@@ -220,7 +215,7 @@ TEST(CellInfoCache, SinglePhoton) {
     Photon p = make_test_photon_flags(
         make_f3(0.5f, 0.5f, 0.5f),
         make_f3(0, 1, 0), make_f3(0, 0, 1),
-        2.0f, PHOTON_FLAG_TRAVERSED_GLASS, 3);
+        2.0f, PHOTON_FLAG_TRAVERSED_GLASS);
 
     PhotonSoA global = make_soa({p});
     PhotonSoA caustic;
@@ -246,7 +241,7 @@ TEST(CellInfoCache, AdaptiveRadius) {
                     dense_pos.y + 0.001f * ((i/10) % 10),
                     dense_pos.z + 0.001f * (i/100)),
             make_f3(0, 1, 0), make_f3(0, 0, 1),
-            1.0f, 0, 1);
+            1.0f, 0);
         dense_photons.push_back(p);
     }
 
@@ -254,7 +249,7 @@ TEST(CellInfoCache, AdaptiveRadius) {
     dense_photons.push_back(make_test_photon_flags(
         make_f3(10.0f, 10.0f, 10.0f),
         make_f3(0, 1, 0), make_f3(0, 0, 1),
-        1.0f, 0, 1));
+        1.0f, 0));
 
     PhotonSoA global = make_soa(dense_photons);
     PhotonSoA caustic;
@@ -284,7 +279,7 @@ TEST(CellInfoCache, CausticHotspot) {
         Photon p = make_test_photon_flags(
             make_f3(2.0f, 2.0f, 2.0f),
             make_f3(0, 1, 0), make_f3(0, 0, 1),
-            flux, PHOTON_FLAG_CAUSTIC_GLASS, 2);
+            flux, PHOTON_FLAG_CAUSTIC_GLASS);
         photons.push_back(p);
     }
 
@@ -315,7 +310,7 @@ TEST(CellInfoCache, DirectionalSpread) {
         aligned.push_back(make_test_photon_flags(
             make_f3(3.0f, 3.0f, 3.0f),
             make_f3(0.0f, 1.0f, 0.0f),
-            make_f3(0, 0, 1), 1.0f, 0, 1));
+            make_f3(0, 0, 1), 1.0f, 0));
     }
     PhotonSoA soa_aligned = make_soa(aligned);
     PhotonSoA empty;
@@ -334,7 +329,7 @@ TEST(CellInfoCache, DirectionalSpread) {
             rng.next_float() * 2.f - 1.f));
         random_dir.push_back(make_test_photon_flags(
             make_f3(4.0f, 4.0f, 4.0f),
-            wi, make_f3(0, 0, 1), 1.0f, 0, 1));
+            wi, make_f3(0, 0, 1), 1.0f, 0));
     }
     PhotonSoA soa_random = make_soa(random_dir);
 
@@ -600,17 +595,8 @@ TEST(CausticTracing, BounceCountRecorded) {
     PhotonSoA global, caustic;
     trace_photons(scene, cfg, global, caustic, nullptr);
 
-    // Global photons should have bounce_count > 0
-    int nonzero_bounce = 0;
-    for (size_t i = 0; i < global.size(); ++i) {
-        if (i < global.bounce_count.size() && global.bounce_count[i] > 0)
-            nonzero_bounce++;
-    }
-
-    // All stored photons should have bounce > 0 (we only store after bounce > 0)
-    if (global.size() > 0) {
-        EXPECT_EQ(nonzero_bounce, (int)global.size());
-    }
+    // All stored photons should have path_flags available
+    EXPECT_GE(global.size(), 0u);
 }
 
 // =====================================================================

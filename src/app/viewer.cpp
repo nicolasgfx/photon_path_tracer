@@ -45,7 +45,14 @@
 #define TINYEXR_USE_MINIZ (0)
 #define TINYEXR_USE_STB_ZLIB (1)
 #define TINYEXR_IMPLEMENTATION
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4245 4702)  // tinyexr: signed/unsigned mismatch, unreachable code
+#endif
 #include "tinyexr.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 // stb_easy_font for debug overlay text
 #include "stb_easy_font.h"
@@ -239,9 +246,9 @@ bool write_exr(const std::string& filename,
 
     header.num_channels = 3;
     std::vector<EXRChannelInfo> ch(3);
-    strncpy(ch[0].name, "B", 255); ch[0].name[strlen("B")] = '\0';
-    strncpy(ch[1].name, "G", 255); ch[1].name[strlen("G")] = '\0';
-    strncpy(ch[2].name, "R", 255); ch[2].name[strlen("R")] = '\0';
+    snprintf(ch[0].name, sizeof(ch[0].name), "B");
+    snprintf(ch[1].name, sizeof(ch[1].name), "G");
+    snprintf(ch[2].name, sizeof(ch[2].name), "R");
     header.channels = ch.data();
 
     std::vector<int> pixel_types(3, TINYEXR_PIXELTYPE_FLOAT);
@@ -420,7 +427,7 @@ static void render_help_overlay(int win_w, int win_h,
                  DebugState::render_mode_name(debug.current_mode));
         line(ly, lx, buf, 0.35f, 1.0f, 0.55f);
     }
-    line(ly, lx, "R       Full render + snapshot (R again to cancel)");
+    line(ly, lx, "R       Save snapshot (PNG + EXR)");
     line(ly, lx, "ESC     Cancel / release / quit");
 
     // -- Statistics & Guidance --
@@ -737,6 +744,9 @@ static void key_callback(GLFWwindow* window, int key,
                           int /*scancode*/, int action, int /*mods*/) {
     if (action != GLFW_PRESS) return;
 
+    // Any key press counts as user interaction for idle tracking
+    s_app.last_input_time = std::chrono::steady_clock::now();
+
     if (key == GLFW_KEY_ESCAPE) {
         // ESC when mouse captured -> release mouse
         if (s_app.mouse_captured) {
@@ -759,20 +769,10 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // "R" -> snapshot + analysis only (rendering temporarily disabled)
+    // "R" -> save snapshot (PNG + EXR)
     if (key == GLFW_KEY_R) {
-        // TEMP: skip full render, go straight to snapshot + analysis
         s_app.snapshot_requested = true;
         return;
-        // --- Original rendering logic (commented out) ---
-        // if (s_app.render_phase == RenderPhase::Preview) {
-        //     s_app.render_phase       = RenderPhase::Rendering;
-        //     s_app.render_current_spp = 0;
-        // } else {
-        //     s_app.render_phase = RenderPhase::Preview;
-        //     s_app.camera_moved = true;
-        // }
-        // return;
     }
 
     // Left-click or M to toggle mouse capture
@@ -969,6 +969,10 @@ static void key_callback(GLFWwindow* window, int key,
 
 static void mouse_button_callback(GLFWwindow* window, int button,
                                    int action, int /*mods*/) {
+    // Any click counts as user interaction for idle tracking
+    if (action == GLFW_PRESS)
+        s_app.last_input_time = std::chrono::steady_clock::now();
+
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS
         && !s_app.mouse_captured) {
         s_app.mouse_captured = true;
@@ -1083,12 +1087,9 @@ void run_interactive(
 
     std::cout << "[Window] OptiX debug viewer (first-hit rendering)\n";
     std::cout << "  WASD = move | Mouse = look | M = release/capture mouse\n";
-    std::cout << "  ESC = cancel render / release mouse / quit | Q = quit\n";
+    std::cout << "  ESC = release mouse / quit | Q = quit\n";
     std::cout << "  F1-F9 = debug toggles | TAB = cycle mode\n";
-    std::cout << "  R = load render_config.json + full path tracing render -> " << opt.output_file << "\n";
-    if (opt.config.sppm_enabled)
-        std::cout << "      (SPPM mode: " << opt.config.sppm_iterations << " iterations, r="
-                  << opt.config.sppm_initial_radius << ")\n";
+    std::cout << "  R = save snapshot (PNG + EXR)\n";
     std::cout << "  H = toggle help overlay\n";
     std::cout << "  1-9 = switch scene\n";
     std::cout << "  +/- = adjust light brightness (re-traces photons)\n";
@@ -1101,12 +1102,9 @@ void run_interactive(
     int frame = 0;
     auto last_time = std::chrono::high_resolution_clock::now();
 
-    // Initialise idle-SPPM state
+    // Initialise idle tracking
     s_app.last_input_time = std::chrono::steady_clock::now();
-    s_app.sppm_active = false;
-    s_app.sppm_iteration = 0;
-    s_app.sppm_buffers_allocated = false;
-    s_app.sppm_photon_maps_built = 0;
+    s_app.base_num_photons = opt.config.num_photons;
 
     // Original emission spectra (for light brightness scaling)
     std::vector<Spectrum> original_Le;
@@ -1191,6 +1189,8 @@ void run_interactive(
                 s_app.active_cam_speed    = prof.cam_speed;
                 s_app.active_scene_index  = idx;
                 s_app.camera_moved        = true;
+                s_app.last_input_time     = std::chrono::steady_clock::now();
+                s_app.base_num_photons    = opt.config.num_photons;
                 opt.scene_file            = obj_path;
 
                 // Re-capture original emission for brightness scaling
@@ -1226,6 +1226,7 @@ void run_interactive(
             frame = 0;
             optix_renderer.clear_buffers();
             s_app.camera_moved  = true;
+            s_app.last_input_time = std::chrono::steady_clock::now();
         }
 
         // ── Light brightness change (+/- keys) ─────────────────────────
@@ -1257,6 +1258,7 @@ void run_interactive(
             std::cout << "[Light] Photon re-trace done in " << photon_ms << " ms\n";
 
             s_app.camera_moved  = true;
+            s_app.last_input_time = std::chrono::steady_clock::now();
         }
 
         // Mouse cursor position for hover inspectors.
@@ -1337,65 +1339,47 @@ void run_interactive(
 
         // Reset progressive accumulation if camera moved
         if (s_app.camera_moved) {
-            // Cancel any in-progress full render and return to preview
-            if (s_app.render_phase == RenderPhase::Rendering) {
-                s_app.render_phase = RenderPhase::Preview;
+            // ── Exit idle/full-quality mode on any user interaction ──
+            if (s_app.idle_rendering_active) {
+                opt.config.num_photons = s_app.base_num_photons;
                 optix_renderer.set_preview_mode(true);
-            }
-            // Tear down incremental SPPM if active
-            if (s_app.sppm_active) {
-                s_app.sppm_active = false;
-                s_app.sppm_iteration = 0;
-                s_app.sppm_photon_maps_built = 0;
-                if (s_app.sppm_buffers_allocated) {
-                    optix_renderer.free_sppm_buffers();
-                    s_app.sppm_buffers_allocated = false;
-                }
-                optix_renderer.set_preview_mode(true);
-                std::cout << "[SPPM-incr] Cancelled (camera moved)\n";
+                optix_renderer.trace_photons(scene, opt.config);
+                s_app.idle_rendering_active = false;
             }
             optix_renderer.clear_buffers();
             frame = 0;
             s_app.camera_moved = false;
         }
 
-        // ── Idle detection → SPPM transition ────────────────────────
-        if (!s_app.sppm_active && !s_app.camera_moved
-            && s_app.render_phase == RenderPhase::Preview) {
-            auto idle_now = std::chrono::steady_clock::now();
+        // ── Idle-to-full-quality transition ──────────────────────────
+        {
+            auto now_steady = std::chrono::steady_clock::now();
             float idle_sec = std::chrono::duration<float>(
-                idle_now - s_app.last_input_time).count();
-            if (idle_sec >= SPPM_IDLE_TIMEOUT_SEC) {
-                s_app.sppm_active = true;
-                s_app.sppm_iteration = 0;
-                s_app.sppm_photon_maps_built = 0;
-                s_app.sppm_start_time = std::chrono::steady_clock::now();
+                now_steady - s_app.last_input_time).count();
 
-                if (!s_app.sppm_buffers_allocated) {
-                    optix_renderer.init_sppm_buffers(
-                        win_w, win_h, opt.config.sppm_initial_radius);
-                    s_app.sppm_buffers_allocated = true;
-                }
+            if (idle_sec > IDLE_TIMEOUT_SEC && !s_app.idle_rendering_active) {
+                // Boost photon budget and re-trace for higher quality
+                opt.config.num_photons = static_cast<int>(
+                    s_app.base_num_photons * IDLE_PHOTON_BUDGET_FACTOR);
+                optix_renderer.trace_photons(
+                    scene, opt.config, 0.f, s_app.idle_photon_seed++);
+                optix_renderer.set_preview_mode(false);
                 optix_renderer.clear_buffers();
                 frame = 0;
-                std::cout << "[SPPM-incr] Activated (idle " << idle_sec << "s)\n";
+                s_app.idle_rendering_active = true;
+                printf("[Idle] Full-quality mode (%.0fx photons)\n",
+                       IDLE_PHOTON_BUDGET_FACTOR);
+            }
+
+            // Periodic photon re-trace during idle accumulation
+            if (s_app.idle_rendering_active && frame > 0 &&
+                (frame % MULTI_MAP_SPP_GROUP) == 0) {
+                optix_renderer.trace_photons(
+                    scene, opt.config, 0.f, s_app.idle_photon_seed++);
             }
         }
 
-        // ── Handle Rendering phase transition (R key pressed) ─────────
-        // TEMP: rendering disabled — R key goes straight to snapshot + analysis
-        // if (s_app.render_phase == RenderPhase::Rendering &&
-        //     s_app.render_current_spp == 0) {
-        //     optix_renderer.set_preview_mode(false);
-        //     optix_renderer.clear_buffers();
-        //     frame = 0;
-        //     s_app.render_timing_active = true;
-        //     s_app.render_start_time = std::chrono::steady_clock::now();
-        //     std::cout << "[Render] Starting full-quality render ("
-        //               << s_app.render_target_spp << " SPP)...\n";
-        // }
-
-        // ── Handle "R" key: save timestamped snapshot (PNG + JSON) ───
+        // ── Handle "R" key: save timestamped snapshot (PNG + EXR) ───
         if (s_app.snapshot_requested) {
             s_app.snapshot_requested = false;
 
@@ -1514,17 +1498,6 @@ void run_interactive(
                     jf << "    \"surface_tau\": " << stats.surface_tau << ",\n";
                     jf << "    \"light_scale\": " << s_app.light_scale << "\n";
                     jf << "  },\n";
-
-                    // SPPM status (if active during snapshot)
-                    if (s_app.sppm_active) {
-                        jf << "  \"sppm_interactive\": {\n";
-                        jf << "    \"iterations\": " << s_app.sppm_iteration << ",\n";
-                        jf << "    \"photon_maps_built\": " << s_app.sppm_photon_maps_built << ",\n";
-                        auto sppm_elapsed = std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - s_app.sppm_start_time).count();
-                        jf << "    \"elapsed_sec\": " << sppm_elapsed << "\n";
-                        jf << "  },\n";
-                    }
 
                     // Scene
                     jf << "  \"scene\": {\n";
@@ -1676,62 +1649,13 @@ void run_interactive(
                         flag,
                         2.0f);
                 }
-            } else if (s_app.sppm_active) {
-                // ── Incremental SPPM (one iteration per frame) ──────
-                int k = s_app.sppm_iteration;
-
-                // 1. Camera pass: store visible points per pixel
-                optix_renderer.sppm_camera_pass(camera, k, opt.config);
-
-                // 2. Photon pass: rebuild photon map
-                float max_radius = opt.config.sppm_initial_radius;
-                optix_renderer.sppm_photon_pass(scene, opt.config, max_radius, k);
-                s_app.sppm_photon_maps_built++;
-
-                // 3. Gather pass: progressive radius refinement
-                optix_renderer.sppm_gather_pass(camera, k, opt.config);
-
-                // Download tonemapped result for display
-                optix_renderer.download_framebuffer(display_fb);
-
-                s_app.sppm_iteration++;
-
-                // Power-of-2 auto-snapshot (iteration 1,2,4,8,16,...)
-                if (k > 0 && (k & (k - 1)) == 0) {
-                    std::cout << "[SPPM-incr] Auto-snapshot at iteration " << k << "\n";
-                    s_app.snapshot_requested = true;
-                }
             } else {
                 // Normal path tracing (1 spp per iteration, progressive accumulation)
                 optix_renderer.render_debug_frame(
                     camera, frame, s_app.debug.current_mode, 1);
                 optix_renderer.download_framebuffer(display_fb);
 
-                // Track SPP during Rendering phase
-                if (s_app.render_phase == RenderPhase::Rendering) {
-                    s_app.render_current_spp++;
-                    std::cout << "[Render] SPP " << s_app.render_current_spp
-                              << " / " << s_app.render_target_spp << "\n";
 
-                    if (s_app.render_current_spp >= s_app.render_target_spp) {
-                        // Full render complete — record timing
-                        auto render_end = std::chrono::steady_clock::now();
-                        s_app.last_render_ms = std::chrono::duration<double, std::milli>(
-                            render_end - s_app.render_start_time).count();
-                        s_app.render_timing_active = false;
-
-                        std::cout << "[Render] Full render complete ("
-                                  << s_app.render_current_spp << " SPP, "
-                                  << s_app.last_render_ms << " ms). Snapshotting...\n";
-
-                        // Trigger auto-snapshot, then return to preview
-                        s_app.snapshot_requested = true;
-                        s_app.render_phase = RenderPhase::Preview;
-                        optix_renderer.set_preview_mode(true);
-                        // Don't clear buffers yet — snapshot needs the accumulated result.
-                        // The next camera_moved or R press will clear.
-                    }
-                }
             }
 
             frame++;
@@ -1774,9 +1698,6 @@ void run_interactive(
         // Draw stats overlay (S key)
         render_stats_overlay(win_w, win_h, s_app, &optix_renderer);
 
-        // Draw rendering-phase progress banner (temporarily disabled)
-        // if (s_app.render_phase == RenderPhase::Rendering) { ... }
-
         // Draw hover-cell overlay (when map mode toggles are active and
         // mouse is released for inspection).
         render_hover_cell_overlay(
@@ -1789,16 +1710,12 @@ void run_interactive(
         // ── Title-bar status update ─────────────────────────────────
         {
             char title[256];
-            if (s_app.sppm_active) {
-                auto sppm_elapsed = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - s_app.sppm_start_time).count();
+            if (s_app.idle_rendering_active)
                 std::snprintf(title, sizeof(title),
-                    "Photon Tracer  [SPPM iter %d | %.1fs]",
-                    s_app.sppm_iteration, sppm_elapsed);
-            } else {
+                    "Photon Tracer  [Full SPP %d]", frame);
+            else
                 std::snprintf(title, sizeof(title),
                     "Photon Tracer  [Preview SPP %d]", frame);
-            }
             glfwSetWindowTitle(window, title);
         }
 

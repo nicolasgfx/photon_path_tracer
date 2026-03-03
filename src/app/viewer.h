@@ -30,18 +30,11 @@ struct Options {
 };
 
 // -- Application state accessible from main ---------------------------
-enum class RenderPhase { Preview, Rendering };
-
 struct AppState {
     DebugState debug;
-    bool       snapshot_requested = false;  // R key: save PNG + JSON snapshot
+    bool       snapshot_requested = false;  // R key: save PNG + EXR snapshot
     bool       volume_enabled   = DEFAULT_VOLUME_ENABLED;  // V key toggle
     bool       use_dense_grid   = DEFAULT_USE_DENSE_GRID;  // G key toggle
-
-    // Render phase state machine (Preview = fast interactive, Rendering = full quality)
-    RenderPhase render_phase       = RenderPhase::Preview;
-    int         render_target_spp  = 256;   // samples to accumulate in Rendering phase
-    int         render_current_spp = 0;     // samples accumulated so far
 
     // Scene switching (keys 1-9, 0)
     int        scene_switch_requested = -1;  // -1 = none, 0-9 = profile index
@@ -79,13 +72,11 @@ struct AppState {
     bool       first_mouse = true;
     bool       camera_moved = false;  // flag to reset accumulation
 
-    // ── Interactive SPPM state ──────────────────────────────────────
+    // ── Idle tracking ───────────────────────────────────────────────
     std::chrono::steady_clock::time_point last_input_time;   // timestamp of last user interaction
-    bool       sppm_active            = false;   // true = SPPM refinement running
-    int        sppm_iteration         = 0;       // current SPPM iteration count
-    bool       sppm_buffers_allocated = false;   // GPU SPPM buffers live?
-    int        sppm_photon_maps_built = 0;       // photon maps built in this session
-    std::chrono::steady_clock::time_point sppm_start_time;   // when SPPM started (for timing)
+    bool idle_rendering_active = false;  // true = full-quality accumulation after idle timeout
+    int  idle_photon_seed      = 0;      // incrementing seed for multi-map decorrelation
+    int  base_num_photons      = 0;      // original config.num_photons (before idle boost)
 };
 
 // Global application state — shared between main() and viewer internals

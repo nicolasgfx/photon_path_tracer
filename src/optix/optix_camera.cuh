@@ -1,12 +1,6 @@
 #pragma once
 
-// optix_camera.cuh – SPPM forward declarations + camera ray generation
-
-// ── Forward declarations for SPPM device functions ──────────────────
-static __forceinline__ __device__ void sppm_camera_pass(
-    int px, int py, int pixel_idx,
-    float3 origin, float3 direction, PCGRng& rng);
-static __forceinline__ __device__ void sppm_gather_pass(int px, int py, int pixel_idx);
+// optix_camera.cuh – camera ray generation from OptiX launch params
 
 // =====================================================================
 // Camera ray helper — calls the unified generate_camera_ray() from

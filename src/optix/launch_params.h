@@ -117,9 +117,6 @@ struct LaunchParams {
     float*    photon_norm_x;   // geometric surface normal at photon hit
     float*    photon_norm_y;
     float*    photon_norm_z;
-    uint16_t* photon_lambda;   // [num_photons * HERO_WAVELENGTHS] wavelength bins
-    float*    photon_flux;     // [num_photons * HERO_WAVELENGTHS] per-hero flux
-    uint8_t*  photon_num_hero; // [num_photons] valid hero count per photon
     int       num_photons;
     int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
     int       photon_map_seed;     // RNG seed offset for multi-map re-tracing
@@ -142,7 +139,6 @@ struct LaunchParams {
     float gather_radius;
 
     // ── Dual-budget caustic system (Jensen 1996 two-budget) ─────────
-    uint8_t*  photon_is_caustic_pass; // [num_photons] 3-value tag (0/1/2)
     int       num_caustic_emitted;    // N_caustic for normalisation
     float     caustic_gather_radius;  // gather radius for caustic budget
     int       caustic_only_store;     // 1 = only store caustic photons
@@ -263,39 +259,6 @@ struct LaunchParams {
     float     vol_grid_cell_size;
     uint32_t  vol_grid_table_size;
     float     vol_gather_radius;       // search radius for volume kNN
-
-    // ── SPPM (Stochastic Progressive Photon Mapping) ────────────────
-    // Per-pixel visible-point buffers (written by camera pass, read by
-    // gather kernel).  All buffers are [width * height].
-    int    sppm_mode;                ///< 0 = off, 1 = camera pass, 2 = gather pass
-    int    sppm_iteration;           ///< current iteration index k
-    int    sppm_photons_per_iter;    ///< N_p photons emitted this iteration
-    float  sppm_alpha;               ///< radius shrinkage factor α
-    float  sppm_min_radius;          ///< floor for radius shrinkage
-
-    // Visible-point storage (written by SPPM camera pass)
-    float*    sppm_vp_pos_x;         ///< [W*H] hit position x
-    float*    sppm_vp_pos_y;         ///< [W*H] hit position y
-    float*    sppm_vp_pos_z;         ///< [W*H] hit position z
-    float*    sppm_vp_norm_x;        ///< [W*H] geometric normal x (for gather filtering)
-    float*    sppm_vp_norm_y;        ///< [W*H] geometric normal y
-    float*    sppm_vp_norm_z;        ///< [W*H] geometric normal z
-    float*    sppm_vp_wo_x;          ///< [W*H] outgoing direction (local) x
-    float*    sppm_vp_wo_y;          ///< [W*H] outgoing direction (local) y
-    float*    sppm_vp_wo_z;          ///< [W*H] outgoing direction (local) z
-    uint32_t* sppm_vp_mat_id;        ///< [W*H] material index
-    float*    sppm_vp_uv_u;          ///< [W*H] texture coord u
-    float*    sppm_vp_uv_v;          ///< [W*H] texture coord v
-    float*    sppm_vp_throughput;     ///< [W*H*NUM_LAMBDA] camera-path throughput
-    uint8_t*  sppm_vp_valid;         ///< [W*H] 1 = valid visible point
-
-    // Progressive per-pixel state (persists across iterations)
-    float*    sppm_radius;           ///< [W*H] current gather radius r_i
-    float*    sppm_N;                ///< [W*H] accumulated photon count N_i
-    float*    sppm_tau;              ///< [W*H*NUM_LAMBDA] accumulated flux τ_i
-
-    // Direct lighting accumulator (summed over iterations)
-    float*    sppm_L_direct;         ///< [W*H*NUM_LAMBDA] summed NEE radiance
 
 #ifdef PPT_USE_OPTIX
     OptixTraversableHandle traversable;

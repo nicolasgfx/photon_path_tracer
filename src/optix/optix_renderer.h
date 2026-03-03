@@ -165,7 +165,6 @@ public:
     /// the hash grid on CPU, uploads the grid + photon data back.
     /// @param grid_radius_override  If > 0, use this radius instead of
     ///     config.gather_radius for the hash grid build and GPU cell size.
-    ///     Used by SPPM to size cells for the SPPM initial radius.
     void trace_photons(const Scene& scene, const RenderConfig& config,
                        float grid_radius_override = 0.f,
                        int photon_map_seed = 0);
@@ -186,38 +185,6 @@ public:
     /// Launch the full final render (multi-spp, blocking)
     void render_final(const Camera& camera, const RenderConfig& config,
                       const Scene& scene);
-
-    /// Launch the SPPM render (iterative photon mapping, blocking).
-    /// Each iteration: camera pass → photon trace → gather → update.
-    /// @param iter_callback  Optional callback invoked after every completed
-    ///                       iteration.  Arguments: (0-based iteration index,
-    ///                       current accumulated FrameBuffer).  Use this to
-    ///                       save per-iteration PNGs for progress tracking.
-    void render_sppm(const Camera& camera, const RenderConfig& config,
-                     const Scene& scene,
-                     std::function<void(int, const FrameBuffer&)> iter_callback = {});
-
-    // ── Incremental SPPM (one iteration per frame, for interactive idle-refine) ──
-
-    /// Allocate SPPM per-pixel GPU buffers and initialise radii.
-    /// Call once when transitioning from Preview → SPPM.
-    void init_sppm_buffers(int w, int h, float initial_radius);
-
-    /// Free all SPPM per-pixel GPU buffers.
-    /// Call when transitioning from SPPM → Preview.
-    void free_sppm_buffers();
-
-    /// SPPM camera pass: trace camera rays, store visible points per pixel.
-    void sppm_camera_pass(const Camera& camera, int iteration,
-                          const RenderConfig& config);
-
-    /// SPPM photon pass: re-trace photon map with given seed.
-    void sppm_photon_pass(const Scene& scene, const RenderConfig& config,
-                          float max_radius, int seed);
-
-    /// SPPM gather pass: query hash grid per pixel, progressive radius update.
-    void sppm_gather_pass(const Camera& camera, int iteration,
-                          const RenderConfig& config);
 
     /// Download the linear HDR float4 buffer from GPU.
     /// If convert_from_spectrum is true, runs spectrum→HDR conversion first.
@@ -505,9 +472,6 @@ private:
     DeviceBuffer d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_;
     DeviceBuffer d_photon_wi_x_,  d_photon_wi_y_,  d_photon_wi_z_;
     DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
-    DeviceBuffer d_photon_lambda_, d_photon_flux_;
-    DeviceBuffer d_photon_num_hero_;  // uint8_t [num_photons] hero count per photon
-    DeviceBuffer d_photon_is_caustic_pass_;  // uint8_t [num_photons] 0=global, 1=caustic-targeted
     // Dense grid device buffers
     DeviceBuffer d_dense_sorted_indices_, d_dense_cell_start_, d_dense_cell_end_;
 
@@ -586,19 +550,6 @@ private:
     DeviceBuffer d_vol_photon_lambda_, d_vol_photon_flux_;
     DeviceBuffer d_vol_grid_sorted_indices_, d_vol_grid_cell_start_, d_vol_grid_cell_end_;
 
-    // SPPM per-pixel buffers (GPU side)
-    DeviceBuffer d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_;
-    DeviceBuffer d_sppm_vp_norm_x_, d_sppm_vp_norm_y_, d_sppm_vp_norm_z_;
-    DeviceBuffer d_sppm_vp_wo_x_,   d_sppm_vp_wo_y_,   d_sppm_vp_wo_z_;
-    DeviceBuffer d_sppm_vp_mat_id_;
-    DeviceBuffer d_sppm_vp_uv_u_, d_sppm_vp_uv_v_;
-    DeviceBuffer d_sppm_vp_throughput_;   // float [W*H*NUM_LAMBDA]
-    DeviceBuffer d_sppm_vp_valid_;        // uint8_t [W*H]
-    DeviceBuffer d_sppm_radius_;          // float [W*H]
-    DeviceBuffer d_sppm_N_;               // float [W*H]
-    DeviceBuffer d_sppm_tau_;             // float [W*H*NUM_LAMBDA]
-    DeviceBuffer d_sppm_L_direct_;        // float [W*H*NUM_LAMBDA]
-
     int  width_       = DEFAULT_IMAGE_WIDTH;
     int  height_      = DEFAULT_IMAGE_HEIGHT;
     bool initialised_ = false;
@@ -618,7 +569,6 @@ private:
     float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
     bool  histogram_only_ = false;  // C key: use only histogram conclusions
     bool  preview_mode_   = true;   // interactive preview: skip kNN, 3-bounce cap
-    bool  sppm_buffers_live_ = false;  // true = SPPM per-pixel buffers are allocated
 
     // GPU device info (populated in init())
     std::string gpu_name_;

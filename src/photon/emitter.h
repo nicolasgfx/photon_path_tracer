@@ -221,7 +221,6 @@ inline void trace_photons(const Scene& scene,
                         vp.position = ray.origin + ray.direction * t_ff;
                         vp.wi = ray.direction * (-1.f);
                         vp.path_flags = path_flags;
-                        vp.bounce_count = (uint8_t)bounce;
                         for (int b = 0; b < NUM_LAMBDA; ++b) {
                             float sig_s_b = med.sigma_s.value[b];
                             float sig_t_b = fmaxf(med.sigma_t.value[b], 1e-20f);
@@ -269,7 +268,6 @@ inline void trace_photons(const Scene& scene,
                 p.spectral_flux = spectral_flux;
                 p.source_emissive_idx = source_emissive;
                 p.path_flags    = path_flags;
-                p.bounce_count  = (uint8_t)bounce;
 
                 // Fill hero wavelength bins for GPU gather compatibility.
                 {
@@ -500,7 +498,6 @@ inline void trace_targeted_caustic_emission(
                     p.spectral_flux     = spectral_flux;
                     p.source_emissive_idx = source_emissive;
                     p.path_flags        = path_flags;
-                    p.bounce_count      = (uint8_t)bounce;
 
                     {
                         PCGRng hero_rng = PCGRng::seed(

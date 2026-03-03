@@ -63,7 +63,6 @@ extern "C" {
 #include "optix/optix_guided.cuh"
 #include "optix/optix_path_trace_v3.cuh"
 #include "optix/optix_camera.cuh"
-#include "optix/optix_sppm.cuh"
 
 // =====================================================================
 extern "C" __global__ void __raygen__render() {
@@ -71,30 +70,6 @@ extern "C" __global__ void __raygen__render() {
     int px = idx.x;
     int py = idx.y;
     int pixel_idx = py * params.width + px;
-
-    // ── SPPM mode dispatch ──────────────────────────────────────────
-    if (params.sppm_mode == 1) {
-        // SPPM camera pass: trace to first diffuse hit, store visible point
-        PCGRng rng = PCGRng::seed(
-            (uint64_t)pixel_idx * 1000
-                + (uint64_t)params.sppm_iteration * 100000,
-            (uint64_t)pixel_idx + 1);
-
-        float3 origin, direction;
-        generate_camera_ray_from_params(px, py, rng, origin, direction);
-
-        // Reset valid flag before camera pass
-        params.sppm_vp_valid[pixel_idx] = 0;
-
-        sppm_camera_pass(px, py, pixel_idx, origin, direction, rng);
-        return;
-    }
-
-    if (params.sppm_mode == 2) {
-        // SPPM gather pass: density estimation + progressive update
-        sppm_gather_pass(px, py, pixel_idx);
-        return;
-    }
 
     // ── Adaptive sampling: skip inactive pixels ──────────────────────
     // active_mask is nullptr when adaptive sampling is disabled.

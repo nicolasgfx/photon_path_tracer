@@ -44,7 +44,6 @@
 | **Guided path tracing** | Per-cell Fibonacci-sphere directional histograms, MIS-combined with BSDF |
 | **Glossy continuation** | Multi-bounce glossy reflections with guided + BSDF mixture sampling |
 | **Adjoint correction** | η² transport-mode tagging at refractive interfaces (photon vs camera) |
-| **Progressive mode** | SPPM (Hachisuka & Jensen 2009) |
 | **Hero wavelengths** | PBRT v4-style, 4 stratified wavelengths per photon |
 | **Tone mapping** | ACES Filmic |
 | **Sub-pixel sampling** | Stratified jittered (16 SPP default) |
@@ -213,9 +212,6 @@ Build artifacts: `build/photon_tracer.exe`, `build/ppt_tests.exe`,
 | `--adaptive-radius` | off | Enable k-NN adaptive gather radius |
 | `--knn-k N` | 100 | k-NN neighbour count |
 | `--max-specular-chain N` | 12 | Camera specular bounce limit |
-| `--sppm` | off | Enable SPPM progressive mode |
-| `--sppm-iterations N` | 64 | SPPM iteration count |
-| `--sppm-radius R` | 0.1 | SPPM initial radius |
 
 ### Output Files
 
@@ -227,9 +223,6 @@ Each render writes timestamped files to `output/`:
 | `render_YYYYMMDD_HHMMSS_nee_direct.png` | Direct lighting only |
 | `render_YYYYMMDD_HHMMSS_photon_indirect.png` | Photon indirect only |
 | `out_debug_nee.png` | Quick NEE preview at render start |
-
-SPPM mode writes per-iteration:
-`output/sppm_…_iter0001.png` … `_final.png`.
 
 ---
 
@@ -369,7 +362,6 @@ src/
     types.h                      Vec3, Ray, HitRecord, ONB
     spectrum.h                   Spectral arithmetic, CIE XYZ, blackbody
     random.h                     PCG RNG
-    sppm.h                       SPPM progressive update & reconstruction
     alias_table.h / cdf.h        O(1) alias sampling, CDF build
     cell_cache.h                 CellInfoCache — per-cell statistics
     nee_sampling.h               Coverage-aware NEE helpers
@@ -444,7 +436,6 @@ build\ppt_tests.exe --gtest_filter="KDTree*"
 | CellInfoCache | Build, query, adaptive radius, hotspot detection |
 | Dispersion | Cauchy IOR, per-bin Fresnel, spectral splitting |
 | IOR stack | Push/pop/overflow, nested dielectric tracking |
-| SPPM | Progressive convergence, radius shrinkage |
 | CPU↔GPU parity | Direct PSNR > 40 dB; indirect PSNR > 30 dB; energy ≤ 5% |
 | OptiX integration | Init, GAS build, scene upload, debug frame, resize |
 

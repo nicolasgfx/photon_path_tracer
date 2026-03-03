@@ -7,34 +7,6 @@
 
 // == BSDF evaluate / pdf / sample (Lambertian + Cook-Torrance glossy) =
 
-// Diffuse-only BSDF for photon density estimation (§6 standard practice).
-// The full Cook-Torrance specular lobe produces unbounded variance
-// in fixed-radius kernel estimators, creating coloured hotspots.
-// Use the Lambertian component only for density estimation;
-// NEE (direct lighting) still uses the full BSDF.
-__forceinline__ __device__
-Spectrum bsdf_evaluate_diffuse(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
-    if (wi.z <= 0.f || wo.z <= 0.f) return Spectrum::zero();
-    Spectrum Kd = dev_get_Kd(mat_id, uv);
-
-    // Clearcoat: diffuse portion attenuated by coat energy loss
-    if (dev_is_clearcoat(mat_id)) {
-        float coat_w = dev_get_clearcoat_weight(mat_id);
-        float ior = dev_get_ior(mat_id);
-        float coat_f0t = (ior - 1.f) / (ior + 1.f);
-        float coat_F0  = coat_f0t * coat_f0t;
-        float cos_o = fabsf(wo.z);
-        float Fr = fresnel_schlick(cos_o, coat_F0);
-        Spectrum f;
-        for (int i = 0; i < NUM_LAMBDA; ++i)
-            f.value[i] = (1.f - coat_w * Fr) * Kd.value[i] * INV_PI;
-        return f;
-    }
-
-    // Fabric: diffuse base only (no sheen for photon gather)
-    return Kd * INV_PI;
-}
-
 __forceinline__ __device__
 Spectrum bsdf_evaluate(uint32_t mat_id, float3 wo, float3 wi, float2 uv) {
     if (wi.z <= 0.f || wo.z <= 0.f) return Spectrum::zero();

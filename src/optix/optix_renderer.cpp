@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
 // optix_renderer.cpp -- OptiX host-side rendering & photon tracing
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
@@ -62,7 +62,6 @@ void fill_common_params(
     const DeviceBuffer& photon_wi_z,
     const DeviceBuffer& photon_norm_x, const DeviceBuffer& photon_norm_y,
     const DeviceBuffer& photon_norm_z,
-    const DeviceBuffer& photon_lambda, const DeviceBuffer& photon_flux,
     const DeviceBuffer& emissive_idx, const DeviceBuffer& emissive_cdf,
     int num_emissive, float total_emissive_power,
     OptixTraversableHandle gas_handle,
@@ -134,8 +133,8 @@ void fill_common_params(
         ? reinterpret_cast<GpuTexDesc*>(tex_descs_buf.d_ptr) : nullptr;
     p.num_textures  = num_textures;
 
-    // num_photons = flux bytes / (HERO_WAVELENGTHS * sizeof(float))
-    p.num_photons       = (int)(photon_flux.bytes / (HERO_WAVELENGTHS * sizeof(float)));
+    // num_photons from position buffer
+    p.num_photons       = (int)(photon_pos_x.bytes / sizeof(float));
     p.num_photons_emitted = num_photons_emitted;
     p.photon_map_seed   = 0;  // default; overridden by render_final for multi-map
     p.photon_pos_x      = const_cast<float*>(photon_pos_x.as<float>());
@@ -147,9 +146,6 @@ void fill_common_params(
     p.photon_norm_x     = photon_norm_x.d_ptr ? const_cast<float*>(photon_norm_x.as<float>()) : nullptr;
     p.photon_norm_y     = photon_norm_y.d_ptr ? const_cast<float*>(photon_norm_y.as<float>()) : nullptr;
     p.photon_norm_z     = photon_norm_z.d_ptr ? const_cast<float*>(photon_norm_z.as<float>()) : nullptr;
-    p.photon_lambda     = const_cast<uint16_t*>(photon_lambda.as<uint16_t>());
-    p.photon_flux       = const_cast<float*>(photon_flux.as<float>());
-    p.photon_num_hero   = nullptr;  // set by callers that have the buffer
 
     p.gather_radius       = gather_radius;
 
@@ -274,7 +270,6 @@ void OptixRenderer::render_debug_frame(
         d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
         d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-        d_photon_lambda_, d_photon_flux_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
         gas_handle_,
@@ -289,15 +284,11 @@ void OptixRenderer::render_debug_frame(
     fill_cell_grid_params(lp);
     fill_dense_grid_params(lp);
 
-    // Dual-budget caustic params
-    lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
-        ? d_photon_is_caustic_pass_.as<uint8_t>() : nullptr;
     lp.num_caustic_emitted    = num_caustic_emitted_;
     lp.caustic_gather_radius  = caustic_radius_;
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
-    lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
 
     lp.samples_per_pixel = spp;
     lp.max_bounces       = DEFAULT_MAX_BOUNCES;
@@ -351,7 +342,6 @@ void OptixRenderer::render_one_spp(
         d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
         d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
         d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-        d_photon_lambda_, d_photon_flux_,
         d_emissive_indices_, d_emissive_cdf_,
         num_emissive_, 0.f,
         gas_handle_,
@@ -366,15 +356,11 @@ void OptixRenderer::render_one_spp(
     fill_cell_grid_params(lp);
     fill_dense_grid_params(lp);
 
-    // Dual-budget caustic params
-    lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
-        ? d_photon_is_caustic_pass_.as<uint8_t>() : nullptr;
     lp.num_caustic_emitted    = num_caustic_emitted_;
     lp.caustic_gather_radius  = caustic_radius_;
 
     // Runtime toggle (V key) overrides the compile-time default
     lp.volume_enabled = (int)runtime_volume_enabled_;
-    lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
 
     lp.samples_per_pixel  = 1;
     lp.max_bounces        = max_bounces;
@@ -514,7 +500,6 @@ void OptixRenderer::render_final(
             d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
             d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
             d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-            d_photon_lambda_, d_photon_flux_,
             d_emissive_indices_, d_emissive_cdf_,
             num_emissive_, 0.f,
             gas_handle_,
@@ -529,15 +514,11 @@ void OptixRenderer::render_final(
         fill_cell_grid_params(lp);
         fill_dense_grid_params(lp);
 
-        // Dual-budget caustic params
-        lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
-            ? d_photon_is_caustic_pass_.as<uint8_t>() : nullptr;
         lp.num_caustic_emitted    = num_caustic_emitted_;
         lp.caustic_gather_radius  = caustic_radius_;
 
         // Runtime toggle (V key) overrides the RenderConfig value
         lp.volume_enabled = (int)runtime_volume_enabled_;
-        lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
 
         lp.samples_per_pixel  = 1;
         lp.max_bounces        = config.max_bounces;
@@ -762,243 +743,6 @@ void OptixRenderer::render_final(
               << "  (~" << (int)mrays << " Mray-bounces/s)\n";
 }
 
-// =====================================================================
-// render_sppm() -- SPPM iterative rendering
-//   For each iteration k:
-//     1. Camera pass   â†’ store visible points per pixel
-//     2. Photon pass   â†’ trace new photons, rebuild hash grid
-//     3. Gather pass   â†’ query hash grid per pixel, progressive update
-// =====================================================================
-void OptixRenderer::render_sppm(
-    const Camera& camera, const RenderConfig& config, const Scene& scene,
-    std::function<void(int, const FrameBuffer&)> iter_callback)
-{
-    resize(config.image_width, config.image_height);
-
-    const int K    = config.sppm_iterations;
-    const int N_p  = config.num_photons;
-    const size_t pixels = (size_t)width_ * height_;
-
-    std::cout << "[SPPM] Starting: " << width_ << "x" << height_
-              << " @ " << K << " iterations, " << N_p << " photons/iter\n";
-
-    // â”€â”€ Allocate SPPM per-pixel buffers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    d_sppm_vp_pos_x_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_pos_y_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_pos_z_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_norm_x_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_norm_y_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_norm_z_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_wo_x_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_wo_y_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_wo_z_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_mat_id_.alloc_zero(pixels * sizeof(uint32_t));
-    d_sppm_vp_uv_u_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_uv_v_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_throughput_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
-    d_sppm_vp_valid_.alloc_zero(pixels * sizeof(uint8_t));
-    d_sppm_N_.alloc_zero(pixels * sizeof(float));
-    d_sppm_tau_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
-    d_sppm_L_direct_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
-
-    // Initialise per-pixel radius to sppm_initial_radius
-    {
-        std::vector<float> init_radius(pixels, config.sppm_initial_radius);
-        d_sppm_radius_.upload(init_radius);
-    }
-
-    auto t_start = std::chrono::high_resolution_clock::now();
-
-    for (int k = 0; k < K; ++k) {
-        // â”€â”€ 1. Camera pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        {
-            LaunchParams lp = {};
-            fill_common_params(lp,
-                d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
-                width_, height_, camera,
-                d_vertices_, d_normals_, d_texcoords_,
-                d_material_ids_,
-                d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
-                d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
-                (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
-                d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
-                d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
-                d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-                d_photon_lambda_, d_photon_flux_,
-                d_emissive_indices_, d_emissive_cdf_,
-                num_emissive_, 0.f,
-                gas_handle_,
-                gather_radius_,
-                num_photons_emitted_,
-                d_nee_direct_buffer_, d_photon_indirect_buffer_,
-                d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
-                d_prof_photon_gather_, d_prof_bsdf_,
-                false, 0.f, 0.f, 0.f, 0, 0.f);  // volume disabled for SPPM
-            fill_clearcoat_fabric_params(lp);
-            fill_cell_grid_params(lp);
-            fill_dense_grid_params(lp);
-
-            // Dual-budget caustic params
-            lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
-                ? d_photon_is_caustic_pass_.as<uint8_t>() : nullptr;
-            lp.num_caustic_emitted    = num_caustic_emitted_;
-            lp.caustic_gather_radius  = caustic_radius_;
-
-            lp.sppm_mode            = 1;  // camera pass
-            lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
-            lp.sppm_iteration       = k;
-            lp.sppm_photons_per_iter = N_p;
-            lp.sppm_alpha           = config.sppm_alpha;
-            lp.sppm_min_radius      = config.sppm_min_radius;
-            lp.max_bounces          = config.max_bounces;
-            lp.max_bounces_camera   = DEFAULT_MAX_BOUNCES_CAMERA;
-            lp.min_bounces_rr       = DEFAULT_MIN_BOUNCES_RR;
-            lp.rr_threshold         = DEFAULT_RR_THRESHOLD;
-            lp.guide_fraction       = guide_fraction_;
-            lp.samples_per_pixel    = 1;
-            lp.frame_number         = k;
-            lp.exposure             = exposure_;
-
-            // SPPM visible-point buffers
-            lp.sppm_vp_pos_x     = d_sppm_vp_pos_x_.as<float>();
-            lp.sppm_vp_pos_y     = d_sppm_vp_pos_y_.as<float>();
-            lp.sppm_vp_pos_z     = d_sppm_vp_pos_z_.as<float>();
-            lp.sppm_vp_norm_x    = d_sppm_vp_norm_x_.as<float>();
-            lp.sppm_vp_norm_y    = d_sppm_vp_norm_y_.as<float>();
-            lp.sppm_vp_norm_z    = d_sppm_vp_norm_z_.as<float>();
-            lp.sppm_vp_wo_x      = d_sppm_vp_wo_x_.as<float>();
-            lp.sppm_vp_wo_y      = d_sppm_vp_wo_y_.as<float>();
-            lp.sppm_vp_wo_z      = d_sppm_vp_wo_z_.as<float>();
-            lp.sppm_vp_mat_id    = d_sppm_vp_mat_id_.as<uint32_t>();
-            lp.sppm_vp_uv_u      = d_sppm_vp_uv_u_.as<float>();
-            lp.sppm_vp_uv_v      = d_sppm_vp_uv_v_.as<float>();
-            lp.sppm_vp_throughput = d_sppm_vp_throughput_.as<float>();
-            lp.sppm_vp_valid      = d_sppm_vp_valid_.as<uint8_t>();
-            lp.sppm_radius        = d_sppm_radius_.as<float>();
-            lp.sppm_N             = d_sppm_N_.as<float>();
-            lp.sppm_tau           = d_sppm_tau_.as<float>();
-            lp.sppm_L_direct      = d_sppm_L_direct_.as<float>();
-
-            d_launch_params_.ensure_alloc(sizeof(LaunchParams));
-            CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
-                                   sizeof(LaunchParams), cudaMemcpyHostToDevice));
-            last_launch_params_host_ = lp;
-
-            OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
-                reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
-                sizeof(LaunchParams), &sbt_,
-                width_, height_, 1));
-            CUDA_CHECK(cudaDeviceSynchronize());
-        }
-
-        // â”€â”€ 2. Photon pass (reuse existing infrastructure) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Override hash grid cell size for SPPM: cells must be >= 2 Ã— max
-        // per-pixel radius so the 3Ã—3Ã—3 neighbour query always covers the
-        // full gather disc.  On iteration 0 the max radius is the initial
-        // SPPM radius; on subsequent iterations it can only shrink.
-        float max_radius = (k == 0) ? config.sppm_initial_radius
-                                    : config.sppm_initial_radius; // radii only shrink
-        trace_photons(scene, config, /*grid_radius_override=*/ max_radius);
-
-        // â”€â”€ 3. Gather pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        {
-            LaunchParams lp = {};
-            fill_common_params(lp,
-                d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
-                width_, height_, camera,
-                d_vertices_, d_normals_, d_texcoords_,
-                d_material_ids_,
-                d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
-                d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
-                (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
-                d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
-                d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
-                d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-                d_photon_lambda_, d_photon_flux_,
-                d_emissive_indices_, d_emissive_cdf_,
-                num_emissive_, 0.f,
-                gas_handle_,
-                gather_radius_,
-                num_photons_emitted_,
-                d_nee_direct_buffer_, d_photon_indirect_buffer_,
-                d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
-                d_prof_photon_gather_, d_prof_bsdf_,
-                false, 0.f, 0.f, 0.f, 0, 0.f);
-            fill_clearcoat_fabric_params(lp);
-            fill_cell_grid_params(lp);
-            fill_dense_grid_params(lp);
-
-            // Dual-budget caustic params
-            lp.photon_is_caustic_pass = d_photon_is_caustic_pass_.d_ptr
-                ? d_photon_is_caustic_pass_.as<uint8_t>() : nullptr;
-            lp.num_caustic_emitted    = num_caustic_emitted_;
-            lp.caustic_gather_radius  = caustic_radius_;
-
-            lp.sppm_mode            = 2;  // gather pass
-            lp.exposure             = exposure_;
-            lp.photon_num_hero = d_photon_num_hero_.d_ptr ? d_photon_num_hero_.as<uint8_t>() : nullptr;
-            lp.sppm_iteration       = k;
-            lp.sppm_photons_per_iter = N_p;
-            lp.sppm_alpha           = config.sppm_alpha;
-            lp.sppm_min_radius      = config.sppm_min_radius;
-            lp.samples_per_pixel    = 1;
-
-            lp.sppm_vp_pos_x     = d_sppm_vp_pos_x_.as<float>();
-            lp.sppm_vp_pos_y     = d_sppm_vp_pos_y_.as<float>();
-            lp.sppm_vp_pos_z     = d_sppm_vp_pos_z_.as<float>();
-            lp.sppm_vp_norm_x    = d_sppm_vp_norm_x_.as<float>();
-            lp.sppm_vp_norm_y    = d_sppm_vp_norm_y_.as<float>();
-            lp.sppm_vp_norm_z    = d_sppm_vp_norm_z_.as<float>();
-            lp.sppm_vp_wo_x      = d_sppm_vp_wo_x_.as<float>();
-            lp.sppm_vp_wo_y      = d_sppm_vp_wo_y_.as<float>();
-            lp.sppm_vp_wo_z      = d_sppm_vp_wo_z_.as<float>();
-            lp.sppm_vp_mat_id    = d_sppm_vp_mat_id_.as<uint32_t>();
-            lp.sppm_vp_uv_u      = d_sppm_vp_uv_u_.as<float>();
-            lp.sppm_vp_uv_v      = d_sppm_vp_uv_v_.as<float>();
-            lp.sppm_vp_throughput = d_sppm_vp_throughput_.as<float>();
-            lp.sppm_vp_valid      = d_sppm_vp_valid_.as<uint8_t>();
-            lp.sppm_radius        = d_sppm_radius_.as<float>();
-            lp.sppm_N             = d_sppm_N_.as<float>();
-            lp.sppm_tau           = d_sppm_tau_.as<float>();
-            lp.sppm_L_direct      = d_sppm_L_direct_.as<float>();
-
-            d_launch_params_.ensure_alloc(sizeof(LaunchParams));
-            CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
-                                   sizeof(LaunchParams), cudaMemcpyHostToDevice));
-            last_launch_params_host_ = lp;
-
-            OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
-                reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
-                sizeof(LaunchParams), &sbt_,
-                width_, height_, 1));
-            CUDA_CHECK(cudaDeviceSynchronize());
-        }
-
-        // â”€â”€ Per-iteration callback (e.g. save progress PNG) â”€â”€â”€â”€â”€â”€â”€â”€
-        if (iter_callback) {
-            FrameBuffer iter_fb;
-            download_framebuffer(iter_fb);
-            iter_callback(k, iter_fb);
-        }
-
-        // â”€â”€ Progress â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        {
-            auto t_now = std::chrono::high_resolution_clock::now();
-            double elapsed = std::chrono::duration<double>(t_now - t_start).count();
-            float pct = 100.f * (k + 1) / K;
-            double eta = (k + 1 < K)
-                ? elapsed * (K - k - 1) / (k + 1) : 0.0;
-            std::printf("\r[SPPM] %3d%%  iter %d/%d  %.1fs  ETA %.1fs   ",
-                        (int)pct, k + 1, K, elapsed, eta);
-            std::fflush(stdout);
-        }
-    }
-
-    auto t_end = std::chrono::high_resolution_clock::now();
-    double total_s = std::chrono::duration<double>(t_end - t_start).count();
-    std::printf("\n[SPPM] Done in %.1f s  (%d iterations, %d photons/iter)\n",
-                total_s, K, N_p);
-}
 
 // print_kernel_profiling() -- download GPU timing data and print summary
 // Gated by ENABLE_STATS — heavy D2H copy, not needed in production.
@@ -1178,239 +922,6 @@ HitRecord OptixRenderer::trace_single_ray(float3 origin, float3 direction) const
 // Incremental SPPM helpers (one iteration per frame for interactive idle-refine)
 // =====================================================================
 
-// ── fill_sppm_lp_buffers() ─────────────────────────────────────────
-// Wires the per-pixel SPPM device buffers into an already-filled
-// LaunchParams.  Avoids duplicating 30 lines in camera/gather passes.
-static void fill_sppm_lp_buffers(
-    LaunchParams& lp,
-    const DeviceBuffer& vp_pos_x,  const DeviceBuffer& vp_pos_y,  const DeviceBuffer& vp_pos_z,
-    const DeviceBuffer& vp_norm_x, const DeviceBuffer& vp_norm_y, const DeviceBuffer& vp_norm_z,
-    const DeviceBuffer& vp_wo_x,   const DeviceBuffer& vp_wo_y,   const DeviceBuffer& vp_wo_z,
-    const DeviceBuffer& vp_mat_id,
-    const DeviceBuffer& vp_uv_u,   const DeviceBuffer& vp_uv_v,
-    const DeviceBuffer& vp_throughput, const DeviceBuffer& vp_valid,
-    const DeviceBuffer& radius,    const DeviceBuffer& N,
-    const DeviceBuffer& tau,       const DeviceBuffer& L_direct,
-    const DeviceBuffer& photon_num_hero,
-    const DeviceBuffer& photon_is_caustic_pass,
-    int num_caustic_emitted, float caustic_radius)
-{
-    lp.sppm_vp_pos_x     = const_cast<float*>(vp_pos_x.as<float>());
-    lp.sppm_vp_pos_y     = const_cast<float*>(vp_pos_y.as<float>());
-    lp.sppm_vp_pos_z     = const_cast<float*>(vp_pos_z.as<float>());
-    lp.sppm_vp_norm_x    = const_cast<float*>(vp_norm_x.as<float>());
-    lp.sppm_vp_norm_y    = const_cast<float*>(vp_norm_y.as<float>());
-    lp.sppm_vp_norm_z    = const_cast<float*>(vp_norm_z.as<float>());
-    lp.sppm_vp_wo_x      = const_cast<float*>(vp_wo_x.as<float>());
-    lp.sppm_vp_wo_y      = const_cast<float*>(vp_wo_y.as<float>());
-    lp.sppm_vp_wo_z      = const_cast<float*>(vp_wo_z.as<float>());
-    lp.sppm_vp_mat_id    = const_cast<uint32_t*>(vp_mat_id.as<uint32_t>());
-    lp.sppm_vp_uv_u      = const_cast<float*>(vp_uv_u.as<float>());
-    lp.sppm_vp_uv_v      = const_cast<float*>(vp_uv_v.as<float>());
-    lp.sppm_vp_throughput = const_cast<float*>(vp_throughput.as<float>());
-    lp.sppm_vp_valid      = const_cast<uint8_t*>(vp_valid.as<uint8_t>());
-    lp.sppm_radius        = const_cast<float*>(radius.as<float>());
-    lp.sppm_N             = const_cast<float*>(N.as<float>());
-    lp.sppm_tau           = const_cast<float*>(tau.as<float>());
-    lp.sppm_L_direct      = const_cast<float*>(L_direct.as<float>());
-
-    lp.photon_num_hero = photon_num_hero.d_ptr
-        ? const_cast<uint8_t*>(photon_num_hero.as<uint8_t>()) : nullptr;
-    lp.photon_is_caustic_pass = photon_is_caustic_pass.d_ptr
-        ? const_cast<uint8_t*>(photon_is_caustic_pass.as<uint8_t>()) : nullptr;
-    lp.num_caustic_emitted   = num_caustic_emitted;
-    lp.caustic_gather_radius = caustic_radius;
-}
-
-// ── init_sppm_buffers() ────────────────────────────────────────────
-void OptixRenderer::init_sppm_buffers(int w, int h, float initial_radius)
-{
-    resize(w, h);
-    const size_t pixels = (size_t)w * h;
-
-    d_sppm_vp_pos_x_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_pos_y_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_pos_z_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_norm_x_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_norm_y_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_norm_z_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_wo_x_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_wo_y_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_wo_z_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_mat_id_.alloc_zero(pixels * sizeof(uint32_t));
-    d_sppm_vp_uv_u_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_uv_v_.alloc_zero(pixels * sizeof(float));
-    d_sppm_vp_throughput_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
-    d_sppm_vp_valid_.alloc_zero(pixels * sizeof(uint8_t));
-    d_sppm_N_.alloc_zero(pixels * sizeof(float));
-    d_sppm_tau_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
-    d_sppm_L_direct_.alloc_zero(pixels * NUM_LAMBDA * sizeof(float));
-
-    // Initialise per-pixel radius
-    {
-        std::vector<float> init_r(pixels, initial_radius);
-        d_sppm_radius_.upload(init_r);
-    }
-
-    sppm_buffers_live_ = true;
-    std::cout << "[SPPM-incr] Buffers allocated (" << w << "x" << h << ")\n";
-}
-
-// ── free_sppm_buffers() ────────────────────────────────────────────
-void OptixRenderer::free_sppm_buffers()
-{
-    d_sppm_vp_pos_x_.free();   d_sppm_vp_pos_y_.free();   d_sppm_vp_pos_z_.free();
-    d_sppm_vp_norm_x_.free();  d_sppm_vp_norm_y_.free();  d_sppm_vp_norm_z_.free();
-    d_sppm_vp_wo_x_.free();    d_sppm_vp_wo_y_.free();    d_sppm_vp_wo_z_.free();
-    d_sppm_vp_mat_id_.free();
-    d_sppm_vp_uv_u_.free();    d_sppm_vp_uv_v_.free();
-    d_sppm_vp_throughput_.free();
-    d_sppm_vp_valid_.free();
-    d_sppm_radius_.free();
-    d_sppm_N_.free();
-    d_sppm_tau_.free();
-    d_sppm_L_direct_.free();
-
-    sppm_buffers_live_ = false;
-}
-
-// ── sppm_camera_pass() ─────────────────────────────────────────────
-void OptixRenderer::sppm_camera_pass(
-    const Camera& camera, int iteration, const RenderConfig& config)
-{
-    LaunchParams lp = {};
-    fill_common_params(lp,
-        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
-        width_, height_, camera,
-        d_vertices_, d_normals_, d_texcoords_,
-        d_material_ids_,
-        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
-        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
-        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
-        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
-        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
-        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-        d_photon_lambda_, d_photon_flux_,
-        d_emissive_indices_, d_emissive_cdf_,
-        num_emissive_, 0.f,
-        gas_handle_,
-        gather_radius_,
-        num_photons_emitted_,
-        d_nee_direct_buffer_, d_photon_indirect_buffer_,
-        d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
-        d_prof_photon_gather_, d_prof_bsdf_,
-        false, 0.f, 0.f, 0.f, 0, 0.f);
-    fill_clearcoat_fabric_params(lp);
-    fill_cell_grid_params(lp);
-    fill_dense_grid_params(lp);
-
-    fill_sppm_lp_buffers(lp,
-        d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_,
-        d_sppm_vp_norm_x_, d_sppm_vp_norm_y_, d_sppm_vp_norm_z_,
-        d_sppm_vp_wo_x_,   d_sppm_vp_wo_y_,   d_sppm_vp_wo_z_,
-        d_sppm_vp_mat_id_,
-        d_sppm_vp_uv_u_,   d_sppm_vp_uv_v_,
-        d_sppm_vp_throughput_, d_sppm_vp_valid_,
-        d_sppm_radius_,    d_sppm_N_,
-        d_sppm_tau_,       d_sppm_L_direct_,
-        d_photon_num_hero_, d_photon_is_caustic_pass_,
-        num_caustic_emitted_, caustic_radius_);
-
-    lp.sppm_mode             = 1;  // camera pass
-    lp.sppm_iteration        = iteration;
-    lp.sppm_photons_per_iter = config.num_photons;
-    lp.sppm_alpha            = config.sppm_alpha;
-    lp.sppm_min_radius       = config.sppm_min_radius;
-    lp.max_bounces           = config.max_bounces;
-    lp.max_bounces_camera    = DEFAULT_MAX_BOUNCES_CAMERA;
-    lp.min_bounces_rr        = DEFAULT_MIN_BOUNCES_RR;
-    lp.rr_threshold          = DEFAULT_RR_THRESHOLD;
-    lp.guide_fraction        = guide_fraction_;
-    lp.samples_per_pixel     = 1;
-    lp.frame_number          = iteration;
-    lp.exposure              = exposure_;
-
-    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
-    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
-                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
-    last_launch_params_host_ = lp;
-
-    OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
-        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
-        sizeof(LaunchParams), &sbt_,
-        width_, height_, 1));
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
-
-// ── sppm_photon_pass() ─────────────────────────────────────────────
-void OptixRenderer::sppm_photon_pass(
-    const Scene& scene, const RenderConfig& config,
-    float max_radius, int seed)
-{
-    trace_photons(scene, config, max_radius, seed);
-}
-
-// ── sppm_gather_pass() ─────────────────────────────────────────────
-void OptixRenderer::sppm_gather_pass(
-    const Camera& camera, int iteration, const RenderConfig& config)
-{
-    LaunchParams lp = {};
-    fill_common_params(lp,
-        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
-        width_, height_, camera,
-        d_vertices_, d_normals_, d_texcoords_,
-        d_material_ids_,
-        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
-        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
-        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
-        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
-        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
-        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-        d_photon_lambda_, d_photon_flux_,
-        d_emissive_indices_, d_emissive_cdf_,
-        num_emissive_, 0.f,
-        gas_handle_,
-        gather_radius_,
-        num_photons_emitted_,
-        d_nee_direct_buffer_, d_photon_indirect_buffer_,
-        d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
-        d_prof_photon_gather_, d_prof_bsdf_,
-        false, 0.f, 0.f, 0.f, 0, 0.f);
-    fill_clearcoat_fabric_params(lp);
-    fill_cell_grid_params(lp);
-    fill_dense_grid_params(lp);
-
-    fill_sppm_lp_buffers(lp,
-        d_sppm_vp_pos_x_,  d_sppm_vp_pos_y_,  d_sppm_vp_pos_z_,
-        d_sppm_vp_norm_x_, d_sppm_vp_norm_y_, d_sppm_vp_norm_z_,
-        d_sppm_vp_wo_x_,   d_sppm_vp_wo_y_,   d_sppm_vp_wo_z_,
-        d_sppm_vp_mat_id_,
-        d_sppm_vp_uv_u_,   d_sppm_vp_uv_v_,
-        d_sppm_vp_throughput_, d_sppm_vp_valid_,
-        d_sppm_radius_,    d_sppm_N_,
-        d_sppm_tau_,       d_sppm_L_direct_,
-        d_photon_num_hero_, d_photon_is_caustic_pass_,
-        num_caustic_emitted_, caustic_radius_);
-
-    lp.sppm_mode             = 2;  // gather pass
-    lp.sppm_iteration        = iteration;
-    lp.sppm_photons_per_iter = config.num_photons;
-    lp.sppm_alpha            = config.sppm_alpha;
-    lp.sppm_min_radius       = config.sppm_min_radius;
-    lp.samples_per_pixel     = 1;
-    lp.exposure              = exposure_;
-
-    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
-    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
-                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
-    last_launch_params_host_ = lp;
-
-    OPTIX_CHECK(optixLaunch(pipeline_, nullptr,
-        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
-        sizeof(LaunchParams), &sbt_,
-        width_, height_, 1));
-    CUDA_CHECK(cudaDeviceSynchronize());
-}
 
 // ── download_hdr_buffer() ──────────────────────────────────────────
 void OptixRenderer::download_hdr_buffer(

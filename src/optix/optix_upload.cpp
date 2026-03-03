@@ -225,12 +225,6 @@ void OptixRenderer::upload_photon_data(
     d_photon_norm_x_.upload(global_photons.norm_x);
     d_photon_norm_y_.upload(global_photons.norm_y);
     d_photon_norm_z_.upload(global_photons.norm_z);
-    d_photon_lambda_.upload(global_photons.lambda_bin);
-    d_photon_flux_.upload(global_photons.flux);
-    if (!global_photons.num_hero.empty())
-        d_photon_num_hero_.upload(global_photons.num_hero);
-    else
-        d_photon_num_hero_.free();
 
     std::cout << "[OptiX] Uploaded " << global_photons.size()
               << " photons to device\n";
