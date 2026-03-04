@@ -3,7 +3,6 @@
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
 #include "core/config.h"
-#include "photon/dense_grid.h"
 #include "renderer/tonemap.h"
 
 #include <cuda_runtime.h>
@@ -146,15 +145,6 @@ void OptixRenderer::render_caustic_debug_pass(
     d_photon_norm_y_.upload(caustic_soa.norm_y);
     d_photon_norm_z_.upload(caustic_soa.norm_z);
 
-    // Build and upload dense grid for the caustic-only set
-    {
-        DenseGridData dg = build_dense_grid(caustic_soa, DENSE_GRID_CELL_SIZE);
-        d_dense_sorted_indices_.upload(dg.sorted_indices);
-        d_dense_cell_start_.upload(dg.cell_start);
-        d_dense_cell_end_.upload(dg.cell_end);
-        stored_dense_grid_ = std::move(dg);
-    }
-
     auto t_setup = std::chrono::high_resolution_clock::now();
     double ms_setup = std::chrono::duration<double, std::milli>(t_setup - t_start).count();
     std::printf("[CausticDebug] Caustic map uploaded (%.1f ms)\n", ms_setup);
@@ -194,7 +184,6 @@ void OptixRenderer::render_caustic_debug_pass(
             config.volume_albedo, config.volume_samples, config.volume_max_t);
         fill_clearcoat_fabric_params(lp);
         fill_cell_grid_params(lp);
-        fill_dense_grid_params(lp);
 
         // Disable dual-budget for this debug pass — all photons are
         // tag-2 caustic, so single-budget gather with N_caustic is correct.
@@ -247,15 +236,6 @@ void OptixRenderer::render_caustic_debug_pass(
     d_photon_norm_x_.upload(stored_photons_.norm_x);
     d_photon_norm_y_.upload(stored_photons_.norm_y);
     d_photon_norm_z_.upload(stored_photons_.norm_z);
-
-    // Re-build dense grid for the restored full photon set
-    {
-        DenseGridData dg = build_dense_grid(stored_photons_, DENSE_GRID_CELL_SIZE);
-        d_dense_sorted_indices_.upload(dg.sorted_indices);
-        d_dense_cell_start_.upload(dg.cell_start);
-        d_dense_cell_end_.upload(dg.cell_end);
-        stored_dense_grid_ = std::move(dg);
-    }
 
     auto t_end = std::chrono::high_resolution_clock::now();
     double ms_total = std::chrono::duration<double, std::milli>(t_end - t_start).count();

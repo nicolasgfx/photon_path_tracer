@@ -233,12 +233,14 @@ struct HashGrid {
     // out_max_dist2: tangential distance² to the k-th neighbor
     //
     // max_layers: safety limit (default 4 = 9×9×9 = 729 cells)
+    // When KNN_3X3X3_FILTER is true, max_layers is capped to 1
+    // (3×3×3 = 27 cells) to avoid pulling distant hash-collision photons.
     void knn_shell_expansion(
         float3 pos, float3 normal, int k, float tau,
         const PhotonSoA& photons,
         std::vector<uint32_t>& out_indices,
         float& out_max_dist2,
-        int max_layers = 4) const
+        int max_layers = KNN_3X3X3_FILTER ? 1 : 4) const
     {
         out_indices.clear();
         out_max_dist2 = std::numeric_limits<float>::max();

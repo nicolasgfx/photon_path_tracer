@@ -158,12 +158,20 @@ DirMapEntry dev_build_direction_map_entry(
     const uint32_t origin_tri = hit.triangle_id;
 
     // Compute cell range covering the search sphere
+    int cc_x = (int)floorf(pos.x / cell_size);
+    int cc_y = (int)floorf(pos.y / cell_size);
+    int cc_z = (int)floorf(pos.z / cell_size);
     int cx0 = (int)floorf((pos.x - r_search) / cell_size);
     int cy0 = (int)floorf((pos.y - r_search) / cell_size);
     int cz0 = (int)floorf((pos.z - r_search) / cell_size);
     int cx1 = (int)floorf((pos.x + r_search) / cell_size);
     int cy1 = (int)floorf((pos.y + r_search) / cell_size);
     int cz1 = (int)floorf((pos.z + r_search) / cell_size);
+    // KNN_3X3X3_FILTER: clamp to ±1 cell from centre (27 cells max)
+    if constexpr (KNN_3X3X3_FILTER) {
+        cx0 = max(cx0, cc_x - 1); cy0 = max(cy0, cc_y - 1); cz0 = max(cz0, cc_z - 1);
+        cx1 = min(cx1, cc_x + 1); cy1 = min(cy1, cc_y + 1); cz1 = min(cz1, cc_z + 1);
+    }
 
     // Visited-key deduplication (max 27 cells in 3×3×3)
     uint32_t visited_keys[27];

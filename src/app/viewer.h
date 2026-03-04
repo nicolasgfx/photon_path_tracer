@@ -35,7 +35,6 @@ struct AppState {
     DebugState debug;
     bool       snapshot_requested = false;  // R key: save PNG + EXR snapshot
     bool       volume_enabled   = DEFAULT_VOLUME_ENABLED;  // V key toggle
-    bool       use_dense_grid   = true;                        // G key toggle
 
     // Scene switching (keys 1-9, 0)
     int        scene_switch_requested = -1;  // -1 = none, 0-9 = profile index

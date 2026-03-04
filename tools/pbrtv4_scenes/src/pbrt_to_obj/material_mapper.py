@@ -820,9 +820,9 @@ def create_emissive_material(name: str, area_light_params: list[PbrtParam],
         if p.type == 'blackbody' and p.name == 'L':
             temp_K = p.value[0] if isinstance(p.value, list) else float(p.value)
             rgb = blackbody_to_rgb(temp_K)
-            # Scale by the PBRT scale factor (normalized — actual intensity 
-            # will be set through light_scale in camera JSON)
-            mtl.Ke = rgb
+            # Apply the PBRT scale factor to Ke so the OBJ/MTL carries the
+            # correct absolute emission intensity (matches RGB-emission path).
+            mtl.Ke = [v * float(light_scale) for v in rgb]
             mtl.comments.append(f"# Blackbody {temp_K}K, PBRT scale={light_scale}")
             return mtl
 

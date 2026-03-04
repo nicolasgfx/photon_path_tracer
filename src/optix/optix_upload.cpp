@@ -6,7 +6,6 @@
 //   upload_photon_data(), upload_emitter_data()
 // ---------------------------------------------------------------------
 #include "optix/optix_renderer.h"
-#include "photon/dense_grid.h"
 
 #include <cuda_runtime.h>
 #include <vector>
@@ -269,18 +268,6 @@ void OptixRenderer::upload_photon_data(
 
     // Copy into stored_photons_
     stored_photons_ = global_photons;
-
-    // ── Build and upload dense grid ───────────────────────────────────
-    {
-        DenseGridData dg = build_dense_grid(stored_photons_, DENSE_GRID_CELL_SIZE);
-        d_dense_sorted_indices_.upload(dg.sorted_indices);
-        d_dense_cell_start_.upload(dg.cell_start);
-        d_dense_cell_end_.upload(dg.cell_end);
-        std::printf("[OptiX] Dense grid: %dx%dx%d = %d cells  (%zu photons)\n",
-                    dg.dim_x, dg.dim_y, dg.dim_z, dg.total_cells(),
-                    dg.sorted_indices.size());
-        stored_dense_grid_ = std::move(dg);
-    }
 
     // ── Build and upload direction-map hash grid ─────────────────────
     {

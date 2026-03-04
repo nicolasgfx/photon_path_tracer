@@ -121,14 +121,6 @@ struct LaunchParams {
     int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
     int       photon_map_seed;     // RNG seed offset for multi-map re-tracing
 
-    // ── Dense 3D grid (surface photon lookup) ────────────────────────
-    uint32_t* dense_sorted_indices;     // [num_photons] sorted by cell
-    uint32_t* dense_cell_start;         // [total_cells]
-    uint32_t* dense_cell_end;           // [total_cells]
-    int       dense_valid;              // 1 = built, 0 = not available
-    float     dense_min_x, dense_min_y, dense_min_z;  // AABB min
-    float     dense_cell_size;          // cell edge length
-    int       dense_dim_x, dense_dim_y, dense_dim_z;  // grid resolution
     float     guide_radius;               // tangential distance cutoff for Epanechnikov kernel
 
     // ── Direction-map hash grid (Teschner spatial hash for kNN) ──────

@@ -16,7 +16,6 @@
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
 #include "photon/cell_bin_grid.h"
-#include "photon/dense_grid.h"
 #include "photon/hash_grid.h"
 #include "photon/direction_map.h"
 #include "debug/stats_collector.h"
@@ -281,8 +280,7 @@ public:
     /// Called after fill_common_params at every launch site.
     void fill_cell_grid_params(LaunchParams& lp) const;
 
-    /// Fill dense grid params into LaunchParams.
-    void fill_dense_grid_params(LaunchParams& lp);
+    /// Fill direction-map hash grid params into LaunchParams.
     void fill_dm_hash_grid_params(LaunchParams& lp);
 
     /// Fill direction map params into LaunchParams.
@@ -357,9 +355,9 @@ public:
     /// Access the stored photon data and hash grid (available after
     /// trace_photons() completes)
     const PhotonSoA& photons() const { return stored_photons_; }
-    const DenseGridData& dense_grid() const { return stored_dense_grid_; }
+    const HashGrid& dm_hash_grid() const { return dm_hash_grid_; }
 
-    /// Cell-bin grid test accessors (returns empty grid when dense grid is disabled)
+    /// Cell-bin grid test accessors
     const CellBinGrid& cell_bin_grid_for_test() const { return cell_bin_grid_; }
     size_t cell_bin_grid_bytes_for_test() const {
         return (size_t)cell_bin_grid_.total_cells() * cell_bin_grid_.bin_count * sizeof(PhotonBin);
@@ -495,8 +493,6 @@ private:
     DeviceBuffer d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_;
     DeviceBuffer d_photon_wi_x_,  d_photon_wi_y_,  d_photon_wi_z_;
     DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
-    // Dense grid device buffers
-    DeviceBuffer d_dense_sorted_indices_, d_dense_cell_start_, d_dense_cell_end_;
 
     // Direction-map hash grid device buffers (Teschner spatial hash for kNN)
     DeviceBuffer d_dm_hash_sorted_indices_, d_dm_hash_cell_start_, d_dm_hash_cell_end_;
@@ -566,9 +562,8 @@ private:
     // Launch params (on device)
     DeviceBuffer d_launch_params_;
 
-    // Stored photon data & dense grid (CPU side, after trace_photons())
+    // Stored photon data (CPU side, after trace_photons())
     PhotonSoA stored_photons_;
-    DenseGridData stored_dense_grid_;
     HashGrid dm_hash_grid_;              // direction-map hash grid (kept for LaunchParams wiring)
     std::vector<uint8_t> caustic_flags_;  // per-photon caustic flag (downloaded from GPU)
 
@@ -576,7 +571,7 @@ private:
     std::vector<Triangle> host_triangles_;
 
     // Host-side cell-bin grid (kept for volume guide + tests only)
-    CellBinGrid cell_bin_grid_;  // empty unless dense grid is built
+    CellBinGrid cell_bin_grid_;  // empty unless cell-bin grid is built
 
     // Device-side cell-bin grid (for volume guide only)
     DeviceBuffer d_cell_bin_grid_;  // PhotonBin [total_cells * bin_count]

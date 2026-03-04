@@ -190,31 +190,6 @@ inline PhotonFlagCounts tally_photon_flags(const PhotonSoA& photons) {
     return c;
 }
 
-// ── Compute grid occupancy from DenseGridData ──────────────────────
-#include "photon/dense_grid.h"
-inline GridOccupancy compute_grid_occupancy(const DenseGridData& grid) {
-    GridOccupancy g;
-    if constexpr (!ENABLE_STATS) return g;
-    int total = grid.total_cells();
-    if (total == 0) return g;
-    g.total_cells = total;
-    g.min_photons_per_cell = INT_MAX;
-    long long sum = 0;
-    for (int i = 0; i < total; ++i) {
-        int count = (int)(grid.cell_end[i] - grid.cell_start[i]);
-        if (count > 0) {
-            g.populated_cells++;
-            g.min_photons_per_cell = (std::min)(g.min_photons_per_cell, count);
-            g.max_photons_per_cell = (std::max)(g.max_photons_per_cell, count);
-            sum += count;
-        }
-    }
-    if (g.populated_cells == 0) g.min_photons_per_cell = 0;
-    g.avg_photons_per_cell = g.populated_cells > 0
-        ? (float)sum / (float)g.populated_cells : 0.f;
-    return g;
-}
-
 // ── Compute hash grid occupancy from HashGrid ───────────────────────
 inline GridOccupancy compute_grid_occupancy(const HashGrid& grid) {
     GridOccupancy g;

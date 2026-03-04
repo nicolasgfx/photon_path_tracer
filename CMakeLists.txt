@@ -354,3 +354,17 @@ if(MSVC)
 else()
     target_compile_options(photon_map_analysis PRIVATE -Wall -Wextra -O2)
 endif()
+
+# -- Append PLY Instances Tool (CPU-only, standalone) ----------------------
+add_executable(append_ply_instances
+    tools/append_ply_instances/main.cpp
+)
+target_compile_features(append_ply_instances PRIVATE cxx_std_17)
+target_compile_definitions(append_ply_instances PRIVATE
+    SCENES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scenes"
+)
+if(MSVC)
+    target_compile_options(append_ply_instances PRIVATE /MP /W4 /fp:fast /O2)
+else()
+    target_compile_options(append_ply_instances PRIVATE -Wall -Wextra -O2)
+endif()

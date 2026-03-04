@@ -141,42 +141,6 @@ struct CellInfo {
     PhotonMapType map_type;
 };
 
-// Query cell info at a world position (DenseGridData variant)
-struct DenseGridData;
-#include "photon/dense_grid.h"
-inline CellInfo query_cell_info(
-    float3 world_pos,
-    const PhotonSoA& photons,
-    const DenseGridData& grid,
-    PhotonMapType map_type)
-{
-    CellInfo info;
-    info.cell_index = make_i3(
-        (int)std::floor((world_pos.x - grid.min_x) / grid.cell_size),
-        (int)std::floor((world_pos.y - grid.min_y) / grid.cell_size),
-        (int)std::floor((world_pos.z - grid.min_z) / grid.cell_size));
-    info.map_type = map_type;
-    info.photon_count = 0;
-    info.sum_flux = 0.f;
-    Spectrum flux_spectrum = Spectrum::zero();
-    int ci = grid.cell_index(world_pos.x, world_pos.y, world_pos.z);
-    if (ci >= 0 && ci < grid.total_cells()) {
-        for (uint32_t j = grid.cell_start[ci]; j < grid.cell_end[ci]; ++j) {
-            uint32_t idx = grid.sorted_indices[j];
-            info.photon_count++;
-            float fl = photons.total_flux(idx);
-            info.sum_flux += fl;
-            Spectrum pf = photons.get_flux(idx);
-            for (int b = 0; b < NUM_LAMBDA; ++b)
-                flux_spectrum.value[b] += pf.value[b];
-        }
-    }
-    info.avg_flux = (info.photon_count > 0) ? info.sum_flux / info.photon_count : 0.f;
-    info.dominant_lambda_bin = flux_spectrum.dominant_bin();
-    info.dominant_lambda_nm  = lambda_of_bin(info.dominant_lambda_bin);
-    return info;
-}
-
 // Query cell info at a world position (HashGrid variant)
 inline CellInfo query_cell_info(
     float3 world_pos,

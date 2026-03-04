@@ -356,7 +356,6 @@ static void render_help_overlay(int win_w, int win_h,
                                  const DebugState& debug,
                                  const Camera& camera,
                                  bool volume_enabled,
-                                 bool use_dense_grid,
                                  int active_scene_index = -1,
                                  float light_scale = 1.0f) {
     // ---------- 2D orthographic projection for overlay ----------
@@ -542,7 +541,6 @@ static void render_help_overlay(int win_w, int win_h,
     // -- Volume Scattering --
     section(ry, rx, "Volume Scattering");
     toggle_line(ry, rx, "V", "Volume",     volume_enabled);
-    toggle_line(ry, rx, "G", "Dense Grid", use_dense_grid);
 
     // -- Scenes --
     section(ry, rx, "Scenes (1-9, 0)");
@@ -710,7 +708,7 @@ static void render_hover_cell_overlay(
         debug.hover_y < 0 || debug.hover_y >= win_h) return;
 
     const PhotonSoA& photons = optix_renderer.photons();
-    const DenseGridData& grid = optix_renderer.dense_grid();
+    const HashGrid& grid = optix_renderer.dm_hash_grid();
     if (photons.size() == 0 || grid.sorted_indices.empty()) return;
 
     float s = ((float)debug.hover_x + 0.5f) / (float)win_w;
@@ -846,15 +844,6 @@ static void key_callback(GLFWwindow* window, int key,
         if (g_active_optix_renderer)
             g_active_optix_renderer->set_volume_enabled(s_app.volume_enabled);
         printf("[Volume] Scattering: %s\n", s_app.volume_enabled ? "ON" : "OFF");
-        s_app.camera_moved  = true;  // reset accumulation
-        return;
-    }
-
-    // Gather mode toggle – G key (dense cell-bin grid vs per-photon hash walk)
-    if (key == GLFW_KEY_G) {
-        s_app.use_dense_grid = !s_app.use_dense_grid;
-        // Dense grid is always active now (no hash grid fallback)
-        printf("[Gather] Dense grid: %s\n", s_app.use_dense_grid ? "ON" : "OFF");
         s_app.camera_moved  = true;  // reset accumulation
         return;
     }
@@ -1187,7 +1176,6 @@ void run_interactive(
     optix_renderer.set_volume_enabled(s_app.volume_enabled);
     optix_renderer.set_guide_fraction(
         s_app.guided_enabled ? DEFAULT_GUIDE_FRACTION : 0.0f);
-    // Dense grid is always active now (no toggle needed)
 
     // Compute initial yaw/pitch from camera look direction
     {
@@ -1766,7 +1754,7 @@ void run_interactive(
                         g_active_optix_renderer->photons());
                     // Grid occupancy
                     rs.grid_occupancy = compute_grid_occupancy(
-                        g_active_optix_renderer->dense_grid());
+                        g_active_optix_renderer->dm_hash_grid());
                 }
                 // Timing
                 rs.timing.total_render_ms = s_app.last_render_ms;
@@ -1804,7 +1792,7 @@ void run_interactive(
 
                 // ── Save photon cache + launch analysis tool ─────────
                 const auto& snap_photons = optix_renderer.photons();
-                const auto& snap_grid    = optix_renderer.dense_grid();
+                const auto& snap_grid    = optix_renderer.dm_hash_grid();
                 if (snap_photons.size() > 0) {
                     std::string cache_path = snap_dir + "/photons.bin";
                     uint64_t snap_hash = compute_scene_hash(
@@ -1906,7 +1894,7 @@ void run_interactive(
         // Draw debug help overlay (if enabled)
         if (s_app.debug.show_help_overlay) {
             render_help_overlay(win_w, win_h, s_app.debug, camera, s_app.volume_enabled,
-                                s_app.use_dense_grid, s_app.active_scene_index, s_app.light_scale);
+                                s_app.active_scene_index, s_app.light_scale);
         }
 
         // Draw stats overlay (S key)

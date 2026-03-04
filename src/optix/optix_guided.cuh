@@ -2,13 +2,12 @@
 
 // optix_guided.cuh — Photon-guided direction sampling on GPU
 //
-// Surface path: Dense-grid cell lookup → random photon pick → bounce in wi.
-// Volume path:  Cell-bin histogram → Fibonacci inverse-CDF sampling (unchanged).
+// Volume path: Cell-bin histogram → Fibonacci inverse-CDF sampling.
 
 // ── Fibonacci sphere bin directions (device) ────────────────────────
 // Pre-compute once and store in a small local array.
 // Matches PhotonBinDirs::init(n) on CPU.
-// Used by volume guide path only (surface path uses dense grid random pick).
+// Used by volume guide path only.
 
 struct DevPhotonBinDirs {
     float3 dirs[MAX_PHOTON_BIN_COUNT];
@@ -44,33 +43,6 @@ struct DevPhotonBinDirs {
 __forceinline__ __device__
 float bin_solid_angle(int num_bins) {
     return (4.0f * PI) / (float)num_bins;
-}
-
-// =====================================================================
-// Dense grid cell lookup (surface photon guide)
-// =====================================================================
-
-__forceinline__ __device__
-int dev_dense_cell_index(float3 pos) {
-    int ix = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
-    int iy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
-    int iz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
-    ix = max(0, min(ix, params.dense_dim_x - 1));
-    iy = max(0, min(iy, params.dense_dim_y - 1));
-    iz = max(0, min(iz, params.dense_dim_z - 1));
-    return ix + iy * params.dense_dim_x
-             + iz * params.dense_dim_x * params.dense_dim_y;
-}
-
-// ── Tangential distance² (projected onto surface plane) ─────────────
-// Same metric as optix_photon_gather.cuh, duplicated here because the
-// gather and guide PTX are compiled separately.
-__forceinline__ __device__
-float dev_guide_tangential_dist2(float3 pos, float3 photon_pos, float3 normal) {
-    float3 diff = pos - photon_pos;
-    float d_plane = dot(diff, normal);
-    float3 tangent = diff - normal * d_plane;
-    return dot(tangent, tangent);
 }
 
 // ── Guided histogram: directional bin data for guide sampling ────────

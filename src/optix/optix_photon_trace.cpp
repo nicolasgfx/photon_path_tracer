@@ -6,7 +6,6 @@
 #include "photon/specular_target.h"
 #include "photon/tri_photon_irradiance.h"
 #include "photon/emitter.h"
-#include "photon/dense_grid.h"
 #include "photon/hash_grid.h"
 #include "photon/photon_bins.h"
 
@@ -627,25 +626,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         }
     }
 
-    // ── Build dense grid on CPU from downloaded photon SoA ───────────
-    {
-        DenseGridData dg = build_dense_grid(stored_photons_, DENSE_GRID_CELL_SIZE);
-        d_dense_sorted_indices_.upload(dg.sorted_indices);
-        d_dense_cell_start_.upload(dg.cell_start);
-        d_dense_cell_end_.upload(dg.cell_end);
-
-        size_t grid_mem_kb = (dg.sorted_indices.size() * sizeof(uint32_t)
-                             + dg.cell_start.size() * sizeof(uint32_t) * 2) / 1024;
-        auto t_now = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
-        std::printf("[Timing] Dense grid build:  %8.1f ms  "
-                    "%dx%dx%d = %d cells  mem=%zu KB\n",
-                    ms, dg.dim_x, dg.dim_y, dg.dim_z, dg.total_cells(),
-                    grid_mem_kb);
-        t_lap = t_now;
-        stored_dense_grid_ = std::move(dg);
-    }
-
     // ── Build and upload direction-map hash grid ─────────────────────
     {
         dm_hash_grid_.build(stored_photons_, DIR_MAP_HASH_CELL_SIZE * 0.5f);
@@ -765,6 +745,4 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         std::printf("[Timing] Photon total:      %8.1f ms\n", total);
     }
 
-    // Dense grid replaces hash grid + kNN + cell analysis.
-    // No CPU hash grid build or bin_idx precompute needed.
 }

@@ -173,7 +173,7 @@ constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
 // importance sample.  One-sample MIS (balance heuristic) weights the
 // result.  All subsequent bounces use pure BSDF + NEE (brute force).
 //
-// The direction map is built once per photon pass from the dense grid:
+// The direction map is built once per photon pass from the hash grid:
 //   - Cast a primary ray per subpixel to find the 1st hitpoint.
 //   - Gather nearby photons and build a 128-bin Fibonacci sphere
 //     histogram (full spherical weighting), weighted by Epanechnikov
@@ -181,18 +181,13 @@ constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
 //   - Per SPP, a direction is sampled from this histogram for MIS.
 
 // Master switch — disables the entire first-hit guide when false.
-constexpr bool  DEFAULT_USE_GUIDE = true;         // [K]
+constexpr bool  DEFAULT_USE_GUIDE = false;         // [K]
 
 constexpr int MAX_GUIDE_PDF_PHOTONS = 64;  // max eligible photons per dir-map build (was 32)
 
 // Probability of choosing the guided strategy vs pure BSDF (1st hit only).
 //   0.0 = BSDF only  |  0.5 = balanced  |  1.0 = guide only
 constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;        // [R]
-
-// ── Dense grid ──────────────────────────────────────────────────────
-// Uniform 3D grid over the photon AABB.  Each cell stores start/end
-// indices into a sorted photon array for O(1) cell lookup.
-constexpr float DENSE_GRID_CELL_SIZE     = 0.01f;  // 0.01f = 1cm cell side-length (metres)
 
 // ── Directional SPP framebuffer ("direction map") ───────────────────
 // Resolution multiplier: subpixel grid is (W * FACTOR) × (H * FACTOR).
@@ -225,7 +220,16 @@ constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 // Teschner spatial hash grid for kNN photon lookup in the direction
 // map build.  Cell size = 0.01 m (1 cm) supports multiple photons per
 // cell.  Hash collisions must stay under 5%.
-constexpr float DIR_MAP_HASH_CELL_SIZE = 0.01f;  // 1 cm cell side-length
+constexpr float DIR_MAP_HASH_CELL_SIZE = 0.01f;  // 0.0f 1 cm cell side-length
+
+// ── 3×3×3 neighbourhood pre-filter for kNN ──────────────────────────
+// When true, the kNN search only considers photons in the 3×3×3 cell
+// neighbourhood (27 cells) centred on the query point's hash cell.
+// This caps the search volume and avoids pulling distant photons from
+// hash-colliding cells, giving tighter adaptive radii in dense regions
+// at a small cost in sparse regions where the radius would exceed 1.5
+// cell widths.  Set false to allow unbounded shell expansion.
+constexpr bool  KNN_3X3X3_FILTER             = false;
 
 // ── Periodic photon + direction-map rebuild during final render ─────
 // Every N SPP, re-trace the photon map (with a fresh seed) and rebuild
@@ -238,13 +242,7 @@ constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 500;  // [R] SPP between rebuilds
 // histogram.  3.5× cell size provides a wider, smoother Epanechnikov
 // falloff that eliminates hard seams at cell boundaries.  Fully
 // contained within the ±3-cell (7×7×7) neighbourhood search.
-constexpr float DEFAULT_GUIDE_RADIUS = 0.035f;  // 3.5 × DENSE_GRID_CELL_SIZE
-
-// ── AABB padding for dense grid (in cell-size multiples) ────────────
-// Padding the AABB prevents photons near the boundary from being lost.
-// Must be >= DIR_MAP_NEIGHBOURHOOD_EXTENT so the 7×7×7 search never
-// indexes out of bounds for photons near the grid edge.
-constexpr float DENSE_GRID_AABB_PAD_CELLS = 3.0f;
+constexpr float DEFAULT_GUIDE_RADIUS = 3.5f * DIR_MAP_HASH_CELL_SIZE;  // 0.035f;3.5 cm Epanechnikov cutoff
 
 // ── NaN / infinity safety net ────────────────────────────────────────
 // With correct one-sample MIS (balance heuristic) and physical BSDFs,

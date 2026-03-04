@@ -13,7 +13,6 @@
 // ─────────────────────────────────────────────────────────────────────
 #include "photon.h"
 #include "hash_grid.h"
-#include "dense_grid.h"
 #include <string>
 #include <cstdint>
 
@@ -61,13 +60,6 @@ bool save_photon_cache(const std::string& path,
                        const HashGrid&   grid,
                        uint64_t          scene_hash,
                        float             gather_radius);
-
-/// Serialise \p photons with dense grid to \p path.
-bool save_photon_cache(const std::string& path,
-                       const PhotonSoA&      photons,
-                       const DenseGridData&  grid,
-                       uint64_t              scene_hash,
-                       float                 gather_radius);
 
 /// Deserialise \p photons and \p grid from \p path.
 /// \p gather_radius_out receives the value stored in the header.

@@ -254,28 +254,6 @@ void OptixRenderer::fill_cell_grid_params(LaunchParams& lp) const {
     }
 }
 
-// fill_dense_grid_params() -- Wire dense grid device pointers into LaunchParams
-void OptixRenderer::fill_dense_grid_params(LaunchParams& lp) {
-    if (d_dense_sorted_indices_.d_ptr && stored_dense_grid_.total_cells() > 0) {
-        lp.dense_sorted_indices = reinterpret_cast<uint32_t*>(d_dense_sorted_indices_.d_ptr);
-        lp.dense_cell_start     = reinterpret_cast<uint32_t*>(d_dense_cell_start_.d_ptr);
-        lp.dense_cell_end       = reinterpret_cast<uint32_t*>(d_dense_cell_end_.d_ptr);
-        lp.dense_valid          = 1;
-        lp.dense_min_x          = stored_dense_grid_.min_x;
-        lp.dense_min_y          = stored_dense_grid_.min_y;
-        lp.dense_min_z          = stored_dense_grid_.min_z;
-        lp.dense_cell_size      = stored_dense_grid_.cell_size;
-        lp.dense_dim_x          = stored_dense_grid_.dim_x;
-        lp.dense_dim_y          = stored_dense_grid_.dim_y;
-        lp.dense_dim_z          = stored_dense_grid_.dim_z;
-    } else {
-        lp.dense_sorted_indices = nullptr;
-        lp.dense_cell_start     = nullptr;
-        lp.dense_cell_end       = nullptr;
-        lp.dense_valid          = 0;
-    }
-}
-
 // fill_dm_hash_grid_params() -- Wire direction-map hash grid into LaunchParams
 void OptixRenderer::fill_dm_hash_grid_params(LaunchParams& lp) {
     if (d_dm_hash_sorted_indices_.d_ptr && dm_hash_grid_.table_size > 0) {
@@ -351,7 +329,6 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
-    fill_dense_grid_params(lp);
     fill_dm_hash_grid_params(lp);
 
     // Direction map specific fields
@@ -472,7 +449,6 @@ void OptixRenderer::render_debug_frame(
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
     fill_cell_grid_params(lp);
-    fill_dense_grid_params(lp);
     fill_direction_map_params(lp);
 
     lp.num_caustic_emitted    = num_caustic_emitted_;
@@ -568,7 +544,6 @@ void OptixRenderer::render_one_spp(
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
     fill_cell_grid_params(lp);
-    fill_dense_grid_params(lp);
     fill_direction_map_params(lp);
 
     lp.num_caustic_emitted    = num_caustic_emitted_;
@@ -728,7 +703,6 @@ void OptixRenderer::render_final(
             config.volume_albedo, config.volume_samples, config.volume_max_t);
         fill_clearcoat_fabric_params(lp);
         fill_cell_grid_params(lp);
-        fill_dense_grid_params(lp);
         fill_direction_map_params(lp);
 
         lp.num_caustic_emitted    = num_caustic_emitted_;

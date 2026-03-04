@@ -218,12 +218,20 @@ Spectrum dev_estimate_volume_photon_density(
     int      knn_count = 0;
 
     const float cell_size = params.vol_grid_cell_size;
+    int cc_x = (int)floorf(pos.x / cell_size);
+    int cc_y = (int)floorf(pos.y / cell_size);
+    int cc_z = (int)floorf(pos.z / cell_size);
     int cx0 = (int)floorf((pos.x - r_search) / cell_size);
     int cy0 = (int)floorf((pos.y - r_search) / cell_size);
     int cz0 = (int)floorf((pos.z - r_search) / cell_size);
     int cx1 = (int)floorf((pos.x + r_search) / cell_size);
     int cy1 = (int)floorf((pos.y + r_search) / cell_size);
     int cz1 = (int)floorf((pos.z + r_search) / cell_size);
+    // KNN_3X3X3_FILTER: clamp to ±1 cell from centre (27 cells max)
+    if constexpr (KNN_3X3X3_FILTER) {
+        cx0 = max(cx0, cc_x - 1); cy0 = max(cy0, cc_y - 1); cz0 = max(cz0, cc_z - 1);
+        cx1 = min(cx1, cc_x + 1); cy1 = min(cy1, cc_y + 1); cz1 = min(cz1, cc_z + 1);
+    }
 
     uint32_t visited_keys[27];
     int num_visited = 0;
