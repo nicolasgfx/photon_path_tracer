@@ -19,6 +19,7 @@
 #include "photon/dense_grid.h"
 #include "photon/direction_map.h"
 #include "debug/stats_collector.h"
+#include "postfx/postfx_pipeline.h"
 #include "optix/launch_params.h"
 
 #include <cuda_runtime.h>
@@ -254,6 +255,9 @@ public:
     void set_denoiser_enabled(bool v) { denoiser_enabled_ = v; }
     bool is_denoiser_enabled() const  { return denoiser_enabled_; }
 
+    /// Runtime post-FX parameters (bloom, etc.)
+    void set_postfx_params(const PostFxParams& p) { postfx_params_ = p; }
+    const PostFxParams& postfx_params() const { return postfx_params_; }
 
 
     /// Runtime guide fraction (T key: toggle guided/unguided).
@@ -603,6 +607,10 @@ private:
     // Runtime guide fraction (T key toggle: 0 = unguided, DEFAULT = guided)
     float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
     bool  preview_mode_   = true;   // interactive preview: unguided PT, reduced bounce cap
+
+    // Post-FX pipeline (bloom, etc.)
+    PostFxPipeline postfx_pipeline_;
+    PostFxParams   postfx_params_;
 
     // GPU device info (populated in init())
     std::string gpu_name_;

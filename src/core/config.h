@@ -266,6 +266,12 @@ constexpr bool  DEFAULT_DENOISER_GUIDE_ALBEDO  = true;    //      feed albedo AO
 constexpr bool  DEFAULT_DENOISER_GUIDE_NORMAL  = true;    //      feed normal AOV to denoiser
 constexpr float DEFAULT_DENOISER_BLEND         = 0.0f;    // [R]  0 = full denoise, 1 = no denoise
 
+// ── Bloom / glow (2D post-FX, §11) ──────────────────────────────────
+constexpr bool  DEFAULT_BLOOM_ENABLED   = false;       // [K]  B key toggle
+constexpr float DEFAULT_BLOOM_INTENSITY = 0.5f;        //      additive strength (0 = off, 1 = full)
+constexpr float DEFAULT_BLOOM_RADIUS_H  = 15.0f;       //      horizontal blur radius in pixels (full res)
+constexpr float DEFAULT_BLOOM_RADIUS_V  = 15.0f;       //      vertical blur radius in pixels (full res)
+
 
 // =====================================================================
 //  §6  SPATIAL INDEX & SURFACE FILTER
@@ -456,30 +462,31 @@ struct SceneProfile {
     float          cam_fov;
     float          cam_speed;
     SceneLightMode light_mode;
+    bool           mirror_x;        // negate X to fix horizontal flip (false = no change)
 };
 
 constexpr int NUM_SCENE_PROFILES = 10;
 
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
     { "zero_day/zero-day-frame25/frame25.obj",   "Zero Day",          false,
-      {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL, false },
     { "villa/villa-daylight.obj",                "Villa",             false,
-      {0,0,0}, {0,0,-1}, 48.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 48.f, 0.1f, SceneLightMode::FromMTL, true },
     { "sanmiguel/sanmiguel-courtyard.obj",       "San Miguel",        false,
-      {0,0,0}, {0,0,-1}, 84.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 84.f, 0.1f, SceneLightMode::FromMTL, true },
     { "staircase/scene-v4.obj",                  "Staircase",         false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
     { "staircase2/scene-v4.obj",                 "Staircase 2",       false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
     { "fireplace_room/fireplace_room.obj",       "Fire Place",        false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
     { "living_room_2/scene-v4.obj",              "Living Room 2",     false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
     { "bedroom/scene-v4.obj",                    "Bedroom",           false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
     { "bathroom/scene-v4.obj",                   "Bathroom",          false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
 };
 

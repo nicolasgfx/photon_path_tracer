@@ -15,6 +15,7 @@
 #include "photon/cell_cache.h"
 #include "renderer/camera.h"
 #include "renderer/pixel_lighting.h"
+#include "postfx/postfx_params.h"
 #include "scene/scene.h"
 #include "photon/photon.h"
 #include "photon/hash_grid.h"
@@ -87,6 +88,9 @@ struct RenderConfig {
     bool  denoiser_guide_albedo  = DEFAULT_DENOISER_GUIDE_ALBEDO;
     bool  denoiser_guide_normal  = DEFAULT_DENOISER_GUIDE_NORMAL;
     float denoiser_blend         = DEFAULT_DENOISER_BLEND;
+
+    // Post-processing effects (§11)
+    PostFxParams postfx;
 
     // Debug
     RenderMode mode          = RenderMode::Combined;

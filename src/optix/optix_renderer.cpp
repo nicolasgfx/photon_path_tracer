@@ -444,6 +444,28 @@ void OptixRenderer::render_debug_frame(
         width_, height_, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    // ── Post-FX in interactive preview ──────────────────────────────
+    // When bloom is enabled, re-derive HDR from the spectral accumulator,
+    // apply bloom, then tone-map to overwrite d_srgb_buffer_.
+    // The inline-tonemapped sRGB from the raygen shader is discarded.
+    if (postfx_params_.bloom_enabled) {
+        launch_spectrum_to_hdr_kernel(
+            (const float*)d_spectrum_buffer_.d_ptr,
+            (const float*)d_sample_counts_.d_ptr,
+            (float*)d_hdr_buffer_.d_ptr,
+            width_, height_, exposure_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        postfx_pipeline_.apply((float*)d_hdr_buffer_.d_ptr,
+                               width_, height_, postfx_params_);
+
+        launch_tonemap_hdr_kernel(
+            (const float*)d_hdr_buffer_.d_ptr,
+            (uint8_t*)d_srgb_buffer_.d_ptr,
+            width_, height_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
 }
 
 // render_one_spp() -- launch a single sample of full path tracing
@@ -851,7 +873,11 @@ void OptixRenderer::render_final(
                        config.denoiser_guide_normal);
         run_denoiser(config.denoiser_blend);
 
-        // 4. Tone map the denoised HDR â†’ sRGB
+        // 3b. Apply post-FX (bloom) on denoised HDR before tone mapping
+        postfx_pipeline_.apply((float*)d_hdr_denoised_.d_ptr,
+                               width_, height_, postfx_params_);
+
+        // 4. Tone map the denoised HDR → sRGB
         launch_tonemap_hdr_kernel(
             (const float*)d_hdr_denoised_.d_ptr,
             (uint8_t*)d_srgb_buffer_.d_ptr,
@@ -864,12 +890,25 @@ void OptixRenderer::render_final(
                   << (config.denoiser_guide_normal ? " +normal" : "")
                   << " (blend=" << config.denoiser_blend << ")";
     } else {
-        // Legacy path: direct spectral â†’ sRGB (no denoising)
-        launch_tonemap_kernel(
+        // Non-denoiser path: spectrum → HDR → post-FX → sRGB
+        // (Previously went straight spectrum → sRGB, but post-FX needs
+        //  the HDR intermediate for luminance-aware bloom.)
+        launch_spectrum_to_hdr_kernel(
             (const float*)d_spectrum_buffer_.d_ptr,
             (const float*)d_sample_counts_.d_ptr,
-            (uint8_t*)d_srgb_buffer_.d_ptr,
+            (float*)d_hdr_buffer_.d_ptr,
             width_, height_, exposure_);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Apply post-FX (bloom) on HDR
+        postfx_pipeline_.apply((float*)d_hdr_buffer_.d_ptr,
+                               width_, height_, postfx_params_);
+
+        // Tone map HDR → sRGB
+        launch_tonemap_hdr_kernel(
+            (const float*)d_hdr_buffer_.d_ptr,
+            (uint8_t*)d_srgb_buffer_.d_ptr,
+            width_, height_);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 

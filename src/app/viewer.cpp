@@ -90,7 +90,8 @@ static constexpr const char* SAVED_CAMERA_FILENAME = "saved_camera.json";
 
 bool save_camera_to_file(const Camera& cam, float yaw, float pitch, float roll,
                          float light_scale,
-                         const std::string& scene_folder) {
+                         const std::string& scene_folder,
+                         const PostFxParams* postfx) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ofstream f(path);
     if (!f.is_open()) {
@@ -111,7 +112,17 @@ bool save_camera_to_file(const Camera& cam, float yaw, float pitch, float roll,
     f << "  \"dof_focus_dist\": " << cam.dof_focus_dist << ",\n";
     f << "  \"dof_f_number\":  " << cam.dof_f_number << ",\n";
     f << "  \"sensor_height\": " << cam.sensor_height << ",\n";
-    f << "  \"dof_focus_range\": " << cam.dof_focus_range << "\n";
+    f << "  \"dof_focus_range\": " << cam.dof_focus_range;
+    // Bloom / post-FX settings
+    if (postfx) {
+        f << ",\n";
+        f << "  \"bloom_enabled\":   " << (postfx->bloom_enabled ? "true" : "false") << ",\n";
+        f << "  \"bloom_intensity\": " << postfx->bloom_intensity << ",\n";
+        f << "  \"bloom_radius_h\":  " << postfx->bloom_radius_h << ",\n";
+        f << "  \"bloom_radius_v\":  " << postfx->bloom_radius_v << "\n";
+    } else {
+        f << "\n";
+    }
     f << "}\n";
     f.close();
     std::printf("[Camera] Saved to %s\n", path.c_str());
@@ -123,10 +134,16 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            const std::string& scene_folder,
                            std::string* out_envmap_path,
                            float3* out_envmap_rotation,
-                           float* out_envmap_scale) {
+                           float* out_envmap_scale,
+                           PostFxParams* out_postfx) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ifstream f(path);
-    if (!f.is_open()) return false;
+    if (!f.is_open()) {
+        // Fall back to camera.json (shipped scene defaults) if no user-saved file
+        path = scene_folder + "/camera.json";
+        f.open(path);
+        if (!f.is_open()) return false;
+    }
 
     // Minimal JSON parser – same style as runtime_config.h
     auto trim_ws = [](const std::string& s) -> std::string {
@@ -197,6 +214,19 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
         }
         else if (key == "environment_scale" && out_envmap_scale) {
             *out_envmap_scale = (float)std::atof(val.c_str());
+        }
+        // Bloom / post-FX settings
+        else if (key == "bloom_enabled" && out_postfx) {
+            out_postfx->bloom_enabled = (val == "true" || val == "1");
+        }
+        else if (key == "bloom_intensity" && out_postfx) {
+            out_postfx->bloom_intensity = (float)std::atof(val.c_str());
+        }
+        else if (key == "bloom_radius_h" && out_postfx) {
+            out_postfx->bloom_radius_h = (float)std::atof(val.c_str());
+        }
+        else if (key == "bloom_radius_v" && out_postfx) {
+            out_postfx->bloom_radius_v = (float)std::atof(val.c_str());
         }
     }
 
@@ -917,6 +947,66 @@ static void key_callback(GLFWwindow* window, int key,
         }
     }
 
+    // ── Bloom controls ──────────────────────────────────────────────
+    // B -> toggle bloom on/off
+    if (key == GLFW_KEY_B) {
+        s_app.postfx.bloom_enabled = !s_app.postfx.bloom_enabled;
+        if (g_active_optix_renderer)
+            g_active_optix_renderer->set_postfx_params(s_app.postfx);
+        printf("[Bloom] %s  (intensity=%.2f, radius H=%.1f V=%.1f)\n",
+               s_app.postfx.bloom_enabled ? "ON" : "OFF",
+               s_app.postfx.bloom_intensity,
+               s_app.postfx.bloom_radius_h,
+               s_app.postfx.bloom_radius_v);
+        s_app.camera_moved = true;
+        return;
+    }
+    // Numpad 4/6 -> adjust bloom horizontal radius
+    if (key == GLFW_KEY_KP_4) {
+        s_app.postfx.bloom_radius_h = fmaxf(1.f, s_app.postfx.bloom_radius_h - 5.f);
+        if (g_active_optix_renderer) g_active_optix_renderer->set_postfx_params(s_app.postfx);
+        printf("[Bloom] Radius H: %.1f\n", s_app.postfx.bloom_radius_h);
+        s_app.camera_moved = true;
+        return;
+    }
+    if (key == GLFW_KEY_KP_6) {
+        s_app.postfx.bloom_radius_h = fminf(200.f, s_app.postfx.bloom_radius_h + 5.f);
+        if (g_active_optix_renderer) g_active_optix_renderer->set_postfx_params(s_app.postfx);
+        printf("[Bloom] Radius H: %.1f\n", s_app.postfx.bloom_radius_h);
+        s_app.camera_moved = true;
+        return;
+    }
+    // Numpad 2/8 -> adjust bloom vertical radius
+    if (key == GLFW_KEY_KP_2) {
+        s_app.postfx.bloom_radius_v = fmaxf(1.f, s_app.postfx.bloom_radius_v - 5.f);
+        if (g_active_optix_renderer) g_active_optix_renderer->set_postfx_params(s_app.postfx);
+        printf("[Bloom] Radius V: %.1f\n", s_app.postfx.bloom_radius_v);
+        s_app.camera_moved = true;
+        return;
+    }
+    if (key == GLFW_KEY_KP_8) {
+        s_app.postfx.bloom_radius_v = fminf(200.f, s_app.postfx.bloom_radius_v + 5.f);
+        if (g_active_optix_renderer) g_active_optix_renderer->set_postfx_params(s_app.postfx);
+        printf("[Bloom] Radius V: %.1f\n", s_app.postfx.bloom_radius_v);
+        s_app.camera_moved = true;
+        return;
+    }
+    // Numpad 5/+ -> adjust bloom intensity
+    if (key == GLFW_KEY_KP_5) {
+        s_app.postfx.bloom_intensity = fmaxf(0.05f, s_app.postfx.bloom_intensity * 0.8f);
+        if (g_active_optix_renderer) g_active_optix_renderer->set_postfx_params(s_app.postfx);
+        printf("[Bloom] Intensity: %.2f\n", s_app.postfx.bloom_intensity);
+        s_app.camera_moved = true;
+        return;
+    }
+    if (key == GLFW_KEY_KP_DECIMAL) {
+        s_app.postfx.bloom_intensity = fminf(5.0f, s_app.postfx.bloom_intensity * 1.25f);
+        if (g_active_optix_renderer) g_active_optix_renderer->set_postfx_params(s_app.postfx);
+        printf("[Bloom] Intensity: %.2f\n", s_app.postfx.bloom_intensity);
+        s_app.camera_moved = true;
+        return;
+    }
+
     // P -> retrace photons (rebuild photon map)
     if (key == GLFW_KEY_P) {
         s_app.photon_retrace_requested = true;
@@ -966,14 +1056,14 @@ static void key_callback(GLFWwindow* window, int key,
         if (idx >= 0 && idx < NUM_SCENE_PROFILES) {
             std::string folder = scene_folder_from_profile(SCENE_PROFILES[idx].obj_path);
             save_camera_to_file(*g_active_camera, s_app.yaw, s_app.pitch,
-                                s_app.roll, s_app.light_scale, folder);
+                                s_app.roll, s_app.light_scale, folder, &s_app.postfx);
         } else {
             // Derive folder from the active options scene_file
             if (g_active_options) {
                 fs::path p(g_active_options->scene_file);
                 std::string folder = p.parent_path().string();
                 save_camera_to_file(*g_active_camera, s_app.yaw, s_app.pitch,
-                                    s_app.roll, s_app.light_scale, folder);
+                                    s_app.roll, s_app.light_scale, folder, &s_app.postfx);
             }
         }
         return;
@@ -1160,6 +1250,8 @@ void run_interactive(
             } else {
                 if (!prof.is_reference)
                     new_scene.normalize_to_reference();
+                if (prof.mirror_x)
+                    new_scene.mirror_x();
                 new_scene.build_bvh();
                 new_scene.build_emissive_distribution();
 
@@ -1174,12 +1266,6 @@ void run_interactive(
                 optix_renderer.upload_scene_data(scene);
                 optix_renderer.upload_emitter_data(scene);
 
-                // ── Trace photons on GPU ───────────────────────────
-                auto tp0 = std::chrono::high_resolution_clock::now();
-                optix_renderer.trace_photons(scene, opt.config);
-                auto tp1 = std::chrono::high_resolution_clock::now();
-                double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
-
                 // Reset camera to scene profile defaults
                 camera.position = make_f3(prof.cam_pos[0], prof.cam_pos[1], prof.cam_pos[2]);
                 camera.look_at  = make_f3(prof.cam_lookat[0], prof.cam_lookat[1], prof.cam_lookat[2]);
@@ -1188,18 +1274,26 @@ void run_interactive(
                 camera.height   = win_h;
                 camera.update();
 
-                // Override with saved camera position (if any)
+                // Override with saved camera position + envmap config
+                std::string new_envmap_path;
+                float3 new_envmap_rotation = make_f3(0, 0, 0);
+                float  new_envmap_scale    = 1.0f;
                 {
                     std::string folder = scene_folder_from_profile(prof.obj_path);
                     float saved_yaw = 0.f, saved_pitch = 0.f, saved_roll = 0.f;
                     float saved_light = DEFAULT_LIGHT_SCALE;
+                    PostFxParams loaded_postfx;
                     if (load_camera_from_file(camera, saved_yaw, saved_pitch,
-                                              saved_roll, saved_light, folder)) {
+                                              saved_roll, saved_light, folder,
+                                              &new_envmap_path, &new_envmap_rotation,
+                                              &new_envmap_scale, &loaded_postfx)) {
                         s_app.yaw   = saved_yaw;
                         s_app.pitch = saved_pitch;
                         s_app.roll  = saved_roll;
                         s_app.light_scale         = saved_light;
                         s_app.light_scale_changed = true;
+                        s_app.postfx = loaded_postfx;
+                        optix_renderer.set_postfx_params(s_app.postfx);
                     } else {
                         // Sync yaw/pitch from new camera direction
                         float3 fwd = normalize(camera.look_at - camera.position);
@@ -1208,6 +1302,34 @@ void run_interactive(
                         s_app.light_scale = DEFAULT_LIGHT_SCALE;
                     }
                 }
+
+                // ── Load environment map (if specified in camera config) ──
+                scene.envmap.reset();  // clear old envmap
+                scene.envmap_selection_prob = 0.f;
+                if (!new_envmap_path.empty()) {
+                    scene.envmap = std::make_shared<EnvironmentMap>();
+                    if (load_environment_map(new_envmap_path, new_envmap_scale,
+                                             new_envmap_rotation, *scene.envmap)) {
+                        scene.envmap->scene_center = scene.scene_bounding_center();
+                        scene.envmap->scene_radius = scene.scene_bounding_radius() * 1.1f;
+                        scene.compute_envmap_selection_prob();
+                        std::printf("[EnvMap] Loaded: %s (%dx%d, sel_p=%.3f)\n",
+                                    new_envmap_path.c_str(),
+                                    scene.envmap->width, scene.envmap->height,
+                                    scene.envmap_selection_prob);
+                    } else {
+                        std::printf("[Warning] Failed to load envmap: %s\n",
+                                    new_envmap_path.c_str());
+                        scene.envmap.reset();
+                    }
+                }
+                optix_renderer.upload_envmap_data(scene);
+
+                // ── Trace photons on GPU (after envmap is available) ──
+                auto tp0 = std::chrono::high_resolution_clock::now();
+                optix_renderer.trace_photons(scene, opt.config);
+                auto tp1 = std::chrono::high_resolution_clock::now();
+                double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
 
                 s_app.active_cam_speed    = prof.cam_speed;
                 s_app.active_scene_index  = idx;

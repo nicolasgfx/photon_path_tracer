@@ -83,6 +83,11 @@ int main(int argc, char* argv[]) {
         }
         if (!SCENE_IS_REFERENCE)
             scene.normalize_to_reference();
+        {
+            constexpr int pidx = scene_profile_index();
+            if (pidx >= 0 && SCENE_PROFILES[pidx].mirror_x)
+                scene.mirror_x();
+        }
         auto t1 = std::chrono::high_resolution_clock::now();
         std::printf("[Timing] OBJ load:          %8.1f ms  (%zu tris, %zu mats, %zu textures)\n",
                     std::chrono::duration<double, std::milli>(t1 - t0).count(),
@@ -133,10 +138,12 @@ int main(int argc, char* argv[]) {
         AppState& app = app_state();
         std::string folder = scene_folder_from_profile(SCENE_OBJ_PATH);
         float yaw_init = 0.f, pitch_init = 0.f, roll_init = 0.f, light_init = DEFAULT_LIGHT_SCALE;
+        PostFxParams loaded_postfx;
         if (load_camera_from_file(camera, yaw_init, pitch_init, roll_init, light_init, folder,
-                                  &envmap_path, &envmap_rotation, &envmap_scale_val)) {
+                                  &envmap_path, &envmap_rotation, &envmap_scale_val, &loaded_postfx)) {
             app.yaw   = yaw_init;   app.pitch = pitch_init;  app.roll = roll_init;
             app.light_scale = light_init;  app.light_scale_changed = true;
+            app.postfx = loaded_postfx;
         }
     }
 
@@ -219,6 +226,9 @@ int main(int argc, char* argv[]) {
         AppState& app2 = app_state();
         app2.active_scene_index = scene_profile_index();
         app2.active_cam_speed = SCENE_CAM_SPEED;
+
+        // Sync loaded postfx params to renderer
+        optix_renderer.set_postfx_params(app2.postfx);
 
         // -- Interactive debug window ---------------------------------
         run_interactive(optix_renderer, camera, opt, scene);

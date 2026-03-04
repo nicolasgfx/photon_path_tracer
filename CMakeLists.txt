@@ -94,12 +94,14 @@ set(CORE_SOURCES
     src/optix/optix_denoiser.cpp
     src/optix/optix_photon_trace.cpp
     src/optix/optix_caustic_debug.cpp
+    src/postfx/postfx_pipeline.cpp
 )
 
 set(CUDA_SOURCES
     src/photon/hash_grid.cu
     src/optix/adaptive_sampling.cu
     src/renderer/tonemap.cu
+    src/postfx/bloom.cu
 )
 
 # -- Shared CUDA static library (shared by photon_tracer and ppt_tests) --------
@@ -283,6 +285,7 @@ if(PPT_BUILD_TESTS)
         src/optix/optix_denoiser.cpp
         src/optix/optix_photon_trace.cpp
         src/optix/optix_caustic_debug.cpp
+        src/postfx/postfx_pipeline.cpp
     )
 
     add_executable(ppt_tests

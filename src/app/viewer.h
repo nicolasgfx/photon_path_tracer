@@ -13,6 +13,7 @@
 #include "debug/stats_collector.h"  // RendererStats, ENABLE_STATS
 #include "renderer/camera.h"
 #include "renderer/renderer.h"      // FrameBuffer
+#include "postfx/postfx_params.h"   // PostFxParams
 #include "scene/scene.h"
 #include <string>
 #include <chrono>
@@ -81,6 +82,9 @@ struct AppState {
     bool idle_rendering_active = false;  // true = full-quality accumulation after idle timeout
     int  idle_photon_seed      = 0;      // incrementing seed for multi-map decorrelation
     int  base_num_photons      = 0;      // original config.num_photons (before idle boost)
+
+    // Post-FX params (bloom, etc.) — per-scene, saved in camera JSON
+    PostFxParams postfx;
 };
 
 // Global application state — shared between main() and viewer internals
@@ -93,14 +97,16 @@ std::string scene_folder_from_profile(const char* obj_path);
 
 bool save_camera_to_file(const Camera& cam, float yaw, float pitch, float roll,
                          float light_scale,
-                         const std::string& scene_folder);
+                         const std::string& scene_folder,
+                         const PostFxParams* postfx = nullptr);
 
 bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            float& light_scale,
                            const std::string& scene_folder,
                            std::string* out_envmap_path = nullptr,
                            float3* out_envmap_rotation = nullptr,
-                           float* out_envmap_scale = nullptr);
+                           float* out_envmap_scale = nullptr,
+                           PostFxParams* out_postfx = nullptr);
 
 // -- PNG output -------------------------------------------------------
 bool write_png(const std::string& filename, const FrameBuffer& fb);

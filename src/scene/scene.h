@@ -104,6 +104,12 @@ struct Scene {
     // build_bvh().  Skipped when SCENE_IS_REFERENCE == true.
     void normalize_to_reference();
 
+    // ── Mirror geometry across YZ plane (negate X) ──────────────────
+    // Fixes horizontally-flipped OBJ models.  Negates X on positions
+    // and normals, swaps v1↔v2 to preserve winding order.
+    // Call AFTER normalize, BEFORE build_bvh().
+    void mirror_x();
+
     // ── CPU ray intersection (BVH traversal) ────────────────────────
     HitRecord intersect(const Ray& ray) const;
 
@@ -156,6 +162,23 @@ inline void Scene::normalize_to_reference() {
         t.v2 = (t.v2 - cur_center) * scale + ref_c;
         // Normals are pure directions — no transformation needed.
     }
+}
+
+inline void Scene::mirror_x() {
+    if (triangles.empty()) return;
+
+    for (auto& t : triangles) {
+        // Negate X on positions
+        t.v0.x = -t.v0.x;  t.v1.x = -t.v1.x;  t.v2.x = -t.v2.x;
+        // Negate X on shading normals
+        t.n0.x = -t.n0.x;  t.n1.x = -t.n1.x;  t.n2.x = -t.n2.x;
+        // Swap v1↔v2 (and n1↔n2, uv1↔uv2) to preserve winding order
+        std::swap(t.v1, t.v2);
+        std::swap(t.n1, t.n2);
+        std::swap(t.uv1, t.uv2);
+    }
+
+    std::printf("[Scene] Mirrored geometry across YZ plane (negated X)\n");
 }
 
 inline void Scene::build_emissive_distribution() {
