@@ -90,7 +90,28 @@ inline CpuPathTraceResult path_trace_cpu(
         cur.direction = direction;
         HitRecord hit = scene.intersect(cur);
 
-        if (!hit.hit) break;
+        if (!hit.hit) {
+            // ── Environment map radiance (miss handler) ─────────────
+            if (scene.has_envmap()) {
+                Spectrum Le = scene.envmap->eval(direction);
+                if (bounce == 0) {
+                    result.combined  += throughput * Le;
+                    result.nee_direct += throughput * Le;
+                } else {
+                    float w_bsdf;
+                    if (pdf_combined_prev <= 0.f) {
+                        w_bsdf = 1.0f;
+                    } else {
+                        float p_env = scene.envmap->pdf(direction)
+                                    * scene.envmap_selection_prob;
+                        w_bsdf = mis_weight_2(pdf_combined_prev, p_env);
+                    }
+                    result.combined  += throughput * Le * w_bsdf;
+                    result.nee_direct += throughput * Le * w_bsdf;
+                }
+            }
+            break;
+        }
 
         // Resolve material (apply diffuse/specular textures)
         Material mat = scene.materials[hit.material_id];

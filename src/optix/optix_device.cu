@@ -60,6 +60,7 @@ extern "C" {
 #include "optix/optix_utils.cuh"
 #include "optix/optix_material.cuh"
 #include "optix/optix_bsdf.cuh"
+#include "optix/optix_envmap.cuh"
 #include "optix/optix_nee.cuh"
 #include "optix/optix_specular.cuh"
 #include "optix/optix_guided.cuh"

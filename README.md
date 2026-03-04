@@ -308,18 +308,18 @@ radius for the cell under the cursor.
 
 ## Scenes
 
-Eight bundled scenes, switchable via hotkeys **1–9, 0**:
+Ten bundled scenes, switchable via hotkeys **1–9, 0**:
 
 | Key | Scene | Complexity | Description |
 |---|---|---|---|
 | **1** | Cornell Box | Low | Classic Cornell Box with diamond |
-| **2** | Living Room | Medium | Furnished interior (Jay-Artist) |
-| **3** | Salle de Bain | Medium | Bathroom scene (nacimus) |
-| **4** | Fire Place | Medium | Fireplace room interior |
-| **5** | Conference Room | Medium | Measured room (Grynberg & Ward) |
-| **6** | Living Room 2 | Medium | Second living room variant |
-| **7** | Staircase | Medium | Staircase interior |
-| **8** | Staircase 2 | Medium | Staircase variant |
+| **2** | Zero Day | High | Beeple Zero-Day cyberpunk cityscape (PBRT v4) |
+| **3** | Villa | Medium | Villa daylight exterior |
+| **4** | San Miguel | High | San Miguel courtyard |
+| **5** | Staircase | Medium | Staircase interior |
+| **6** | Staircase 2 | Medium | Staircase variant |
+| **7** | Fire Place | Medium | Fireplace room interior |
+| **8** | Living Room 2 | Medium | Second living room variant |
 | **9** | Bedroom | Medium | Bedroom interior |
 | **0** | Bathroom | Medium | Bathroom interior |
 

@@ -21,7 +21,45 @@ struct DirectLightSample {
     bool     visible;      // Shadow ray result
 };
 
-// ── Sample direct illumination (pure power-weighted, v3) ─────────────
+// ── Sample envmap for direct lighting (CPU) ─────────────────────────
+inline DirectLightSample sample_direct_light_envmap(
+    float3 hit_pos,
+    float3 hit_normal,
+    const Scene& scene,
+    PCGRng& rng)
+{
+    DirectLightSample result;
+    result.Li      = Spectrum::zero();
+    result.visible = false;
+
+    if (!scene.has_envmap()) return result;
+
+    auto es = scene.envmap->sample(rng.next_float(), rng.next_float());
+    if (es.pdf <= 0.f) return result;
+
+    float3 wi = es.direction;
+    float cos_theta_receiver = dot(wi, hit_normal);
+    if (cos_theta_receiver <= 0.f) return result;
+
+    // Shadow ray to infinity
+    Ray shadow_ray;
+    shadow_ray.origin    = nee_shadow_ray_origin(hit_pos, hit_normal);
+    shadow_ray.direction = wi;
+    shadow_ray.tmin      = NEE_RAY_EPSILON;
+    shadow_ray.tmax      = 1e20f;
+
+    HitRecord shadow_hit = scene.intersect(shadow_ray);
+    if (shadow_hit.hit) return result;  // occluded
+
+    result.Li        = rgb_to_spectrum_emission(es.rgb.x, es.rgb.y, es.rgb.z);
+    result.wi        = wi;
+    result.pdf_light = es.pdf * scene.envmap_selection_prob;
+    result.distance  = 1e20f;
+    result.visible   = true;
+    return result;
+}
+
+// ── Sample direct illumination (one-sample MIS envmap + triangles, v3) ──
 inline DirectLightSample sample_direct_light(
     float3 hit_pos,
     float3 hit_normal,
@@ -33,6 +71,25 @@ inline DirectLightSample sample_direct_light(
     result.Li      = Spectrum::zero();
     result.visible = false;
 
+    bool use_envmap = scene.has_envmap() && scene.envmap_selection_prob > 0.f;
+    bool has_tris   = !scene.emissive_tri_indices.empty();
+
+    if (!use_envmap && !has_tris) return result;
+
+    if (use_envmap && has_tris) {
+        // One-sample MIS between envmap and triangle lights
+        float p_env = scene.envmap_selection_prob;
+        if (rng.next_float() < p_env) {
+            return sample_direct_light_envmap(hit_pos, hit_normal, scene, rng);
+        } else {
+            // Sample triangle, scale by 1/(1-p_env)
+            // Fall through to triangle sampling below, then scale
+        }
+    } else if (use_envmap) {
+        return sample_direct_light_envmap(hit_pos, hit_normal, scene, rng);
+    }
+
+    // ── Triangle light sampling ─────────────────────────────────────
     if (scene.emissive_tri_indices.empty()) return result;
 
     // ── Select emissive triangle via power-weighted alias table ──────
@@ -83,6 +140,10 @@ inline DirectLightSample sample_direct_light(
     }
 
     // 6. Compute incident radiance
+    // When envmap is active, effective triangle PDF = (1 - p_env) * pdf
+    if (use_envmap)
+        pdf_solid_angle *= (1.f - scene.envmap_selection_prob);
+
     result.Li        = light_mat.Le;
     result.wi        = wi;
     result.pdf_light = pdf_solid_angle;
@@ -93,20 +154,33 @@ inline DirectLightSample sample_direct_light(
 }
 
 // ── PDF of direct light sampling for a given direction (v3) ──────────
-// Pure power-weighted PDF.
+// Combined envmap + triangle PDF for emission MIS.
 inline float direct_light_pdf(
     float3 hit_pos,
     float3 wi,
     const Scene& scene,
     float /*coverage_fraction*/ = 0.f)  // kept for API compat, ignored
 {
+    float pdf_total = 0.f;
+
+    // Envmap contribution: if ray missed geometry, envmap would be sampled
+    // But this function is called for rays that *hit* emissive surfaces,
+    // so envmap PDF applies only when the ray escapes to infinity.
+    // For triangle hits, we compute triangle PDF as before.
+
     // Trace ray in direction wi and check if it hits an emissive surface
     Ray ray;
     ray.origin    = hit_pos;
     ray.direction = wi;
 
     HitRecord hit = scene.intersect(ray);
-    if (!hit.hit) return 0.f;
+
+    if (!hit.hit) {
+        // Ray escapes — PDF is envmap PDF (if present)
+        if (scene.has_envmap())
+            pdf_total = scene.envmap->pdf(wi) * scene.envmap_selection_prob;
+        return pdf_total;
+    }
 
     const Material& mat = scene.materials[hit.material_id];
     if (!mat.is_emissive()) return 0.f;
@@ -130,5 +204,11 @@ inline float direct_light_pdf(
     }
 
     float dist2 = hit.t * hit.t;
-    return nee_pdf_area_to_solid_angle(p_power, 1.0f / area, dist2, cos_theta);
+    float pdf_tri = nee_pdf_area_to_solid_angle(p_power, 1.0f / area, dist2, cos_theta);
+
+    // Scale by selection probability when envmap is active
+    if (scene.has_envmap())
+        pdf_tri *= (1.f - scene.envmap_selection_prob);
+
+    return pdf_tri;
 }

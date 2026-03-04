@@ -52,10 +52,45 @@ struct EmittedPhoton {
 //   3. Sample direction: cosine-weighted hemisphere (Lambertian, pdf=cos/π)
 //   4. Flux = Le(λ) · cos_θ / (p_tri · p_pos · p_dir)
 //
+// When an environment map is present, one-sample MIS selects between
+// envmap and triangle lights using envmap_selection_prob.
+//
 // Canonical emission sampler: alias-table + cosine hemisphere.
 // ─────────────────────────────────────────────────────────────────
 inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
     EmittedPhoton ep;
+
+    bool use_envmap = scene.has_envmap() && scene.envmap_selection_prob > 0.f;
+    bool has_tris   = !scene.emissive_tri_indices.empty();
+
+    if (use_envmap && (!has_tris || rng.next_float() < scene.envmap_selection_prob)) {
+        // ── Emit from environment map ───────────────────────────────
+        float actual_p = has_tris ? scene.envmap_selection_prob : 1.f;
+        auto pe = scene.envmap->sample_photon(
+            rng.next_float(), rng.next_float(),
+            rng.next_float(), rng.next_float());
+
+        if (pe.pdf <= 0.f) {
+            ep.spectral_flux = Spectrum::zero();
+            ep.ray.origin    = make_f3(0, 0, 0);
+            ep.ray.direction = make_f3(0, 1, 0);
+            return ep;
+        }
+
+        float combined_pdf = pe.pdf * actual_p;
+        float inv_pdf = 1.f / combined_pdf;
+        Spectrum Le = rgb_to_spectrum_emission(pe.rgb.x, pe.rgb.y, pe.rgb.z);
+        for (int b = 0; b < NUM_LAMBDA; ++b)
+            ep.spectral_flux.value[b] = Le.value[b] * inv_pdf;
+
+        ep.ray.origin    = pe.origin;
+        ep.ray.direction = pe.direction;
+        ep.source_emissive_idx = 0xFFFFu;  // envmap source
+        return ep;
+    }
+
+    // ── Emit from triangle light ────────────────────────────────────
+    float actual_p_tri = (use_envmap) ? (1.f - scene.envmap_selection_prob) : 1.f;
 
     float u1 = rng.next_float();
     float u2 = rng.next_float();
@@ -80,7 +115,7 @@ inline EmittedPhoton sample_emitted_photon(const Scene& scene, PCGRng& rng) {
     float cos_theta = local_dir.z;
     float pdf_dir = cosine_hemisphere_pdf(cos_theta);
 
-    float denom = pdf_tri * pdf_pos * pdf_dir;
+    float denom = pdf_tri * pdf_pos * pdf_dir * actual_p_tri;
     if (denom > 0.f) {
         float scale = cos_theta / denom;
         for (int b = 0; b < NUM_LAMBDA; ++b)
@@ -132,7 +167,7 @@ inline void trace_photons(const Scene& scene,
         volume_map->reserve(config.num_photons / 4);
     }
 
-    if (scene.emissive_tri_indices.empty()) {
+    if (scene.emissive_tri_indices.empty() && !scene.has_envmap()) {
         return;
     }
 

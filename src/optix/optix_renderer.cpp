@@ -174,6 +174,25 @@ void fill_common_params(
 
     // Terminal-bounce photon gather (H-1 fix: was never set → always 0)
     p.photon_final_gather = DEFAULT_PHOTON_FINAL_GATHER ? 1 : 0;
+
+    // Environment map defaults (overridden by fill_envmap_params)
+    p.has_envmap = 0;
+    p.envmap_pixels = nullptr;
+    p.envmap_marginal_cdf = nullptr;
+    p.envmap_conditional_cdf = nullptr;
+    p.envmap_width = 0;
+    p.envmap_height = 0;
+    p.envmap_scale = 1.0f;
+    p.envmap_total_power = 0.f;
+    p.envmap_selection_prob = 0.f;
+    p.envmap_scene_center = make_f3(0, 0, 0);
+    p.envmap_scene_radius = 1.0f;
+    p.envmap_rot_row0 = make_f3(1, 0, 0);
+    p.envmap_rot_row1 = make_f3(0, 1, 0);
+    p.envmap_rot_row2 = make_f3(0, 0, 1);
+    p.envmap_inv_rot_row0 = make_f3(1, 0, 0);
+    p.envmap_inv_rot_row1 = make_f3(0, 1, 0);
+    p.envmap_inv_rot_row2 = make_f3(0, 0, 1);
 }
 
 // fill_cell_grid_params() -- Wire volume CellBinGrid + kNN data into LaunchParams

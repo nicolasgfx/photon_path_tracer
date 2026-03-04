@@ -11,114 +11,168 @@ extern "C" __global__ void __raygen__photon_trace() {
     const uint3 idx = optixGetLaunchIndex();
     int photon_idx = idx.x;
     if (photon_idx >= params.num_photons) return;
-    if (params.num_emissive <= 0) return;
 
     // Incorporate photon_map_seed for multi-map re-tracing (§1.2)
     PCGRng rng = PCGRng::seed(
         (uint64_t)photon_idx * 7 + 42 + (uint64_t)params.photon_map_seed * 0x100000007ULL,
         (uint64_t)photon_idx + 1);
 
-    // 1. Sample emissive triangle (power CDF)
-    int local_idx = 0;
-    {
-        float xi = rng.next_float();
-        local_idx = binary_search_cdf(
-            params.emissive_cdf, params.num_emissive, xi);
-        if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
-    }
-    uint32_t tri_idx = params.emissive_tri_indices[local_idx];
-
-    float pdf_tri;
-    if (local_idx == 0) pdf_tri = params.emissive_cdf[0];
-    else pdf_tri = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
-
-    // 2. Get triangle geometry
-    float3 v0 = params.vertices[tri_idx * 3 + 0];
-    float3 v1 = params.vertices[tri_idx * 3 + 1];
-    float3 v2 = params.vertices[tri_idx * 3 + 2];
-    uint32_t mat_id = params.material_ids[tri_idx];
-
-    // 3. Sample point on triangle
-    float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
-    float3 pos = v0 * bary.x + v1 * bary.y + v2 * bary.z;
-    float3 e1 = v1 - v0;
-    float3 e2 = v2 - v0;
-    float3 geo_n = normalize(cross(e1, e2));
-    float  area  = length(cross(e1, e2)) * 0.5f;
-    float  pdf_pos = 1.f / area;
-
-    // 4. Sample HERO_WAVELENGTHS stratified wavelength bins
-    //    Hero = sampled from Le CDF; companions at stratified offsets
-    //    (Wilkie et al. 2002 / PBRT v4 style)
-    // Interpolate UV at emitter sample point for emission texture
-    float2 euv0 = params.texcoords[tri_idx * 3 + 0];
-    float2 euv1 = params.texcoords[tri_idx * 3 + 1];
-    float2 euv2 = params.texcoords[tri_idx * 3 + 2];
-    float2 emit_uv = make_float2(
-        euv0.x * bary.x + euv1.x * bary.y + euv2.x * bary.z,
-        euv0.y * bary.x + euv1.y * bary.y + euv2.y * bary.z);
-    Spectrum Le = dev_get_Le(mat_id, emit_uv);
-    float Le_sum = 0.f;
-    for (int i = 0; i < NUM_LAMBDA; ++i) Le_sum += Le.value[i];
-    if (Le_sum <= 0.f) return;
-
-    // Sample primary hero wavelength from Le CDF
-    float xi_lambda = rng.next_float() * Le_sum;
-    int hero_bin = NUM_LAMBDA - 1;
-    float cum = 0.f;
-    for (int i = 0; i < NUM_LAMBDA; ++i) {
-        cum += Le.value[i];
-        if (xi_lambda <= cum) { hero_bin = i; break; }
-    }
-
-    // Build stratified companion bins
-    int   hero_bins[HERO_WAVELENGTHS];
+    // ── Source selection: envmap vs triangle lights ──────────────────
+    float3 origin, direction;
+    uint16_t source_emissive_local = 0xFFFFu;
+    int hero_bins[HERO_WAVELENGTHS];
     float hero_flux[HERO_WAVELENGTHS];
-    int   num_hero = HERO_WAVELENGTHS;
+    int num_hero = HERO_WAVELENGTHS;
 
-    hero_bins[0] = hero_bin;
-    for (int h = 1; h < HERO_WAVELENGTHS; ++h) {
-        // Stratified offset: evenly spaced across the spectrum
-        int offset = (h * NUM_LAMBDA) / HERO_WAVELENGTHS;
-        int companion = (hero_bin + offset) % NUM_LAMBDA;
-        hero_bins[h] = companion;
-    }
+    float p_env = (params.has_envmap && params.envmap_selection_prob > 0.f)
+                ? params.envmap_selection_prob : 0.f;
+    bool has_tris = params.num_emissive > 0;
 
-    // 5. Sample cosine-weighted direction within emission cone
-    constexpr float cone_half_rad = DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG * (PI / 180.0f);
-    const float cos_cone_max = cosf(cone_half_rad);
-    float3 local_dir = sample_cosine_cone_dev(rng, cos_cone_max);
-    ONB frame = ONB::from_normal(geo_n);
-    float3 world_dir = frame.local_to_world(local_dir);
-    float cos_theta = local_dir.z;
-    float cone_denom = PI * (1.0f - cos_cone_max * cos_cone_max);
-    float pdf_dir = (cone_denom > 0.f) ? cos_theta / cone_denom : cos_theta * INV_PI;
+    if (!has_tris && p_env <= 0.f) return;
 
-    // 6. Compute initial flux per hero wavelength
-    //    Each hero channel: flux_h = Le(λ_h) * cos / (pdf_tri * pdf_pos * pdf_dir * pdf_lambda_h)
-    //    pdf_lambda_h for companion channels uses the same Le CDF probability
-    //    as if that bin had been directly sampled: pdf_lambda_h = Le(λ_h) / Le_sum
-    //
-    //    PBRT v4 §14.3 hero-wavelength normalization: divide by
-    //    HERO_WAVELENGTHS because each physical photon contributes to
-    //    HERO_WAVELENGTHS spectral bins, but the density estimator
-    //    divides by N_emitted (the number of physical photons, not
-    //    the number of per-bin contributions).  Without this factor
-    //    the indirect component is HERO_WAVELENGTHS× too bright.
-    float denom_common = pdf_tri * pdf_pos * pdf_dir;
-    float inv_hero = 1.0f / (float)HERO_WAVELENGTHS;
-    for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
-        int bin = hero_bins[h];
-        float Le_h = Le.value[bin];
-        float pdf_lambda_h = Le_h / Le_sum;
-        hero_flux[h] = (denom_common * pdf_lambda_h > 0.f)
-                     ? (Le_h * cos_theta) / (denom_common * pdf_lambda_h) * inv_hero
-                     : 0.f;
-    }
+    // Coin flip: emit from envmap or triangle
+    float xi_source = rng.next_float();
+    if (p_env > 0.f && (xi_source < p_env || !has_tris)) {
+        // ── Emit photon from environment map ────────────────────────
+        float actual_p = has_tris ? p_env : 1.f;
 
-    // 7. Trace through scene
-    float3 origin    = pos + geo_n * OPTIX_SCENE_EPSILON;
-    float3 direction = world_dir;
+        DevEnvSample es = dev_envmap_sample(rng);
+        if (es.pdf <= 0.f) return;
+
+        float3 light_dir = es.direction;           // direction FROM envmap
+        float3 photon_dir = light_dir * (-1.f);    // towards scene
+
+        // Create disk sample origin (PBRT bounding sphere approach)
+        ONB frame = ONB::from_normal(light_dir);
+        float u3 = rng.next_float();
+        float u4 = rng.next_float();
+        float r = params.envmap_scene_radius * sqrtf(u3);
+        float theta_disk = 2.0f * PI * u4;
+        float disk_x = r * cosf(theta_disk);
+        float disk_y = r * sinf(theta_disk);
+        float disk_area = PI * params.envmap_scene_radius * params.envmap_scene_radius;
+
+        origin = params.envmap_scene_center + light_dir * params.envmap_scene_radius
+               + frame.u * disk_x + frame.v * disk_y;
+        direction = photon_dir;
+        Spectrum Le_envmap = es.Le;
+
+        // Flux = Le / (pdf_dir / disk_area) / p_select = Le * disk_area / (pdf_dir * p_select)
+        float combined_pdf = es.pdf / disk_area * actual_p;
+        float inv_combined = 1.f / fmaxf(combined_pdf, 1e-10f);
+
+        // Build hero wavelengths from Le
+        float Le_sum = 0.f;
+        for (int i = 0; i < NUM_LAMBDA; ++i) Le_sum += Le_envmap.value[i];
+        if (Le_sum <= 0.f) return;
+
+        float xi_lambda = rng.next_float() * Le_sum;
+        int hero_bin = NUM_LAMBDA - 1;
+        float cum = 0.f;
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            cum += Le_envmap.value[i];
+            if (xi_lambda <= cum) { hero_bin = i; break; }
+        }
+        hero_bins[0] = hero_bin;
+        for (int h = 1; h < HERO_WAVELENGTHS; ++h) {
+            int offset = (h * NUM_LAMBDA) / HERO_WAVELENGTHS;
+            hero_bins[h] = (hero_bin + offset) % NUM_LAMBDA;
+        }
+
+        // Per-hero flux
+        float inv_hero = 1.0f / (float)HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            int bin = hero_bins[h];
+            float Le_h = Le_envmap.value[bin];
+            float pdf_lambda_h = Le_h / Le_sum;
+            hero_flux[h] = (pdf_lambda_h > 0.f)
+                ? Le_h * inv_combined / pdf_lambda_h * inv_hero
+                : 0.f;
+        }
+
+    } else {
+        // ── Emit photon from triangle light ─────────────────────────
+        float actual_p_tri = (p_env > 0.f) ? (1.f - p_env) : 1.f;
+
+        if (params.num_emissive <= 0) return;
+
+        int local_idx = 0;
+        {
+            float xi = rng.next_float();
+            local_idx = binary_search_cdf(
+                params.emissive_cdf, params.num_emissive, xi);
+            if (local_idx >= params.num_emissive) local_idx = params.num_emissive - 1;
+        }
+        source_emissive_local = (uint16_t)local_idx;
+        uint32_t tri_idx = params.emissive_tri_indices[local_idx];
+
+        float pdf_tri;
+        if (local_idx == 0) pdf_tri = params.emissive_cdf[0];
+        else pdf_tri = params.emissive_cdf[local_idx] - params.emissive_cdf[local_idx - 1];
+
+        float3 v0 = params.vertices[tri_idx * 3 + 0];
+        float3 v1 = params.vertices[tri_idx * 3 + 1];
+        float3 v2 = params.vertices[tri_idx * 3 + 2];
+        uint32_t mat_id = params.material_ids[tri_idx];
+
+        float3 bary = sample_triangle_dev(rng.next_float(), rng.next_float());
+        float3 pos = v0 * bary.x + v1 * bary.y + v2 * bary.z;
+        float3 e1 = v1 - v0;
+        float3 e2 = v2 - v0;
+        float3 geo_n = normalize(cross(e1, e2));
+        float  area  = length(cross(e1, e2)) * 0.5f;
+        float  pdf_pos = 1.f / area;
+
+        float2 euv0 = params.texcoords[tri_idx * 3 + 0];
+        float2 euv1 = params.texcoords[tri_idx * 3 + 1];
+        float2 euv2 = params.texcoords[tri_idx * 3 + 2];
+        float2 emit_uv = make_float2(
+            euv0.x * bary.x + euv1.x * bary.y + euv2.x * bary.z,
+            euv0.y * bary.x + euv1.y * bary.y + euv2.y * bary.z);
+        Spectrum Le = dev_get_Le(mat_id, emit_uv);
+        float Le_sum = 0.f;
+        for (int i = 0; i < NUM_LAMBDA; ++i) Le_sum += Le.value[i];
+        if (Le_sum <= 0.f) return;
+
+        float xi_lambda = rng.next_float() * Le_sum;
+        int hero_bin = NUM_LAMBDA - 1;
+        float cum = 0.f;
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            cum += Le.value[i];
+            if (xi_lambda <= cum) { hero_bin = i; break; }
+        }
+
+        hero_bins[0] = hero_bin;
+        for (int h = 1; h < HERO_WAVELENGTHS; ++h) {
+            int offset = (h * NUM_LAMBDA) / HERO_WAVELENGTHS;
+            hero_bins[h] = (hero_bin + offset) % NUM_LAMBDA;
+        }
+
+        constexpr float cone_half_rad = DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG * (PI / 180.0f);
+        const float cos_cone_max = cosf(cone_half_rad);
+        float3 local_dir = sample_cosine_cone_dev(rng, cos_cone_max);
+        ONB frame = ONB::from_normal(geo_n);
+        float3 world_dir = frame.local_to_world(local_dir);
+        float cos_theta = local_dir.z;
+        float cone_denom = PI * (1.0f - cos_cone_max * cos_cone_max);
+        float pdf_dir = (cone_denom > 0.f) ? cos_theta / cone_denom : cos_theta * INV_PI;
+
+        // Flux per hero wavelength (divided by selection probability for one-sample MIS)
+        float denom = pdf_tri * pdf_pos * pdf_dir * actual_p_tri;
+        float inv_hero = 1.0f / (float)HERO_WAVELENGTHS;
+        for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+            int bin = hero_bins[h];
+            float Le_h = Le.value[bin];
+            float pdf_lambda_h = Le_h / Le_sum;
+            hero_flux[h] = (denom * pdf_lambda_h > 0.f)
+                         ? (Le_h * cos_theta) / (denom * pdf_lambda_h) * inv_hero
+                         : 0.f;
+        }
+
+        origin    = pos + geo_n * OPTIX_SCENE_EPSILON;
+        direction = world_dir;
+    } // end source selection
+
     // Caustic tracking (matches CPU emitter.h convention):
     // Starts false; set true on first specular/translucent hit; reset
     // to false on diffuse/glossy.  Only L→S→D (or L→D→S→D) paths
@@ -234,7 +288,7 @@ extern "C" __global__ void __raygen__photon_trace() {
                     params.out_photon_flux[slot * HERO_WAVELENGTHS + h]   = hero_flux[h];
                 }
                 params.out_photon_num_hero[slot] = (uint8_t)num_hero;
-                params.out_photon_source_emissive[slot] = (uint16_t)local_idx;
+                params.out_photon_source_emissive[slot] = source_emissive_local;
                 if (params.out_photon_is_caustic)
                     params.out_photon_is_caustic[slot] = on_caustic_path ? (uint8_t)1 : (uint8_t)0;
                 if (params.out_photon_path_flags)

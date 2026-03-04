@@ -321,15 +321,105 @@ Spectrum dev_estimate_volume_photon_density(
     return L;
 }
 // =====================================================================
+// dev_nee_envmap_sample — NEE: sample envmap + shadow + BSDF MIS
+// =====================================================================
+// Moved here from optix_envmap.cuh because it depends on NeeSampleResult.
+__forceinline__ __device__
+NeeSampleResult dev_nee_envmap_sample(
+    float3 pos, float3 normal, float3 wo_local,
+    uint32_t mat_id, const ONB& frame, float2 uv, PCGRng& rng)
+{
+    NeeSampleResult r;
+    r.L = Spectrum::zero();
+    r.visible = false;
+
+    DevEnvSample es = dev_envmap_sample(rng);
+    if (es.pdf <= 0.f) return r;
+
+    float3 wi = es.direction;
+    float cos_x = dot(wi, normal);
+    if (cos_x <= 0.f) return r;
+
+    // Shadow ray to infinity (if occluded by geometry, envmap is blocked)
+    if (!trace_shadow(pos + normal * OPTIX_SCENE_EPSILON, wi, DEFAULT_RAY_TMAX))
+        return r;
+    r.visible = true;
+
+    // BSDF evaluation
+    float3 wi_local = frame.world_to_local(wi);
+    if (wi_local.z <= 0.f) return r;
+    Spectrum f = bsdf_evaluate(mat_id, wo_local, wi_local, uv);
+
+    // MIS: envmap NEE PDF vs BSDF PDF
+    // Account for one-sample MIS selection: actual PDF = envmap_selection_prob * pdf_env
+    float pdf_env = es.pdf * params.envmap_selection_prob;
+    float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
+    float w_mis = mis_weight_2(pdf_env, pdf_bsdf);
+
+    // Contribution: f * Le * cos / pdf_env (with MIS)
+    for (int i = 0; i < NUM_LAMBDA; ++i)
+        r.L.value[i] = w_mis * f.value[i] * es.Le.value[i]
+                      * cos_x / fmaxf(pdf_env, 1e-8f);
+
+    return r;
+}
+
+// =====================================================================
 // dev_nee_dispatch — entry point for all NEE calls
 // =====================================================================
+// One-sample MIS between triangle lights and envmap:
+//   - Coin flip with envmap_selection_prob → choose envmap or triangles
+//   - Divide result by the selection probability (unbiased estimator)
 
 __forceinline__ __device__
 NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
                            uint32_t mat_id, PCGRng& rng, int bounce,
                            float2 uv)
 {
-    return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+    NeeResult result;
+    result.L = Spectrum::zero();
+    result.visibility = 0.f;
+
+    bool use_envmap = params.has_envmap && params.envmap_selection_prob > 0.f;
+    bool has_tris   = params.num_emissive > 0;
+
+    if (!use_envmap && !has_tris) return result;
+
+    if (use_envmap && has_tris) {
+        // One-sample MIS: coin flip between envmap and triangle lights
+        float p_env = params.envmap_selection_prob;
+        float xi = rng.next_float();
+
+        if (xi < p_env) {
+            // Sample envmap
+            ONB frame = ONB::from_normal(normal);
+            NeeSampleResult sr = dev_nee_envmap_sample(
+                pos, normal, wo_local, mat_id, frame, uv, rng);
+            // Divide by selection probability (already accounts for MIS inside)
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                result.L.value[i] = sr.L.value[i];
+            result.visibility = sr.visible ? 1.f : 0.f;
+        } else {
+            // Sample triangle light (scale by 1/(1-p_env))
+            NeeResult tri = dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+            float inv_p_tri = 1.f / fmaxf(1.f - p_env, 1e-8f);
+            for (int i = 0; i < NUM_LAMBDA; ++i)
+                result.L.value[i] = tri.L.value[i] * inv_p_tri;
+            result.visibility = tri.visibility;
+        }
+    } else if (use_envmap) {
+        // Envmap only (no triangle lights)
+        ONB frame = ONB::from_normal(normal);
+        NeeSampleResult sr = dev_nee_envmap_sample(
+            pos, normal, wo_local, mat_id, frame, uv, rng);
+        result.L = sr.L;
+        result.visibility = sr.visible ? 1.f : 0.f;
+    } else {
+        // Triangle lights only (no envmap)
+        return dev_nee_direct(pos, normal, wo_local, mat_id, rng, bounce, uv);
+    }
+
+    return result;
 }
 
 // =====================================================================
@@ -337,6 +427,7 @@ NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
 // =====================================================================
 // Evaluates HG phase function instead of surface BSDF.
 // Applies Beer-Lambert transmittance along the shadow ray for each λ.
+// Supports one-sample MIS between envmap and triangle lights.
 
 __forceinline__ __device__
 NeeResult dev_nee_volume_scatter(float3 pos, float3 wo_world,
@@ -346,6 +437,50 @@ NeeResult dev_nee_volume_scatter(float3 pos, float3 wo_world,
     NeeResult result;
     result.L = Spectrum::zero();
     result.visibility = 0.f;
+
+    bool use_envmap = params.has_envmap && params.envmap_selection_prob > 0.f;
+    bool has_tris   = params.num_emissive > 0;
+
+    if (!use_envmap && !has_tris) return result;
+
+    // One-sample MIS source selection
+    bool chose_envmap = false;
+    if (use_envmap && has_tris) {
+        chose_envmap = rng.next_float() < params.envmap_selection_prob;
+    } else if (use_envmap) {
+        chose_envmap = true;
+    }
+
+    if (chose_envmap) {
+        // ── Sample envmap for volume scatter NEE ────────────────────
+        DevEnvSample es = dev_envmap_sample(rng);
+        if (es.pdf <= 0.f) return result;
+
+        float3 wi = es.direction;
+
+        // Shadow ray to infinity (from volume — no normal offset)
+        if (!trace_shadow(pos, wi, DEFAULT_RAY_TMAX))
+            return result;
+        result.visibility = 1.f;
+
+        // HG phase function
+        float cos_theta = dot(wo_world * (-1.f), wi);
+        float p_hg = henyey_greenstein_phase(cos_theta, hg_g);
+
+        // Effective envmap PDF (no Beer-Lambert needed — infinite distance)
+        float pdf_env = es.pdf * params.envmap_selection_prob;
+
+        // MIS: envmap NEE vs HG sampling
+        float w_mis = mis_weight_2(pdf_env, p_hg);
+
+        for (int i = 0; i < NUM_LAMBDA; ++i) {
+            result.L.value[i] = w_mis * p_hg * es.Le.value[i]
+                               / fmaxf(pdf_env, 1e-8f);
+        }
+        return result;
+    }
+
+    // ── Triangle light sampling (original code) ─────────────────────
     if (params.num_emissive <= 0) return result;
 
     // Select a light from the power-weighted CDF
@@ -411,10 +546,11 @@ NeeResult dev_nee_volume_scatter(float3 pos, float3 wo_world,
     }
 
     // Beer-Lambert transmittance along shadow ray (per wavelength)
+    float inv_p_tri_sel = (use_envmap) ? 1.f / fmaxf(1.f - params.envmap_selection_prob, 1e-8f) : 1.f;
     for (int i = 0; i < NUM_LAMBDA; ++i) {
         float T_shadow = expf(-med.sigma_t.value[i] * dist);
         result.L.value[i] = w_mis * p_hg * Le.value[i] * T_shadow
-                           / fmaxf(p_wi, 1e-8f);
+                           * inv_p_tri_sel / fmaxf(p_wi, 1e-8f);
     }
 
     return result;

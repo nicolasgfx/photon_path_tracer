@@ -84,6 +84,7 @@ set(CORE_SOURCES
     src/main.cpp
     src/app/viewer.cpp
     src/scene/obj_loader.cpp
+    src/scene/envmap_loader.cpp
     src/photon/photon_io.cpp
     src/photon/direction_map.cpp
     src/renderer/renderer.cpp

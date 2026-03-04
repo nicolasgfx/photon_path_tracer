@@ -93,7 +93,10 @@ bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
 
 bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
                            float& light_scale,
-                           const std::string& scene_folder);
+                           const std::string& scene_folder,
+                           std::string* out_envmap_path = nullptr,
+                           float3* out_envmap_rotation = nullptr,
+                           float* out_envmap_scale = nullptr);
 
 // -- PNG output -------------------------------------------------------
 bool write_png(const std::string& filename, const FrameBuffer& fb);

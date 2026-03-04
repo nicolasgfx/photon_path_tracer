@@ -158,6 +158,25 @@ struct LaunchParams {
     int       num_emissive;
     float     total_emissive_power;
 
+    // ── Environment map (infinite light, IBL) ────────────────────────
+    float*    envmap_pixels;          // [envmap_w * envmap_h * 3] RGB float
+    float*    envmap_marginal_cdf;    // [envmap_h] row CDF
+    float*    envmap_conditional_cdf; // [envmap_h * envmap_w] per-row column CDF
+    int       envmap_width;
+    int       envmap_height;
+    float     envmap_scale;
+    float     envmap_total_power;
+    float     envmap_selection_prob;  // probability of choosing envmap in NEE/photon
+    float3    envmap_rot_row0;        // rotation matrix (world → envmap local)
+    float3    envmap_rot_row1;
+    float3    envmap_rot_row2;
+    float3    envmap_inv_rot_row0;    // inverse rotation (envmap local → world)
+    float3    envmap_inv_rot_row1;
+    float3    envmap_inv_rot_row2;
+    int       has_envmap;             // 1 = envmap loaded, 0 = no envmap
+    float3    envmap_scene_center;    // bounding sphere center
+    float     envmap_scene_radius;    // bounding sphere radius
+
     // ── Targeted caustic emission (Jensen §9.2) ─────────────────────
     // Specular triangle set for importance-sampled caustic photon emission.
     // The alias table enables O(1) area-weighted specular triangle sampling.

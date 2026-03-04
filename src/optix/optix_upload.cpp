@@ -213,6 +213,27 @@ void OptixRenderer::fill_clearcoat_fabric_params(LaunchParams& lp) const {
     lp.cauchy_A      = d_cauchy_A_.d_ptr      ? const_cast<float*>(d_cauchy_A_.as<float>())      : nullptr;
     lp.cauchy_B      = d_cauchy_B_.d_ptr      ? const_cast<float*>(d_cauchy_B_.as<float>())      : nullptr;
     lp.mat_dispersion = d_mat_dispersion_.d_ptr ? const_cast<uint8_t*>(d_mat_dispersion_.as<uint8_t>()) : nullptr;
+
+    // Environment map data
+    if (envmap_uploaded_) {
+        lp.has_envmap = 1;
+        lp.envmap_pixels          = const_cast<float*>(d_envmap_pixels_.as<float>());
+        lp.envmap_marginal_cdf    = const_cast<float*>(d_envmap_marginal_cdf_.as<float>());
+        lp.envmap_conditional_cdf = const_cast<float*>(d_envmap_conditional_cdf_.as<float>());
+        lp.envmap_width           = envmap_width_;
+        lp.envmap_height          = envmap_height_;
+        lp.envmap_scale           = envmap_scale_;
+        lp.envmap_total_power     = envmap_total_power_;
+        lp.envmap_selection_prob  = envmap_selection_prob_;
+        lp.envmap_scene_center    = envmap_scene_center_;
+        lp.envmap_scene_radius    = envmap_scene_radius_;
+        lp.envmap_rot_row0        = envmap_rot_row0_;
+        lp.envmap_rot_row1        = envmap_rot_row1_;
+        lp.envmap_rot_row2        = envmap_rot_row2_;
+        lp.envmap_inv_rot_row0    = envmap_inv_rot_row0_;
+        lp.envmap_inv_rot_row1    = envmap_inv_rot_row1_;
+        lp.envmap_inv_rot_row2    = envmap_inv_rot_row2_;
+    }
 }
 
 // =====================================================================
@@ -307,6 +328,42 @@ void OptixRenderer::upload_emitter_data(const Scene& scene) {
                 n, total,
                 *std::max_element(weights.begin(), weights.end()),
                 *std::min_element(weights.begin(), weights.end()));
+}
+
+// =====================================================================
+// upload_envmap_data() -- Upload environment map for GPU rendering
+// =====================================================================
+void OptixRenderer::upload_envmap_data(const Scene& scene) {
+    if (!scene.has_envmap()) {
+        envmap_uploaded_ = false;
+        return;
+    }
+
+    const auto& em = *scene.envmap;
+
+    d_envmap_pixels_.upload(em.pixels.data(), em.pixels.size());
+    d_envmap_marginal_cdf_.upload(em.marginal_cdf.data(), em.marginal_cdf.size());
+    d_envmap_conditional_cdf_.upload(em.conditional_cdf.data(), em.conditional_cdf.size());
+
+    // Cache scalar params for fill_clearcoat_fabric_params
+    envmap_width_          = em.width;
+    envmap_height_         = em.height;
+    envmap_scale_          = em.scale;
+    envmap_total_power_    = em.total_power;
+    envmap_selection_prob_ = scene.envmap_selection_prob;
+    envmap_scene_center_   = em.scene_center;
+    envmap_scene_radius_   = em.scene_radius;
+    envmap_rot_row0_       = em.rotation.row0;
+    envmap_rot_row1_       = em.rotation.row1;
+    envmap_rot_row2_       = em.rotation.row2;
+    envmap_inv_rot_row0_   = em.inv_rotation.row0;
+    envmap_inv_rot_row1_   = em.inv_rotation.row1;
+    envmap_inv_rot_row2_   = em.inv_rotation.row2;
+
+    envmap_uploaded_ = true;
+
+    std::printf("[OptiX] EnvMap uploaded: %dx%d  selection_prob=%.4f\n",
+                em.width, em.height, scene.envmap_selection_prob);
 }
 
 

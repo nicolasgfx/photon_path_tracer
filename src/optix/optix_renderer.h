@@ -160,6 +160,9 @@ public:
     /// Upload emitter data to device (for GPU photon tracing)
     void upload_emitter_data(const Scene& scene);
 
+    /// Upload environment map data to device
+    void upload_envmap_data(const Scene& scene);
+
 
 
     /// Trace photons entirely on the GPU. Downloads results, builds
@@ -495,6 +498,21 @@ private:
     DeviceBuffer d_emissive_indices_;
     DeviceBuffer d_emissive_cdf_;
     DeviceBuffer d_emissive_local_idx_;  // int [num_tris] inverse lookup
+
+    // Environment map device buffers
+    DeviceBuffer d_envmap_pixels_;          // float [envmap_w * envmap_h * 3]
+    DeviceBuffer d_envmap_marginal_cdf_;    // float [envmap_h]
+    DeviceBuffer d_envmap_conditional_cdf_; // float [envmap_h * envmap_w]
+    bool envmap_uploaded_ = false;
+
+    // Environment map scalar params (cached for fill_clearcoat_fabric_params)
+    int   envmap_width_ = 0, envmap_height_ = 0;
+    float envmap_scale_ = 1.f, envmap_total_power_ = 0.f;
+    float envmap_selection_prob_ = 0.f;
+    float3 envmap_scene_center_ = {0, 0, 0};
+    float  envmap_scene_radius_ = 1.f;
+    float3 envmap_rot_row0_ = {1,0,0}, envmap_rot_row1_ = {0,1,0}, envmap_rot_row2_ = {0,0,1};
+    float3 envmap_inv_rot_row0_ = {1,0,0}, envmap_inv_rot_row1_ = {0,1,0}, envmap_inv_rot_row2_ = {0,0,1};
 
     // Targeted caustic specular triangle data (device)
     DeviceBuffer d_targeted_spec_tri_indices_;   // uint32_t [N]

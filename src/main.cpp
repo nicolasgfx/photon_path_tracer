@@ -8,6 +8,7 @@
 #include "scene/obj_loader.h"
 #include "scene/scene.h"
 #include "scene/scene_builder.h"
+#include "scene/envmap.h"
 #include "renderer/camera.h"
 #include "optix/optix_renderer.h"
 #include "tests/test_data_io.h"
@@ -28,19 +29,19 @@
 static constexpr int scene_profile_index() {
     #if defined(SCENE_CORNELL_BOX)
         return 0;
-    #elif defined(SCENE_LIVING_ROOM)
+    #elif defined(SCENE_ZERO_DAY)
         return 1;
-    #elif defined(SCENE_SALLE_DE_BAIN)
+    #elif defined(SCENE_VILLA)
         return 2;
-    #elif defined(SCENE_FIREPLACE_ROOM)
+    #elif defined(SCENE_SAN_MIGUEL)
         return 3;
-    #elif defined(SCENE_CONFERENCE)
-        return 4;
-    #elif defined(SCENE_LIVING_ROOM_2)
-        return 5;
     #elif defined(SCENE_STAIRCASE)
-        return 6;
+        return 4;
     #elif defined(SCENE_STAIRCASE_2)
+        return 5;
+    #elif defined(SCENE_FIREPLACE_ROOM)
+        return 6;
+    #elif defined(SCENE_LIVING_ROOM_2)
         return 7;
     #elif defined(SCENE_BEDROOM)
         return 8;
@@ -125,13 +126,41 @@ int main(int argc, char* argv[]) {
     camera.update();
 
     // -- Load saved camera position (if any) --------------------------
+    std::string envmap_path;
+    float3 envmap_rotation = make_f3(0, 0, 0);
+    float envmap_scale_val = 1.0f;
     {
         AppState& app = app_state();
         std::string folder = scene_folder_from_profile(SCENE_OBJ_PATH);
         float yaw_init = 0.f, pitch_init = 0.f, light_init = DEFAULT_LIGHT_SCALE;
-        if (load_camera_from_file(camera, yaw_init, pitch_init, light_init, folder)) {
+        if (load_camera_from_file(camera, yaw_init, pitch_init, light_init, folder,
+                                  &envmap_path, &envmap_rotation, &envmap_scale_val)) {
             app.yaw   = yaw_init;   app.pitch = pitch_init;
             app.light_scale = light_init;  app.light_scale_changed = true;
+        }
+    }
+
+    // -- Load environment map (if specified in camera.json) -----------
+    if (!envmap_path.empty()) {
+        auto t_env0 = std::chrono::high_resolution_clock::now();
+        scene.envmap = std::make_shared<EnvironmentMap>();
+        if (load_environment_map(envmap_path, envmap_scale_val,
+                                 envmap_rotation, *scene.envmap)) {
+            // Set bounding sphere from scene geometry
+            scene.envmap->scene_center = scene.scene_bounding_center();
+            scene.envmap->scene_radius = scene.scene_bounding_radius() * 1.1f;
+
+            // Compute selection probability for one-sample MIS
+            scene.compute_envmap_selection_prob();
+
+            auto t_env1 = std::chrono::high_resolution_clock::now();
+            std::printf("[Timing] EnvMap load:       %8.1f ms  (%dx%d, sel_p=%.3f)\n",
+                        std::chrono::duration<double, std::milli>(t_env1 - t_env0).count(),
+                        scene.envmap->width, scene.envmap->height,
+                        scene.envmap_selection_prob);
+        } else {
+            std::printf("[Warning] Failed to load envmap: %s\n", envmap_path.c_str());
+            scene.envmap.reset();
         }
     }
 
@@ -157,6 +186,10 @@ int main(int argc, char* argv[]) {
             auto t4 = std::chrono::high_resolution_clock::now();
             std::printf("[Timing] upload_emitter:    %8.1f ms\n",
                 std::chrono::duration<double, std::milli>(t4 - t3).count());
+            optix_renderer.upload_envmap_data(scene);
+            auto t5 = std::chrono::high_resolution_clock::now();
+            std::printf("[Timing] upload_envmap:     %8.1f ms\n",
+                std::chrono::duration<double, std::milli>(t5 - t4).count());
         }
         std::cout << "\n";
 

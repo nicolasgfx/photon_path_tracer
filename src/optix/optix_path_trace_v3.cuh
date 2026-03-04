@@ -76,7 +76,37 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         TraceResult hit = trace_radiance(origin, direction);
         if constexpr (ENABLE_STATS) result.clk_ray_trace += clock64() - t0;
 
-        if (!hit.hit) break;
+        if (!hit.hit) {
+            // ── Environment map radiance (miss handler) ─────────────
+            if (params.has_envmap) {
+                Spectrum Le = dev_envmap_eval(direction);
+                if (bounce == 0) {
+                    // Camera sees envmap directly — no MIS
+                    Spectrum Le_contrib = throughput * Le;
+                    result.combined  += Le_contrib;
+                    result.nee_direct += Le_contrib;
+                    if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                        result.bounce_contrib[bounce] += Le_contrib;
+                } else {
+                    // MIS: BSDF hit envmap. Weight against NEE envmap PDF.
+                    // Delta previous bounce → full weight to BSDF.
+                    float w_bsdf;
+                    if (pdf_combined_prev <= 0.f) {
+                        w_bsdf = 1.0f;
+                    } else {
+                        float p_env = dev_envmap_pdf(direction)
+                                    * params.envmap_selection_prob;
+                        w_bsdf = mis_weight_2(pdf_combined_prev, p_env);
+                    }
+                    Spectrum Le_contrib = throughput * Le * w_bsdf;
+                    result.combined  += Le_contrib;
+                    result.nee_direct += Le_contrib;
+                    if (params.bounce_aov_enabled && bounce < MAX_AOV_BOUNCES)
+                        result.bounce_contrib[bounce] += Le_contrib;
+                }
+            }
+            break;
+        }
 
         // ── Per-material interior medium transport (§7.7) ───────────
         // When the camera ray is inside a Translucent object's medium,
@@ -316,6 +346,10 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                 } else {
                     float p_nee = dev_light_pdf(
                         hit.triangle_id, hit.geo_normal, direction, hit.t);
+                    // When envmap is active, triangle NEE uses one-sample MIS:
+                    // effective PDF = (1 - envmap_selection_prob) * p_nee
+                    if (params.has_envmap)
+                        p_nee *= (1.f - params.envmap_selection_prob);
                     w_bsdf = mis_weight_2(pdf_combined_prev, p_nee);
                 }
                 Spectrum Le_contrib = throughput * Le * w_bsdf;

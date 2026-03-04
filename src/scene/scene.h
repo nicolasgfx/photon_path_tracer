@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────
 #include "scene/triangle.h"
 #include "scene/material.h"
+#include "scene/envmap.h"
 #include "core/spectrum.h"
 #include "core/config.h"
 #include "core/alias_table.h"
@@ -12,6 +13,7 @@
 #include <string>
 #include <algorithm>
 #include <iostream>
+#include <memory>
 
 // ── BVH Node ────────────────────────────────────────────────────────
 struct BVHNode {
@@ -59,6 +61,36 @@ struct Scene {
     float                  total_emissive_power = 0.f;
 
     AABB                   scene_bounds;
+
+    // ── Environment map (infinite light) ──────────────────────────
+    std::shared_ptr<EnvironmentMap> envmap;  // nullptr if no envmap
+    float envmap_selection_prob = 0.f;       // probability of choosing envmap in NEE/photon
+
+    bool has_envmap() const { return envmap && envmap->width > 0; }
+
+    // Compute the envmap vs emissive triangle selection probability
+    // based on relative power.  Call after build_emissive_distribution()
+    // and envmap->build_distribution().
+    void compute_envmap_selection_prob() {
+        if (!has_envmap()) { envmap_selection_prob = 0.f; return; }
+        float env_power = envmap->total_power;
+        float tri_power = total_emissive_power;
+        if (env_power + tri_power <= 0.f) { envmap_selection_prob = 0.5f; return; }
+        envmap_selection_prob = env_power / (env_power + tri_power);
+        // Clamp to [0.1, 0.9] to avoid starving either strategy
+        envmap_selection_prob = fmaxf(0.1f, fminf(0.9f, envmap_selection_prob));
+        std::printf("[Scene] Envmap selection prob = %.4f  (env=%.2f  tri=%.2f)\n",
+                    envmap_selection_prob, env_power, tri_power);
+    }
+
+    // Bounding sphere for photon emission from infinity
+    float3 scene_bounding_center() const {
+        return scene_bounds.center();
+    }
+    float scene_bounding_radius() const {
+        float3 ext = scene_bounds.extent();
+        return length(ext) * 0.5f * 1.01f;  // slight expansion
+    }
 
     // ── Build acceleration structure ────────────────────────────────
     void build_bvh();

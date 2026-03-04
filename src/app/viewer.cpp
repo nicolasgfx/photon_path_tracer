@@ -113,7 +113,10 @@ bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
 
 bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
                            float& light_scale,
-                           const std::string& scene_folder) {
+                           const std::string& scene_folder,
+                           std::string* out_envmap_path,
+                           float3* out_envmap_rotation,
+                           float* out_envmap_scale) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ifstream f(path);
     if (!f.is_open()) return false;
@@ -168,6 +171,19 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
         else if (key == "yaw")          { yaw            = (float)std::atof(val.c_str()); }
         else if (key == "pitch")        { pitch          = (float)std::atof(val.c_str()); }
         else if (key == "light_scale")  { light_scale    = (float)std::atof(val.c_str()); }
+        else if (key == "environment_map" && out_envmap_path) {
+            // Strip quotes from string value
+            std::string v = val;
+            if (!v.empty() && v.front() == '"') v.erase(0, 1);
+            if (!v.empty() && v.back()  == '"') v.pop_back();
+            if (!v.empty()) *out_envmap_path = scene_folder + "/" + v;
+        }
+        else if (key == "environment_rotation_deg" && out_envmap_rotation) {
+            parse_float3(val, *out_envmap_rotation);
+        }
+        else if (key == "environment_scale" && out_envmap_scale) {
+            *out_envmap_scale = (float)std::atof(val.c_str());
+        }
     }
 
     if (got_pos && got_lookat) {
