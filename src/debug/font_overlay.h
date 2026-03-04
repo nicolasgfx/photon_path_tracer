@@ -251,13 +251,12 @@ inline void stampText(std::vector<uint8_t>& pixels, uint32_t imgW, uint32_t imgH
     }
 }
 
-// ── Stamp watermarks (bottom-left: GitHub, bottom-right: email) ─────
+// ── Stamp watermark (bottom-right: email) ───────────────────────────
 
 inline void stampWatermarks(std::vector<uint8_t>& pixels, uint32_t W, uint32_t H) {
     const int scale = std::max(1, static_cast<int>(W) / 480);
     constexpr int GW = 5, GH = 7, SPACING = 1;
 
-    const std::string leftText  = "https://github.com/nicolasgfx/photon_path_tracer";
     const std::string rightText = "drnicolasmenzel@gmail.com";
 
     int charW  = (GW + SPACING) * scale;
@@ -271,7 +270,6 @@ inline void stampWatermarks(std::vector<uint8_t>& pixels, uint32_t W, uint32_t H
     constexpr uint8_t tr = 200, tg = 200, tb = 200;
     constexpr float   ta = 0.55f;
 
-    stampText(pixels, W, H, leftText,  margin, y, tr, tg, tb, ta, scale);
     stampText(pixels, W, H, rightText,
              static_cast<int>(W) - rightW - margin, y, tr, tg, tb, ta, scale);
 }
