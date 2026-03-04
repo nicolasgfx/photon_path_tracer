@@ -1,22 +1,25 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────
-// optix_direction_map.cuh — Direction map build kernel
+// optix_direction_map.cuh — Direction map build kernel (v2: hash grid + shadow rays)
 // ─────────────────────────────────────────────────────────────────────
-// Launched as a CUDA kernel (not a separate OptiX program) after
-// photon tracing to precompute the directional SPP framebuffer.
+// Launched as an OptiX raygen program after photon tracing to
+// precompute the directional guidance framebuffer (1:1 with pixels).
 //
-// For each subpixel:
+// For each pixel:
 //   1. Cast a primary ray → find 1st hitpoint.
 //   2. If delta material, follow specular chain to first non-delta hit.
-//   3. Gather nearby photons from the dense grid (5×5×5 neighbourhood).
-//   4. Build a 128-bin Fibonacci sphere histogram weighted by
-//      Epanechnikov kernel; delta-material photons are boosted.
-//   5. Sample one direction from the histogram using RNG.
-//   6. Compute the marginal guide PDF at that direction.
-//   7. Write DirMapEntry to device buffer.
-//
-// The kernel re-uses the existing dense grid, photon data, and scene
-// traversal from the main OptiX pipeline (accessed through LaunchParams).
+//   3. Gather nearby photons via hash grid kNN (Teschner spatial hash).
+//   4. For each candidate photon, trace a shadow ray from the hitpoint.
+//      Accept/reject based on material of the first intersection:
+//        - miss               → accept  (w = DIR_MAP_DEFAULT_WEIGHT)
+//        - delta (glass/mirror)→ accept  (w = DIR_MAP_DELTA_WEIGHT)
+//        - translucent        → accept  (w = DIR_MAP_TRANSLUCENT_WEIGHT)
+//        - emissive           → reject
+//        - non-delta diffuse  → reject
+//   5. Build a 128-bin Fibonacci sphere histogram from accepted photons.
+//   6. Sample one direction from the histogram using RNG.
+//   7. Compute the marginal guide PDF at that direction.
+//   8. Write DirMapEntry to device buffer.
 // ─────────────────────────────────────────────────────────────────────
 
 #include "photon/direction_map.h"
@@ -139,8 +142,8 @@ DirMapEntry dev_build_direction_map_entry(
     entry.norm_z = hit.shading_normal.z;
     entry.mat_type = params.mat_type[hit.material_id];
 
-    // ── Dense grid photon gathering → Fibonacci histogram ─────────
-    if (!params.dense_valid || params.num_photons == 0) return entry;
+    // ── Hash grid photon gathering + shadow ray filtering ───────────
+    if (!params.dm_hash_valid || params.num_photons == 0) return entry;
 
     float3 pos = hit.position;
     float3 N   = hit.shading_normal;
@@ -149,12 +152,22 @@ DirMapEntry dev_build_direction_map_entry(
     float3 wo = cur_dir * (-1.f);
     if (dot(wo, N) < 0.f) N = N * (-1.f);
 
-    const int R = DIR_MAP_NEIGHBOURHOOD_EXTENT;  // ±3 cells = 7×7×7
-    const float guide_r2 = params.guide_radius * params.guide_radius;
+    const float r_search = params.guide_radius;
+    const float r2_search = r_search * r_search;
+    const float cell_size = params.dm_hash_cell_size;
+    const uint32_t origin_tri = hit.triangle_id;
 
-    int cx = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
-    int cy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
-    int cz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
+    // Compute cell range covering the search sphere
+    int cx0 = (int)floorf((pos.x - r_search) / cell_size);
+    int cy0 = (int)floorf((pos.y - r_search) / cell_size);
+    int cz0 = (int)floorf((pos.z - r_search) / cell_size);
+    int cx1 = (int)floorf((pos.x + r_search) / cell_size);
+    int cy1 = (int)floorf((pos.y + r_search) / cell_size);
+    int cz1 = (int)floorf((pos.z + r_search) / cell_size);
+
+    // Visited-key deduplication (max 27 cells in 3×3×3)
+    uint32_t visited_keys[27];
+    int num_visited = 0;
 
     // Histogram bins (in registers / local memory)
     DirMapBin bins[DIR_MAP_SPHERE_BINS];
@@ -167,154 +180,91 @@ DirMapEntry dev_build_direction_map_entry(
     int n_eligible = 0;
     float total_weight = 0.f;
 
-    for (int dz = -R; dz <= R; ++dz) {
-        int iz = cz + dz;
-        if (iz < 0 || iz >= params.dense_dim_z) continue;
-        for (int dy = -R; dy <= R; ++dy) {
-            int iy = cy + dy;
-            if (iy < 0 || iy >= params.dense_dim_y) continue;
-            for (int dx = -R; dx <= R; ++dx) {
-                int ix = cx + dx;
-                if (ix < 0 || ix >= params.dense_dim_x) continue;
-                int cell = ix + iy * params.dense_dim_x
-                             + iz * params.dense_dim_x * params.dense_dim_y;
-                uint32_t cs = params.dense_cell_start[cell];
-                uint32_t ce = params.dense_cell_end[cell];
+    for (int iz = cz0; iz <= cz1; ++iz)
+    for (int iy = cy0; iy <= cy1; ++iy)
+    for (int ix = cx0; ix <= cx1; ++ix) {
+        uint32_t key = teschner_hash(make_i3(ix, iy, iz),
+                                     params.dm_hash_table_size);
+        // Deduplicate buckets (different cells can hash to same bucket)
+        bool already = false;
+        for (int v = 0; v < num_visited; ++v)
+            if (visited_keys[v] == key) { already = true; break; }
+        if (already) continue;
+        if (num_visited < 27) visited_keys[num_visited++] = key;
 
-                for (uint32_t j = cs; j < ce; ++j) {
-                    uint32_t idx = params.dense_sorted_indices[j];
+        uint32_t cs = params.dm_hash_cell_start[key];
+        uint32_t ce = params.dm_hash_cell_end[key];
+        if (cs == 0xFFFFFFFFu) continue;
 
-                    // ── Normal gate ──
-                    float3 pn = make_f3(
-                        params.photon_norm_x[idx],
-                        params.photon_norm_y[idx],
-                        params.photon_norm_z[idx]);
-                    if (dot(pn, N) <= 0.f) continue;
+        for (uint32_t j = cs; j < ce; ++j) {
+            uint32_t idx = params.dm_hash_sorted_indices[j];
 
-                    // ── Surface-tau gate (plane distance) ──
-                    float3 pp = make_f3(
-                        params.photon_pos_x[idx],
-                        params.photon_pos_y[idx],
-                        params.photon_pos_z[idx]);
-                    if (fabsf(dot(pos - pp, N)) > DEFAULT_SURFACE_TAU) continue;
+            // ── Radius gate (3D Euclidean) ──
+            float3 pp = make_f3(
+                params.photon_pos_x[idx],
+                params.photon_pos_y[idx],
+                params.photon_pos_z[idx]);
+            float3 diff = pos - pp;
+            float d2 = dot(diff, diff);
+            if (d2 > r2_search) continue;
 
-                    // ── Tangential distance gate ──
-                    float d_tan2 = dev_guide_tangential_dist2(pos, pp, N);
-                    if (d_tan2 >= guide_r2) continue;
+            // ── Shadow ray from hitpoint to photon ──
+            float3 to_photon = pp - pos;
+            float  dist      = sqrtf(d2);
+            if (dist < 1e-6f) continue;  // degenerate: photon at hitpoint
+            float3 ray_dir   = to_photon * (1.f / dist);
 
-                    // ── Wi hemisphere gate ──
-                    float3 pw = make_f3(
-                        params.photon_wi_x[idx],
-                        params.photon_wi_y[idx],
-                        params.photon_wi_z[idx]);
-                    if (dot(pw, N) <= 0.f) continue;
+            // Shorten max distance slightly so we don't hit the
+            // photon's own surface triangle at t ≈ dist.
+            float shadow_dist = dist * 0.999f;
 
-                    ++n_eligible;
+            ShadowMaterialResult sr = trace_shadow_material(
+                pos, ray_dir, shadow_dist, origin_tri);
 
-                    // Epanechnikov kernel weight
-                    float w = 1.f - d_tan2 / guide_r2;
+            float w = 0.f;  // weight for this photon (0 = rejected)
 
-                    // Delta-material boost: if photon came through glass/mirror,
-                    // boost its contribution so we trace more rays in caustic directions
-                    // (photon_path_flags not available in launch params SoA, but
-                    //  we can infer from the photon's wi alignment with the
-                    //  surface normal — caustic photons tend to arrive from
-                    //  angles different from diffuse photons.)
-                    // For now, use a simple heuristic based on the photon's
-                    // penetration angle: sharper angles get a small boost.
-                    // TODO: upload photon_path_flags for proper delta detection.
-                    // Simple boost: wi close to N = grazing = likely caustic
-                    float wi_cos = dot(pw, N);
-                    float boost = 1.f;
-                    // We could check path_flags here but for now keep it simple;
-                    // the delta boost is applied uniformly (TODO: per-photon flags)
-                    w *= boost;
+            if (!sr.hit) {
+                // Miss: no geometry between hitpoint and photon → accept
+                w = DIR_MAP_DEFAULT_WEIGHT;
+            } else {
+                // Hit something — classify by material type
+                uint32_t sr_mat = sr.material_id;
 
-                    // Accumulate into Fibonacci bin
-                    int bin = fib.find_nearest(pw);
-                    bins[bin].weight += w;
-                    bins[bin].centroid = bins[bin].centroid + pw * w;
-                    bins[bin].count += 1;
-                    total_weight += w;
-
-                    // Cap eligible count
-                    if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto gather_done;
+                if (dev_is_emissive(sr_mat)) {
+                    // Light source → reject
+                    continue;
+                } else if (dev_is_specular(sr_mat)) {
+                    // Delta material (glass/mirror) → accept with boost
+                    w = DIR_MAP_DELTA_WEIGHT;
+                } else if (dev_is_translucent(sr_mat)) {
+                    // Translucent material → accept with boost
+                    w = DIR_MAP_TRANSLUCENT_WEIGHT;
+                } else {
+                    // Non-delta diffuse surface → reject
+                    continue;
                 }
             }
+
+            ++n_eligible;
+
+            // Accumulate into Fibonacci bin using the photon's
+            // incoming direction (wi)
+            float3 pw = make_f3(
+                params.photon_wi_x[idx],
+                params.photon_wi_y[idx],
+                params.photon_wi_z[idx]);
+
+            int bin = fib.find_nearest(pw);
+            bins[bin].weight += w;
+            bins[bin].centroid = bins[bin].centroid + pw * w;
+            bins[bin].count += 1;
+            total_weight += w;
+
+            // Cap eligible count
+            if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto gather_done;
         }
     }
 gather_done:
-
-    // ── Fallback gather with relaxed gates ──────────────────────────
-    // If the primary gather found zero eligible photons, re-scan with
-    // wider surface-tau (2×) and relaxed normal gate (dot > -0.3) to
-    // fill black holes from subpixels on curved/offset surfaces.
-    // We keep the same search extent and radius for consistency.
-    if (n_eligible == 0) {
-        const float relaxed_tau   = DEFAULT_SURFACE_TAU * 2.0f;
-        const float relaxed_ndot  = -0.3f;  // accept nearly opposing normals
-        const float relaxed_r2    = guide_r2 * 2.25f;  // 1.5× radius → 2.25× r²
-
-        for (int dz = -R; dz <= R; ++dz) {
-            int iz = cz + dz;
-            if (iz < 0 || iz >= params.dense_dim_z) continue;
-            for (int dy2 = -R; dy2 <= R; ++dy2) {
-                int iy = cy + dy2;
-                if (iy < 0 || iy >= params.dense_dim_y) continue;
-                for (int dx2 = -R; dx2 <= R; ++dx2) {
-                    int ix = cx + dx2;
-                    if (ix < 0 || ix >= params.dense_dim_x) continue;
-                    int cell = ix + iy * params.dense_dim_x
-                                 + iz * params.dense_dim_x * params.dense_dim_y;
-                    uint32_t cs = params.dense_cell_start[cell];
-                    uint32_t ce = params.dense_cell_end[cell];
-
-                    for (uint32_t j = cs; j < ce; ++j) {
-                        uint32_t idx2 = params.dense_sorted_indices[j];
-
-                        // Relaxed normal gate
-                        float3 pn = make_f3(
-                            params.photon_norm_x[idx2],
-                            params.photon_norm_y[idx2],
-                            params.photon_norm_z[idx2]);
-                        if (dot(pn, N) <= relaxed_ndot) continue;
-
-                        // Relaxed surface-tau gate
-                        float3 pp = make_f3(
-                            params.photon_pos_x[idx2],
-                            params.photon_pos_y[idx2],
-                            params.photon_pos_z[idx2]);
-                        if (fabsf(dot(pos - pp, N)) > relaxed_tau) continue;
-
-                        // Wider tangential distance gate
-                        float d_tan2 = dev_guide_tangential_dist2(pos, pp, N);
-                        if (d_tan2 >= relaxed_r2) continue;
-
-                        // Wi hemisphere gate (keep strict — direction must be usable)
-                        float3 pw = make_f3(
-                            params.photon_wi_x[idx2],
-                            params.photon_wi_y[idx2],
-                            params.photon_wi_z[idx2]);
-                        if (dot(pw, N) <= 0.f) continue;
-
-                        ++n_eligible;
-
-                        // Epanechnikov kernel weight (over relaxed radius)
-                        float w = 1.f - d_tan2 / relaxed_r2;
-
-                        int bin = fib.find_nearest(pw);
-                        bins[bin].weight += w;
-                        bins[bin].centroid = bins[bin].centroid + pw * w;
-                        bins[bin].count += 1;
-                        total_weight += w;
-
-                        if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto fallback_done;
-                    }
-                }
-            }
-        }
-    fallback_done:;
-    }
 
     entry.num_eligible = (uint16_t)n_eligible;
 

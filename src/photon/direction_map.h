@@ -2,12 +2,13 @@
 // ─────────────────────────────────────────────────────────────────────
 // direction_map.h — Directional SPP framebuffer ("direction map")
 // ─────────────────────────────────────────────────────────────────────
-// Per-subpixel precomputed guidance for first-hit direction sampling.
+// Per-pixel precomputed guidance for first-hit direction sampling.
 //
 // Layout:
-//   - Subpixel grid: (W * DIR_MAP_SUBPIXEL_FACTOR) × (H * DIR_MAP_SUBPIXEL_FACTOR)
-//   - Each subpixel stores a compact guidance record computed from
-//     nearby photon flux via a Fibonacci sphere histogram.
+//   - Grid: W × H (1:1 with framebuffer, DIR_MAP_SUBPIXEL_FACTOR = 1)
+//   - Each pixel stores a compact guidance record computed from
+//     nearby photon flux via a Fibonacci sphere histogram, filtered
+//     by shadow rays to the kNN photon candidates.
 //   - The direction map is built ONCE after photon tracing, then
 //     consumed per-SPP in the render kernel (re-sampled with varying
 //     RNG seed to stochastically vary the guided direction).
@@ -20,18 +21,12 @@
 #include "core/config.h"
 #include <cstdint>
 
-// ── Per-subpixel compact guidance record (GPU-resident) ─────────────
-// Each entry stores the precomputed discrete CDF over DIR_MAP_SPHERE_BINS
-// Fibonacci bins, compacted to the top-K most important directions.
-// This allows per-SPP resampling without re-running the histogram build.
+// Per-pixel compact guidance record (GPU-resident)
+// Each entry stores a single sampled direction + PDF.
+// Shadow rays from hitpoint to kNN photons determine acceptance.
 //
-// Memory: ~32 bytes per subpixel (excluding CDF/dirs stored separately).
-// At 4×4 subpixels, 1024×768 → 12,582,912 subpixels → ~384 MB total
-// for the full CDF approach.
-//
-// Lean approach: store only a single sampled direction + PDF per entry.
-// The direction map kernel is re-launched per SPP with a different seed
-// to vary the sampled direction.  Storage = 32 bytes × 12M ≈ 384 MB.
+// Memory: ~48 bytes per pixel.  At 1:1 with framebuffer,
+// 1024×768 → 786,432 pixels → ~36 MB.
 
 struct DirMapEntry {
     // Sampled guided direction (world space, normalised)

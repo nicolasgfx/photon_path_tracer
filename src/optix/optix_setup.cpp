@@ -359,14 +359,38 @@ void OptixRenderer::create_programs() {
             context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_shadow_pg_));
     }
 
-    std::cout << "[OptiX] Program groups created (render + photon trace + targeted + dirmap)\n";
+    // Hit group (shadow_material — shadow ray returning material info)
+    {
+        OptixProgramGroupDesc desc = {};
+        desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        desc.hitgroup.moduleCH = module_;
+        desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow_material";
+        desc.hitgroup.moduleAH = module_;
+        desc.hitgroup.entryFunctionNameAH = "__anyhit__shadow_material";
+        log_size = sizeof(log);
+        OPTIX_CHECK(optixProgramGroupCreate(
+            context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_shadow_material_pg_));
+    }
+
+    // Miss (shadow_material)
+    {
+        OptixProgramGroupDesc desc = {};
+        desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+        desc.miss.module = module_;
+        desc.miss.entryFunctionName = "__miss__shadow_material";
+        log_size = sizeof(log);
+        OPTIX_CHECK(optixProgramGroupCreate(
+            context_, &desc, 1, &pg_options, log, &log_size, &miss_shadow_material_pg_));
+    }
+
+    std::cout << "[OptiX] Program groups created (render + photon trace + targeted + dirmap + shadow_material)\n";
 }
 
 void OptixRenderer::create_pipeline() {
     OptixProgramGroup program_groups[] = {
         raygen_pg_, raygen_photon_pg_, raygen_targeted_pg_, raygen_dirmap_pg_,
-        miss_pg_, miss_shadow_pg_,
-        hitgroup_pg_, hitgroup_shadow_pg_
+        miss_pg_, miss_shadow_pg_, miss_shadow_material_pg_,
+        hitgroup_pg_, hitgroup_shadow_pg_, hitgroup_shadow_material_pg_
     };
 
     OptixPipelineLinkOptions link_options = {};
@@ -433,9 +457,9 @@ void OptixRenderer::build_sbt(const Scene& scene) {
         d_raygen_dirmap_record_.upload(&rec, 1);
     }
 
-    // Miss records (radiance + shadow)
+    // Miss records (radiance + shadow + shadow_material)
     {
-        std::vector<MissRecord> miss_records(2);
+        std::vector<MissRecord> miss_records(3);
 
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg_, &miss_records[0]));
         miss_records[0].data.background_color = make_f3(0, 0, 0);
@@ -443,15 +467,18 @@ void OptixRenderer::build_sbt(const Scene& scene) {
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_shadow_pg_, &miss_records[1]));
         miss_records[1].data.background_color = make_f3(0, 0, 0);
 
+        OPTIX_CHECK(optixSbtRecordPackHeader(miss_shadow_material_pg_, &miss_records[2]));
+        miss_records[2].data.background_color = make_f3(0, 0, 0);
+
         d_miss_records_.upload(miss_records);
         sbt_.missRecordBase          = reinterpret_cast<CUdeviceptr>(d_miss_records_.d_ptr);
         sbt_.missRecordStrideInBytes = sizeof(MissRecord);
-        sbt_.missRecordCount         = 2;
+        sbt_.missRecordCount         = 3;
     }
 
-    // Hit group records (radiance + shadow)
+    // Hit group records (radiance + shadow + shadow_material)
     {
-        std::vector<HitGroupRecord> hg_records(2);
+        std::vector<HitGroupRecord> hg_records(3);
 
         auto fill_hg = [&](HitGroupRecord& rec) {
             rec.data.vertices     = d_vertices_.as<float3>();
@@ -472,10 +499,13 @@ void OptixRenderer::build_sbt(const Scene& scene) {
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_shadow_pg_, &hg_records[1]));
         fill_hg(hg_records[1]);
 
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_shadow_material_pg_, &hg_records[2]));
+        fill_hg(hg_records[2]);
+
         d_hitgroup_records_.upload(hg_records);
         sbt_.hitgroupRecordBase          = reinterpret_cast<CUdeviceptr>(d_hitgroup_records_.d_ptr);
         sbt_.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
-        sbt_.hitgroupRecordCount         = 2;
+        sbt_.hitgroupRecordCount         = 3;
     }
 
     std::cout << "[OptiX] SBT built (render + photon trace)\n";

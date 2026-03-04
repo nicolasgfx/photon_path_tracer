@@ -281,6 +281,44 @@ void OptixRenderer::upload_photon_data(
                     dg.sorted_indices.size());
         stored_dense_grid_ = std::move(dg);
     }
+
+    // ── Build and upload direction-map hash grid ─────────────────────
+    {
+        // build() sets cell_size = radius*2.  Pass radius = cell_size/2
+        // so the internal cell_size matches DIR_MAP_HASH_CELL_SIZE.
+        dm_hash_grid_.build(stored_photons_, DIR_MAP_HASH_CELL_SIZE * 0.5f);
+
+        d_dm_hash_sorted_indices_.upload(dm_hash_grid_.sorted_indices);
+        d_dm_hash_cell_start_.upload(dm_hash_grid_.cell_start);
+        d_dm_hash_cell_end_.upload(dm_hash_grid_.cell_end);
+
+        // Collision diagnostic: count distinct 3D cells mapping to same bucket
+        size_t collisions = 0;
+        size_t occupied = 0;
+        for (uint32_t b = 0; b < dm_hash_grid_.table_size; ++b) {
+            if (dm_hash_grid_.cell_start[b] == 0xFFFFFFFFu) continue;
+            ++occupied;
+            // Check if multiple distinct cell coords map to this bucket
+            int3 first_cell = dm_hash_grid_.cell_coord(
+                make_f3(stored_photons_.pos_x[dm_hash_grid_.sorted_indices[dm_hash_grid_.cell_start[b]]],
+                        stored_photons_.pos_y[dm_hash_grid_.sorted_indices[dm_hash_grid_.cell_start[b]]],
+                        stored_photons_.pos_z[dm_hash_grid_.sorted_indices[dm_hash_grid_.cell_start[b]]]));
+            for (uint32_t j = dm_hash_grid_.cell_start[b] + 1; j < dm_hash_grid_.cell_end[b]; ++j) {
+                uint32_t idx = dm_hash_grid_.sorted_indices[j];
+                int3 c = dm_hash_grid_.cell_coord(
+                    make_f3(stored_photons_.pos_x[idx],
+                            stored_photons_.pos_y[idx],
+                            stored_photons_.pos_z[idx]));
+                if (c.x != first_cell.x || c.y != first_cell.y || c.z != first_cell.z) {
+                    ++collisions;
+                    break;
+                }
+            }
+        }
+        double collision_pct = occupied > 0 ? 100.0 * (double)collisions / (double)occupied : 0.0;
+        std::printf("[DirMap] Hash grid: table_size=%u  occupied=%zu  collisions=%zu (%.2f%%)  cell_size=%.4f\n",
+                    dm_hash_grid_.table_size, occupied, collisions, collision_pct, dm_hash_grid_.cell_size);
+    }
 }
 
 // =====================================================================

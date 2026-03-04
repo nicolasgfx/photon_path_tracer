@@ -131,10 +131,18 @@ struct LaunchParams {
     int       dense_dim_x, dense_dim_y, dense_dim_z;  // grid resolution
     float     guide_radius;               // tangential distance cutoff for Epanechnikov kernel
 
+    // ── Direction-map hash grid (Teschner spatial hash for kNN) ──────
+    uint32_t* dm_hash_sorted_indices;   // [num_photons] sorted by cell key
+    uint32_t* dm_hash_cell_start;       // [dm_hash_table_size]
+    uint32_t* dm_hash_cell_end;         // [dm_hash_table_size]
+    float     dm_hash_cell_size;        // cell edge length (DIR_MAP_HASH_CELL_SIZE)
+    uint32_t  dm_hash_table_size;       // number of hash buckets
+    int       dm_hash_valid;            // 1 = built, 0 = not available
+
     // ── Direction map (first-hit guided brute-force PT) ──────────────
     DirMapEntry* dir_map_buffer;       // [dir_map_width * dir_map_height] or nullptr
-    int       dir_map_width;            // sub_width  = width * DIR_MAP_SUBPIXEL_FACTOR
-    int       dir_map_height;           // sub_height = height * DIR_MAP_SUBPIXEL_FACTOR
+    int       dir_map_width;            // width  (= framebuffer width when factor=1)
+    int       dir_map_height;           // height (= framebuffer height when factor=1)
     int       dir_map_valid;            // 1 = direction map built, 0 = not available
     int       dir_map_spp_seed;         // seed offset for per-SPP resampling
 

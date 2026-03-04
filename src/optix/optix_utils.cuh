@@ -68,3 +68,38 @@ bool trace_shadow(float3 origin, float3 direction, float max_dist) {
         occluded);
     return (occluded == 0); // 0 = visible
 }
+
+// == Shadow ray with material info (ray type 2) =======================
+// Traces from origin towards a photon position and returns the material
+// of the first intersected triangle.  The origin triangle is skipped
+// via triangle-ID check in __anyhit__shadow_material.
+struct ShadowMaterialResult {
+    bool     hit;           // true = geometry found before target distance
+    uint32_t material_id;   // valid only when hit == true
+};
+
+__forceinline__ __device__
+ShadowMaterialResult trace_shadow_material(
+    float3 origin, float3 direction, float max_dist,
+    uint32_t origin_tri_id)
+{
+    // p0 = origin_tri_id (input: read by any-hit for self-intersection skip)
+    //      overwritten to hit flag (output: 1 = hit, 0 = miss)
+    // p1 = material_id   (output: written by closest-hit)
+    unsigned int p0 = origin_tri_id;
+    unsigned int p1 = 0;
+
+    optixTrace(
+        params.traversable,
+        origin, direction,
+        OPTIX_SCENE_EPSILON, max_dist, 0.0f,
+        OptixVisibilityMask(255),
+        OPTIX_RAY_FLAG_NONE,
+        2, 1, 2,   // SBT offset=2 (shadow_material), stride=1, missSBTIndex=2
+        p0, p1);
+
+    ShadowMaterialResult r;
+    r.hit         = (p0 != 0);
+    r.material_id = p1;
+    return r;
+}

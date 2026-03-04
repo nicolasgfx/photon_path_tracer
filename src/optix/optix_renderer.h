@@ -17,6 +17,7 @@
 #include "photon/hash_grid.h"
 #include "photon/cell_bin_grid.h"
 #include "photon/dense_grid.h"
+#include "photon/hash_grid.h"
 #include "photon/direction_map.h"
 #include "debug/stats_collector.h"
 #include "postfx/postfx_pipeline.h"
@@ -282,6 +283,7 @@ public:
 
     /// Fill dense grid params into LaunchParams.
     void fill_dense_grid_params(LaunchParams& lp);
+    void fill_dm_hash_grid_params(LaunchParams& lp);
 
     /// Fill direction map params into LaunchParams.
     void fill_direction_map_params(LaunchParams& lp) const;
@@ -407,6 +409,8 @@ private:
     OptixProgramGroup        miss_shadow_pg_     = nullptr;
     OptixProgramGroup        hitgroup_pg_        = nullptr;
     OptixProgramGroup        hitgroup_shadow_pg_ = nullptr;
+    OptixProgramGroup        hitgroup_shadow_material_pg_ = nullptr; // shadow ray with material info
+    OptixProgramGroup        miss_shadow_material_pg_     = nullptr; // miss for shadow_material ray
 
     // SBT
     OptixShaderBindingTable  sbt_          = {};
@@ -494,6 +498,9 @@ private:
     // Dense grid device buffers
     DeviceBuffer d_dense_sorted_indices_, d_dense_cell_start_, d_dense_cell_end_;
 
+    // Direction-map hash grid device buffers (Teschner spatial hash for kNN)
+    DeviceBuffer d_dm_hash_sorted_indices_, d_dm_hash_cell_start_, d_dm_hash_cell_end_;
+
     // Direction map device buffer + host container
     DeviceBuffer d_dir_map_buffer_;            // DirMapEntry [dir_map_width * dir_map_height]
     DirectionMap direction_map_;               // host-side copy for debug PNG output
@@ -562,6 +569,7 @@ private:
     // Stored photon data & dense grid (CPU side, after trace_photons())
     PhotonSoA stored_photons_;
     DenseGridData stored_dense_grid_;
+    HashGrid dm_hash_grid_;              // direction-map hash grid (kept for LaunchParams wiring)
     std::vector<uint8_t> caustic_flags_;  // per-photon caustic flag (downloaded from GPU)
 
     // Host-side scene triangles for debug ray picking/hover inspection.

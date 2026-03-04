@@ -646,6 +646,22 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         stored_dense_grid_ = std::move(dg);
     }
 
+    // ── Build and upload direction-map hash grid ─────────────────────
+    {
+        dm_hash_grid_.build(stored_photons_, DIR_MAP_HASH_CELL_SIZE * 0.5f);
+
+        d_dm_hash_sorted_indices_.upload(dm_hash_grid_.sorted_indices);
+        d_dm_hash_cell_start_.upload(dm_hash_grid_.cell_start);
+        d_dm_hash_cell_end_.upload(dm_hash_grid_.cell_end);
+
+        auto t_now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();
+        std::printf("[Timing] DM hash grid build: %7.1f ms  "
+                    "table_size=%u  cell_size=%.4f\n",
+                    ms, dm_hash_grid_.table_size, dm_hash_grid_.cell_size);
+        t_lap = t_now;
+    }
+
     // Build and upload per-triangle photon irradiance heatmap (for preview)
     {
         auto irr = build_tri_photon_irradiance(stored_photons_, num_tris_);

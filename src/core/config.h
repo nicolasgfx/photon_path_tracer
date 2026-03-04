@@ -196,20 +196,24 @@ constexpr float DENSE_GRID_CELL_SIZE     = 0.01f;  // 0.01f = 1cm cell side-leng
 
 // ── Directional SPP framebuffer ("direction map") ───────────────────
 // Resolution multiplier: subpixel grid is (W * FACTOR) × (H * FACTOR).
-// Memory per subpixel is small (~32 bytes), so 4×4 is very affordable.
-//   4 = 4×4 subpixels per pixel = 12M subpixels at 1024×768
-constexpr int   DIR_MAP_SUBPIXEL_FACTOR  = 4;
+//   1 = 1:1 with framebuffer (one direction map entry per pixel)
+constexpr int   DIR_MAP_SUBPIXEL_FACTOR  = 1;
 
 // Number of Fibonacci sphere directional bins for the per-subpixel
 // histogram.  128 bins ≈ 0.10 sr per bin ≈ 18° angular radius.
 // This is 4× finer than the old volume guide (32 bins).
 constexpr int   DIR_MAP_SPHERE_BINS      = 128;
 
-// Weight multiplier for photon directions associated with delta
-// materials (glass/mirror).  Higher = more rays traced into caustic
-// directions.  Imagine a sphere with bumps: the bigger the bump,
-// the higher the sampling probability into that direction.
-constexpr float DIR_MAP_DELTA_BOOST      = 4.0f;
+// ── Photon weighting for shadow-ray-filtered direction map ──────────
+// Shadow rays from the camera hitpoint to each kNN photon determine
+// acceptance.  Accepted photons are weighted before entering the
+// Fibonacci sphere histogram.
+constexpr float DIR_MAP_DEFAULT_WEIGHT     = 1.0f;  // miss (no obstruction)
+constexpr float DIR_MAP_DELTA_WEIGHT       = 4.0f;  // hit delta material (glass/mirror)
+constexpr float DIR_MAP_TRANSLUCENT_WEIGHT = 4.0f;  // hit translucent material
+
+// Legacy alias (kept for any remaining references)
+constexpr float DIR_MAP_DELTA_BOOST        = DIR_MAP_DELTA_WEIGHT;
 
 // ── Cone jitter ─────────────────────────────────────────────────────
 // Half-angle (radians) applied when sampling a guided direction from
@@ -217,14 +221,11 @@ constexpr float DIR_MAP_DELTA_BOOST      = 4.0f;
 // centroid, improving convergence.
 constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 
-// ── Neighbourhood for direction map build ───────────────────────────
-// 7×7×7 block of dense-grid cells centred on the hit point.
-// Must cover guide_radius regardless of sub-cell hit position:
-//   guide_radius = 3.5 × cell_size → need ±ceil(3.5) = ±4, but ±3
-//   is sufficient because Epanechnikov weight is ~0 at 3.5 cells.
-// Wider search eliminates block artifacts from abrupt photon-set
-// changes at cell boundaries.  Runs once per subpixel per build.
-constexpr int DIR_MAP_NEIGHBOURHOOD_EXTENT = 3;   // ±3 cells = 7×7×7
+// ── Direction map hash grid cell size ────────────────────────────────
+// Teschner spatial hash grid for kNN photon lookup in the direction
+// map build.  Cell size = 0.01 m (1 cm) supports multiple photons per
+// cell.  Hash collisions must stay under 5%.
+constexpr float DIR_MAP_HASH_CELL_SIZE = 0.01f;  // 1 cm cell side-length
 
 // ── Periodic photon + direction-map rebuild during final render ─────
 // Every N SPP, re-trace the photon map (with a fresh seed) and rebuild
@@ -532,6 +533,6 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
       {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL, false },
     // Shift+1 – Kroken
     { "kroken/camera-1.obj",                     "Kroken",            false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
+      {0,0,0}, {0,0,-1}, 90.f, 0.05f, SceneLightMode::FromMTL, false },
 };
 

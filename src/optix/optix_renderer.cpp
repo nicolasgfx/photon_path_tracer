@@ -276,6 +276,25 @@ void OptixRenderer::fill_dense_grid_params(LaunchParams& lp) {
     }
 }
 
+// fill_dm_hash_grid_params() -- Wire direction-map hash grid into LaunchParams
+void OptixRenderer::fill_dm_hash_grid_params(LaunchParams& lp) {
+    if (d_dm_hash_sorted_indices_.d_ptr && dm_hash_grid_.table_size > 0) {
+        lp.dm_hash_sorted_indices = reinterpret_cast<uint32_t*>(d_dm_hash_sorted_indices_.d_ptr);
+        lp.dm_hash_cell_start     = reinterpret_cast<uint32_t*>(d_dm_hash_cell_start_.d_ptr);
+        lp.dm_hash_cell_end       = reinterpret_cast<uint32_t*>(d_dm_hash_cell_end_.d_ptr);
+        lp.dm_hash_cell_size      = dm_hash_grid_.cell_size;
+        lp.dm_hash_table_size     = dm_hash_grid_.table_size;
+        lp.dm_hash_valid          = 1;
+    } else {
+        lp.dm_hash_sorted_indices = nullptr;
+        lp.dm_hash_cell_start     = nullptr;
+        lp.dm_hash_cell_end       = nullptr;
+        lp.dm_hash_cell_size      = 0.f;
+        lp.dm_hash_table_size     = 0;
+        lp.dm_hash_valid          = 0;
+    }
+}
+
 // =====================================================================
 // Direction map: fill params, build (OptiX launch), download
 // =====================================================================
@@ -333,6 +352,7 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
     fill_dense_grid_params(lp);
+    fill_dm_hash_grid_params(lp);
 
     // Direction map specific fields
     lp.dir_map_buffer   = reinterpret_cast<DirMapEntry*>(d_dir_map_buffer_.d_ptr);
@@ -341,6 +361,21 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
     lp.dir_map_valid    = 1;
     lp.dir_map_spp_seed = spp_seed;
     lp.guide_radius     = DEFAULT_GUIDE_RADIUS;
+
+    // ── Debug: dump LaunchParams state before launch ──────────────
+    std::printf("[DirMap] build_direction_map: dm_w=%d dm_h=%d  spp_seed=%d\n", dm_w, dm_h, spp_seed);
+    std::printf("[DirMap]   dm_hash_valid=%d  table_size=%u  cell_size=%.6f\n",
+               lp.dm_hash_valid, lp.dm_hash_table_size, lp.dm_hash_cell_size);
+    std::printf("[DirMap]   dm_hash_sorted_indices=%p  cell_start=%p  cell_end=%p\n",
+               (void*)lp.dm_hash_sorted_indices, (void*)lp.dm_hash_cell_start, (void*)lp.dm_hash_cell_end);
+    std::printf("[DirMap]   num_photons=%d  guide_radius=%.6f  traversable=%llu\n",
+               lp.num_photons, lp.guide_radius, (unsigned long long)lp.traversable);
+    std::printf("[DirMap]   dir_map_buffer=%p  dir_map_valid=%d\n",
+               (void*)lp.dir_map_buffer, lp.dir_map_valid);
+    std::printf("[DirMap]   cam_pos=(%.3f, %.3f, %.3f)\n",
+               lp.cam_pos.x, lp.cam_pos.y, lp.cam_pos.z);
+    std::printf("[DirMap]   photon_pos_x=%p  photon_wi_x=%p\n",
+               (void*)lp.photon_pos_x, (void*)lp.photon_wi_x);
 
     // Upload params and swap SBT to direction map raygen
     d_launch_params_.ensure_alloc(sizeof(LaunchParams));
@@ -359,6 +394,7 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
         dm_w, dm_h, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+    std::printf("[DirMap] OptiX launch completed\n");
 }
 
 void OptixRenderer::download_direction_map() {
@@ -369,6 +405,42 @@ void OptixRenderer::download_direction_map() {
                               direction_map_.entries.size() * sizeof(DirMapEntry),
                               cudaMemcpyDeviceToHost));
     }
+
+    // ── Debug: analyse downloaded direction map ──────────────────
+    int n_total = (int)direction_map_.entries.size();
+    int n_hit = 0, n_eligible = 0, n_has_dir = 0;
+    float max_pdf = 0.f;
+    uint16_t max_elig = 0;
+    for (int i = 0; i < n_total; ++i) {
+        const auto& e = direction_map_.entries[i];
+        if (e.hit_x != 0.f || e.hit_y != 0.f || e.hit_z != 0.f) ++n_hit;
+        if (e.num_eligible > 0) ++n_eligible;
+        if (e.dir_x != 0.f || e.dir_y != 0.f || e.dir_z != 0.f) ++n_has_dir;
+        if (e.pdf > max_pdf) max_pdf = e.pdf;
+        if (e.num_eligible > max_elig) max_elig = e.num_eligible;
+    }
+    std::printf("[DirMap] download: %d entries  base=%dx%d  factor=%d\n",
+               n_total, direction_map_.base_width, direction_map_.base_height,
+               direction_map_.factor);
+    int denom = n_total > 0 ? n_total : 1;
+    std::printf("[DirMap]   n_hit=%d (%.1f%%)  n_eligible=%d (%.1f%%)  n_has_dir=%d (%.1f%%)\n",
+               n_hit, 100.f * n_hit / denom,
+               n_eligible, 100.f * n_eligible / denom,
+               n_has_dir, 100.f * n_has_dir / denom);
+    std::printf("[DirMap]   max_pdf=%.6f  max_eligible=%d\n", max_pdf, (int)max_elig);
+    // Print first 5 non-zero entries
+    int printed = 0;
+    for (int i = 0; i < n_total && printed < 5; ++i) {
+        const auto& e = direction_map_.entries[i];
+        if (e.num_eligible > 0) {
+            std::printf("[DirMap]   entry[%d]: dir=(%.4f,%.4f,%.4f) pdf=%.6f elig=%d pos=(%.3f,%.3f,%.3f)\n",
+                       i, e.dir_x, e.dir_y, e.dir_z, e.pdf, (int)e.num_eligible,
+                       e.hit_x, e.hit_y, e.hit_z);
+            ++printed;
+        }
+    }
+    if (printed == 0)
+        std::printf("[DirMap]   WARNING: all entries have num_eligible=0 — direction map is empty!\n");
 }
 
 // render_debug_frame() -- first-hit preview (v3: always traces full path)

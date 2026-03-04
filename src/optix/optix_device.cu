@@ -357,3 +357,53 @@ extern "C" __global__ void __miss__radiance() {
 extern "C" __global__ void __miss__shadow() {
     optixSetPayload_0(0u); // 0 = not occluded
 }
+
+// =====================================================================
+// __anyhit__shadow_material  –  self-intersection skip + stochastic opacity
+// =====================================================================
+// Ray type 2: shadow ray that returns the material of the first hit.
+// Payload 0 carries the origin triangle_id (set before trace) so we
+// can skip self-intersection at the launch point.
+extern "C" __global__ void __anyhit__shadow_material() {
+    const int prim_idx = optixGetPrimitiveIndex();
+
+    // Skip origin triangle (self-intersection avoidance)
+    uint32_t origin_tri_id = optixGetPayload_0();
+    if ((uint32_t)prim_idx == origin_tri_id) {
+        optixIgnoreIntersection();
+        return;
+    }
+
+    // Stochastic opacity (same logic as __anyhit__radiance)
+    if (!params.opacity) return;
+
+    const uint32_t mat_id = params.material_ids[prim_idx];
+    const float    opac   = params.opacity[mat_id];
+
+    if (opac >= 1.f) return;       // fully opaque — accept hit
+    if (opac <= 0.f) { optixIgnoreIntersection(); return; } // fully transparent
+
+    const uint3    idx        = optixGetLaunchIndex();
+    const uint32_t pixel_seed = idx.x + idx.y * 65537u;
+    const uint32_t h   = tea4(pixel_seed, prim_idx ^ __float_as_uint(optixGetRayTmax()));
+    const float    xi  = (float)(h & 0x00FFFFFFu) / (float)0x01000000u;
+
+    if (xi >= opac) optixIgnoreIntersection();
+}
+
+// =====================================================================
+// __closesthit__shadow_material  –  return material_id of first hit
+// =====================================================================
+extern "C" __global__ void __closesthit__shadow_material() {
+    const int      prim_idx = optixGetPrimitiveIndex();
+    const uint32_t mat_id   = params.material_ids[prim_idx];
+    optixSetPayload_0(1u);      // hit flag (1 = hit)
+    optixSetPayload_1(mat_id);  // material_id of intersected triangle
+}
+
+// =====================================================================
+// __miss__shadow_material  –  no geometry between hitpoint and photon
+// =====================================================================
+extern "C" __global__ void __miss__shadow_material() {
+    optixSetPayload_0(0u);  // no hit
+}
