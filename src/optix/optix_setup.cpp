@@ -300,15 +300,15 @@ void OptixRenderer::create_programs() {
             context_, &desc, 1, &pg_options, log, &log_size, &raygen_targeted_pg_));
     }
 
-    // Raygen (photon density gather at first camera hit)
+    // Raygen (direction map build)
     {
         OptixProgramGroupDesc desc = {};
         desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
         desc.raygen.module = module_;
-        desc.raygen.entryFunctionName = "__raygen__photon_gather";
+        desc.raygen.entryFunctionName = "__raygen__direction_map";
         log_size = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(
-            context_, &desc, 1, &pg_options, log, &log_size, &raygen_gather_pg_));
+            context_, &desc, 1, &pg_options, log, &log_size, &raygen_dirmap_pg_));
     }
 
     // Miss (radiance)
@@ -359,12 +359,12 @@ void OptixRenderer::create_programs() {
             context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_shadow_pg_));
     }
 
-    std::cout << "[OptiX] Program groups created (render + photon trace + targeted + gather)\n";
+    std::cout << "[OptiX] Program groups created (render + photon trace + targeted + dirmap)\n";
 }
 
 void OptixRenderer::create_pipeline() {
     OptixProgramGroup program_groups[] = {
-        raygen_pg_, raygen_photon_pg_, raygen_targeted_pg_, raygen_gather_pg_,
+        raygen_pg_, raygen_photon_pg_, raygen_targeted_pg_, raygen_dirmap_pg_,
         miss_pg_, miss_shadow_pg_,
         hitgroup_pg_, hitgroup_shadow_pg_
     };
@@ -387,7 +387,7 @@ void OptixRenderer::create_pipeline() {
         context_,
         &pipeline_options,
         &link_options,
-        program_groups, 7,
+        program_groups, sizeof(program_groups) / sizeof(program_groups[0]),
         log, &log_size,
         &pipeline_));
 
@@ -426,11 +426,11 @@ void OptixRenderer::build_sbt(const Scene& scene) {
         d_raygen_targeted_record_.upload(&rec, 1);
     }
 
-    // Raygen record (photon density gather at first camera hit)
+    // Raygen record (direction map build)
     {
         RayGenRecord rec = {};
-        OPTIX_CHECK(optixSbtRecordPackHeader(raygen_gather_pg_, &rec));
-        d_raygen_gather_record_.upload(&rec, 1);
+        OPTIX_CHECK(optixSbtRecordPackHeader(raygen_dirmap_pg_, &rec));
+        d_raygen_dirmap_record_.upload(&rec, 1);
     }
 
     // Miss records (radiance + shadow)

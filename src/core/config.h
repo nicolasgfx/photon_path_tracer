@@ -29,7 +29,12 @@
 // Gate runtime statistics collection and debug file output.  When false,
 // the compiler eliminates all stats code paths (zero overhead).
 // See §9 for debug-specific flags that are subordinate to this gate.
-constexpr bool ENABLE_STATS = true;
+constexpr bool ENABLE_STATS = false;
+
+// Gate guided-sampling photon-count diagnostics (min / max / avg eligible
+// photons per neighbourhood).  When true, four device-side atomic counters
+// are updated on every guided bounce — substantial overhead on GPU.
+constexpr bool ENABLE_GUIDE_STATS = false;
 
 
 // =====================================================================
@@ -54,8 +59,8 @@ constexpr bool ENABLE_STATS = true;
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 1920;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 1024;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 1024;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 768;           // [R]
 
 
 // =====================================================================
@@ -91,11 +96,6 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diff
 constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
 
-// Enable/disable the photon density estimation pass at first camera hit.
-// When enabled, a separate raygen program gathers photon radiance at the
-// first diffuse hit and writes it to photon_gather_buffer.  The result is
-// added to the path-traced output during tonemap / spectrum-to-HDR.
-constexpr bool DEFAULT_PHOTON_GATHER_ENABLED = true;
 
 
 // =====================================================================
@@ -117,7 +117,7 @@ constexpr int DEFAULT_MAX_BOUNCES = 8;                // [R]
 // Throughput is divided by survival probability (unbiased).
 //   MIN_BOUNCES_RR — Fast: 3  |  Balanced: 5  |  Quality: 8
 //   RR_THRESHOLD   — 0.80 (aggressive) .. 0.95 (conservative)
-constexpr int   DEFAULT_MIN_BOUNCES_RR = 5;            // [R]
+constexpr int   DEFAULT_MIN_BOUNCES_RR = 8;            // [R]
 constexpr float DEFAULT_RR_THRESHOLD   = 0.95f;        // [R]
 
 // ── Spectral transport (PBRT v4 §14.3) ─────────────────────────────
@@ -136,7 +136,7 @@ constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 // IDLE_TIMEOUT_SEC of no input the viewer switches to full-quality
 // photon-guided accumulation.
 constexpr int   PREVIEW_MAX_BOUNCES = 2;             //  bounce cap in preview mode
-constexpr float IDLE_TIMEOUT_SEC    = 1.0f;
+constexpr float IDLE_TIMEOUT_SEC    = 2.0f;
 
 
 // =====================================================================
@@ -164,24 +164,27 @@ constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
 
 
 // =====================================================================
-//  §4a  PHOTON-GUIDED PATH TRACING (one-sample MIS)
+//  §4a  FIRST-HIT GUIDED BRUTE-FORCE PATH TRACING
 // =====================================================================
-// Dense-grid guided sampling: at each non-delta camera bounce, a coin
-// flip (p = guide_fraction) chooses between picking a photon direction
-// from the dense grid ("guide") and a normal BSDF importance sample.
-// One-sample MIS (balance heuristic) weights the result using the
-// marginal PDF over all eligible photons.
+// Direction-map guided sampling: at the FIRST non-delta camera hit,
+// a coin flip (p = guide_fraction) chooses between picking a direction
+// from the precomputed directional SPP framebuffer and a normal BSDF
+// importance sample.  One-sample MIS (balance heuristic) weights the
+// result.  All subsequent bounces use pure BSDF + NEE (brute force).
 //
-// All constants below control this subsystem.  The dense grid itself
-// is built from the merged photon SoA (global + caustic + targeted)
-// after every photon trace pass.
+// The direction map is built once per photon pass from the dense grid:
+//   - Cast a primary ray per subpixel to find the 1st hitpoint.
+//   - Gather nearby photons and build a 128-bin Fibonacci sphere
+//     histogram (full spherical weighting), weighted by Epanechnikov
+//     kernel.  Delta-material photon directions receive a boost.
+//   - Per SPP, a direction is sampled from this histogram for MIS.
 
-// Master switch — disables the entire guide path when false.
-constexpr bool  DEFAULT_USE_GUIDE = true;        // [K]
+// Master switch — disables the entire first-hit guide when false.
+constexpr bool  DEFAULT_USE_GUIDE = true;         // [K]
 
-constexpr int MAX_GUIDE_PDF_PHOTONS = 32; // was 64
+constexpr int MAX_GUIDE_PDF_PHOTONS = 64;  // max eligible photons per dir-map build (was 32)
 
-// Probability of choosing the guided strategy vs pure BSDF.
+// Probability of choosing the guided strategy vs pure BSDF (1st hit only).
 //   0.0 = BSDF only  |  0.5 = balanced  |  1.0 = guide only
 constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;        // [R]
 
@@ -190,28 +193,58 @@ constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;        // [R]
 // indices into a sorted photon array for O(1) cell lookup.
 constexpr float DENSE_GRID_CELL_SIZE     = 0.01f;  // 0.01f = 1cm cell side-length (metres)
 
+// ── Directional SPP framebuffer ("direction map") ───────────────────
+// Resolution multiplier: subpixel grid is (W * FACTOR) × (H * FACTOR).
+// Memory per subpixel is small (~32 bytes), so 4×4 is very affordable.
+//   4 = 4×4 subpixels per pixel = 12M subpixels at 1024×768
+constexpr int   DIR_MAP_SUBPIXEL_FACTOR  = 4;
+
+// Number of Fibonacci sphere directional bins for the per-subpixel
+// histogram.  128 bins ≈ 0.10 sr per bin ≈ 18° angular radius.
+// This is 4× finer than the old volume guide (32 bins).
+constexpr int   DIR_MAP_SPHERE_BINS      = 128;
+
+// Weight multiplier for photon directions associated with delta
+// materials (glass/mirror).  Higher = more rays traced into caustic
+// directions.  Imagine a sphere with bumps: the bigger the bump,
+// the higher the sampling probability into that direction.
+constexpr float DIR_MAP_DELTA_BOOST      = 4.0f;
+
 // ── Cone jitter ─────────────────────────────────────────────────────
-// Half-angle (radians) applied to photon wi when sampling a guided
-// direction.  Widens the stochastic axis around the photon's incoming
-// direction, improving convergence.
-//   0.0  = no jitter (use photon wi exactly)
-//   0.15 = ~8.6°  balanced default
-constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // 0.15f // [R] radians
+// Half-angle (radians) applied when sampling a guided direction from
+// the direction map.  Widens the stochastic axis around the bin
+// centroid, improving convergence.
+constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 
-// ── Firefly clamp ───────────────────────────────────────────────────
-// Safety clamp on per-bounce f·cos/pdf contribution.  Prevents residual
-// firefly outliers from numerical edge cases.  Slightly biased (energy
-// loss in extreme situations) but makes convergence much more robust.
-//   10–20 = aggressive  |  50 = balanced  |  200+ = nearly unbiased
-constexpr float MAX_BOUNCE_CONTRIBUTION  = 50.f;
+// ── Neighbourhood for direction map build ───────────────────────────
+// 5×5×5 block of dense-grid cells centred on the hit point.
+// Wider than the old 3×3×3 to smooth across cell boundaries and
+// eliminate block artifacts.  Costs more but only runs once per
+// subpixel (not per bounce).
+constexpr int DIR_MAP_NEIGHBOURHOOD_EXTENT = 2;   // ±2 cells = 5×5×5
 
-// Per-path throughput clamp.  After each bounce, the cumulative
-// throughput magnitude is capped to this value.  Prevents compounding
-// of per-bounce clamps (50² = 2500 after two clamped bounces) from
-// creating extreme NEE contributions downstream.  Slightly biased but
-// eliminates persistent fireflies visible even at high frame counts.
-//   50 = aggressive  |  100 = balanced  |  500+ = nearly unbiased
-constexpr float MAX_PATH_THROUGHPUT      = 100.f;
+// ── Continuous guide radius (Epanechnikov kernel) ───────────────────
+// Tangential-distance cutoff for eligible photons in the direction map
+// histogram.  2.5× cell size covers the centre cell plus smooth
+// overlap into 5×5×5 neighbours.
+constexpr float DEFAULT_GUIDE_RADIUS = 0.025f;  // 2.5 × DENSE_GRID_CELL_SIZE
+
+// ── AABB padding for dense grid (in cell-size multiples) ────────────
+// Padding the AABB prevents photons near the boundary from being lost.
+constexpr float DENSE_GRID_AABB_PAD_CELLS = 2.0f;
+
+// ── NaN / infinity safety net ────────────────────────────────────────
+// With correct one-sample MIS (balance heuristic) and physical BSDFs,
+// f·cos / combined_pdf is analytically bounded:
+//   Lambert:  f·cos / pdf  ≤  2 · Kd  (< 2 for albedo < 1)
+//   GGR spec: importance sampling tracks the NDF, ratio ≈ G·F/4cos  (< ~8)
+//   Fabric:   same as Lambert + small sheen term  (< ~3)
+// So the clamps below should NEVER trigger under normal rendering.
+// They exist purely as guards against numerical edge cases (division by
+// near-epsilon, NaN propagation from degenerate geometry, etc.).
+// Set to very large values — if they fire, investigate the root cause.
+constexpr float MAX_BOUNCE_CONTRIBUTION  = 1e4f;
+constexpr float MAX_PATH_THROUGHPUT      = 1e4f;
 
 
 // =====================================================================

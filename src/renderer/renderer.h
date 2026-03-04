@@ -41,9 +41,6 @@ struct RenderConfig {
     float  gather_radius     = DEFAULT_GATHER_RADIUS;
     float  caustic_radius    = DEFAULT_CAUSTIC_RADIUS;
 
-    // Photon gather pass (density estimation at first camera hit)
-    bool   photon_gather_enabled = DEFAULT_PHOTON_GATHER_ENABLED;
-
     // MIS and guided-BSDF (v1 features, removed in v2.1)
     // These fields are kept for API compatibility only — they have no
     // effect; the renderer always uses the v2.1 first-hit + photon pipeline.

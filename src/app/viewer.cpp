@@ -1065,8 +1065,10 @@ void run_interactive(
     g_active_optix_renderer = &optix_renderer;
     g_active_options        = &opt;
 
-    // Sync initial volume state from AppState into the renderer
+    // Sync initial AppState into the renderer
     optix_renderer.set_volume_enabled(s_app.volume_enabled);
+    optix_renderer.set_guide_fraction(
+        s_app.guided_enabled ? DEFAULT_GUIDE_FRACTION : 0.0f);
     // Dense grid is always active now (no toggle needed)
 
     // Compute initial yaw/pitch from camera look direction
@@ -1364,6 +1366,7 @@ void run_interactive(
                     scene, opt.config, 0.f, s_app.idle_photon_seed++);
                 optix_renderer.set_preview_mode(false);
                 optix_renderer.clear_buffers();
+
                 frame = 0;
                 s_app.idle_rendering_active = true;
                 printf("[Idle] Full-quality mode\n");
@@ -1412,6 +1415,21 @@ void run_interactive(
             std::cout << "  [Snapshot] " << png_path << "\n";
             if (!raw_path.empty())
                 std::cout << "  [Snapshot] " << raw_path << " (raw)\n";
+
+            // ── Direction map debug PNGs ─────────────────────────────
+            {
+                optix_renderer.download_direction_map();
+                const auto& dm = optix_renderer.direction_map();
+                if (dm.base_width > 0 && dm.base_height > 0) {
+                    std::string dm_debug = prefix + "_dirmap_debug.png";
+                    std::string dm_str   = prefix + "_dirmap_strength.png";
+                    dm.write_debug_png(dm_debug);
+                    dm.write_strength_png(dm_str);
+                    std::cout << "  [Snapshot] " << dm_debug << " (direction map)\n";
+                    std::cout << "  [Snapshot] " << dm_str   << " (direction strength)\n";
+                }
+            }
+
             std::cout << "========================================\n\n";
 
             // ── Statistics gathering, JSON export, analysis report ────

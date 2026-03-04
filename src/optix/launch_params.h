@@ -7,6 +7,7 @@
 #include "core/config.h"
 #include "photon/photon_bins.h"
 #include "volume/medium.h"
+#include "photon/direction_map.h"
 
 #ifdef PPT_USE_OPTIX
 #include <optix.h>
@@ -118,8 +119,6 @@ struct LaunchParams {
     float*    photon_norm_x;   // geometric surface normal at photon hit
     float*    photon_norm_y;
     float*    photon_norm_z;
-    float*    photon_spectral_flux;  // [num_photons * NUM_LAMBDA] full spectral flux
-    uint8_t*  photon_is_caustic;    // [num_photons] 0=non-caustic, 1=global-caustic, 2=targeted-caustic
     int       num_photons;
     int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
     int       photon_map_seed;     // RNG seed offset for multi-map re-tracing
@@ -133,7 +132,19 @@ struct LaunchParams {
     float     dense_cell_size;          // cell edge length
     int       dense_dim_x, dense_dim_y, dense_dim_z;  // grid resolution
     float     guide_cone_cos_half_angle;  // cos(half-angle) for photon wi cone jitter (1.0 = off)
-    int       guide_use_neighbourhood;    // 0 = single cell, 1 = 3×3×3 neighbourhood
+    float     guide_radius;               // tangential distance cutoff for Epanechnikov kernel
+
+    // ── Direction map (first-hit guided brute-force PT) ──────────────
+    DirMapEntry* dir_map_buffer;       // [dir_map_width * dir_map_height] or nullptr
+    int       dir_map_width;            // sub_width  = width * DIR_MAP_SUBPIXEL_FACTOR
+    int       dir_map_height;           // sub_height = height * DIR_MAP_SUBPIXEL_FACTOR
+    int       dir_map_valid;            // 1 = direction map built, 0 = not available
+    int       dir_map_spp_seed;         // seed offset for per-SPP resampling
+
+    // ── Guide stats (ENABLE_GUIDE_STATS only) ────────────────────────
+    // Device buffer [4]: [0]=min_eligible, [1]=max_eligible,
+    //                    [2]=sum_eligible, [3]=count_guided_bounces
+    int*      guide_stats_buf;
 
     // Per-triangle photon irradiance heatmap (precomputed on CPU, for preview)
     float*    tri_photon_irradiance;  // [num_triangles] accumulated scalar irradiance
@@ -206,14 +217,6 @@ struct LaunchParams {
     long long* prof_nee;             // time in NEE direct lighting
     long long* prof_photon_gather;   // time in photon density estimation
     long long* prof_bsdf;            // time in BSDF eval + continuation
-
-    // ── Photon gather pass output buffer ──────────────────────────────
-    // Written once by __raygen__photon_gather, added to spectrum_buffer
-    // during camera rendering.  Stored separately so it can be replaced
-    // when the photon map is re-traced.
-    float*   photon_gather_buffer;  // [W*H*NUM_LAMBDA] density estimation result
-    int      photon_gather_valid;   // 1 = gather pass has run, 0 = not yet
-    int      photon_map_iteration;  // for progressive photon mapping (radius shrink)
 
     // ── Adaptive sampling ────────────────────────────────────────────
     // All three pointers are nullptr when adaptive sampling is disabled.

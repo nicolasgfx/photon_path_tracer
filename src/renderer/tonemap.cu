@@ -31,8 +31,7 @@ __global__ void tonemap_kernel(
     const float* __restrict__ sample_counts,    // [W*H]
     uint8_t*     __restrict__ srgb_buffer,      // [W*H*4]
     int width, int height,
-    float exposure,
-    const float* __restrict__ photon_gather_buffer)  // [W*H*NUM_LAMBDA] or nullptr
+    float exposure)
 {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -41,14 +40,12 @@ __global__ void tonemap_kernel(
     int pixel_idx = py * width + px;
     float n_samples = sample_counts[pixel_idx];
 
-    // Compute average spectrum + additive photon gather contribution
+    // Compute average spectrum
     float X = 0.f, Y = 0.f, Z = 0.f;
     for (int i = 0; i < NUM_LAMBDA; ++i) {
         float val = (n_samples > 0.f)
             ? spectrum_buffer[pixel_idx * NUM_LAMBDA + i] / n_samples
             : 0.f;
-        if (photon_gather_buffer)
-            val += photon_gather_buffer[pixel_idx * NUM_LAMBDA + i];
         X += val * CIE_XBAR[i];
         Y += val * CIE_YBAR[i];
         Z += val * CIE_ZBAR[i];
@@ -97,15 +94,14 @@ void launch_tonemap_kernel(
     const float* d_sample_counts,
     uint8_t*     d_srgb_buffer,
     int width, int height,
-    float exposure,
-    const float* d_photon_gather_buffer)
+    float exposure)
 {
     dim3 block(16, 16);
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
     tonemap_kernel<<<grid, block>>>(
         d_spectrum_buffer, d_sample_counts, d_srgb_buffer,
-        width, height, exposure, d_photon_gather_buffer);
+        width, height, exposure);
 }
 
 // =====================================================================
@@ -117,8 +113,7 @@ __global__ void spectrum_to_hdr_kernel(
     const float* __restrict__ sample_counts,
     float*       __restrict__ hdr_buffer,
     int width, int height,
-    float exposure,
-    const float* __restrict__ photon_gather_buffer)  // [W*H*NUM_LAMBDA] or nullptr
+    float exposure)
 {
     int px = blockIdx.x * blockDim.x + threadIdx.x;
     int py = blockIdx.y * blockDim.y + threadIdx.y;
@@ -132,8 +127,6 @@ __global__ void spectrum_to_hdr_kernel(
         float val = (n_samples > 0.f)
             ? spectrum_buffer[pixel_idx * NUM_LAMBDA + i] / n_samples
             : 0.f;
-        if (photon_gather_buffer)
-            val += photon_gather_buffer[pixel_idx * NUM_LAMBDA + i];
         X += val * CIE_XBAR[i];
         Y += val * CIE_YBAR[i];
         Z += val * CIE_ZBAR[i];
@@ -158,15 +151,14 @@ void launch_spectrum_to_hdr_kernel(
     const float* d_sample_counts,
     float*       d_hdr_buffer,
     int width, int height,
-    float exposure,
-    const float* d_photon_gather_buffer)
+    float exposure)
 {
     dim3 block(16, 16);
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
     spectrum_to_hdr_kernel<<<grid, block>>>(
         d_spectrum_buffer, d_sample_counts, d_hdr_buffer,
-        width, height, exposure, d_photon_gather_buffer);
+        width, height, exposure);
 }
 
 // =====================================================================

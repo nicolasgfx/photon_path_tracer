@@ -15,6 +15,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 #include <cstring>
+#include <climits>
 #include <numeric>
 #include <algorithm>
 #include <chrono>
@@ -146,8 +147,6 @@ void fill_common_params(
     p.photon_norm_x     = photon_norm_x.d_ptr ? const_cast<float*>(photon_norm_x.as<float>()) : nullptr;
     p.photon_norm_y     = photon_norm_y.d_ptr ? const_cast<float*>(photon_norm_y.as<float>()) : nullptr;
     p.photon_norm_z     = photon_norm_z.d_ptr ? const_cast<float*>(photon_norm_z.as<float>()) : nullptr;
-    p.photon_spectral_flux = nullptr;  // set by caller after fill_common_params
-    p.photon_is_caustic    = nullptr;  // set by caller after fill_common_params
 
     p.gather_radius       = gather_radius;
 
@@ -234,7 +233,7 @@ void OptixRenderer::fill_cell_grid_params(LaunchParams& lp) const {
 }
 
 // fill_dense_grid_params() -- Wire dense grid device pointers into LaunchParams
-void OptixRenderer::fill_dense_grid_params(LaunchParams& lp) const {
+void OptixRenderer::fill_dense_grid_params(LaunchParams& lp) {
     if (d_dense_sorted_indices_.d_ptr && stored_dense_grid_.total_cells() > 0) {
         lp.dense_sorted_indices = reinterpret_cast<uint32_t*>(d_dense_sorted_indices_.d_ptr);
         lp.dense_cell_start     = reinterpret_cast<uint32_t*>(d_dense_cell_start_.d_ptr);
@@ -252,6 +251,133 @@ void OptixRenderer::fill_dense_grid_params(LaunchParams& lp) const {
         lp.dense_cell_start     = nullptr;
         lp.dense_cell_end       = nullptr;
         lp.dense_valid          = 0;
+    }
+
+    // Guide stats buffer (ENABLE_GUIDE_STATS only)
+    if constexpr (ENABLE_GUIDE_STATS) {
+        d_guide_stats_buf_.ensure_alloc(4 * sizeof(int));
+        // Reset: min=INT_MAX, max=0, sum=0, count=0
+        int init[4] = { INT_MAX, 0, 0, 0 };
+        CUDA_CHECK(cudaMemcpy(d_guide_stats_buf_.d_ptr, init,
+                               4 * sizeof(int), cudaMemcpyHostToDevice));
+        lp.guide_stats_buf = reinterpret_cast<int*>(d_guide_stats_buf_.d_ptr);
+    } else {
+        lp.guide_stats_buf = nullptr;
+    }
+}
+
+// print_guide_stats_if_enabled() -- readback + print guide neighbourhood stats
+void OptixRenderer::print_guide_stats_if_enabled() {
+    if constexpr (!ENABLE_GUIDE_STATS) return;
+    if (!d_guide_stats_buf_.d_ptr) return;
+    int buf[4];
+    CUDA_CHECK(cudaMemcpy(buf, d_guide_stats_buf_.d_ptr,
+                           4 * sizeof(int), cudaMemcpyDeviceToHost));
+    int gs_min   = buf[0];
+    int gs_max   = buf[1];
+    int gs_sum   = buf[2];
+    int gs_count = buf[3];
+    if (gs_count > 0) {
+        std::printf("[GuideStats] eligible photons per neighbourhood: "
+                    "min=%d  max=%d  avg=%.1f  (over %d guided bounces)\n",
+                    gs_min, gs_max,
+                    (double)gs_sum / (double)gs_count, gs_count);
+    }
+}
+
+// =====================================================================
+// Direction map: fill params, build (OptiX launch), download
+// =====================================================================
+
+void OptixRenderer::fill_direction_map_params(LaunchParams& lp) const {
+    const int factor = DIR_MAP_SUBPIXEL_FACTOR;
+    const int dm_w = width_  * factor;
+    const int dm_h = height_ * factor;
+
+    if (d_dir_map_buffer_.d_ptr && d_dir_map_buffer_.bytes >= (size_t)dm_w * dm_h * sizeof(DirMapEntry)) {
+        lp.dir_map_buffer   = reinterpret_cast<DirMapEntry*>(d_dir_map_buffer_.d_ptr);
+        lp.dir_map_width    = dm_w;
+        lp.dir_map_height   = dm_h;
+        lp.dir_map_valid    = 1;
+    } else {
+        lp.dir_map_buffer   = nullptr;
+        lp.dir_map_width    = 0;
+        lp.dir_map_height   = 0;
+        lp.dir_map_valid    = 0;
+    }
+    lp.dir_map_spp_seed = 0;  // default; overridden per-SPP in render loops
+}
+
+void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
+    const int factor = DIR_MAP_SUBPIXEL_FACTOR;
+    const int dm_w = width_  * factor;
+    const int dm_h = height_ * factor;
+    const size_t dm_bytes = (size_t)dm_w * dm_h * sizeof(DirMapEntry);
+
+    // Allocate device buffer if needed
+    d_dir_map_buffer_.ensure_alloc(dm_bytes);
+
+    // Build a minimal LaunchParams for the direction map pass
+    LaunchParams lp = {};
+    fill_common_params(lp,
+        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+        width_, height_, camera,
+        d_vertices_, d_normals_, d_texcoords_,
+        d_material_ids_,
+        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
+        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
+        d_emissive_indices_, d_emissive_cdf_,
+        num_emissive_, 0.f,
+        gas_handle_,
+        gather_radius_,
+        num_photons_emitted_,
+        DeviceBuffer(), DeviceBuffer(),
+        DeviceBuffer(), DeviceBuffer(), DeviceBuffer(),
+        DeviceBuffer(), DeviceBuffer(),
+        DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
+        DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
+    fill_clearcoat_fabric_params(lp);
+    fill_dense_grid_params(lp);
+
+    // Direction map specific fields
+    lp.dir_map_buffer   = reinterpret_cast<DirMapEntry*>(d_dir_map_buffer_.d_ptr);
+    lp.dir_map_width    = dm_w;
+    lp.dir_map_height   = dm_h;
+    lp.dir_map_valid    = 1;
+    lp.dir_map_spp_seed = spp_seed;
+    lp.guide_radius     = DEFAULT_GUIDE_RADIUS;
+    lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
+
+    // Upload params and swap SBT to direction map raygen
+    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
+    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
+
+    OptixShaderBindingTable dirmap_sbt = sbt_;
+    dirmap_sbt.raygenRecord = reinterpret_cast<CUdeviceptr>(d_raygen_dirmap_record_.d_ptr);
+
+    OPTIX_CHECK(optixLaunch(
+        pipeline_,
+        nullptr,
+        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+        sizeof(LaunchParams),
+        &dirmap_sbt,
+        dm_w, dm_h, 1));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void OptixRenderer::download_direction_map() {
+    direction_map_.resize(width_, height_);
+    if (d_dir_map_buffer_.d_ptr) {
+        CUDA_CHECK(cudaMemcpy(direction_map_.entries.data(),
+                              d_dir_map_buffer_.d_ptr,
+                              direction_map_.entries.size() * sizeof(DirMapEntry),
+                              cudaMemcpyDeviceToHost));
     }
 }
 
@@ -285,6 +411,7 @@ void OptixRenderer::render_debug_frame(
     fill_clearcoat_fabric_params(lp);
     fill_cell_grid_params(lp);
     fill_dense_grid_params(lp);
+    fill_direction_map_params(lp);
 
     lp.num_caustic_emitted    = num_caustic_emitted_;
     lp.caustic_gather_radius  = caustic_radius_;
@@ -299,6 +426,8 @@ void OptixRenderer::render_debug_frame(
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
     lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
+    lp.guide_radius      = DEFAULT_GUIDE_RADIUS;
+    lp.dir_map_spp_seed  = frame_number;  // vary direction map per frame
     lp.preview_mode      = preview_mode_ ? 1 : 0;
     lp.frame_number      = frame_number;
     lp.render_mode       = mode;
@@ -327,6 +456,7 @@ void OptixRenderer::render_debug_frame(
         width_, height_, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+    print_guide_stats_if_enabled();
 }
 
 // render_one_spp() -- launch a single sample of full path tracing
@@ -358,6 +488,7 @@ void OptixRenderer::render_one_spp(
     fill_clearcoat_fabric_params(lp);
     fill_cell_grid_params(lp);
     fill_dense_grid_params(lp);
+    fill_direction_map_params(lp);
 
     lp.num_caustic_emitted    = num_caustic_emitted_;
     lp.caustic_gather_radius  = caustic_radius_;
@@ -372,6 +503,8 @@ void OptixRenderer::render_one_spp(
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
     lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
+    lp.guide_radius      = DEFAULT_GUIDE_RADIUS;
+    lp.dir_map_spp_seed  = frame_number;  // vary direction map per frame
     lp.preview_mode      = 0;  // render_one_spp is always full quality
     lp.frame_number       = frame_number;
     lp.render_mode        = RenderMode::Full;
@@ -392,6 +525,7 @@ void OptixRenderer::render_one_spp(
         width_, height_, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+    print_guide_stats_if_enabled();
 }
 
 // =====================================================================
@@ -468,95 +602,6 @@ bool OptixRenderer::build_view_adaptive_cdf(const Scene& scene, float beta)
     return true;
 }
 
-// =====================================================================
-// launch_photon_gather() — Photon density estimation at first camera hit
-// Runs ONCE per photon map.  Fills d_photon_gather_buffer_.
-// =====================================================================
-void OptixRenderer::launch_photon_gather(
-    const Camera& camera, const RenderConfig& config)
-{
-    if (!config.photon_gather_enabled) return;
-
-    if (!d_photon_spectral_flux_.d_ptr || stored_photons_.size() == 0) {
-        std::printf("[Gather] Skipping: no photon spectral flux data\n");
-        return;
-    }
-
-    // Zero the gather buffer before writing
-    CUDA_CHECK(cudaMemset(d_photon_gather_buffer_.d_ptr, 0, d_photon_gather_buffer_.bytes));
-
-    LaunchParams lp = {};
-    fill_common_params(lp,
-        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
-        width_, height_, camera,
-        d_vertices_, d_normals_, d_texcoords_,
-        d_material_ids_,
-        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
-        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
-        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
-        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
-        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
-        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
-        d_emissive_indices_, d_emissive_cdf_,
-        num_emissive_, 0.f,
-        gas_handle_,
-        gather_radius_,
-        num_photons_emitted_,
-        d_nee_direct_buffer_, d_photon_indirect_buffer_,
-        d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
-        d_prof_photon_gather_, d_prof_bsdf_,
-        config.volume_enabled, config.volume_density, config.volume_falloff,
-        config.volume_albedo, config.volume_samples, config.volume_max_t);
-    fill_clearcoat_fabric_params(lp);
-    fill_cell_grid_params(lp);
-    fill_dense_grid_params(lp);
-
-    lp.num_caustic_emitted    = num_caustic_emitted_;
-    lp.caustic_gather_radius  = caustic_radius_;
-
-    // Wire photon spectral data
-    lp.photon_spectral_flux = const_cast<float*>(d_photon_spectral_flux_.as<float>());
-    lp.photon_is_caustic    = reinterpret_cast<uint8_t*>(d_photon_is_caustic_.d_ptr);
-
-    // Output buffer
-    lp.photon_gather_buffer = reinterpret_cast<float*>(d_photon_gather_buffer_.d_ptr);
-    lp.photon_gather_valid  = 0;
-    lp.photon_map_iteration = 0;
-
-    // Emitter inverse-index (needed for NEE)
-    lp.emissive_local_idx = d_emissive_local_idx_.d_ptr
-        ? const_cast<int*>(d_emissive_local_idx_.as<int>()) : nullptr;
-
-    lp.render_mode        = RenderMode::Full;
-    lp.samples_per_pixel  = 1;
-    lp.frame_number       = 0;
-
-    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
-    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
-                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
-
-    // Swap SBT to the gather raygen program
-    CUdeviceptr saved_raygen = sbt_.raygenRecord;
-    sbt_.raygenRecord = reinterpret_cast<CUdeviceptr>(d_raygen_gather_record_.d_ptr);
-
-    OPTIX_CHECK(optixLaunch(
-        pipeline_,
-        nullptr,
-        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
-        sizeof(LaunchParams),
-        &sbt_,
-        width_, height_, 1));
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    // Restore SBT
-    sbt_.raygenRecord = saved_raygen;
-    photon_gather_done_ = true;
-
-    std::printf("[Gather] Photon density estimation pass complete (%dx%d)\n",
-                width_, height_);
-}
-
 // render_final() -- full path tracing (v3)
 void OptixRenderer::render_final(
     const Camera& camera, const RenderConfig& config, const Scene& scene)
@@ -606,21 +651,10 @@ void OptixRenderer::render_final(
         fill_clearcoat_fabric_params(lp);
         fill_cell_grid_params(lp);
         fill_dense_grid_params(lp);
+        fill_direction_map_params(lp);
 
         lp.num_caustic_emitted    = num_caustic_emitted_;
         lp.caustic_gather_radius  = caustic_radius_;
-
-        // Photon spectral data for gather pass + guided sampling
-        lp.photon_spectral_flux = d_photon_spectral_flux_.d_ptr
-            ? const_cast<float*>(d_photon_spectral_flux_.as<float>()) : nullptr;
-        lp.photon_is_caustic    = d_photon_is_caustic_.d_ptr
-            ? reinterpret_cast<uint8_t*>(d_photon_is_caustic_.d_ptr) : nullptr;
-
-        // Photon gather pass output (density estimation at first hit)
-        lp.photon_gather_buffer = d_photon_gather_buffer_.d_ptr
-            ? reinterpret_cast<float*>(d_photon_gather_buffer_.d_ptr) : nullptr;
-        lp.photon_gather_valid  = photon_gather_done_ ? 1 : 0;
-        lp.photon_map_iteration = 0;
 
         // Runtime toggle (V key) overrides the RenderConfig value
         lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -632,6 +666,8 @@ void OptixRenderer::render_final(
         lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
         lp.guide_fraction    = guide_fraction_;
         lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
+        lp.guide_radius       = DEFAULT_GUIDE_RADIUS;
+        lp.dir_map_spp_seed   = frame_number;  // vary direction map per SPP
         lp.frame_number       = frame_number;
         lp.render_mode        = RenderMode::Full;
         lp.exposure           = exposure_;
@@ -671,6 +707,7 @@ void OptixRenderer::render_final(
             width_, height_, 1));
 
         CUDA_CHECK(cudaDeviceSynchronize());
+        if (frame_number == 0) print_guide_stats_if_enabled();
     };
 
     // â”€â”€ Progress helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -728,8 +765,15 @@ void OptixRenderer::render_final(
         }
     }
 
-    // ── Photon gather pass (density estimation at first hit) ──────
-    launch_photon_gather(camera, config);
+    // ── Build direction map (first-hit guidance) ─────────────────────
+    // Uses the current photon map + camera to precompute guided
+    // directions for each subpixel.  Re-built per SPP via spp_seed
+    // in the PT kernel (the direction map stores a new sampled direction
+    // each time), but we launch the build once here for the initial seed.
+    std::printf("[Render] Building direction map (%dx%d subpixels) ...\n",
+                width_ * DIR_MAP_SUBPIXEL_FACTOR,
+                height_ * DIR_MAP_SUBPIXEL_FACTOR);
+    build_direction_map(camera, /*spp_seed=*/0);
 
     if (!adaptive) {
         // â”€â”€ Non-adaptive path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -806,9 +850,7 @@ void OptixRenderer::render_final(
             (const float*)d_spectrum_buffer_.d_ptr,
             (const float*)d_sample_counts_.d_ptr,
             (float*)d_hdr_buffer_.d_ptr,
-            width_, height_, exposure_,
-            d_photon_gather_buffer_.d_ptr
-                ? (const float*)d_photon_gather_buffer_.d_ptr : nullptr);
+            width_, height_, exposure_);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // 2. Tone-map the raw (un-denoised) HDR â†’ sRGB for side-by-side comparison
@@ -842,9 +884,7 @@ void OptixRenderer::render_final(
             (const float*)d_spectrum_buffer_.d_ptr,
             (const float*)d_sample_counts_.d_ptr,
             (uint8_t*)d_srgb_buffer_.d_ptr,
-            width_, height_, exposure_,
-            d_photon_gather_buffer_.d_ptr
-                ? (const float*)d_photon_gather_buffer_.d_ptr : nullptr);
+            width_, height_, exposure_);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -1050,9 +1090,7 @@ void OptixRenderer::download_hdr_buffer(
             d_spectrum_buffer_.as<float>(),
             d_sample_counts_.as<float>(),
             reinterpret_cast<float*>(d_hdr_buffer_.d_ptr),
-            width_, height_, exposure_,
-            d_photon_gather_buffer_.d_ptr
-                ? (const float*)d_photon_gather_buffer_.d_ptr : nullptr);
+            width_, height_, exposure_);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 

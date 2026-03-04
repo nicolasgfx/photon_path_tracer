@@ -85,6 +85,7 @@ set(CORE_SOURCES
     src/app/viewer.cpp
     src/scene/obj_loader.cpp
     src/photon/photon_io.cpp
+    src/photon/direction_map.cpp
     src/renderer/renderer.cpp
     src/optix/optix_renderer.cpp
     src/optix/optix_setup.cpp

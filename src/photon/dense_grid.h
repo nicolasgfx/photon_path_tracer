@@ -1,4 +1,5 @@
 #pragma once
+#include "core/config.h"
 #include <vector>
 #include <cstdint>
 #include <algorithm>
@@ -42,8 +43,11 @@ inline DenseGridData build_dense_grid(
         return g;
     }
 
-    // Compute AABB with half-cell padding
-    float pad = cell_size * 0.5f;
+    // Compute AABB with configurable padding (DENSE_GRID_AABB_PAD_CELLS × cell_size)
+    // Wider padding prevents photons near the boundary from being lost
+    // and ensures the 5×5×5 neighbourhood search in the direction map
+    // doesn't index out of bounds for photons near the grid edge.
+    float pad = cell_size * DENSE_GRID_AABB_PAD_CELLS;
     g.min_x = g.min_y = g.min_z =  1e30f;
     float max_x = -1e30f, max_y = -1e30f, max_z = -1e30f;
     for (int i = 0; i < n; ++i) {

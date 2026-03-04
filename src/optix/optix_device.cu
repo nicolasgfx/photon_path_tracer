@@ -3,9 +3,10 @@
 // ---------------------------------------------------------------------
 //
 // Programs:
-//   __raygen__render                  - v3 photon-guided path tracing
+//   __raygen__render                  - v3 first-hit guided brute-force PT
 //   __raygen__photon_trace            - GPU photon emission + tracing
 //   __raygen__targeted_photon_trace   - GPU targeted caustic emission (Jensen §9.2)
+//   __raygen__direction_map           - Build direction map (per-subpixel)
 //   __raygen__photon_gather           - Photon density estimation at first camera hit
 //   __closesthit__radiance            - closest-hit for radiance rays
 //   __closesthit__shadow    - closest-hit for shadow rays
@@ -62,6 +63,7 @@ extern "C" {
 #include "optix/optix_nee.cuh"
 #include "optix/optix_specular.cuh"
 #include "optix/optix_guided.cuh"
+#include "optix/optix_direction_map.cuh"
 #include "optix/optix_path_trace_v3.cuh"
 #include "optix/optix_camera.cuh"
 
@@ -189,9 +191,10 @@ extern "C" __global__ void __raygen__render() {
         float n_samples = params.sample_counts[pixel_idx];
         Spectrum avg;
         for (int i = 0; i < NUM_LAMBDA; ++i) {
-            avg.value[i] = (n_samples > 0.f)
+            float val = (n_samples > 0.f)
                 ? params.spectrum_buffer[pixel_idx * NUM_LAMBDA + i] / n_samples
                 : 0.f;
+            avg.value[i] = val;
         }
 
         float3 rgb = dev_spectrum_to_srgb(avg);
@@ -209,7 +212,21 @@ extern "C" __global__ void __raygen__render() {
 // ── Textual includes: raygen entry points ────────────────────────────
 #include "optix/optix_photon_trace.cuh"
 #include "optix/optix_targeted_photon.cuh"
-#include "optix/optix_photon_gather.cuh"
+
+// =====================================================================
+// __raygen__direction_map  –  Build direction map (one subpixel per thread)
+// =====================================================================
+// Launched at (dir_map_width × dir_map_height, 1, 1).
+// Each thread builds one DirMapEntry by tracing a primary ray, following
+// specular chains, gathering photons from the dense grid, and sampling
+// a guided direction from the Fibonacci histogram.
+extern "C" __global__ void __raygen__direction_map() {
+    dev_build_direction_map_pixel(
+        params.dir_map_buffer,
+        params.dir_map_width,
+        params.dir_map_height,
+        params.dir_map_spp_seed);
+}
 
 // =====================================================================
 // Stochastic opacity helpers (TEA hash for cheap per-intersection RNG)

@@ -62,6 +62,17 @@ int dev_dense_cell_index(float3 pos) {
              + iz * params.dense_dim_x * params.dense_dim_y;
 }
 
+// ── Tangential distance² (projected onto surface plane) ─────────────
+// Same metric as optix_photon_gather.cuh, duplicated here because the
+// gather and guide PTX are compiled separately.
+__forceinline__ __device__
+float dev_guide_tangential_dist2(float3 pos, float3 photon_pos, float3 normal) {
+    float3 diff = pos - photon_pos;
+    float d_plane = dot(diff, normal);
+    float3 tangent = diff - normal * d_plane;
+    return dot(tangent, tangent);
+}
+
 // Forward declaration — defined below, called by dev_guide_sample_and_pdf_full.
 __forceinline__ __device__
 float dev_guide_pdf_at_direction(
@@ -69,13 +80,17 @@ float dev_guide_pdf_at_direction(
 
 // ── Fused guide sample + PDF (complete version) ─────────────────────
 // Two-phase approach:
-//   Phase 1: Single pass with reservoir-1 to pick one photon uniformly
-//            at random from all eligible photons (no first-K bias).
+//   Phase 1: Single pass with weighted reservoir-1 to pick one photon.
+//            Each eligible photon is weighted by an Epanechnikov kernel
+//            w = max(0, 1 − d_tan²/r²) based on tangential distance,
+//            so nearby photons dominate the pick.  This, combined with
+//            the continuous radius gate, eliminates hard cell-boundary
+//            discontinuities that caused block artifacts.
 //   Phase 2: Second pass to compute the EXACT marginal guide PDF at
 //            the jittered direction — identical to dev_guide_pdf_at_direction.
 //
-// This guarantees the PDF used for MIS weighting exactly matches the
-// sampling distribution, preventing firefly outliers from PDF mismatch.
+// Both phases use the same MAX_GUIDE_PDF_PHOTONS cap and identical
+// cell iteration order, ensuring PDF-sample consistency for MIS.
 
 struct GuideSamplePdfResult {
     int    photon_idx;   // -1 if no eligible photon found
@@ -95,16 +110,19 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
     if (!params.dense_valid || params.num_photons == 0)
         return res;
 
-    const int R = params.guide_use_neighbourhood ? 1 : 0;
+    const int R = DIR_MAP_NEIGHBOURHOOD_EXTENT;  // 5×5×5 neighbourhood
+    const float guide_r2 = params.guide_radius * params.guide_radius;
 
     int cx = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
     int cy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
     int cz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
 
-    // ── Phase 1: Reservoir-1 pick ────────────────────────────────────
-    // Single pass over all eligible photons to select one uniformly.
+    // ── Phase 1: Weighted reservoir-1 pick ───────────────────────────
+    // Epanechnikov kernel: w = max(0, 1 − d_tan²/r²).  Photons near
+    // the query point contribute more weight than distant ones.
     int      picked_idx = -1;
     float3   picked_wi  = make_f3(0.f, 0.f, 1.f);
+    float    w_sum      = 0.f;   // cumulative kernel weight
     int      n_eligible = 0;
 
     for (int dz = -R; dz <= R; ++dz) {
@@ -123,12 +141,14 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
                 for (uint32_t j = cs; j < ce; ++j) {
                     uint32_t idx = params.dense_sorted_indices[j];
 
+                    // Normal gate
                     float3 pn = make_f3(
                         params.photon_norm_x[idx],
                         params.photon_norm_y[idx],
                         params.photon_norm_z[idx]);
                     if (dot(pn, filter_normal) <= 0.f) continue;
 
+                    // Surface-tau gate (plane distance)
                     float3 pp = make_f3(
                         params.photon_pos_x[idx],
                         params.photon_pos_y[idx],
@@ -136,6 +156,11 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
                     if (fabsf(dot(pos - pp, filter_normal)) > DEFAULT_SURFACE_TAU)
                         continue;
 
+                    // Tangential distance gate (continuous radius)
+                    float d_tan2 = dev_guide_tangential_dist2(pos, pp, filter_normal);
+                    if (d_tan2 >= guide_r2) continue;
+
+                    // Wi hemisphere gate
                     float3 pw = make_f3(
                         params.photon_wi_x[idx],
                         params.photon_wi_y[idx],
@@ -144,13 +169,31 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
 
                     ++n_eligible;
 
-                    // Reservoir-1: replace with probability 1/n_eligible
-                    if (rng.next_float() < 1.0f / (float)n_eligible) {
+                    // Epanechnikov kernel weight
+                    float w = 1.f - d_tan2 / guide_r2;
+
+                    // Weighted reservoir-1: replace with prob w / w_sum
+                    w_sum += w;
+                    if (rng.next_float() < w / w_sum) {
                         picked_idx = (int)idx;
                         picked_wi  = pw;
                     }
+
+                    // Cap eligible count to bound worst-case iteration
+                    if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto reservoir_done;
                 }
             }
+        }
+    }
+reservoir_done:
+
+    // ── Guide stats: track per-neighbourhood eligible photon counts ──
+    if constexpr (ENABLE_GUIDE_STATS) {
+        if (params.guide_stats_buf) {
+            atomicMin(&params.guide_stats_buf[0], n_eligible);
+            atomicMax(&params.guide_stats_buf[1], n_eligible);
+            atomicAdd(&params.guide_stats_buf[2], n_eligible);
+            atomicAdd(&params.guide_stats_buf[3], 1);
         }
     }
 
@@ -170,10 +213,8 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
 
     // ── Phase 2: Exact marginal PDF ──────────────────────────────────
     // Second pass over the same neighbourhood to compute the exact PDF
-    // at wi_dir.  This matches dev_guide_pdf_at_direction exactly,
-    // ensuring consistent MIS weights between guide and BSDF branches.
-    // Only wi (3 floats) is re-read per photon; gates re-evaluated for
-    // correctness but the branch predictor should mostly hit the cache.
+    // at wi_dir.  Uses identical gates, radius, cap, and iteration
+    // order as Phase 1, ensuring PDF-sample consistency for MIS.
     res.pdf_guide = dev_guide_pdf_at_direction(pos, filter_normal, wi_dir, cos_half);
 
     return res;
@@ -183,10 +224,9 @@ GuideSamplePdfResult dev_guide_sample_and_pdf_full(
 // Standalone version: used when the BSDF branch wins the coin flip
 // and we need the guide PDF at the BSDF-sampled direction.
 // Loops over eligible photons in the dense-grid neighbourhood and
-// computes:  pdf = (1/N) Σᵢ cosine_cone_pdf(cos∠(ω, wᵢ), cos_half)
-// where N = number of eligible photons.  Returns 0 when no photons
-// pass the normal / tau / hemisphere gates.
-// Iterates ALL eligible photons (no cap) to avoid cell-boundary bias.
+// computes:  pdf = Σᵢ wᵢ·cone_pdf(ω, wᵢ) / Σᵢ wᵢ
+// where wᵢ = Epanechnikov kernel weight for photon i.
+// Returns 0 when no photons pass the gates.
 
 __forceinline__ __device__
 float dev_guide_pdf_at_direction(
@@ -195,13 +235,15 @@ float dev_guide_pdf_at_direction(
     if (!params.dense_valid || params.num_photons == 0)
         return 0.f;
 
-    const int R = params.guide_use_neighbourhood ? 1 : 0;
+    const int R = DIR_MAP_NEIGHBOURHOOD_EXTENT;  // 5×5×5 neighbourhood
+    const float guide_r2 = params.guide_radius * params.guide_radius;
 
     int cx = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
     int cy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
     int cz = (int)floorf((pos.z - params.dense_min_z) / params.dense_cell_size);
 
-    float  pdf_sum   = 0.f;
+    float  pdf_sum    = 0.f;
+    float  w_sum      = 0.f;
     int    n_eligible = 0;
 
     for (int dz = -R; dz <= R; ++dz) {
@@ -227,13 +269,17 @@ float dev_guide_pdf_at_direction(
                         params.photon_norm_z[idx]);
                     if (dot(pn, filter_normal) <= 0.f) continue;
 
-                    // Surface-tau gate
+                    // Surface-tau gate (plane distance)
                     float3 pp = make_f3(
                         params.photon_pos_x[idx],
                         params.photon_pos_y[idx],
                         params.photon_pos_z[idx]);
                     if (fabsf(dot(pos - pp, filter_normal)) > DEFAULT_SURFACE_TAU)
                         continue;
+
+                    // Tangential distance gate (continuous radius)
+                    float d_tan2 = dev_guide_tangential_dist2(pos, pp, filter_normal);
+                    if (d_tan2 >= guide_r2) continue;
 
                     // Wi hemisphere gate
                     float3 pw = make_f3(
@@ -243,15 +289,24 @@ float dev_guide_pdf_at_direction(
                     if (dot(pw, filter_normal) <= 0.f) continue;
 
                     ++n_eligible;
+
+                    // Epanechnikov kernel weight (matches reservoir)
+                    float w = 1.f - d_tan2 / guide_r2;
+                    w_sum += w;
+
                     float cos_angle = dot(wi_world, pw);
-                    pdf_sum += (cos_half < 1.f - 1e-6f)
+                    pdf_sum += w * ((cos_half < 1.f - 1e-6f)
                         ? cosine_cone_pdf(cos_angle, cos_half)
-                        : INV_2PI;
+                        : INV_2PI);
+
+                    // Same cap as reservoir — must match for PDF consistency
+                    if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto pdf_done;
                 }
             }
         }
     }
-    return (n_eligible > 0) ? pdf_sum / (float)n_eligible : 0.f;
+pdf_done:
+    return (w_sum > 0.f) ? pdf_sum / w_sum : 0.f;
 }
 
 // ── Guided histogram: directional bin data for guide sampling ────────

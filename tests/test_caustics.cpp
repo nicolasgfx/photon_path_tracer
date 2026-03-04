@@ -17,7 +17,7 @@ static std::string scene_path(const char* rel) {
 // ── Test that SpecularTargetSet finds glass/translucent triangles ──────
 TEST(Caustics, SpecularTargetSetFindsGlass) {
     Scene scene;
-    ASSERT_TRUE(load_obj(scene_path("cornell_box/cornellbox.obj"), scene));
+    ASSERT_TRUE(load_obj(scene_path("cornell_water/CornellBox-Water.obj"), scene));
     SpecularTargetSet ts = SpecularTargetSet::build(scene);
     std::printf("[Test] SpecularTargetSet: valid=%d  n_spec_tris=%zu\n",
                 (int)ts.valid, ts.specular_tri_indices.size());
@@ -29,14 +29,14 @@ TEST(Caustics, SpecularTargetSetFindsGlass) {
         std::printf("[Test]   tri#%u mat#%u type=%d ior=%.2f area=%.6f\n",
                     ti, mi, (int)mat.type, mat.ior, ts.tri_areas[i]);
     }
-    EXPECT_TRUE(ts.valid) << "No specular/glass/translucent triangles found in cornell_box";
+    EXPECT_TRUE(ts.valid) << "No specular/glass/translucent triangles found in cornell_water";
     EXPECT_GT(ts.specular_tri_indices.size(), 0u);
 }
 
 // ── Test that targeted caustic photon sampling produces valid photons ──
 TEST(Caustics, SampleTargetedCausticPhotons) {
     Scene scene;
-    ASSERT_TRUE(load_obj(scene_path("cornell_box/cornellbox.obj"), scene));
+    ASSERT_TRUE(load_obj(scene_path("cornell_water/CornellBox-Water.obj"), scene));
     scene.build_bvh();
     scene.build_emissive_distribution();
     SpecularTargetSet ts = SpecularTargetSet::build(scene);
@@ -71,7 +71,7 @@ TEST(Caustics, SampleTargetedCausticPhotons) {
 // ── Test that trace_targeted_caustic_emission produces stored caustic photons ──
 TEST(Caustics, TraceTargetedCausticEmission) {
     Scene scene;
-    ASSERT_TRUE(load_obj(scene_path("cornell_box/cornellbox.obj"), scene));
+    ASSERT_TRUE(load_obj(scene_path("cornell_water/CornellBox-Water.obj"), scene));
     scene.build_bvh();
     scene.build_emissive_distribution();
     SpecularTargetSet ts = SpecularTargetSet::build(scene);
@@ -107,7 +107,7 @@ TEST(Caustics, TraceTargetedCausticEmission) {
 // ── Detailed step-by-step bounce trace for a single targeted photon ──
 TEST(Caustics, SinglePhotonBounceTrace) {
     Scene scene;
-    ASSERT_TRUE(load_obj(scene_path("cornell_box/cornellbox.obj"), scene));
+    ASSERT_TRUE(load_obj(scene_path("cornell_water/CornellBox-Water.obj"), scene));
     scene.build_bvh();
     scene.build_emissive_distribution();
     SpecularTargetSet ts = SpecularTargetSet::build(scene);

@@ -68,5 +68,13 @@ the idea to improve is:
  ## your tasks
 
  - Review and compare with academic approaches
+
+
+ # updates
+
+## 1
+ - during the final rendering, I want to see the accumulated rendering of pass1 + pass2, updated after each iteration. this request does NOT imply that pass 1 must  be computed more than once.but it populates the window first, and then pass 2 contiously contributes
+- add detailed and relevant debug information to the .json output about the 2 passes
+- the gamma of  the .exr HDR file seemed off: it needs to be linear color space as far as I know
  
 

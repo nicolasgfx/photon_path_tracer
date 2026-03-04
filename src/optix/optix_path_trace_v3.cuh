@@ -1,14 +1,15 @@
 #pragma once
 
 // ─────────────────────────────────────────────────────────────────────
-// optix_path_trace_v3.cuh — Photon-Guided Path Tracer (v3)
+// optix_path_trace_v3.cuh — First-Hit Guided Brute-Force Path Tracer
 // ─────────────────────────────────────────────────────────────────────
 // Single iterative bounce loop with:
 //   1. NEE — 1 shadow ray, MIS-weighted against BSDF (Veach 1997)
-//   2. Dense-grid photon guide — 50/50 balanced: pick a random photon
-//      from the hitpoint's cell and bounce in its wi direction, OR
-//      sample the BSDF.  MIS-weighted via balance heuristic.
-//   3. Russian roulette after MIN_BOUNCES_RR guaranteed bounces
+//   2. First-hit guidance — at bounce 0 only, 50/50 coin flip between
+//      direction-map guided direction and BSDF importance sample.
+//      MIS-weighted via balance heuristic.
+//   3. Bounces 1+ — pure BSDF importance sampling (brute-force PT)
+//   4. Russian roulette after MIN_BOUNCES_RR guaranteed bounces
 // ─────────────────────────────────────────────────────────────────────
 
 // ── PathTraceResult ─────────────────────────────────────────────────
@@ -385,11 +386,16 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             aov_written = true;
         }
 
-        // ── Dense-grid photon guide probability ─────────────────────
-        // Guided / BSDF one-sample MIS: either pick a random photon
-        // from the dense grid and bounce in its wi direction, or sample
-        // the BSDF.  p_guide = probability of choosing the guide strategy.
-        float p_guide = (!params.preview_mode && params.dense_valid)
+        // ── First-hit direction-map guidance (bounce 0 only) ─────────
+        // At the FIRST non-delta hit, use the precomputed direction map
+        // for a 50/50 coin flip between guided direction and BSDF.
+        // All subsequent bounces use pure BSDF sampling (brute-force PT).
+        //
+        // The direction map is indexed by the pixel's subpixel grid.
+        // We pick the centre subpixel for the current pixel.
+        bool is_first_non_delta = (bounce == 0 || !aov_written);
+        float p_guide = (is_first_non_delta && !params.preview_mode
+                        && params.dir_map_valid && params.dir_map_buffer)
                       ? params.guide_fraction : 0.f;
 
         // ── NEE: 1 shadow ray ───────────────────────────────────────
@@ -409,7 +415,7 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                 result.bounce_contrib[bounce] += nee_contrib;
         }
 
-        // ── Next direction: dense-grid guided or BSDF ───────────────
+        // ── Next direction: guided (1st hit) or BSDF ────────────────
         float3 wi_world;
         float combined_pdf = 0.f;
         Spectrum f_over_pdf = Spectrum::zero();
@@ -418,40 +424,39 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         bool chose_guide = (p_guide > 0.f && rng.next_float() < p_guide);
 
         if (chose_guide) {
-            // ── Photon-guided sample (fused sample + exact PDF) ────────
-            // Phase 1: reservoir-1 picks a uniformly random eligible photon.
-            // Phase 2: exact marginal PDF via full neighbourhood scan
-            //          (same computation as dev_guide_pdf_at_direction).
-            float cos_half = params.guide_cone_cos_half_angle;
-            GuideSamplePdfResult gs = dev_guide_sample_and_pdf_full(
-                hit.position, hit.shading_normal, cos_half, rng);
-            if (gs.photon_idx >= 0) {
-                float3 wi_local = frame.world_to_local(gs.wi_dir);
-                if (wi_local.z > 0.f) {
-                    Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
-                    float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
-                    combined_pdf = p_guide * gs.pdf_guide + (1.f - p_guide) * pdf_bsdf;
-                    if (combined_pdf > 1e-8f) {
-                        float cos_theta = wi_local.z;
-                        for (int i = 0; i < NUM_LAMBDA; ++i) {
-                            f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
-                            f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
+            // ── Direction-map guided sample (1st hit only) ──────────
+            // Look up the precomputed DirMapEntry for this pixel's
+            // centre subpixel.
+            int factor = DIR_MAP_SUBPIXEL_FACTOR;
+            int sx = pixel_idx % params.width * factor + factor / 2;
+            int sy = pixel_idx / params.width * factor + factor / 2;
+            if (sx < params.dir_map_width && sy < params.dir_map_height) {
+                int dir_idx = sy * params.dir_map_width + sx;
+                DirMapEntry de = params.dir_map_buffer[dir_idx];
+                if (de.num_eligible > 0 && de.pdf > 1e-10f) {
+                    float3 guide_dir = make_f3(de.dir_x, de.dir_y, de.dir_z);
+                    float3 wi_local = frame.world_to_local(guide_dir);
+                    if (wi_local.z > 0.f) {
+                        Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
+                        float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
+                        combined_pdf = p_guide * de.pdf + (1.f - p_guide) * pdf_bsdf;
+                        if (combined_pdf > 1e-8f) {
+                            float cos_theta = wi_local.z;
+                            for (int i = 0; i < NUM_LAMBDA; ++i) {
+                                f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
+                                f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
+                            }
+                            wi_world = guide_dir;
+                            sample_valid = true;
                         }
-                        wi_world = gs.wi_dir;
-                        sample_valid = true;
                     }
                 }
             }
-            // Defensive fallback: if the guide strategy was chosen but
-            // could not produce a valid sample (no eligible photons),
-            // fall back to BSDF sampling.  This is unbiased because
-            // pdf_guide = 0 everywhere when no photons exist, so
-            // combined_pdf = (1 - p_guide) * pdf_bsdf.
+            // Defensive fallback: if guide couldn't produce a valid sample
             if (!sample_valid) {
                 BSDFSample bs = bsdf_sample(mat_id, wo_local, hit.uv, rng, pixel_idx);
                 if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
                 wi_world = frame.local_to_world(bs.wi);
-                // No eligible photons → pdf_guide = 0 → combined = (1-α) * pdf_bsdf
                 combined_pdf = (1.f - p_guide) * bs.pdf;
                 if (combined_pdf < 1e-8f) break;
                 float cos_theta = bs.wi.z;
@@ -464,7 +469,7 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         }
 
         if (!chose_guide) {
-            // ── BSDF sample ─────────────────────────────────────────
+            // ── Pure BSDF sample (all bounces, or 1st hit when guide not chosen) ──
             long long t_bsdf = 0;
             if constexpr (ENABLE_STATS) t_bsdf = clock64();
             BSDFSample bs = bsdf_sample(mat_id, wo_local, hit.uv, rng, pixel_idx);
@@ -475,12 +480,18 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             wi_world = frame.local_to_world(bs.wi);
             float cos_theta = bs.wi.z;
 
-            // MIS: when dense grid is active, evaluate the true guide
-            // PDF at the BSDF-sampled direction so MIS weights are correct.
+            // MIS: when first-hit guide is active, evaluate the guide
+            // PDF at the BSDF-sampled direction for correct MIS weights.
             if (p_guide > 0.f) {
-                float pdf_guide = dev_guide_pdf_at_direction(
-                    hit.position, hit.shading_normal, wi_world,
-                    params.guide_cone_cos_half_angle);
+                int factor = DIR_MAP_SUBPIXEL_FACTOR;
+                int sx = pixel_idx % params.width * factor + factor / 2;
+                int sy = pixel_idx / params.width * factor + factor / 2;
+                float pdf_guide = 0.f;
+                if (sx < params.dir_map_width && sy < params.dir_map_height) {
+                    int dir_idx = sy * params.dir_map_width + sx;
+                    DirMapEntry de = params.dir_map_buffer[dir_idx];
+                    if (de.num_eligible > 0) pdf_guide = de.pdf;
+                }
                 combined_pdf = p_guide * pdf_guide + (1.f - p_guide) * bs.pdf;
             } else {
                 combined_pdf = bs.pdf;
