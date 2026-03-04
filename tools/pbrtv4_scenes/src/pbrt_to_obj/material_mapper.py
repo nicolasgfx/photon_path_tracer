@@ -129,6 +129,26 @@ def roughness_to_phong(alpha: float) -> float:
     return 2.0 / (alpha * alpha) - 2.0
 
 
+def _safe_float(val, default: float = 0.0) -> float:
+    """Convert a PBRT param value to float, returning *default* for texture refs / lists."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default  # texture reference string
+    if isinstance(val, (list, tuple)):
+        # RGB → luminance
+        if len(val) >= 3:
+            return 0.2126 * float(val[0]) + 0.7152 * float(val[1]) + 0.0722 * float(val[2])
+        elif len(val) == 1:
+            return float(val[0])
+    return default
+
+
 def _pbrt_roughness_to_ours(roughness: float, remaproughness: bool = True) -> float:
     """Convert PBRT roughness value to our renderer's roughness parameter.
     
@@ -187,14 +207,49 @@ class TextureResolver:
             return None
 
         if td.tex_class == 'scale':
-            scale = get_param(td.params, 'scale', 1.0)
+            scale_val = get_param(td.params, 'scale', 1.0)
             inner = get_param(td.params, 'tex')
-            if inner:
-                return self._resolve_recursive(inner, accum_scale * scale, depth + 1)
+
+            # Determine numeric scale factor
+            if isinstance(scale_val, (int, float)):
+                effective_scale = float(scale_val)
+            elif isinstance(scale_val, (list, tuple)) and len(scale_val) >= 3:
+                # RGB spectrum → luminance approximation
+                effective_scale = (0.2126 * scale_val[0] + 0.7152 * scale_val[1]
+                                   + 0.0722 * scale_val[2])
+            else:
+                # Texture reference string – can't fold into a scalar
+                effective_scale = 1.0
+
+            # Try following 'tex' first (primary image source)
+            if isinstance(inner, str):
+                result = self._resolve_recursive(
+                    inner, accum_scale * effective_scale, depth + 1)
+                if result:
+                    return result
+
+            # Fall back: if 'scale' is itself a texture ref, follow it instead
+            if isinstance(scale_val, str):
+                result = self._resolve_recursive(
+                    scale_val, accum_scale, depth + 1)
+                if result:
+                    return result
+
             return None
 
         if td.tex_class == 'constant':
             # No file to reference
+            return None
+
+        if td.tex_class in ('mix', 'directionmix'):
+            # Mix two textures — try to resolve each and return first image found
+            for key in ('tex1', 'tex2'):
+                child = get_param(td.params, key)
+                if isinstance(child, str):
+                    result = self._resolve_recursive(
+                        child, accum_scale, depth + 1)
+                    if result:
+                        return result
             return None
 
         return None
@@ -365,14 +420,14 @@ def _map_coated_diffuse(mtl: MtlMaterial, params: list[PbrtParam],
     remap = get_param(params, 'remaproughness', True)
 
     if uroughness is not None and vroughness is not None:
-        ur = _pbrt_roughness_to_ours(float(uroughness), remap)
-        vr = _pbrt_roughness_to_ours(float(vroughness), remap)
+        ur = _pbrt_roughness_to_ours(_safe_float(uroughness), remap)
+        vr = _pbrt_roughness_to_ours(_safe_float(vroughness), remap)
         mtl.pb_roughness_x = ur
         mtl.pb_roughness_y = vr
         mtl.pb_clearcoat_roughness = math.sqrt(ur * vr)
         mtl.Ns = roughness_to_phong(mtl.pb_clearcoat_roughness)
     elif roughness is not None:
-        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        our_r = _pbrt_roughness_to_ours(_safe_float(roughness), remap)
         mtl.pb_clearcoat_roughness = our_r
         mtl.Ns = roughness_to_phong(our_r)
     else:
@@ -381,8 +436,8 @@ def _map_coated_diffuse(mtl: MtlMaterial, params: list[PbrtParam],
 
     # Coat IOR
     eta = get_param(params, 'eta', 1.5)
-    mtl.pb_eta = float(eta)
-    mtl.Ni = float(eta)
+    mtl.pb_eta = _safe_float(eta, 1.5)
+    mtl.Ni = _safe_float(eta, 1.5)
 
     # Coat weight
     mtl.pb_clearcoat = 1.0
@@ -433,13 +488,13 @@ def _map_dielectric(mtl: MtlMaterial, params: list[PbrtParam],
     mtl.Ks = [1.0, 1.0, 1.0]
 
     eta = get_param(params, 'eta', 1.5)
-    mtl.pb_eta = float(eta)
-    mtl.Ni = float(eta)
+    mtl.pb_eta = _safe_float(eta, 1.5)
+    mtl.Ni = _safe_float(eta, 1.5)
 
     roughness = get_param(params, 'roughness', None)
     remap = get_param(params, 'remaproughness', True)
     if roughness is not None:
-        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        our_r = _pbrt_roughness_to_ours(_safe_float(roughness), remap)
         mtl.pb_roughness = our_r
         mtl.Ns = roughness_to_phong(our_r)
 
@@ -481,14 +536,14 @@ def _map_conductor(mtl: MtlMaterial, params: list[PbrtParam],
     remap = get_param(params, 'remaproughness', True)
 
     if uroughness is not None and vroughness is not None:
-        ur = _pbrt_roughness_to_ours(float(uroughness), remap)
-        vr = _pbrt_roughness_to_ours(float(vroughness), remap)
+        ur = _pbrt_roughness_to_ours(_safe_float(uroughness), remap)
+        vr = _pbrt_roughness_to_ours(_safe_float(vroughness), remap)
         mtl.pb_roughness_x = ur
         mtl.pb_roughness_y = vr
         mtl.pb_roughness = math.sqrt(ur * vr)
         mtl.Ns = roughness_to_phong(mtl.pb_roughness)
     elif roughness is not None:
-        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        our_r = _pbrt_roughness_to_ours(_safe_float(roughness), remap)
         mtl.pb_roughness = our_r
         mtl.Ns = roughness_to_phong(our_r)
     else:
@@ -540,19 +595,19 @@ def _map_coated_conductor(mtl: MtlMaterial, params: list[PbrtParam],
                           get_param(params, 'roughness', None))
     remap = get_param(params, 'remaproughness', True)
     if roughness is not None:
-        our_r = _pbrt_roughness_to_ours(float(roughness), remap)
+        our_r = _pbrt_roughness_to_ours(_safe_float(roughness), remap)
         mtl.pb_base_roughness = our_r
     else:
         mtl.pb_base_roughness = 0.0
 
     # Coat properties
     coat_eta = get_param(params, 'interface.eta', 1.5)
-    mtl.pb_eta = float(coat_eta)
-    mtl.Ni = float(coat_eta)
+    mtl.pb_eta = _safe_float(coat_eta, 1.5)
+    mtl.Ni = _safe_float(coat_eta, 1.5)
 
     coat_roughness = get_param(params, 'interface.roughness', 0.0)
     if coat_roughness is not None:
-        our_cr = _pbrt_roughness_to_ours(float(coat_roughness), remap)
+        our_cr = _pbrt_roughness_to_ours(_safe_float(coat_roughness), remap)
         mtl.pb_clearcoat_roughness = our_cr
     else:
         mtl.pb_clearcoat_roughness = 0.0
@@ -579,8 +634,8 @@ def _map_thin_dielectric(mtl: MtlMaterial, params: list[PbrtParam]):
     mtl.Ks = [1.0, 1.0, 1.0]
 
     eta = get_param(params, 'eta', 1.5)
-    mtl.pb_eta = float(eta)
-    mtl.Ni = float(eta)
+    mtl.pb_eta = _safe_float(eta, 1.5)
+    mtl.Ni = _safe_float(eta, 1.5)
 
     # ThinDielectric has no roughness — perfectly smooth
     mtl.pb_roughness = 0.0
@@ -604,7 +659,7 @@ def _map_mix(mtl: MtlMaterial, params: list[PbrtParam],
     amount = get_param(params, 'amount', 0.5)
     if isinstance(amount, list):
         amount = amount[0]
-    amount = float(amount)
+    amount = _safe_float(amount, 0.5)
 
     mat_names = []
     if isinstance(materials_param, list):
@@ -720,7 +775,7 @@ def _map_diffuse_transmission(mtl: MtlMaterial, params: list[PbrtParam],
         if isinstance(transmittance, list):
             mtl.pb_transmission = sum(transmittance[:3]) / len(transmittance[:3])
         else:
-            mtl.pb_transmission = float(transmittance)
+            mtl.pb_transmission = _safe_float(transmittance, 0.25)
     else:
         # Default: PBRT diffusetransmission defaults both reflectance and
         # transmittance to 0.25  

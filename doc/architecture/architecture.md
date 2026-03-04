@@ -1,33 +1,42 @@
-# Architecture — Spectral Photon-Centric Renderer (v2.5)
+# Architecture — Spectral Photon-Guided Path Tracer (v3)
 
 This document describes the complete rendering pipeline, its design
 rationale, mathematical foundations, and implementation details.
 
-**Architecture version:** v2.5 (+ pb_tf_spectrum, GPU allocation amortization, emissive inverse-index, photon map pool)
+**Architecture version:** v3 (guided sub-path sidecar, full camera path tracing, dense-grid photon sampling)
 
 ---
 
 ## 1. Overview
 
-The renderer implements a **photon-centric** architecture where photon rays
-carry the full transport burden and camera rays stop at the first diffuse hit.
-All light transport is computed over 32 discrete wavelength bins spanning
-380–780 nm. The pipeline runs on the GPU via **NVIDIA OptiX 9.x** for ray
-tracing and **CUDA** for auxiliary kernels, with a full **CPU reference
-renderer** for validation.
+The renderer implements a **photon-guided path tracing** architecture.
+Camera rays run a full iterative bounce loop; at each non-delta bounce the
+renderer fires a **guided sub-path sidecar** in a photon direction sampled
+from a dense 3D grid. The sidecar returns irradiance that is mixed with
+next-event estimation (NEE) to form the bounce contribution. Photon rays
+carry the transport information that seeds the guide; the camera path
+carries the actual radiance integration. All light transport is computed
+over 32 discrete wavelength bins spanning 380–780 nm. The pipeline runs on
+the GPU via **NVIDIA OptiX 9.x** for ray tracing and **CUDA** for
+auxiliary kernels, with a full **CPU reference renderer** for validation.
 
 ### 1.1 Design Philosophy
 
-Camera rays are **cheap probes**: they find the first visible surface point
-(following specular bounces through mirrors/glass) and evaluate direct
-lighting via next-event estimation (NEE). All global illumination — indirect
-diffuse, caustics, colour bleeding — is carried entirely by the photon map,
-which is queried at the camera hit-point.
+Camera rays are **full path tracers** with a photon-guided sidecar:
 
-Photon rays are the **real path tracers**: they start from light sources and
-bounce through the scene with full spectral transport, sophisticated
-importance sampling, and Russian roulette. The photon distribution encodes
-the complete indirect light field.
+1. They traverse specular chains (mirror/glass) deterministically.
+2. At each non-delta (diffuse/glossy) surface they:
+   - Evaluate **NEE** (1 shadow ray, MIS-weighted against BSDF).
+   - Fire a **guided sub-path** in a direction drawn from nearby photons
+     stored in a dense grid. The sub-path returns irradiance that is mixed
+     with NEE.
+   - Continue via **BSDF importance sampling** (always — no coin flip).
+3. Russian roulette terminates low-throughput paths.
+
+The photon map is an **irradiance sidecar** — an input signal to the
+path tracer, analogous to how NEE is an input signal from the emitter
+distribution. The photon map does NOT replace camera-side transport;
+it augments BSDF-sampled paths with photon-guided directions.
 
 ### 1.2 Priority Order
 
@@ -134,23 +143,33 @@ with $N \to \infty$ (consistency).
    f. Adaptive caustic shooting: re-emit photons toward high-CV
       caustic hotspot cells (§5.6), rebuild grids + cache if augmented
    g. Save photon map + spatial index to binary file (optional)
-4. ═══ CAMERA PASS ═══  (first-hit only, independent of photon pass)
-   a. For each pixel: trace ONE camera ray → find first hit
-   b. Follow specular bounces (mirrors, glass) up to N=8
-   c. At first diffuse hit:
-      - NEE: shadow rays to light sample points
-      - Photon gather: query KD-tree / hash grid within adaptive radius
-        (radius from CellInfoCache, §5.5)
-      - Caustic gather: skip if CellInfoCache reports zero caustics
-      - Combine: L = L_direct(NEE) + L_indirect(photon density)
-   d. Multiply by specular chain throughput
+4. ═══ CAMERA PASS ═══  (full path trace with guided sidecar)
+   a. For each pixel: trace ONE camera ray
+   b. Iterative bounce loop:
+      - If hit emissive: add emission (MIS-weighted against NEE)
+      - If hit delta surface (mirror/glass/translucent): bounce
+        deterministically, update throughput, continue
+      - If hit non-delta surface:
+        i.  NEE: 1 shadow ray, MIS-weighted against BSDF
+        ii. Guide sidecar: sample photon direction from dense grid 3×3×3
+            neighbourhood → evaluate BSDF → trace full sub-path
+            → compute guided irradiance G → mix with NEE (N):
+              caustic photon → max(N, G) by brightness
+              diffuse photon → (N + G) / 2
+        iii. BSDF continuation: sample new direction, always continue
+             (no coin flip between guide and BSDF)
+        iv. Russian roulette after MIN_BOUNCES_RR guaranteed bounces
+   c. Sub-paths use the same loop but with EnableGuideSidecar=false
+      (no recursive sidecar) and skip_bounce0_emission=true
+      (avoid double-counting with parent NEE)
 5. Spectral → RGB conversion (CIE XYZ), ACES filmic tone mapping, output
 ```
 
-**Key design principle:** The photon pass and camera pass are **fully
-independent**. The photon map is a static light-field snapshot that can be
-precomputed to any desired quality (millions of photons, many bounces) and
-saved to disk. The camera pass loads this map and renders interactively.
+**Key design principle:** The photon pass and camera pass are **loosely
+coupled**. The photon map is an irradiance sidecar — a cached light-field
+signal that seeds guided directions for the camera path tracer. Camera rays
+perform full transport (NEE + guided sub-path + BSDF continuation); the
+photon map augments this transport rather than replacing it.
 
 ### 4.1 Scene Loading
 
@@ -844,106 +863,126 @@ scenes.
 
 ---
 
-## 7. Camera Pass (First-Hit Only)
+## 7. Camera Pass (Full Path Trace + Guided Sidecar)
 
-Camera rays follow **specular-only bounces** (mirror, glass) until the
-first diffuse surface, then evaluate NEE + photon gather. No diffuse
-continuation.
+Camera rays run an iterative bounce loop (`full_path_trace_v3`) that
+evaluates NEE, fires a photon-guided sub-path, and continues via BSDF
+at every non-delta bounce. The function is templatized:
+
+| Instantiation | Role |
+|--------------|------|
+| `full_path_trace_v3<true>` | Main camera path — fires guided sub-paths, inits Fibonacci sphere |
+| `full_path_trace_v3<false>` | Sub-path — no sidecar, no Fibonacci init (prevents 2^N recursion) |
+
+The template uses `if constexpr` to compile out the sidecar in sub-paths,
+giving them an independent register frame and avoiding infinite recursion.
 
 ### 7.1 Per Pixel
 
 1. Generate camera ray (with DOF if enabled, stratified sub-pixel jitter)
-2. Trace ray → find first intersection
-3. If miss: background colour / environment
-4. If hit emissive: add emission directly (× specular chain throughput)
-5. If hit **specular (delta) surface** (mirror/glass):
-   - Bounce deterministically (reflect or refract via Fresnel)
-   - Multiply specular chain throughput by BSDF factor
-   - Delta BSDF handling: delta PDFs cancel with the delta measure —
-     treat as deterministic events, do NOT divide by a PDF
-   - Continue until hitting a diffuse surface or exceeding max specular
-     bounces (N=8)
-6. If hit **diffuse/glossy non-emissive surface**:
-   - Evaluate NEE (§7.2) and photon gather (§7.3)
-   - Multiply result by accumulated specular chain throughput
+2. Enter iterative bounce loop (up to `DEFAULT_MAX_BOUNCES_CAMERA`)
+3. **Trace ray** → find intersection
+4. If miss: break
+5. **Medium transport** (if inside per-material or atmospheric medium):
+   free-flight sampling, scatter NEE, volume photon gather
+6. If hit **emissive**: add Le × MIS weight (`mis_weight_2(pdf_bsdf, pdf_nee)`)
+   and break. At bounce 0 no MIS is needed (camera sees the light directly).
+   Sub-paths skip bounce-0 emission (`skip_bounce0_emission = true`) to
+   avoid double-counting with the parent NEE.
+7. If hit **delta surface** (mirror/glass/translucent): deterministic
+   specular bounce, update throughput, IOR stack, medium stack; set
+   `pdf_combined_prev = 0` (Dirac); continue loop.
+8. If hit **non-delta surface**: enter shading block (§7.2–7.5).
 
-### 7.1.1 Specular Chain Throughput
+### 7.2 NEE at Non-Delta Surfaces
 
-The camera maintains an `IORStack ior_stack` across specular bounces
-(shared with the glossy continuation loop). Each specular bounce calls
-`dev_specular_bounce(dir, pos, shading_normal, geo_normal, mat_id, uv,
-rng, nullptr, 0, &ior_stack)` — passing `nullptr` for hero bins
-(camera uses D-line, §5.1.2) and the IOR stack pointer.
+Standard Veach-style MIS: sample one light point, cast shadow ray, evaluate
+BSDF at the light direction, weight against BSDF PDF. The NEE contribution
+`nee_L` is computed but **deferred** — it is not added to the result
+directly. Instead it enters the mixing stage (§7.4).
+
+### 7.3 Guided Sub-Path Sidecar (§4a)
+
+At each non-delta bounce (only in `<true>` instantiation):
+
+1. **Sample photon direction**: `dev_guide_sample_and_pdf_full()` performs
+   a reservoir-1 pick over photons in the 3×3×3 dense-grid neighbourhood
+   centred on the shading point. The picked photon's `wi` is jittered
+   by a cone half-angle (`DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15 rad`).
+   Returns the guided direction, the photon's `path_flags`, and PDF.
+
+2. **Evaluate BSDF** at the guided direction:
+   `bsdf_weight = f_eval(wo, wi_guided) × cos_theta`
+
+3. **Trace full sub-path**: `full_path_trace_v3<false>(sub_origin, wi_guided, …, skip_bounce0_emission=true)`.
+   The sub-path runs the same bounce loop (NEE + BSDF continuation +
+   Russian roulette) but without a sidecar and with bounce-0 emission
+   suppressed.
+
+4. **Compute guided irradiance**:
+   `G = bsdf_weight × sub_path.combined`
+
+### 7.4 Mixing Rule
+
+The NEE contribution (N) and guided contribution (G) are combined based
+on the picked photon's caustic flags:
+
+| Photon type | Flag test | Mixing rule | Rationale |
+|------------|-----------|-------------|-----------|
+| **Caustic** | `picked_flags & 0x12` (CAUSTIC_GLASS \| CAUSTIC_SPECULAR) | `max(N, G)` by `Spectrum::sum()` | Caustics are concentrated; take the brighter signal |
+| **Diffuse** | otherwise | `(N + G) / 2` | Smooth lighting; average reduces variance |
+
+The mixed result `combined_irradiance` is multiplied by throughput and
+added to the result.
+
+### 7.5 BSDF Continuation (Always)
+
+After the sidecar, the BSDF **always** samples a continuation direction:
 
 ```
-T = 1.0  // initial throughput (per wavelength bin)
-IORStack ior_stack;  // empty = air (IOR 1.0)
-for each specular bounce:
-    sb = dev_specular_bounce(dir, pos, normal, geo_normal,
-                             mat_id, uv, rng, nullptr, 0, &ior_stack)
-    T *= sb.filter   // per-wavelength: Fresnel * Tf * dispersion correction
-    dir = sb.new_dir
-    pos = sb.new_pos
-
-// At diffuse endpoint:
-L_pixel = T * (L_emission + L_direct + L_indirect)
+bs = bsdf_sample(mat_id, wo_local, uv, rng)
+throughput *= bs.f * cos_theta / bs.pdf
 ```
 
-**Critical:** If the specular chain throughput $T$ is omitted, mirrors and
-glass views will have **wrong brightness**.
+There is no coin flip between guided and BSDF directions — both fire.
+The BSDF direction is the main path; the guided direction is a sidecar
+that adds information without replacing the main transport.
 
-**Spectral dispersion:** For glass materials with wavelength-dependent IOR,
-the Fresnel reflectance, refraction direction, and transmittance are all
-$\lambda$-dependent. The `SpecularBounceResult.filter` carries the
-per-wavelength correction factor (see §5.1.2).
+`pdf_combined_prev = bs.pdf` is stored for emission MIS at the next bounce.
 
-**Translucent surfaces in camera specular chain:**
-Currently treated identically to Glass (delta Fresnel bounce). This is
-physically reasonable for smooth dielectrics.
+### 7.6 Russian Roulette
 
-> **TODO(D1):** Add NEE + photon gather at translucent surfaces —
-> requires dual-hemisphere gather and diffuse+specular BSDF split.
-
-### 7.2 NEE (Direct Lighting)
-
-At the first-hit diffuse/glossy surface point $x$ with outgoing direction
-$\omega_o$ and surface normal $n_x$:
-
-1. Sample M light points from emitter distribution
-2. For each sampled light point $y_j$: cast shadow ray, evaluate BSDF,
-   compute contribution
-3. Average over M samples
-
-**Coverage-aware stratified sampling:**
+After `min_bounces_rr` guaranteed bounces:
 
 $$
-p_{\text{select}}(i) = (1 - c) \cdot p_{\text{power}}(i) + c \cdot p_{\text{area}}(i)
+p_{\text{survive}} = \min\bigl(\text{RR\_THRESHOLD},\; \max_\lambda(T(\lambda))\bigr)
 $$
 
-Where $c = 0.3$ (default). Two CDFs: `power_cdf` ($A_t \cdot \bar{L}_{e,t}$)
-and `area_cdf` ($A_t$ only). The mixture PDF is always positive for any
-emissive triangle (at $c > 0$).
+If $p_{\text{survive}} < 10^{-4}$: terminate. Otherwise, survive with
+probability $p_{\text{survive}}$; boost throughput by $1/p_{\text{survive}}$.
 
-**Area-sampling estimator (mandatory):**
+### 7.7 Specular Chain Throughput
+
+The camera maintains an `IORStack ior_stack` and `MediumStack medium_stack`
+across all bounces (specular and non-specular). Each specular bounce calls
+`dev_specular_bounce()` with the stacks. The throughput is updated
+per-wavelength:
+
+```
+T[i] *= sb.filter[i]     // Fresnel × Tf × dispersion correction
+```
+
+### 7.8 Emission MIS
+
+When the BSDF continuation ray hits an emissive surface at bounce > 0:
 
 $$
-L_{\text{direct}} = \frac{1}{M}\sum_{j=1}^{M} \frac{f_s(x,\omega_j,\omega_o,\lambda)\, L_e(y_j,-\omega_j,\lambda)\, |\cos\theta_x|\, |\cos\theta_y|}{p_A(y_j)\, \|x - y_j\|^2} \cdot V(x, y_j)
+w_{\text{BSDF}} = \frac{p_{\text{BSDF}}^2}{p_{\text{BSDF}}^2 + p_{\text{NEE}}^2}
 $$
 
-where $p_A(y_j) = p_{tri}(t_j) / A_{t_j}$.
-
-### 7.3 Photon Density Estimation (Indirect Lighting)
-
-Query the photon map (KD-tree or hash grid) at the hit position:
-$L_{\text{indirect}} = L_{\text{photon}}(x, \omega_o, \lambda)$
-
-### 7.4 Final Pixel Radiance
-
-$$
-L_{\text{pixel}} = L_{\text{emission}} + L_{\text{direct}} + L_{\text{indirect}}
-$$
-
-No camera ray continuation. All multi-bounce transport is in the photon map.
+When the previous bounce was delta (`pdf_combined_prev = 0`), NEE cannot
+sample that path, so `w_BSDF = 1`. This is the standard power-heuristic
+one-sample MIS.
 
 ---
 
@@ -1359,7 +1398,7 @@ with `--use_fast_math`.
 
 | Program                           | Type        | Purpose                              |
 |-----------------------------------|-------------|--------------------------------------|
-| `__raygen__render`                | Ray Gen     | First-hit camera pass + NEE + gather |
+| `__raygen__render`                | Ray Gen     | Camera path trace (`full_path_trace_v3<true>`) + accumulation |
 | `__raygen__photon_trace`          | Ray Gen     | GPU photon emission + tracing        |
 | `__raygen__targeted_photon_trace` | Ray Gen     | Targeted caustic photon emission     |
 | `__closesthit__radiance`          | Closest-Hit | Unpack geometry at hit point         |
@@ -1432,8 +1471,19 @@ All tunable constants in `src/core/config.h`:
 | `DEFAULT_GPU_MAX_GATHER_RADIUS` | 0.5 | Max gather radius for GPU grid k-NN |
 | `DEFAULT_KNN_K` | 100 | k-NN neighbour count |
 | `DEFAULT_TARGETED_CAUSTIC_MIX` | 1.0 | Fraction of caustic budget targeted |
-| `MULTI_MAP_SPP_GROUP` | 4 | Re-seed photon map every N camera samples |
 | `PHOTON_MAP_POOL_SIZE` | 4 | Pre-build this many maps at render start |
+
+### Guided Sub-Path Sidecar (§4a)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DEFAULT_USE_GUIDE` | `true` | Master switch for the guided sidecar |
+| `DEFAULT_GUIDE_FRACTION` | 0.5 | Legacy enable flag (> 0 enables sidecar at runtime) |
+| `MAX_GUIDE_PDF_PHOTONS` | 32 | Max photons considered in reservoir sampling |
+| `DENSE_GRID_CELL_SIZE` | 0.01 | Dense grid cell side-length (metres) |
+| `DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE` | 0.15 | Cone jitter half-angle (radians, ~8.6°) |
+| `GUIDE_USE_NEIGHBOURHOOD` | `true` | Use 3×3×3 cell neighbourhood (false = single cell) |
+| `DEV_PHOTON_FLAG_CAUSTIC_MASK` | 0x12 | CAUSTIC_GLASS \| CAUSTIC_SPECULAR — triggers max(N,G) mixing |
 
 ### NEE
 
@@ -1588,6 +1638,8 @@ src/
   optix/
     optix_renderer.h / .cpp     Host pipeline: SBT, GAS, launch params
     optix_device.cu             All OptiX raygen / closesthit programs
+    optix_path_trace_v3.cuh     Full path trace kernel (template <bool EnableGuideSidecar>)
+    optix_guided.cuh            Dense-grid reservoir sampling + guide PDF evaluation
     launch_params.h             GPU/CPU shared launch parameter struct
     adaptive_sampling.h / .cu   Per-pixel noise metric + convergence mask
   debug/
@@ -1694,38 +1746,47 @@ Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
 1. **Full spectral transport.** 32 wavelength bins; dispersion, metamerism,
    and spectral emission naturally captured without RGB approximations.
 
-2. **Photon-centric simplicity.** Camera pass is trivial (first-hit + NEE +
-   gather). All algorithmic complexity concentrated in the photon pass.
+2. **Guided sub-path sidecar.** Photon directions seed full sub-paths at
+   every non-delta bounce. The irradiance sidecar augments BSDF-sampled
+   transport without replacing it — both the guide and the BSDF fire.
 
-3. **Precomputable photon map.** Binary save/load with scene hash — compute
+3. **Caustic-aware mixing.** Two mixing rules adapt to photon type:
+   `max(N, G)` for caustics (take the stronger signal), `(N + G) / 2`
+   for diffuse (average reduces variance).
+
+4. **No firefly clamps needed.** The mixing rules naturally bound the
+   guide contribution relative to NEE, eliminating the need for ad-hoc
+   energy clamps.
+
+5. **Precomputable photon map.** Binary save/load with scene hash — compute
    once, render interactively with arbitrary camera positions.
 
-4. **Surface-aware gather.** Tangential disk kernel eliminates planar
+6. **Surface-aware gather.** Tangential disk kernel eliminates planar
    blocking artifacts and cross-surface leakage.
 
-5. **Dual CPU/GPU implementation.** CPU reference renderer provides ground
+7. **Dual CPU/GPU implementation.** CPU reference renderer provides ground
    truth; GPU provides interactive speed. Integration tests verify parity.
 
-6. **Adaptive gather radius.** k-NN per hitpoint adapts to local photon
+8. **Adaptive gather radius.** k-NN per hitpoint adapts to local photon
    density automatically.
 
-7. **Photon path decorrelation.** Cell-stratified bouncing ensures efficient
+9. **Photon path decorrelation.** Cell-stratified bouncing ensures efficient
    coverage of the hemisphere.
 
-8. **Coverage-aware NEE.** Mixture of power-weighted and area-weighted
-   sampling ensures all emitters get shadow rays.
+10. **Coverage-aware NEE.** Mixture of power-weighted and area-weighted
+    sampling ensures all emitters get shadow rays.
 
-9. **Interactive debug viewer.** Multiple render modes and overlays for
+11. **Interactive debug viewer.** Multiple render modes and overlays for
     inspecting every intermediate quantity.
 
-10. **Comprehensive test suite.** Unit tests, integration tests (CPU↔GPU),
+12. **Comprehensive test suite.** Unit tests, integration tests (CPU↔GPU),
     ground-truth comparisons, and per-ray validation.
 
-11. **Chromatic dispersion.** Cauchy-equation wavelength-dependent IOR with
+13. **Chromatic dispersion.** Cauchy-equation wavelength-dependent IOR with
     per-bin Fresnel produces physically correct spectral splitting
     (prismatic rainbows, chromatic caustics).
 
-12. **CellInfoCache precomputation.** Per-cell photon statistics (density,
+14. **CellInfoCache precomputation.** Per-cell photon statistics (density,
     variance, caustic count, directional spread) enable adaptive gather
     radius and empty-region skip without per-query overhead.
 
@@ -1758,8 +1819,9 @@ Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
 
 ## 22. Weaknesses and Limitations
 
-1. **No diffuse camera continuation.** All indirect lighting comes from the
-   photon map. Photon map quality directly determines GI quality.
+1. **Sub-path cost per bounce.** The guided sidecar traces a full sub-path
+   at every non-delta bounce. This multiplies the per-bounce ray cost but
+   converges faster than BSDF-only paths in complex lighting.
 
 2. **Single GAS, no instancing.** Flat triangle soup only.
 
@@ -1780,6 +1842,10 @@ Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
    `MediumStack`). Dual-hemisphere NEE + photon gather at translucent
    surfaces is partially covered (NEE at medium scatter events); full
    surface-level dual-gather is future work.
+
+10. **Dense grid resolution.** The guided sidecar depends on local photon
+    density in the dense grid. In very sparse regions the sidecar may find
+    no photons, falling back to NEE-only for that bounce.
 
 ---
 
@@ -1807,38 +1873,36 @@ Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
 - **Skipping tag=1 photons in gather** — discards valid global caustics
 - **Mixing N_global and N_caustic normalizers** — wrong brightness in dual-budget
 - CPU vs GPU: different structures OK, but gather metric must match
+- **Firing sidecar at delta bounces** — sidecar is for non-delta only; delta bounces are deterministic
+- **Allowing sub-paths to fire their own sidecars** — causes 2^N recursion; use `<false>` template
+- **Not skipping bounce-0 emission in sub-paths** — double-counts with parent NEE
+- **Using coin flip between guide and BSDF** — both must fire; BSDF always continues
 
 ---
 
 ## 24. Architectural Differences from v1
 
-| Aspect | v1 (Previous) | v2.4 (Current) |
-|--------|---------------|----------------|
-| Camera ray depth | Full path tracing (N bounces) | First hit only (specular chain N≤12 to first diffuse) |
-| Indirect lighting | Photon map + camera BSDF bouncing | Photon map only |
-| MIS | 3-way (NEE + BSDF + photon) | None at camera; standard BSDF in photon rays |
-| Photon bounce strategy | Standard BSDF | Stratified BSDF at bounce 0 |
-| Spectral sampling | One wavelength per photon | Hero wavelength system: 4 stratified bins per photon |
-| Spatial index | Hash grid only | KD-tree (CPU) + Hash grid (GPU) + tangential kernel |
-| Gather radius | Fixed or SPPM (bounded) | k-NN adaptive per hitpoint (tangential distance) |
-| Gather kernel | 3D spherical | Tangential disk kernel (fixes planar blocking) |
-| Photon tag system | Boolean caustic flag | Three-valued tag (0/1/2) with dual-budget normalization |
-| Nested dielectrics | Hardcoded outside_ior = 1.0 | IOR stack (4-deep, push/pop on refract) |
-| Specular entering test | Shading normal | Geometric normal (§5.2.7) |
-| Epsilon offset | Shading normal | Geometric normal (§5.2.7) |
-| Photon precomputation | Recomputes every launch | Binary save/load with scene hash invalidation |
-| Photon budget | Single budget | Separate `global_photon_budget` / `caustic_photon_budget` |
-| Caustic handling | Separate caustic map | Separate caustic map + targeted shooting |
-| Tone mapping | Reinhard | ACES Filmic |
-| Volume rendering | Rayleigh + Beer-Lambert | Temporarily disabled |
-| Default render mode | Progressive accumulation | Guided photon path tracing (single-shot + photon map pool) |
-| CPU reference | Partial | Full, physically identical to GPU |
-| Integration tests | None (unit only) | CPU↔GPU comparison suite |
-| Cell-bin grid | Used for guided camera bouncing | Deleted (~800 lines) |
-| GPU buffer allocation | alloc() every SPP | ensure_alloc() — no-op when size unchanged (§21.1) |
-| Light PDF lookup | O(N) linear scan | O(1) inverse-index table (§21.2) |
-| Photon map re-tracing | Re-trace at every SPP group | Pre-built pool of maps, pointer-swap cycling (§21.3) |
-| Glass spectral Tf | RGB→spectrum only | + pb_tf_spectrum direct per-bin override (§4.1.1) |
+| Aspect | v1 | v2.x | v3 (Current) |
+|--------|-----|------|---------------|
+| Camera ray depth | Full path tracing (N bounces) | First-hit only (specular chain → first diffuse) | Full path tracing with guided sub-path sidecar at each non-delta bounce |
+| Indirect lighting | Photon map + camera BSDF bouncing | Photon map density estimation only | Camera BSDF continuation + photon-guided sub-path irradiance |
+| Guide role | None | Direct density estimate at hitpoint | Irradiance sidecar — photon directions seed sub-paths that return radiance |
+| MIS | 3-way (NEE + BSDF + photon) | None at camera | 2-way NEE↔BSDF for emission; NEE↔guide mixing (max or average) |
+| Mixing rule | N/A | N/A | Caustic photon → max(N,G); Diffuse photon → (N+G)/2 |
+| Template recursion guard | N/A | N/A | `<bool EnableGuideSidecar>`: `<true>` = main, `<false>` = sub-path |
+| Firefly clamps | N/A | MAX_BOUNCE_CONTRIBUTION, MAX_PATH_THROUGHPUT | Removed — mixing rules handle energy naturally |
+| Dense grid | N/A | N/A | 3D uniform grid over photon AABB; 3×3×3 neighbourhood reservoir sampling |
+| Photon bounce strategy | Standard BSDF | Stratified BSDF at bounce 0 | Stratified BSDF at bounce 0 |
+| Spectral sampling | One wavelength per photon | Hero wavelength system: 4 stratified bins | Hero wavelength system: 4 stratified bins |
+| Spatial index | Hash grid only | KD-tree (CPU) + Hash grid (GPU) + tangential kernel | Same + dense grid for guided sampling |
+| Gather radius | Fixed or SPPM | k-NN adaptive per hitpoint (tangential) | k-NN adaptive per hitpoint (tangential) |
+| Gather kernel | 3D spherical | Tangential disk kernel | Tangential disk kernel |
+| Photon tag system | Boolean caustic flag | Three-valued tag (0/1/2) dual-budget | Three-valued tag + per-photon path_flags for sidecar mixing |
+| Nested dielectrics | Hardcoded outside_ior = 1.0 | IOR stack (4-deep) | IOR stack (4-deep) |
+| Photon precomputation | Recomputes every launch | Binary save/load | Binary save/load |
+| Tone mapping | Reinhard | ACES Filmic | ACES Filmic |
+| Cell-bin grid | Used for guided camera bouncing | Deleted (~800 lines) | Deleted; replaced by dense grid for sidecar |
+| GPU buffer allocation | alloc() every SPP | ensure_alloc() | ensure_alloc() |
 
 ---
 
@@ -1846,11 +1910,13 @@ Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
 
 | Feature | Reason |
 |---------|--------|
-| Camera ray bouncing (bounce > 0) | Replaced by photon-only indirect |
-| MIS 3-way weighting | Camera has no BSDF continuation |
-| Photon-guided camera BSDF sampling | No camera BSDF bounces |
-| `RenderMode::Full` with multi-bounce | Replaced by first-hit + NEE + photon |
-| `dev_sample_guided_bounce()` in camera pass | Photon bounces use standard BSDF |
+| First-hit-only camera pass (v2.x) | Replaced by full path trace with guided sidecar |
+| Photon density estimation at camera hitpoint (v2.x) | Replaced by guided sub-path irradiance |
+| `MAX_BOUNCE_CONTRIBUTION` clamp | Removed — mixing rules handle energy naturally |
+| `MAX_PATH_THROUGHPUT` clamp | Removed — mixing rules handle energy naturally |
+| MIS 3-way weighting (v1) | Camera uses 2-way NEE↔BSDF for emission MIS |
+| Coin-flip guide selection | BSDF always continues; guide is an additive sidecar |
+| `dev_sample_guided_bounce()` (v1) | Replaced by `dev_guide_sample_and_pdf_full()` reservoir sampling |
+| Dense cell-bin grid (`CellBinGrid`) | Deleted; replaced by dense uniform grid |
 | Volume rendering | Temporarily disabled for surface validation |
-| Dense cell-bin grid (`CellBinGrid`) | Deleted. KD-tree handles spatial queries |
 | Obsolete tests (multi-bounce camera, MIS weights, guided bouncing) | Fully deleted, replaced by new tests |

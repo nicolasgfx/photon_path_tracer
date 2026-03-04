@@ -6,6 +6,7 @@
 //   __raygen__render                  - v3 photon-guided path tracing
 //   __raygen__photon_trace            - GPU photon emission + tracing
 //   __raygen__targeted_photon_trace   - GPU targeted caustic emission (Jensen §9.2)
+//   __raygen__photon_gather           - Photon density estimation at first camera hit
 //   __closesthit__radiance            - closest-hit for radiance rays
 //   __closesthit__shadow    - closest-hit for shadow rays
 //   __miss__radiance        - miss for radiance rays
@@ -208,6 +209,7 @@ extern "C" __global__ void __raygen__render() {
 // ── Textual includes: raygen entry points ────────────────────────────
 #include "optix/optix_photon_trace.cuh"
 #include "optix/optix_targeted_photon.cuh"
+#include "optix/optix_photon_gather.cuh"
 
 // =====================================================================
 // Stochastic opacity helpers (TEA hash for cheap per-intersection RNG)

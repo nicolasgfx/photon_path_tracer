@@ -64,7 +64,7 @@ struct LaunchParams {
     float  guide_fraction;        // [v3] photon-guided fraction (0..1)
     int    guide_fallback_bounce; // [v3] switch to photon gather after this bounce
     int    photon_final_gather;   // [v3] 1 = use photon map at terminal bounce
-    int    preview_mode;          // 1 = fast preview (skip kNN guide/caustic/gather, 3-bounce cap)
+    int    preview_mode;          // 1 = fast preview (unguided PT, PREVIEW_MAX_BOUNCES cap)
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
 
     int    frame_number;
@@ -118,6 +118,8 @@ struct LaunchParams {
     float*    photon_norm_x;   // geometric surface normal at photon hit
     float*    photon_norm_y;
     float*    photon_norm_z;
+    float*    photon_spectral_flux;  // [num_photons * NUM_LAMBDA] full spectral flux
+    uint8_t*  photon_is_caustic;    // [num_photons] 0=non-caustic, 1=global-caustic, 2=targeted-caustic
     int       num_photons;
     int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
     int       photon_map_seed;     // RNG seed offset for multi-map re-tracing
@@ -204,6 +206,14 @@ struct LaunchParams {
     long long* prof_nee;             // time in NEE direct lighting
     long long* prof_photon_gather;   // time in photon density estimation
     long long* prof_bsdf;            // time in BSDF eval + continuation
+
+    // ── Photon gather pass output buffer ──────────────────────────────
+    // Written once by __raygen__photon_gather, added to spectrum_buffer
+    // during camera rendering.  Stored separately so it can be replaced
+    // when the photon map is re-traced.
+    float*   photon_gather_buffer;  // [W*H*NUM_LAMBDA] density estimation result
+    int      photon_gather_valid;   // 1 = gather pass has run, 0 = not yet
+    int      photon_map_iteration;  // for progressive photon mapping (radius shrink)
 
     // ── Adaptive sampling ────────────────────────────────────────────
     // All three pointers are nullptr when adaptive sampling is disabled.

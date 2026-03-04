@@ -124,7 +124,7 @@ class ObjWriter:
 
         total_verts = sum(g.positions.shape[0] for g in self.groups)
         total_faces = sum(g.faces.shape[0] for g in self.groups)
-        print(f"  OBJ: {len(self.groups)} groups, {total_verts:,} vertices, {total_faces:,} faces → {obj_path}")
+        print(f"  OBJ: {len(self.groups)} groups, {total_verts:,} vertices, {total_faces:,} faces -> {obj_path}")
 
 
 class ObjGroup:
@@ -227,4 +227,4 @@ def write_mtl(mtl_path: str, materials: dict[str, MtlMaterial]):
 
             f.write("\n")
 
-    print(f"  MTL: {len(materials)} material(s) → {mtl_path}")
+    print(f"  MTL: {len(materials)} material(s) -> {mtl_path}")

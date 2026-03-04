@@ -2403,10 +2403,8 @@ TEST(MultiHero, PhotonSoA_Clear) {
     EXPECT_TRUE(soa.num_hero.empty());
 }
 
-// -- MULTI_MAP_SPP_GROUP config sanity check -------------------------
-TEST(MultiHero, MultiMapConfigValid) {
-    EXPECT_GT(MULTI_MAP_SPP_GROUP, 0)
-        << "MULTI_MAP_SPP_GROUP must be positive";
+// -- Hero wavelength config sanity check -----------------------------
+TEST(MultiHero, HeroWavelengthConfigValid) {
     EXPECT_GE(HERO_WAVELENGTHS, 1);
     EXPECT_LE(HERO_WAVELENGTHS, NUM_LAMBDA);
     // NUM_LAMBDA should be evenly divisible by HERO_WAVELENGTHS

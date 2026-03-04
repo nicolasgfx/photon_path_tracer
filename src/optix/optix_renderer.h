@@ -186,6 +186,11 @@ public:
     void render_final(const Camera& camera, const RenderConfig& config,
                       const Scene& scene);
 
+    /// Launch the photon density estimation pass (once per photon map).
+    /// Traces camera rays to first non-specular hit and evaluates photon
+    /// density (diffuse + caustic) into photon_gather_buffer.
+    void launch_photon_gather(const Camera& camera, const RenderConfig& config);
+
     /// Download the linear HDR float4 buffer from GPU.
     /// If convert_from_spectrum is true, runs spectrum→HDR conversion first.
     void download_hdr_buffer(std::vector<float>& out, bool convert_from_spectrum = true);
@@ -385,6 +390,7 @@ private:
     OptixProgramGroup        raygen_pg_          = nullptr;
     OptixProgramGroup        raygen_photon_pg_   = nullptr;  // photon trace
     OptixProgramGroup        raygen_targeted_pg_ = nullptr;  // targeted caustic photon trace
+    OptixProgramGroup        raygen_gather_pg_   = nullptr;  // photon density gather at first hit
     OptixProgramGroup        miss_pg_            = nullptr;
     OptixProgramGroup        miss_shadow_pg_     = nullptr;
     OptixProgramGroup        hitgroup_pg_        = nullptr;
@@ -414,6 +420,7 @@ private:
     // Component output buffers (for debug PNGs)
     DeviceBuffer d_nee_direct_buffer_;       // float [W*H*NUM_LAMBDA]
     DeviceBuffer d_photon_indirect_buffer_;  // float [W*H*NUM_LAMBDA]
+    DeviceBuffer d_photon_gather_buffer_;    // float [W*H*NUM_LAMBDA] density estimation pass output
 
     // Adaptive sampling buffers
     DeviceBuffer d_lum_sum_;          // float [W*H]
@@ -473,6 +480,8 @@ private:
     DeviceBuffer d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_;
     DeviceBuffer d_photon_wi_x_,  d_photon_wi_y_,  d_photon_wi_z_;
     DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
+    DeviceBuffer d_photon_spectral_flux_;  // float [num_photons * NUM_LAMBDA]
+    DeviceBuffer d_photon_is_caustic_;     // uint8_t [num_photons] caustic tag
     // Dense grid device buffers
     DeviceBuffer d_dense_sorted_indices_, d_dense_cell_start_, d_dense_cell_end_;
 
@@ -515,6 +524,7 @@ private:
     DeviceBuffer d_raygen_record_;
     DeviceBuffer d_raygen_photon_record_;
     DeviceBuffer d_raygen_targeted_record_;
+    DeviceBuffer d_raygen_gather_record_;
     DeviceBuffer d_miss_records_;
     DeviceBuffer d_hitgroup_records_;
 
@@ -569,7 +579,8 @@ private:
     // Runtime guide fraction (T key toggle: 0 = unguided, DEFAULT = guided)
     float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
     bool  histogram_only_ = false;  // C key: use only histogram conclusions
-    bool  preview_mode_   = true;   // interactive preview: skip kNN, 3-bounce cap
+    bool  preview_mode_   = true;   // interactive preview: unguided PT, reduced bounce cap
+    bool  photon_gather_done_ = false;  // true after launch_photon_gather() completes
 
     // GPU device info (populated in init())
     std::string gpu_name_;
@@ -613,6 +624,7 @@ inline void OptixRenderer::resize(int w, int h) {
     // Component buffers
     d_nee_direct_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
     d_photon_indirect_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
+    d_photon_gather_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
 
     // Per-bounce AOV buffers (DB-04)
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
@@ -640,6 +652,7 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_pixel_max_spp_.d_ptr,   0, d_pixel_max_spp_.bytes));
     CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_photon_gather_buffer_.d_ptr, 0, d_photon_gather_buffer_.bytes));
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
         CUDA_CHECK(cudaMemset(d_bounce_aov_[b].d_ptr, 0, d_bounce_aov_[b].bytes));
 
@@ -675,6 +688,8 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     if (d_photon_indirect_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+    if (d_photon_gather_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_photon_gather_buffer_.d_ptr, 0, d_photon_gather_buffer_.bytes));
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
         if (d_bounce_aov_[b].d_ptr)
             CUDA_CHECK(cudaMemset(d_bounce_aov_[b].d_ptr, 0, d_bounce_aov_[b].bytes));
@@ -731,6 +746,7 @@ inline void OptixRenderer::cleanup() {
     if (raygen_pg_)            { optixProgramGroupDestroy(raygen_pg_);         raygen_pg_ = nullptr; }
     if (raygen_photon_pg_)     { optixProgramGroupDestroy(raygen_photon_pg_);  raygen_photon_pg_ = nullptr; }
     if (raygen_targeted_pg_)   { optixProgramGroupDestroy(raygen_targeted_pg_); raygen_targeted_pg_ = nullptr; }
+    if (raygen_gather_pg_)     { optixProgramGroupDestroy(raygen_gather_pg_);   raygen_gather_pg_ = nullptr; }
     if (miss_pg_)              { optixProgramGroupDestroy(miss_pg_);           miss_pg_ = nullptr; }
     if (miss_shadow_pg_)       { optixProgramGroupDestroy(miss_shadow_pg_);    miss_shadow_pg_ = nullptr; }
     if (hitgroup_pg_)          { optixProgramGroupDestroy(hitgroup_pg_);       hitgroup_pg_ = nullptr; }

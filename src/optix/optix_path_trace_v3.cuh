@@ -53,8 +53,9 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
     bool aov_written = false;
 
     // Fibonacci sphere directions for cell-bin histogram sampling (volume only)
+    // Skipped in preview mode to save registers & time.
     DevPhotonBinDirs fib;
-    if (params.vol_cell_grid_valid)
+    if (!params.preview_mode && params.vol_cell_grid_valid)
         fib.init(params.photon_bin_count);
     else
         fib.count = 0;
@@ -63,7 +64,7 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
     float pdf_combined_prev = 0.f;
 
     const int max_bounces = params.preview_mode
-        ? min(params.max_bounces_camera, 3)
+        ? min(params.max_bounces_camera, PREVIEW_MAX_BOUNCES)
         : params.max_bounces_camera;
 
     for (int bounce = 0; bounce < max_bounces; ++bounce) {
@@ -230,8 +231,9 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
 
                     // ── MT-04: HG + volume photon guide mixture ─────
                     // Read volume cell-bin histogram for guided scatter
+                    // (skipped in preview mode — pure HG sampling only)
                     GuidedHistogram vol_hist = dev_read_vol_cell_histogram(scatter_pos);
-                    float p_vol_guide = (vol_hist.valid) ? 0.5f : 0.f;
+                    float p_vol_guide = (!params.preview_mode && vol_hist.valid) ? 0.5f : 0.f;
 
                     float3 wi_world;
                     bool scatter_valid = false;
@@ -387,7 +389,8 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         // Guided / BSDF one-sample MIS: either pick a random photon
         // from the dense grid and bounce in its wi direction, or sample
         // the BSDF.  p_guide = probability of choosing the guide strategy.
-        float p_guide = params.dense_valid ? params.guide_fraction : 0.f;
+        float p_guide = (!params.preview_mode && params.dense_valid)
+                      ? params.guide_fraction : 0.f;
 
         // ── NEE: 1 shadow ray ───────────────────────────────────────
         // §4.1: Standard Veach-style MIS: sample a light, weight against BSDF.
@@ -439,11 +442,25 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
                     }
                 }
             }
-            // One-sample MIS: if the guide strategy was chosen but
-            // could not produce a valid sample, the correct contribution
-            // is zero — do NOT fall through to BSDF (that would cause a
-            // systematic 1/(1-p_guide) overestimate in photon-sparse regions).
-            if (!sample_valid) break;
+            // Defensive fallback: if the guide strategy was chosen but
+            // could not produce a valid sample (no eligible photons),
+            // fall back to BSDF sampling.  This is unbiased because
+            // pdf_guide = 0 everywhere when no photons exist, so
+            // combined_pdf = (1 - p_guide) * pdf_bsdf.
+            if (!sample_valid) {
+                BSDFSample bs = bsdf_sample(mat_id, wo_local, hit.uv, rng, pixel_idx);
+                if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
+                wi_world = frame.local_to_world(bs.wi);
+                // No eligible photons → pdf_guide = 0 → combined = (1-α) * pdf_bsdf
+                combined_pdf = (1.f - p_guide) * bs.pdf;
+                if (combined_pdf < 1e-8f) break;
+                float cos_theta = bs.wi.z;
+                for (int i = 0; i < NUM_LAMBDA; ++i) {
+                    f_over_pdf.value[i] = bs.f.value[i] * cos_theta / combined_pdf;
+                    f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
+                }
+                sample_valid = true;
+            }
         }
 
         if (!chose_guide) {

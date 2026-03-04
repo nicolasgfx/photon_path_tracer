@@ -647,6 +647,15 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         stored_dense_grid_ = std::move(dg);
     }
 
+    // ── Upload photon spectral flux + caustic tags for gather pass ───
+    {
+        d_photon_spectral_flux_.upload(stored_photons_.spectral_flux);
+        d_photon_is_caustic_.upload(caustic_pass_flags_);
+        std::printf("[OptiX] Uploaded spectral_flux (%zu KB) + caustic tags (%zu B) for gather pass\n",
+                    stored_photons_.spectral_flux.size() * sizeof(float) / 1024,
+                    caustic_pass_flags_.size());
+    }
+
     // Build and upload per-triangle photon irradiance heatmap (for preview)
     {
         auto irr = build_tri_photon_irradiance(stored_photons_, num_tris_);

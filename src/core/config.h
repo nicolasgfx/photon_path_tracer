@@ -88,8 +88,14 @@ constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diff
 // These caps prevent pathologically large searches in sparse regions.
 // Values are fractions of scene extent (scene normalised to [-0.5, 0.5]³).
 //   Fast: 0.08–0.10  |  Balanced: 0.05  |  Quality: 0.02–0.03
-constexpr float DEFAULT_GATHER_RADIUS  = 0.1f;      // 0.05[R]  global (diffuse) map
+constexpr float DEFAULT_GATHER_RADIUS  = 0.05f;      // 0.05[R]  global (diffuse) map
 constexpr float DEFAULT_CAUSTIC_RADIUS = 0.025f;     // 0.025[R]  caustic map (tighter for sharp caustics)
+
+// Enable/disable the photon density estimation pass at first camera hit.
+// When enabled, a separate raygen program gathers photon radiance at the
+// first diffuse hit and writes it to photon_gather_buffer.  The result is
+// added to the path-traced output during tonemap / spectrum-to-HDR.
+constexpr bool DEFAULT_PHOTON_GATHER_ENABLED = true;
 
 
 // =====================================================================
@@ -124,10 +130,13 @@ constexpr int HERO_WAVELENGTHS = 4;
 // 90° = full hemisphere (Lambertian).  Smaller = directional emitters.
 constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 
-// ── Idle-to-full-quality rendering ──────────────────────────────────
-// After this many seconds of no input the viewer switches from
-// 3-bounce preview to full-quality accumulation.
-constexpr float IDLE_TIMEOUT_SEC = 1.0f;
+// ── Preview mode (interactive navigation) ───────────────────────────
+// During interactive camera motion the renderer uses plain unguided
+// path tracing with a reduced bounce cap for speed.  After
+// IDLE_TIMEOUT_SEC of no input the viewer switches to full-quality
+// photon-guided accumulation.
+constexpr int   PREVIEW_MAX_BOUNCES = 2;             //  bounce cap in preview mode
+constexpr float IDLE_TIMEOUT_SEC    = 1.0f;
 
 
 // =====================================================================

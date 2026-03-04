@@ -300,6 +300,17 @@ void OptixRenderer::create_programs() {
             context_, &desc, 1, &pg_options, log, &log_size, &raygen_targeted_pg_));
     }
 
+    // Raygen (photon density gather at first camera hit)
+    {
+        OptixProgramGroupDesc desc = {};
+        desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+        desc.raygen.module = module_;
+        desc.raygen.entryFunctionName = "__raygen__photon_gather";
+        log_size = sizeof(log);
+        OPTIX_CHECK(optixProgramGroupCreate(
+            context_, &desc, 1, &pg_options, log, &log_size, &raygen_gather_pg_));
+    }
+
     // Miss (radiance)
     {
         OptixProgramGroupDesc desc = {};
@@ -348,12 +359,12 @@ void OptixRenderer::create_programs() {
             context_, &desc, 1, &pg_options, log, &log_size, &hitgroup_shadow_pg_));
     }
 
-    std::cout << "[OptiX] Program groups created (render + photon trace + targeted)\n";
+    std::cout << "[OptiX] Program groups created (render + photon trace + targeted + gather)\n";
 }
 
 void OptixRenderer::create_pipeline() {
     OptixProgramGroup program_groups[] = {
-        raygen_pg_, raygen_photon_pg_, raygen_targeted_pg_,
+        raygen_pg_, raygen_photon_pg_, raygen_targeted_pg_, raygen_gather_pg_,
         miss_pg_, miss_shadow_pg_,
         hitgroup_pg_, hitgroup_shadow_pg_
     };
@@ -376,7 +387,7 @@ void OptixRenderer::create_pipeline() {
         context_,
         &pipeline_options,
         &link_options,
-        program_groups, 6,
+        program_groups, 7,
         log, &log_size,
         &pipeline_));
 
@@ -413,6 +424,13 @@ void OptixRenderer::build_sbt(const Scene& scene) {
         RayGenRecord rec = {};
         OPTIX_CHECK(optixSbtRecordPackHeader(raygen_targeted_pg_, &rec));
         d_raygen_targeted_record_.upload(&rec, 1);
+    }
+
+    // Raygen record (photon density gather at first camera hit)
+    {
+        RayGenRecord rec = {};
+        OPTIX_CHECK(optixSbtRecordPackHeader(raygen_gather_pg_, &rec));
+        d_raygen_gather_record_.upload(&rec, 1);
     }
 
     // Miss records (radiance + shadow)

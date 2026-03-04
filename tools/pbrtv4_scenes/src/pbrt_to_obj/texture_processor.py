@@ -54,7 +54,7 @@ def process_textures(all_textures: dict[str, ResolvedTexture],
             # Bake scale factor
             _bake_scaled_texture(src_path, dst_path, rt.scale)
 
-    print(f"  Processed {len(all_textures)} texture(s) → {output_tex_dir}")
+    print(f"  Processed {len(all_textures)} texture(s) -> {output_tex_dir}")
 
 
 def copy_env_map(filepath: str, source_dir: str, output_tex_dir: str) -> str | None:
@@ -126,7 +126,7 @@ def _bake_scaled_texture(src_path: str, dst_path: str, scale: float):
         img_array = np.clip(img_array, 0, 255).astype(np.uint8)
         result = Image.fromarray(img_array)
         result.save(dst_path, 'PNG')
-        print(f"  Baked: {os.path.basename(src_path)} × {scale:.3f} → {os.path.basename(dst_path)}")
+        print(f"  Baked: {os.path.basename(src_path)} x {scale:.3f} -> {os.path.basename(dst_path)}")
     except Exception as e:
         print(f"  [WARN] Failed to bake {src_path}: {e}")
         shutil.copy2(src_path, dst_path)

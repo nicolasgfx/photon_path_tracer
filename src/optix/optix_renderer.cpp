@@ -146,6 +146,8 @@ void fill_common_params(
     p.photon_norm_x     = photon_norm_x.d_ptr ? const_cast<float*>(photon_norm_x.as<float>()) : nullptr;
     p.photon_norm_y     = photon_norm_y.d_ptr ? const_cast<float*>(photon_norm_y.as<float>()) : nullptr;
     p.photon_norm_z     = photon_norm_z.d_ptr ? const_cast<float*>(photon_norm_z.as<float>()) : nullptr;
+    p.photon_spectral_flux = nullptr;  // set by caller after fill_common_params
+    p.photon_is_caustic    = nullptr;  // set by caller after fill_common_params
 
     p.gather_radius       = gather_radius;
 
@@ -466,6 +468,95 @@ bool OptixRenderer::build_view_adaptive_cdf(const Scene& scene, float beta)
     return true;
 }
 
+// =====================================================================
+// launch_photon_gather() — Photon density estimation at first camera hit
+// Runs ONCE per photon map.  Fills d_photon_gather_buffer_.
+// =====================================================================
+void OptixRenderer::launch_photon_gather(
+    const Camera& camera, const RenderConfig& config)
+{
+    if (!config.photon_gather_enabled) return;
+
+    if (!d_photon_spectral_flux_.d_ptr || stored_photons_.size() == 0) {
+        std::printf("[Gather] Skipping: no photon spectral flux data\n");
+        return;
+    }
+
+    // Zero the gather buffer before writing
+    CUDA_CHECK(cudaMemset(d_photon_gather_buffer_.d_ptr, 0, d_photon_gather_buffer_.bytes));
+
+    LaunchParams lp = {};
+    fill_common_params(lp,
+        d_spectrum_buffer_, d_sample_counts_, d_srgb_buffer_,
+        width_, height_, camera,
+        d_vertices_, d_normals_, d_texcoords_,
+        d_material_ids_,
+        d_Kd_, d_Ks_, d_Le_, d_roughness_, d_ior_, d_mat_type_,
+        d_diffuse_tex_, d_tex_atlas_, d_tex_descs_,
+        (int)(d_tex_descs_.bytes / sizeof(GpuTexDesc)),
+        d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_,
+        d_photon_wi_x_, d_photon_wi_y_, d_photon_wi_z_,
+        d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_,
+        d_emissive_indices_, d_emissive_cdf_,
+        num_emissive_, 0.f,
+        gas_handle_,
+        gather_radius_,
+        num_photons_emitted_,
+        d_nee_direct_buffer_, d_photon_indirect_buffer_,
+        d_prof_total_, d_prof_ray_trace_, d_prof_nee_,
+        d_prof_photon_gather_, d_prof_bsdf_,
+        config.volume_enabled, config.volume_density, config.volume_falloff,
+        config.volume_albedo, config.volume_samples, config.volume_max_t);
+    fill_clearcoat_fabric_params(lp);
+    fill_cell_grid_params(lp);
+    fill_dense_grid_params(lp);
+
+    lp.num_caustic_emitted    = num_caustic_emitted_;
+    lp.caustic_gather_radius  = caustic_radius_;
+
+    // Wire photon spectral data
+    lp.photon_spectral_flux = const_cast<float*>(d_photon_spectral_flux_.as<float>());
+    lp.photon_is_caustic    = reinterpret_cast<uint8_t*>(d_photon_is_caustic_.d_ptr);
+
+    // Output buffer
+    lp.photon_gather_buffer = reinterpret_cast<float*>(d_photon_gather_buffer_.d_ptr);
+    lp.photon_gather_valid  = 0;
+    lp.photon_map_iteration = 0;
+
+    // Emitter inverse-index (needed for NEE)
+    lp.emissive_local_idx = d_emissive_local_idx_.d_ptr
+        ? const_cast<int*>(d_emissive_local_idx_.as<int>()) : nullptr;
+
+    lp.render_mode        = RenderMode::Full;
+    lp.samples_per_pixel  = 1;
+    lp.frame_number       = 0;
+
+    d_launch_params_.ensure_alloc(sizeof(LaunchParams));
+    CUDA_CHECK(cudaMemcpy(d_launch_params_.d_ptr, &lp,
+                           sizeof(LaunchParams), cudaMemcpyHostToDevice));
+
+    // Swap SBT to the gather raygen program
+    CUdeviceptr saved_raygen = sbt_.raygenRecord;
+    sbt_.raygenRecord = reinterpret_cast<CUdeviceptr>(d_raygen_gather_record_.d_ptr);
+
+    OPTIX_CHECK(optixLaunch(
+        pipeline_,
+        nullptr,
+        reinterpret_cast<CUdeviceptr>(d_launch_params_.d_ptr),
+        sizeof(LaunchParams),
+        &sbt_,
+        width_, height_, 1));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Restore SBT
+    sbt_.raygenRecord = saved_raygen;
+    photon_gather_done_ = true;
+
+    std::printf("[Gather] Photon density estimation pass complete (%dx%d)\n",
+                width_, height_);
+}
+
 // render_final() -- full path tracing (v3)
 void OptixRenderer::render_final(
     const Camera& camera, const RenderConfig& config, const Scene& scene)
@@ -518,6 +609,18 @@ void OptixRenderer::render_final(
 
         lp.num_caustic_emitted    = num_caustic_emitted_;
         lp.caustic_gather_radius  = caustic_radius_;
+
+        // Photon spectral data for gather pass + guided sampling
+        lp.photon_spectral_flux = d_photon_spectral_flux_.d_ptr
+            ? const_cast<float*>(d_photon_spectral_flux_.as<float>()) : nullptr;
+        lp.photon_is_caustic    = d_photon_is_caustic_.d_ptr
+            ? reinterpret_cast<uint8_t*>(d_photon_is_caustic_.d_ptr) : nullptr;
+
+        // Photon gather pass output (density estimation at first hit)
+        lp.photon_gather_buffer = d_photon_gather_buffer_.d_ptr
+            ? reinterpret_cast<float*>(d_photon_gather_buffer_.d_ptr) : nullptr;
+        lp.photon_gather_valid  = photon_gather_done_ ? 1 : 0;
+        lp.photon_map_iteration = 0;
 
         // Runtime toggle (V key) overrides the RenderConfig value
         lp.volume_enabled = (int)runtime_volume_enabled_;
@@ -625,6 +728,9 @@ void OptixRenderer::render_final(
         }
     }
 
+    // ── Photon gather pass (density estimation at first hit) ──────
+    launch_photon_gather(camera, config);
+
     if (!adaptive) {
         // â”€â”€ Non-adaptive path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         for (int s = 0; s < total_spp; ++s) {
@@ -700,7 +806,9 @@ void OptixRenderer::render_final(
             (const float*)d_spectrum_buffer_.d_ptr,
             (const float*)d_sample_counts_.d_ptr,
             (float*)d_hdr_buffer_.d_ptr,
-            width_, height_, exposure_);
+            width_, height_, exposure_,
+            d_photon_gather_buffer_.d_ptr
+                ? (const float*)d_photon_gather_buffer_.d_ptr : nullptr);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // 2. Tone-map the raw (un-denoised) HDR â†’ sRGB for side-by-side comparison
@@ -734,7 +842,9 @@ void OptixRenderer::render_final(
             (const float*)d_spectrum_buffer_.d_ptr,
             (const float*)d_sample_counts_.d_ptr,
             (uint8_t*)d_srgb_buffer_.d_ptr,
-            width_, height_, exposure_);
+            width_, height_, exposure_,
+            d_photon_gather_buffer_.d_ptr
+                ? (const float*)d_photon_gather_buffer_.d_ptr : nullptr);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -940,7 +1050,9 @@ void OptixRenderer::download_hdr_buffer(
             d_spectrum_buffer_.as<float>(),
             d_sample_counts_.as<float>(),
             reinterpret_cast<float*>(d_hdr_buffer_.d_ptr),
-            width_, height_, exposure_);
+            width_, height_, exposure_,
+            d_photon_gather_buffer_.d_ptr
+                ? (const float*)d_photon_gather_buffer_.d_ptr : nullptr);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
