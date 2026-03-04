@@ -29,7 +29,7 @@
 // Gate runtime statistics collection and debug file output.  When false,
 // the compiler eliminates all stats code paths (zero overhead).
 // See §9 for debug-specific flags that are subordinate to this gate.
-constexpr bool ENABLE_STATS = false;
+constexpr bool ENABLE_STATS = true;
 
 
 // =====================================================================
