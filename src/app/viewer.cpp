@@ -924,8 +924,6 @@ static void key_callback(GLFWwindow* window, int key,
             return;
         }
         s_app.histogram_only = !s_app.histogram_only;
-        if (g_active_optix_renderer)
-            g_active_optix_renderer->set_histogram_only(s_app.histogram_only);
         s_app.camera_moved = true;  // reset accumulation
         printf("[Stats] Histogram-only conclusions %s\n",
                s_app.histogram_only ? "ON" : "OFF");

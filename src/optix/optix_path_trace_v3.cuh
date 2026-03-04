@@ -480,19 +480,12 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             wi_world = frame.local_to_world(bs.wi);
             float cos_theta = bs.wi.z;
 
-            // MIS: when first-hit guide is active, evaluate the guide
-            // PDF at the BSDF-sampled direction for correct MIS weights.
+            // MIS: the direction map stores ONE pre-sampled direction per
+            // subpixel (a delta in direction space).  The probability that
+            // the guide would have produced the BSDF-sampled direction is 0.
+            // So combined_pdf = (1-p_guide) * bs.pdf  (guide term vanishes).
             if (p_guide > 0.f) {
-                int factor = DIR_MAP_SUBPIXEL_FACTOR;
-                int sx = pixel_idx % params.width * factor + factor / 2;
-                int sy = pixel_idx / params.width * factor + factor / 2;
-                float pdf_guide = 0.f;
-                if (sx < params.dir_map_width && sy < params.dir_map_height) {
-                    int dir_idx = sy * params.dir_map_width + sx;
-                    DirMapEntry de = params.dir_map_buffer[dir_idx];
-                    if (de.num_eligible > 0) pdf_guide = de.pdf;
-                }
-                combined_pdf = p_guide * pdf_guide + (1.f - p_guide) * bs.pdf;
+                combined_pdf = (1.f - p_guide) * bs.pdf;
             } else {
                 combined_pdf = bs.pdf;
             }
@@ -538,7 +531,11 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         }
 
         // ── Prepare next ray ────────────────────────────────────────
-        origin    = hit.position + hit.shading_normal * OPTIX_SCENE_EPSILON;
+        // Use geometric normal for offset to avoid self-intersection
+        // on smooth-shaded meshes where shading_normal diverges.
+        float3 offset_n = hit.geo_normal;
+        if (dot(offset_n, direction * (-1.f)) < 0.f) offset_n = offset_n * (-1.f);
+        origin    = hit.position + offset_n * OPTIX_SCENE_EPSILON;
         direction = wi_world;
         pdf_combined_prev = combined_pdf;
     }

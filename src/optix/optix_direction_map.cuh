@@ -150,7 +150,7 @@ DirMapEntry dev_build_direction_map_entry(
     if (dot(wo, N) < 0.f) N = N * (-1.f);
 
     const int R = DIR_MAP_NEIGHBOURHOOD_EXTENT;  // ±2 cells = 5×5×5
-    const float guide_r2 = DEFAULT_GUIDE_RADIUS * DEFAULT_GUIDE_RADIUS;
+    const float guide_r2 = params.guide_radius * params.guide_radius;
 
     int cx = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
     int cy = (int)floorf((pos.y - params.dense_min_y) / params.dense_cell_size);
@@ -296,15 +296,9 @@ gather_done:
     float bin_prob = bins[chosen_bin].weight / total_weight;
     float cone_pdf_val;
     if (cos_half < 1.f - 1e-6f) {
-        // Cosine-cone PDF at the jittered direction
+        // Cosine-cone PDF at the jittered direction (matches sample_cosine_cone)
         float cos_theta = dot(wi_dir, fib.dirs[chosen_bin]);
-        if (cos_theta >= cos_half) {
-            // Inside the cone: pdf = cos_theta / (π * (1 - cos²_half))
-            // Actually: uniform cone pdf = 1 / (2π(1-cos_half))
-            cone_pdf_val = 1.f / (2.f * PI * (1.f - cos_half));
-        } else {
-            cone_pdf_val = 0.f;
-        }
+        cone_pdf_val = cosine_cone_pdf(cos_theta, cos_half);
     } else {
         // No jitter: Dirac-like — use 1/(2π) as a stand-in
         cone_pdf_val = 1.f / (2.f * PI);

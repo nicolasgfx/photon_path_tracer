@@ -13,7 +13,7 @@
 //   __miss__radiance        - miss for radiance rays
 //   __miss__shadow          - miss for shadow rays
 //
-// Payload layout (14 values):
+// Payload layout (15 values, p0-p14):
 //   p0-p2  : hit position (float3)
 //   p3-p5  : shading normal (float3)
 //   p6     : hit distance t (float)
@@ -21,7 +21,7 @@
 //   p8     : triangle ID (uint32_t)
 //   p9     : hit flag (0 = miss, 1 = hit)
 //   p10-p12: geometric normal (float3)
-//   p13    : (reserved)
+//   p13-p14: texture UV (float2)
 // ---------------------------------------------------------------------
 #include <optix.h>
 #include <cstdint>

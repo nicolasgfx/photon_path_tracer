@@ -143,7 +143,6 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     lp.num_media     = d_media_.d_ptr ? (int)(d_media_.bytes / sizeof(HomogeneousMedium)) : 0;
 
     lp.num_photons       = num_photons;
-    lp.max_bounces       = config.max_bounces;
     lp.photon_max_bounces = DEBUG_PHOTON_SINGLE_BOUNCE ? 1 : config.max_bounces;
 
     // Emitter data

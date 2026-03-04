@@ -58,12 +58,10 @@ struct LaunchParams {
 
     // Rendering parameters
     int    samples_per_pixel;
-    int    max_bounces;           // [legacy] max specular chain bounces
     int    max_bounces_camera;    // [v3] max camera path depth (§4)
     int    min_bounces_rr;        // [v3] guaranteed bounces before RR
     float  rr_threshold;          // [v3] max RR survival probability
     float  guide_fraction;        // [v3] photon-guided fraction (0..1)
-    int    guide_fallback_bounce; // [v3] switch to photon gather after this bounce
     int    photon_final_gather;   // [v3] 1 = use photon map at terminal bounce
     int    preview_mode;          // 1 = fast preview (unguided PT, PREVIEW_MAX_BOUNCES cap)
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
@@ -131,7 +129,6 @@ struct LaunchParams {
     float     dense_min_x, dense_min_y, dense_min_z;  // AABB min
     float     dense_cell_size;          // cell edge length
     int       dense_dim_x, dense_dim_y, dense_dim_z;  // grid resolution
-    float     guide_cone_cos_half_angle;  // cos(half-angle) for photon wi cone jitter (1.0 = off)
     float     guide_radius;               // tangential distance cutoff for Epanechnikov kernel
 
     // ── Direction map (first-hit guided brute-force PT) ──────────────
@@ -140,11 +137,6 @@ struct LaunchParams {
     int       dir_map_height;           // sub_height = height * DIR_MAP_SUBPIXEL_FACTOR
     int       dir_map_valid;            // 1 = direction map built, 0 = not available
     int       dir_map_spp_seed;         // seed offset for per-SPP resampling
-
-    // ── Guide stats (ENABLE_GUIDE_STATS only) ────────────────────────
-    // Device buffer [4]: [0]=min_eligible, [1]=max_eligible,
-    //                    [2]=sum_eligible, [3]=count_guided_bounces
-    int*      guide_stats_buf;
 
     // Per-triangle photon irradiance heatmap (precomputed on CPU, for preview)
     float*    tri_photon_irradiance;  // [num_triangles] accumulated scalar irradiance

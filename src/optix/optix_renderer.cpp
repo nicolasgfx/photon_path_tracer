@@ -171,6 +171,9 @@ void fill_common_params(
     p.bounce_aov_enabled = 0;
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
         p.bounce_aov[b] = nullptr;
+
+    // Terminal-bounce photon gather (H-1 fix: was never set → always 0)
+    p.photon_final_gather = DEFAULT_PHOTON_FINAL_GATHER ? 1 : 0;
 }
 
 // fill_cell_grid_params() -- Wire volume CellBinGrid + kNN data into LaunchParams
@@ -252,37 +255,6 @@ void OptixRenderer::fill_dense_grid_params(LaunchParams& lp) {
         lp.dense_cell_end       = nullptr;
         lp.dense_valid          = 0;
     }
-
-    // Guide stats buffer (ENABLE_GUIDE_STATS only)
-    if constexpr (ENABLE_GUIDE_STATS) {
-        d_guide_stats_buf_.ensure_alloc(4 * sizeof(int));
-        // Reset: min=INT_MAX, max=0, sum=0, count=0
-        int init[4] = { INT_MAX, 0, 0, 0 };
-        CUDA_CHECK(cudaMemcpy(d_guide_stats_buf_.d_ptr, init,
-                               4 * sizeof(int), cudaMemcpyHostToDevice));
-        lp.guide_stats_buf = reinterpret_cast<int*>(d_guide_stats_buf_.d_ptr);
-    } else {
-        lp.guide_stats_buf = nullptr;
-    }
-}
-
-// print_guide_stats_if_enabled() -- readback + print guide neighbourhood stats
-void OptixRenderer::print_guide_stats_if_enabled() {
-    if constexpr (!ENABLE_GUIDE_STATS) return;
-    if (!d_guide_stats_buf_.d_ptr) return;
-    int buf[4];
-    CUDA_CHECK(cudaMemcpy(buf, d_guide_stats_buf_.d_ptr,
-                           4 * sizeof(int), cudaMemcpyDeviceToHost));
-    int gs_min   = buf[0];
-    int gs_max   = buf[1];
-    int gs_sum   = buf[2];
-    int gs_count = buf[3];
-    if (gs_count > 0) {
-        std::printf("[GuideStats] eligible photons per neighbourhood: "
-                    "min=%d  max=%d  avg=%.1f  (over %d guided bounces)\n",
-                    gs_min, gs_max,
-                    (double)gs_sum / (double)gs_count, gs_count);
-    }
 }
 
 // =====================================================================
@@ -350,7 +322,6 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
     lp.dir_map_valid    = 1;
     lp.dir_map_spp_seed = spp_seed;
     lp.guide_radius     = DEFAULT_GUIDE_RADIUS;
-    lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
 
     // Upload params and swap SBT to direction map raygen
     d_launch_params_.ensure_alloc(sizeof(LaunchParams));
@@ -420,12 +391,10 @@ void OptixRenderer::render_debug_frame(
     lp.volume_enabled = (int)runtime_volume_enabled_;
 
     lp.samples_per_pixel = spp;
-    lp.max_bounces       = DEFAULT_MAX_BOUNCES;
     lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
-    lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
     lp.guide_radius      = DEFAULT_GUIDE_RADIUS;
     lp.dir_map_spp_seed  = frame_number;  // vary direction map per frame
     lp.preview_mode      = preview_mode_ ? 1 : 0;
@@ -456,7 +425,6 @@ void OptixRenderer::render_debug_frame(
         width_, height_, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
-    print_guide_stats_if_enabled();
 }
 
 // render_one_spp() -- launch a single sample of full path tracing
@@ -497,12 +465,10 @@ void OptixRenderer::render_one_spp(
     lp.volume_enabled = (int)runtime_volume_enabled_;
 
     lp.samples_per_pixel  = 1;
-    lp.max_bounces        = max_bounces;
     lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
     lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
     lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
     lp.guide_fraction    = guide_fraction_;
-    lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
     lp.guide_radius      = DEFAULT_GUIDE_RADIUS;
     lp.dir_map_spp_seed  = frame_number;  // vary direction map per frame
     lp.preview_mode      = 0;  // render_one_spp is always full quality
@@ -525,7 +491,6 @@ void OptixRenderer::render_one_spp(
         width_, height_, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
-    print_guide_stats_if_enabled();
 }
 
 // =====================================================================
@@ -660,12 +625,10 @@ void OptixRenderer::render_final(
         lp.volume_enabled = (int)runtime_volume_enabled_;
 
         lp.samples_per_pixel  = 1;
-        lp.max_bounces        = config.max_bounces;
         lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
         lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
         lp.rr_threshold      = DEFAULT_RR_THRESHOLD;
         lp.guide_fraction    = guide_fraction_;
-        lp.guide_cone_cos_half_angle = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
         lp.guide_radius       = DEFAULT_GUIDE_RADIUS;
         lp.dir_map_spp_seed   = frame_number;  // vary direction map per SPP
         lp.frame_number       = frame_number;
@@ -707,7 +670,6 @@ void OptixRenderer::render_final(
             width_, height_, 1));
 
         CUDA_CHECK(cudaDeviceSynchronize());
-        if (frame_number == 0) print_guide_stats_if_enabled();
     };
 
     // â”€â”€ Progress helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -766,10 +728,14 @@ void OptixRenderer::render_final(
     }
 
     // ── Build direction map (first-hit guidance) ─────────────────────
-    // Uses the current photon map + camera to precompute guided
-    // directions for each subpixel.  Re-built per SPP via spp_seed
-    // in the PT kernel (the direction map stores a new sampled direction
-    // each time), but we launch the build once here for the initial seed.
+    // Uses the current photon map + camera to precompute one guided
+    // direction per subpixel.  Currently built once (spp_seed=0);
+    // the same direction is reused across all SPP.
+    // TODO(H-2): rebuild per SPP inside the loop (with incrementing
+    //   spp_seed) to decorrelate guide samples and improve convergence.
+    //   Requires profiling: one extra OptiX launch per SPP at
+    //   (W*4)×(H*4) = ~12M threads.  Alternative: store multiple
+    //   candidate directions in DirMapEntry and index by frame_number.
     std::printf("[Render] Building direction map (%dx%d subpixels) ...\n",
                 width_ * DIR_MAP_SUBPIXEL_FACTOR,
                 height_ * DIR_MAP_SUBPIXEL_FACTOR);

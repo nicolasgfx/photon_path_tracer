@@ -206,6 +206,13 @@ void OptixRenderer::fill_clearcoat_fabric_params(LaunchParams& lp) const {
 
     // Per-material thin-glass flag (§ thin dielectric)
     lp.mat_thin = d_mat_thin_.d_ptr ? const_cast<uint8_t*>(d_mat_thin_.as<uint8_t>()) : nullptr;
+
+    // Material fields previously only wired in photon trace (C-1/C-2/C-3 fix)
+    lp.opacity       = d_opacity_.d_ptr       ? const_cast<float*>(d_opacity_.as<float>())       : nullptr;
+    lp.emission_tex  = d_emission_tex_.d_ptr  ? const_cast<int*>(d_emission_tex_.as<int>())      : nullptr;
+    lp.cauchy_A      = d_cauchy_A_.d_ptr      ? const_cast<float*>(d_cauchy_A_.as<float>())      : nullptr;
+    lp.cauchy_B      = d_cauchy_B_.d_ptr      ? const_cast<float*>(d_cauchy_B_.as<float>())      : nullptr;
+    lp.mat_dispersion = d_mat_dispersion_.d_ptr ? const_cast<uint8_t*>(d_mat_dispersion_.as<uint8_t>()) : nullptr;
 }
 
 // =====================================================================

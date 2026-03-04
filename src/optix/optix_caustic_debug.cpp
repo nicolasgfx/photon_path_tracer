@@ -203,7 +203,6 @@ void OptixRenderer::render_caustic_debug_pass(
 
         lp.volume_enabled     = (int)runtime_volume_enabled_;
         lp.samples_per_pixel  = 1;
-        lp.max_bounces        = config.max_bounces;
         lp.max_bounces_camera = DEFAULT_MAX_BOUNCES_CAMERA;
         lp.min_bounces_rr    = DEFAULT_MIN_BOUNCES_RR;
         lp.rr_threshold      = DEFAULT_RR_THRESHOLD;

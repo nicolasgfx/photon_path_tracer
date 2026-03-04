@@ -59,8 +59,8 @@ constexpr bool ENABLE_GUIDE_STATS = false;
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 1024;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 768;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 1920;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 1080;           // [R]
 
 
 // =====================================================================
@@ -70,8 +70,8 @@ constexpr int DEFAULT_IMAGE_HEIGHT = 768;           // [R]
 // Adjust these first when tuning a render.
 
 // ── Sub-pixel stratified jitter grid ────────────────────────────────
-constexpr int STRATA_X = 32;
-constexpr int STRATA_Y = 32;                           // 16 × 16 = 256 strata
+constexpr int STRATA_X = 16;
+constexpr int STRATA_Y = 16;                           // 16 × 16 = 256 strata
 
 // ── Samples per pixel ───────────────────────────────────────────────
 // Anti-aliasing + noise averaging.  This is the single biggest

@@ -257,10 +257,6 @@ public:
     void set_guide_fraction(float f) { guide_fraction_ = f; }
     float get_guide_fraction() const  { return guide_fraction_; }
 
-    /// Toggle histogram-only conclusion mode (C key).
-    void set_histogram_only(bool v) { histogram_only_ = v; }
-    bool is_histogram_only() const  { return histogram_only_; }
-
     /// Preview mode: skip kNN guide, caustic gather, photon final gather.
     /// Used during interactive navigation for real-time frame rates.
     void set_preview_mode(bool v) { preview_mode_ = v; }
@@ -292,9 +288,6 @@ public:
 
     /// Access the host direction map (after download_direction_map).
     const DirectionMap& direction_map() const { return direction_map_; }
-
-    /// Readback and print guide neighbourhood photon stats (ENABLE_GUIDE_STATS).
-    void print_guide_stats_if_enabled();
 
     template<typename CamT, typename FbT>
     void render_coverage_debug_png(const CamT&, const FbT&) {}
@@ -493,8 +486,6 @@ private:
     DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
     // Dense grid device buffers
     DeviceBuffer d_dense_sorted_indices_, d_dense_cell_start_, d_dense_cell_end_;
-    // Guide stats device buffer (ENABLE_GUIDE_STATS only) — 4 ints
-    DeviceBuffer d_guide_stats_buf_;
 
     // Direction map device buffer + host container
     DeviceBuffer d_dir_map_buffer_;            // DirMapEntry [dir_map_width * dir_map_height]
@@ -593,7 +584,6 @@ private:
 
     // Runtime guide fraction (T key toggle: 0 = unguided, DEFAULT = guided)
     float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
-    bool  histogram_only_ = false;  // C key: use only histogram conclusions
     bool  preview_mode_   = true;   // interactive preview: unguided PT, reduced bounce cap
 
     // GPU device info (populated in init())
