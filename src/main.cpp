@@ -136,13 +136,15 @@ int main(int argc, char* argv[]) {
     std::string envmap_path;
     float3 envmap_rotation = make_f3(0, 0, 0);
     float envmap_scale_val = 1.0f;
+    float3 envmap_constant = make_f3(0, 0, 0);
     {
         AppState& app = app_state();
         std::string folder = scene_folder_from_profile(SCENE_OBJ_PATH);
         float yaw_init = 0.f, pitch_init = 0.f, roll_init = 0.f, light_init = DEFAULT_LIGHT_SCALE;
         PostFxParams loaded_postfx;
         if (load_camera_from_file(camera, yaw_init, pitch_init, roll_init, light_init, folder,
-                                  &envmap_path, &envmap_rotation, &envmap_scale_val, &loaded_postfx)) {
+                                  &envmap_path, &envmap_rotation, &envmap_scale_val, &loaded_postfx,
+                                  &envmap_constant)) {
             app.yaw   = yaw_init;   app.pitch = pitch_init;  app.roll = roll_init;
             app.light_scale = light_init;  app.light_scale_changed = true;
             app.postfx = loaded_postfx;
@@ -155,11 +157,8 @@ int main(int argc, char* argv[]) {
         scene.envmap = std::make_shared<EnvironmentMap>();
         if (load_environment_map(envmap_path, envmap_scale_val,
                                  envmap_rotation, *scene.envmap)) {
-            // Set bounding sphere from scene geometry
             scene.envmap->scene_center = scene.scene_bounding_center();
             scene.envmap->scene_radius = scene.scene_bounding_radius() * 1.1f;
-
-            // Compute selection probability for one-sample MIS
             scene.compute_envmap_selection_prob();
 
             auto t_env1 = std::chrono::high_resolution_clock::now();
@@ -169,6 +168,17 @@ int main(int argc, char* argv[]) {
                         scene.envmap_selection_prob);
         } else {
             std::printf("[Warning] Failed to load envmap: %s\n", envmap_path.c_str());
+            scene.envmap.reset();
+        }
+    } else if (envmap_constant.x > 0.f || envmap_constant.y > 0.f || envmap_constant.z > 0.f) {
+        // Constant-colour environment (e.g. blackbody sky with no EXR texture)
+        scene.envmap = std::make_shared<EnvironmentMap>();
+        if (create_constant_envmap(envmap_constant.x, envmap_constant.y, envmap_constant.z,
+                                   envmap_scale_val, envmap_rotation, *scene.envmap)) {
+            scene.envmap->scene_center = scene.scene_bounding_center();
+            scene.envmap->scene_radius = scene.scene_bounding_radius() * 1.1f;
+            scene.compute_envmap_selection_prob();
+        } else {
             scene.envmap.reset();
         }
     }

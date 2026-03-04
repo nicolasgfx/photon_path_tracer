@@ -218,11 +218,13 @@ constexpr float DIR_MAP_DELTA_BOOST      = 4.0f;
 constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 
 // ── Neighbourhood for direction map build ───────────────────────────
-// 5×5×5 block of dense-grid cells centred on the hit point.
-// Wider than the old 3×3×3 to smooth across cell boundaries and
-// eliminate block artifacts.  Costs more but only runs once per
-// subpixel (not per bounce).
-constexpr int DIR_MAP_NEIGHBOURHOOD_EXTENT = 2;   // ±2 cells = 5×5×5
+// 7×7×7 block of dense-grid cells centred on the hit point.
+// Must cover guide_radius regardless of sub-cell hit position:
+//   guide_radius = 3.5 × cell_size → need ±ceil(3.5) = ±4, but ±3
+//   is sufficient because Epanechnikov weight is ~0 at 3.5 cells.
+// Wider search eliminates block artifacts from abrupt photon-set
+// changes at cell boundaries.  Runs once per subpixel per build.
+constexpr int DIR_MAP_NEIGHBOURHOOD_EXTENT = 3;   // ±3 cells = 7×7×7
 
 // ── Periodic photon + direction-map rebuild during final render ─────
 // Every N SPP, re-trace the photon map (with a fresh seed) and rebuild
@@ -232,13 +234,16 @@ constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 500;  // [R] SPP between rebuilds
 
 // ── Continuous guide radius (Epanechnikov kernel) ───────────────────
 // Tangential-distance cutoff for eligible photons in the direction map
-// histogram.  2.5× cell size covers the centre cell plus smooth
-// overlap into 5×5×5 neighbours.
-constexpr float DEFAULT_GUIDE_RADIUS = 0.025f;  // 2.5 × DENSE_GRID_CELL_SIZE
+// histogram.  3.5× cell size provides a wider, smoother Epanechnikov
+// falloff that eliminates hard seams at cell boundaries.  Fully
+// contained within the ±3-cell (7×7×7) neighbourhood search.
+constexpr float DEFAULT_GUIDE_RADIUS = 0.035f;  // 3.5 × DENSE_GRID_CELL_SIZE
 
 // ── AABB padding for dense grid (in cell-size multiples) ────────────
 // Padding the AABB prevents photons near the boundary from being lost.
-constexpr float DENSE_GRID_AABB_PAD_CELLS = 2.0f;
+// Must be >= DIR_MAP_NEIGHBOURHOOD_EXTENT so the 7×7×7 search never
+// indexes out of bounds for photons near the grid edge.
+constexpr float DENSE_GRID_AABB_PAD_CELLS = 3.0f;
 
 // ── NaN / infinity safety net ────────────────────────────────────────
 // With correct one-sample MIS (balance heuristic) and physical BSDFs,
@@ -289,8 +294,10 @@ constexpr float DEFAULT_BLOOM_RADIUS_V  = 15.0f;       //      vertical blur rad
 // ── Surface consistency filter (τ) ──────────────────────────────────
 // Plane-distance threshold: photons farther than τ from the query
 // tangent plane are rejected (prevents cross-surface leakage).
-//   Tight: 0.01  |  Balanced: 0.02  |  Loose: 0.05
-constexpr float DEFAULT_SURFACE_TAU        = 0.02f;
+//   Tight: 0.01  |  Balanced: 0.03  |  Loose: 0.05
+// 0.03 is slightly relaxed vs the old 0.02 to reduce black (no-guidance)
+// patches on curved or slightly offset surfaces in the direction map.
+constexpr float DEFAULT_SURFACE_TAU        = 0.05f;
 constexpr float PLANE_TAU_EPSILON_FACTOR   = 10.0f;   // robust τ floor = factor × ray_eps
 
 // ── k-NN gather ─────────────────────────────────────────────────────

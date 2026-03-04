@@ -149,7 +149,7 @@ DirMapEntry dev_build_direction_map_entry(
     float3 wo = cur_dir * (-1.f);
     if (dot(wo, N) < 0.f) N = N * (-1.f);
 
-    const int R = DIR_MAP_NEIGHBOURHOOD_EXTENT;  // ±2 cells = 5×5×5
+    const int R = DIR_MAP_NEIGHBOURHOOD_EXTENT;  // ±3 cells = 7×7×7
     const float guide_r2 = params.guide_radius * params.guide_radius;
 
     int cx = (int)floorf((pos.x - params.dense_min_x) / params.dense_cell_size);
@@ -244,6 +244,77 @@ DirMapEntry dev_build_direction_map_entry(
         }
     }
 gather_done:
+
+    // ── Fallback gather with relaxed gates ──────────────────────────
+    // If the primary gather found zero eligible photons, re-scan with
+    // wider surface-tau (2×) and relaxed normal gate (dot > -0.3) to
+    // fill black holes from subpixels on curved/offset surfaces.
+    // We keep the same search extent and radius for consistency.
+    if (n_eligible == 0) {
+        const float relaxed_tau   = DEFAULT_SURFACE_TAU * 2.0f;
+        const float relaxed_ndot  = -0.3f;  // accept nearly opposing normals
+        const float relaxed_r2    = guide_r2 * 2.25f;  // 1.5× radius → 2.25× r²
+
+        for (int dz = -R; dz <= R; ++dz) {
+            int iz = cz + dz;
+            if (iz < 0 || iz >= params.dense_dim_z) continue;
+            for (int dy2 = -R; dy2 <= R; ++dy2) {
+                int iy = cy + dy2;
+                if (iy < 0 || iy >= params.dense_dim_y) continue;
+                for (int dx2 = -R; dx2 <= R; ++dx2) {
+                    int ix = cx + dx2;
+                    if (ix < 0 || ix >= params.dense_dim_x) continue;
+                    int cell = ix + iy * params.dense_dim_x
+                                 + iz * params.dense_dim_x * params.dense_dim_y;
+                    uint32_t cs = params.dense_cell_start[cell];
+                    uint32_t ce = params.dense_cell_end[cell];
+
+                    for (uint32_t j = cs; j < ce; ++j) {
+                        uint32_t idx2 = params.dense_sorted_indices[j];
+
+                        // Relaxed normal gate
+                        float3 pn = make_f3(
+                            params.photon_norm_x[idx2],
+                            params.photon_norm_y[idx2],
+                            params.photon_norm_z[idx2]);
+                        if (dot(pn, N) <= relaxed_ndot) continue;
+
+                        // Relaxed surface-tau gate
+                        float3 pp = make_f3(
+                            params.photon_pos_x[idx2],
+                            params.photon_pos_y[idx2],
+                            params.photon_pos_z[idx2]);
+                        if (fabsf(dot(pos - pp, N)) > relaxed_tau) continue;
+
+                        // Wider tangential distance gate
+                        float d_tan2 = dev_guide_tangential_dist2(pos, pp, N);
+                        if (d_tan2 >= relaxed_r2) continue;
+
+                        // Wi hemisphere gate (keep strict — direction must be usable)
+                        float3 pw = make_f3(
+                            params.photon_wi_x[idx2],
+                            params.photon_wi_y[idx2],
+                            params.photon_wi_z[idx2]);
+                        if (dot(pw, N) <= 0.f) continue;
+
+                        ++n_eligible;
+
+                        // Epanechnikov kernel weight (over relaxed radius)
+                        float w = 1.f - d_tan2 / relaxed_r2;
+
+                        int bin = fib.find_nearest(pw);
+                        bins[bin].weight += w;
+                        bins[bin].centroid = bins[bin].centroid + pw * w;
+                        bins[bin].count += 1;
+                        total_weight += w;
+
+                        if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto fallback_done;
+                    }
+                }
+            }
+        }
+    fallback_done:;
+    }
 
     entry.num_eligible = (uint16_t)n_eligible;
 

@@ -135,7 +135,8 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            std::string* out_envmap_path,
                            float3* out_envmap_rotation,
                            float* out_envmap_scale,
-                           PostFxParams* out_postfx) {
+                           PostFxParams* out_postfx,
+                           float3* out_envmap_constant) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ifstream f(path);
     if (!f.is_open()) {
@@ -227,6 +228,9 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
         }
         else if (key == "bloom_radius_v" && out_postfx) {
             out_postfx->bloom_radius_v = (float)std::atof(val.c_str());
+        }
+        else if (key == "environment_constant" && out_envmap_constant) {
+            parse_float3(val, *out_envmap_constant);
         }
     }
 
@@ -1287,6 +1291,7 @@ void run_interactive(
                 std::string new_envmap_path;
                 float3 new_envmap_rotation = make_f3(0, 0, 0);
                 float  new_envmap_scale    = 1.0f;
+                float3 new_envmap_constant = make_f3(0, 0, 0);
                 {
                     std::string folder = scene_folder_from_profile(prof.obj_path);
                     float saved_yaw = 0.f, saved_pitch = 0.f, saved_roll = 0.f;
@@ -1295,7 +1300,8 @@ void run_interactive(
                     if (load_camera_from_file(camera, saved_yaw, saved_pitch,
                                               saved_roll, saved_light, folder,
                                               &new_envmap_path, &new_envmap_rotation,
-                                              &new_envmap_scale, &loaded_postfx)) {
+                                              &new_envmap_scale, &loaded_postfx,
+                                              &new_envmap_constant)) {
                         s_app.yaw   = saved_yaw;
                         s_app.pitch = saved_pitch;
                         s_app.roll  = saved_roll;
@@ -1333,6 +1339,21 @@ void run_interactive(
                     } else {
                         std::printf("[Warning] Failed to load envmap: %s\n",
                                     new_envmap_path.c_str());
+                        scene.envmap.reset();
+                    }
+                } else if (new_envmap_constant.x > 0.f || new_envmap_constant.y > 0.f
+                           || new_envmap_constant.z > 0.f) {
+                    scene.envmap = std::make_shared<EnvironmentMap>();
+                    if (create_constant_envmap(new_envmap_constant.x,
+                                               new_envmap_constant.y,
+                                               new_envmap_constant.z,
+                                               new_envmap_scale,
+                                               new_envmap_rotation,
+                                               *scene.envmap)) {
+                        scene.envmap->scene_center = scene.scene_bounding_center();
+                        scene.envmap->scene_radius = scene.scene_bounding_radius() * 1.1f;
+                        scene.compute_envmap_selection_prob();
+                    } else {
                         scene.envmap.reset();
                     }
                 }

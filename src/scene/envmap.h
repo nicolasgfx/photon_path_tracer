@@ -373,3 +373,35 @@ bool load_environment_map(const std::string& exr_path,
                           float scale,
                           float3 rotation_deg,
                           EnvironmentMap& envmap);
+
+// ── Create a constant-colour environment map (no file needed) ───────
+// Useful for PBRT scenes with `LightSource "infinite"` that specify a
+// constant blackbody instead of an EXR texture.
+inline bool create_constant_envmap(float r, float g, float b,
+                                   float scale_factor,
+                                   float3 rotation_deg,
+                                   EnvironmentMap& envmap) {
+    constexpr int W = 8, H = 4;  // tiny – constant colour, no detail needed
+    envmap.width  = W;
+    envmap.height = H;
+    envmap.scale  = scale_factor;
+
+    envmap.pixels.resize(W * H * 3);
+    for (int i = 0; i < W * H; ++i) {
+        envmap.pixels[i * 3 + 0] = fmaxf(r, 0.f);
+        envmap.pixels[i * 3 + 1] = fmaxf(g, 0.f);
+        envmap.pixels[i * 3 + 2] = fmaxf(b, 0.f);
+    }
+
+    envmap.rotation     = rotation_from_euler_deg(rotation_deg.x,
+                                                   rotation_deg.y,
+                                                   rotation_deg.z);
+    envmap.inv_rotation = rotation_transpose(envmap.rotation);
+
+    envmap.build_distribution();
+
+    std::printf("[EnvMap] Created constant envmap: rgb=(%.3f,%.3f,%.3f) "
+                "scale=%.2f  total_power=%.4f\n",
+                r, g, b, scale_factor, envmap.total_power);
+    return true;
+}

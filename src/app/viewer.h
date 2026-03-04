@@ -106,7 +106,8 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            std::string* out_envmap_path = nullptr,
                            float3* out_envmap_rotation = nullptr,
                            float* out_envmap_scale = nullptr,
-                           PostFxParams* out_postfx = nullptr);
+                           PostFxParams* out_postfx = nullptr,
+                           float3* out_envmap_constant = nullptr);
 
 // -- PNG output -------------------------------------------------------
 bool write_png(const std::string& filename, const FrameBuffer& fb);

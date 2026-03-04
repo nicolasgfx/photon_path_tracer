@@ -46,15 +46,20 @@ bool DirectionMap::write_debug_png(const std::string& path) const {
 }
 
 // ── write_strength_png: guidance strength → grayscale ────────────────
-// Brightness = num_eligible / max_eligible.  Black = no guidance.
+// Brightness = num_eligible / MAX_GUIDE_PDF_PHOTONS (absolute [0..1]).
+// Uses the fixed cap as denominator so the scale is consistent across
+// frames and rebuilds.  Black = no guidance.
 bool DirectionMap::write_strength_png(const std::string& path) const {
     if (entries.empty()) return false;
 
     int w = sub_width();
     int h = sub_height();
 
-    // Find max eligible for normalization
-    uint16_t max_elig = 1;
+    // Fixed denominator: absolute normalisation to [0..1]
+    constexpr float denom = (float)MAX_GUIDE_PDF_PHOTONS;  // 64
+
+    // Diagnostic: also find actual max for the log line
+    uint16_t max_elig = 0;
     for (auto& e : entries)
         if (e.num_eligible > max_elig) max_elig = e.num_eligible;
 
@@ -66,7 +71,7 @@ bool DirectionMap::write_strength_png(const std::string& path) const {
             int dst = ((h - 1 - sy) * w + sx) * 4;
             const DirMapEntry& e = entries[src];
 
-            float t = (float)e.num_eligible / (float)max_elig;
+            float t = (float)e.num_eligible / denom;  // [0..1]
             uint8_t v = (uint8_t)std::clamp(int(t * 255.f), 0, 255);
             rgba[dst + 0] = v;
             rgba[dst + 1] = v;
@@ -76,6 +81,7 @@ bool DirectionMap::write_strength_png(const std::string& path) const {
     }
 
     int ok = stbi_write_png(path.c_str(), w, h, 4, rgba.data(), w * 4);
-    if (ok) std::printf("[DirMap] Strength PNG: %s  (%d x %d)\n", path.c_str(), w, h);
+    if (ok) std::printf("[DirMap] Strength PNG: %s  (%d x %d, max_eligible=%d/%d)\n",
+                        path.c_str(), w, h, (int)max_elig, (int)MAX_GUIDE_PDF_PHOTONS);
     return ok != 0;
 }
