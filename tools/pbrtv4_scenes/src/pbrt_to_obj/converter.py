@@ -33,7 +33,8 @@ from .sphere_gen import generate_sphere
 
 
 def convert_scene(scene_pbrt_path: str, output_dir: str, *,
-                   verbose: bool = True, include_instances: bool = False):
+                   verbose: bool = True, include_instances: bool = False,
+                   z_up: bool = False):
     """Convert a single PBRT scene file to OBJ + MTL + camera.json.
 
     Parameters
@@ -42,6 +43,7 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
     output_dir         : absolute path to output folder (will be created)
     verbose            : print progress
     include_instances  : if False (default), skip ObjectInstance-expanded shapes
+    z_up               : if True, rotate geometry from Z-up to Y-up
     """
     scene_pbrt_path = os.path.abspath(scene_pbrt_path)
     output_dir = os.path.abspath(output_dir)
@@ -162,8 +164,18 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
     obj_path = os.path.join(output_dir, f"{scene_name}.obj")
     mtl_path = os.path.join(output_dir, f"{scene_name}.mtl")
 
-    global_xform = np.eye(4, dtype=np.float64)  # leave geometry in PBRT world space;
-    # the camera extractor derives eye/target from the pre-WorldBegin transform.
+    global_xform = np.eye(4, dtype=np.float64)
+    if z_up:
+        # 90° rotation around X: (x,y,z) → (x, z, -y)
+        # This converts Z-up (ground = XY) to Y-up (ground = XZ)
+        global_xform = np.array([
+            [1,  0,  0,  0],
+            [0,  0, -1,  0],
+            [0,  1,  0,  0],
+            [0,  0,  0,  1],
+        ], dtype=np.float64)
+        if verbose:
+            print("  [Z-up] Applying 90 deg X rotation (Z-up -> Y-up)")
     bbox_min = np.array([1e30, 1e30, 1e30])
     bbox_max = np.array([-1e30, -1e30, -1e30])
 
@@ -473,7 +485,8 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
 
     cam_path = os.path.join(output_dir, "camera.json")
     scene_bounds = (bbox_min.tolist(), bbox_max.tolist())
-    extract_camera_json(scene, cam_path, env_map_out, scene_bounds)
+    extract_camera_json(scene, cam_path, env_map_out, scene_bounds,
+                        z_up_rotation=global_xform if z_up else None)
 
     if verbose:
         print(f"\n{'='*60}")
@@ -482,7 +495,8 @@ def convert_scene(scene_pbrt_path: str, output_dir: str, *,
 
 
 def convert_scene_folder(folder_path: str, output_base: str, *,
-                          verbose: bool = True, include_instances: bool = False):
+                          verbose: bool = True, include_instances: bool = False,
+                          z_up: bool = False):
     """Auto-discover scene .pbrt files in a folder and convert each.
 
     Skips files that are known includes (materials.pbrt, geometry.pbrt).
@@ -512,7 +526,7 @@ def convert_scene_folder(folder_path: str, output_base: str, *,
         stem = sf.stem
         out_dir = os.path.join(output_base, f"{folder_name}-{stem}")
         convert_scene(str(sf), out_dir, verbose=verbose,
-                      include_instances=include_instances)
+                      include_instances=include_instances, z_up=z_up)
 
 
 # ---------------------------------------------------------------------------

@@ -56,6 +56,9 @@ struct AppState {
     // Show statistics overlay (S key)
     bool       show_stats_overlay = false;
 
+    // Animation sequence (N key)
+    bool       animation_requested = false;  // N key: render animation sequence
+
     // Render timing: timestamp when progressive accumulation started
     std::chrono::steady_clock::time_point render_start_time;
     bool       render_timing_active = false;
@@ -64,9 +67,10 @@ struct AppState {
     // Collected statistics (populated on snapshot)
     RendererStats last_stats;
 
-    // Camera angles (yaw/pitch in radians)
+    // Camera angles (yaw/pitch/roll in radians)
     float      yaw   = 0.f;     // horizontal angle
     float      pitch = 0.f;     // vertical angle
+    float      roll  = 0.f;     // roll angle (Q=CCW, E=CW)
     bool       mouse_captured = true;  // start with mouse captured
     double     last_mx = 0.0, last_my = 0.0;
     bool       first_mouse = true;
@@ -87,11 +91,11 @@ AppState& app_state();
 // (e.g. "cornell_box/cornellbox.obj" -> "scenes/cornell_box")
 std::string scene_folder_from_profile(const char* obj_path);
 
-bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
+bool save_camera_to_file(const Camera& cam, float yaw, float pitch, float roll,
                          float light_scale,
                          const std::string& scene_folder);
 
-bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
+bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            float& light_scale,
                            const std::string& scene_folder,
                            std::string* out_envmap_path = nullptr,

@@ -88,7 +88,7 @@ std::string scene_folder_from_profile(const char* obj_path) {
 
 static constexpr const char* SAVED_CAMERA_FILENAME = "saved_camera.json";
 
-bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
+bool save_camera_to_file(const Camera& cam, float yaw, float pitch, float roll,
                          float light_scale,
                          const std::string& scene_folder) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
@@ -104,14 +104,21 @@ bool save_camera_to_file(const Camera& cam, float yaw, float pitch,
     f << "  \"fov_deg\":       " << cam.fov_deg << ",\n";
     f << "  \"yaw\":           " << yaw   << ",\n";
     f << "  \"pitch\":         " << pitch << ",\n";
-    f << "  \"light_scale\":   " << light_scale << "\n";
+    f << "  \"roll\":          " << roll  << ",\n";
+    f << "  \"light_scale\":   " << light_scale << ",\n";
+    // DOF settings
+    f << "  \"dof_enabled\":   " << (cam.dof_enabled ? "true" : "false") << ",\n";
+    f << "  \"dof_focus_dist\": " << cam.dof_focus_dist << ",\n";
+    f << "  \"dof_f_number\":  " << cam.dof_f_number << ",\n";
+    f << "  \"sensor_height\": " << cam.sensor_height << ",\n";
+    f << "  \"dof_focus_range\": " << cam.dof_focus_range << "\n";
     f << "}\n";
     f.close();
     std::printf("[Camera] Saved to %s\n", path.c_str());
     return true;
 }
 
-bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
+bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            float& light_scale,
                            const std::string& scene_folder,
                            std::string* out_envmap_path,
@@ -170,7 +177,14 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch,
         else if (key == "fov_deg")      { cam.fov_deg    = (float)std::atof(val.c_str()); }
         else if (key == "yaw")          { yaw            = (float)std::atof(val.c_str()); }
         else if (key == "pitch")        { pitch          = (float)std::atof(val.c_str()); }
+        else if (key == "roll")         { roll           = (float)std::atof(val.c_str()); }
         else if (key == "light_scale")  { light_scale    = (float)std::atof(val.c_str()); }
+        // DOF settings
+        else if (key == "dof_enabled")    { cam.dof_enabled    = (val == "true" || val == "1"); }
+        else if (key == "dof_focus_dist") { cam.dof_focus_dist = (float)std::atof(val.c_str()); }
+        else if (key == "dof_f_number")   { cam.dof_f_number   = (float)std::atof(val.c_str()); }
+        else if (key == "sensor_height")  { cam.sensor_height  = (float)std::atof(val.c_str()); }
+        else if (key == "dof_focus_range"){ cam.dof_focus_range= (float)std::atof(val.c_str()); }
         else if (key == "environment_map" && out_envmap_path) {
             // Strip quotes from string value
             std::string v = val;
@@ -775,15 +789,7 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    if (key == GLFW_KEY_Q) {
-        if (s_app.mouse_captured) {
-            s_app.mouse_captured = false;
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            return;
-        }
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
-        return;
-    }
+    // Q is now used for camera roll (polled per-frame in WASD section)
 
     // "R" -> save snapshot (PNG + EXR)
     if (key == GLFW_KEY_R) {
@@ -960,14 +966,14 @@ static void key_callback(GLFWwindow* window, int key,
         if (idx >= 0 && idx < NUM_SCENE_PROFILES) {
             std::string folder = scene_folder_from_profile(SCENE_PROFILES[idx].obj_path);
             save_camera_to_file(*g_active_camera, s_app.yaw, s_app.pitch,
-                                s_app.light_scale, folder);
+                                s_app.roll, s_app.light_scale, folder);
         } else {
             // Derive folder from the active options scene_file
             if (g_active_options) {
                 fs::path p(g_active_options->scene_file);
                 std::string folder = p.parent_path().string();
                 save_camera_to_file(*g_active_camera, s_app.yaw, s_app.pitch,
-                                    s_app.light_scale, folder);
+                                    s_app.roll, s_app.light_scale, folder);
             }
         }
         return;
@@ -1185,12 +1191,13 @@ void run_interactive(
                 // Override with saved camera position (if any)
                 {
                     std::string folder = scene_folder_from_profile(prof.obj_path);
-                    float saved_yaw = 0.f, saved_pitch = 0.f;
+                    float saved_yaw = 0.f, saved_pitch = 0.f, saved_roll = 0.f;
                     float saved_light = DEFAULT_LIGHT_SCALE;
                     if (load_camera_from_file(camera, saved_yaw, saved_pitch,
-                                              saved_light, folder)) {
+                                              saved_roll, saved_light, folder)) {
                         s_app.yaw   = saved_yaw;
                         s_app.pitch = saved_pitch;
+                        s_app.roll  = saved_roll;
                         s_app.light_scale         = saved_light;
                         s_app.light_scale_changed = true;
                     } else {
@@ -1324,8 +1331,11 @@ void run_interactive(
                 sinf(s_app.yaw) * cosf(s_app.pitch),
                 sinf(s_app.pitch),
                 -cosf(s_app.yaw) * cosf(s_app.pitch));
-            float3 right = normalize(cross(forward, make_f3(0, 1, 0)));
-            float3 up_dir = make_f3(0, 1, 0);
+            float3 right_unrolled = normalize(cross(forward, make_f3(0, 1, 0)));
+            float3 up_perp = cross(right_unrolled, forward); // perpendicular up (no roll)
+            // Apply roll: rotate right/up around forward axis
+            float3 right = right_unrolled * cosf(s_app.roll) + up_perp * sinf(s_app.roll);
+            float3 up_dir = up_perp * cosf(s_app.roll) - right_unrolled * sinf(s_app.roll);
 
             float speed = s_app.active_cam_speed * dt;
             // Shift for faster movement
@@ -1340,14 +1350,28 @@ void run_interactive(
             if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)      move = move + up_dir * speed;
             if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) move = move - up_dir * speed;
 
+            // Q/E -> camera roll (CCW / CW)
+            constexpr float kRollSpeed = 1.0f; // radians per second
+            if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
+                s_app.roll += kRollSpeed * dt;
+                s_app.camera_moved = true;
+                s_app.last_input_time = std::chrono::steady_clock::now();
+            }
+            if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
+                s_app.roll -= kRollSpeed * dt;
+                s_app.camera_moved = true;
+                s_app.last_input_time = std::chrono::steady_clock::now();
+            }
+
             if (move.x != 0.f || move.y != 0.f || move.z != 0.f) {
                 camera.position = camera.position + move;
                 s_app.camera_moved = true;
                 s_app.last_input_time = std::chrono::steady_clock::now();
             }
 
-            // Update look_at from yaw/pitch
+            // Update look_at from yaw/pitch, up from roll
             camera.look_at = camera.position + forward;
+            camera.up = up_dir;
             camera.width   = win_w;
             camera.height  = win_h;
             camera.update();

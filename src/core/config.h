@@ -358,28 +358,28 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
   constexpr const char* SCENE_OBJ_PATH    = "zero_day/zero-day-frame25/frame25.obj";
   constexpr const char* SCENE_DISPLAY_NAME = "Zero Day";
   constexpr bool  SCENE_IS_REFERENCE       = false;
-  constexpr float SCENE_CAM_POS[]          = { 1420.108f, -58.301f, 0.0f };
-  constexpr float SCENE_CAM_LOOKAT[]       = { 1421.108f, -58.296f, 0.0f };
-  constexpr float SCENE_CAM_FOV            = 22.275f;
-  constexpr float SCENE_CAM_SPEED          = 5.0f;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 70.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
 
 #elif defined(SCENE_VILLA)
   constexpr const char* SCENE_OBJ_PATH    = "villa/villa-daylight.obj";
   constexpr const char* SCENE_DISPLAY_NAME = "Villa";
   constexpr bool  SCENE_IS_REFERENCE       = false;
-  constexpr float SCENE_CAM_POS[]          = { 10.239f, 5.014f, 3.76f };
-  constexpr float SCENE_CAM_LOOKAT[]       = { 11.233f, 5.17f, 3.76f };
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
   constexpr float SCENE_CAM_FOV            = 48.0f;
-  constexpr float SCENE_CAM_SPEED          = 0.5f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
 
 #elif defined(SCENE_SAN_MIGUEL)
   constexpr const char* SCENE_OBJ_PATH    = "sanmiguel/sanmiguel-courtyard.obj";
   constexpr const char* SCENE_DISPLAY_NAME = "San Miguel";
   constexpr bool  SCENE_IS_REFERENCE       = false;
-  constexpr float SCENE_CAM_POS[]          = { 22.868f, -12.929f, 1.948f };
-  constexpr float SCENE_CAM_LOOKAT[]       = { 22.212f, -12.181f, 2.048f };
-  constexpr float SCENE_CAM_FOV            = 83.97f;
-  constexpr float SCENE_CAM_SPEED          = 1.0f;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 84.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.1f;
 
 #elif defined(SCENE_STAIRCASE)
   constexpr const char* SCENE_OBJ_PATH    = "staircase/scene-v4.obj";
@@ -464,11 +464,11 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
     { "zero_day/zero-day-frame25/frame25.obj",   "Zero Day",          false,
-      {1420.108f,-58.301f,0.f}, {1421.108f,-58.296f,0.f}, 22.275f, 5.f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL },
     { "villa/villa-daylight.obj",                "Villa",             false,
-      {10.239f,5.014f,3.76f}, {11.233f,5.17f,3.76f}, 48.f, 0.5f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 48.f, 0.1f, SceneLightMode::FromMTL },
     { "sanmiguel/sanmiguel-courtyard.obj",       "San Miguel",        false,
-      {22.868f,-12.929f,1.948f}, {22.212f,-12.181f,2.048f}, 83.97f, 1.f, SceneLightMode::FromMTL },
+      {0,0,0}, {0,0,-1}, 84.f, 0.1f, SceneLightMode::FromMTL },
     { "staircase/scene-v4.obj",                  "Staircase",         false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL },
     { "staircase2/scene-v4.obj",                 "Staircase 2",       false,

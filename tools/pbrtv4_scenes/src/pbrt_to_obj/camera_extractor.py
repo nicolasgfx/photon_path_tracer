@@ -19,15 +19,17 @@ from .material_mapper import blackbody_to_rgb
 
 def extract_camera_json(scene: PbrtScene, output_path: str,
                         env_map_path: str | None = None,
-                        scene_bounds: tuple[list[float], list[float]] | None = None):
+                        scene_bounds: tuple[list[float], list[float]] | None = None,
+                        z_up_rotation: np.ndarray | None = None):
     """Extract camera + lighting metadata and write camera.json.
     
     Parameters
     ----------
-    scene        : parsed PBRT scene
-    output_path  : path to write camera.json
-    env_map_path : relative path to the environment map (or None)
-    scene_bounds : (bbox_min, bbox_max) in world space (or None)
+    scene          : parsed PBRT scene
+    output_path    : path to write camera.json
+    env_map_path   : relative path to the environment map (or None)
+    scene_bounds   : (bbox_min, bbox_max) in world space (or None)
+    z_up_rotation  : 4×4 rotation matrix to apply to camera (Z-up → Y-up)
     """
     cam = scene.camera
     film = scene.film
@@ -62,6 +64,13 @@ def extract_camera_json(scene: PbrtScene, output_path: str,
             eye = np.array([0.0, 0.0, 0.0])
             target = np.array([0.0, 0.0, -1.0])
             up_transformed = np.array([0.0, 1.0, 0.0])
+
+    # --- Apply Z-up → Y-up rotation to camera vectors ---
+    if z_up_rotation is not None:
+        R = z_up_rotation[:3, :3]
+        eye = R @ eye
+        target = R @ target
+        up_transformed = R @ up_transformed
 
     # --- FOV ---
     fov = get_param(cam.params, 'fov', 45.0)

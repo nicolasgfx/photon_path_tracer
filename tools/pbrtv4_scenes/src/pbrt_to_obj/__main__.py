@@ -50,12 +50,20 @@ def main():
         help="Include ObjectInstance-expanded shapes (large tree meshes). "
              "Off by default to keep output small.",
     )
+    parser.add_argument(
+        "--zup",
+        action="store_true",
+        default=False,
+        help="Rotate geometry from Z-up to Y-up (90° around X). "
+             "Use for PBRT scenes where the ground plane is XY.",
+    )
 
     args = parser.parse_args()
     scene_path = os.path.abspath(args.scene)
     output_path = os.path.abspath(args.output)
     verbose = not args.quiet
     include_instances = args.include_instances
+    z_up = args.zup
 
     if not os.path.exists(scene_path):
         print(f"Error: path not found: {scene_path}", file=sys.stderr)
@@ -63,14 +71,14 @@ def main():
 
     if os.path.isdir(scene_path):
         convert_scene_folder(scene_path, output_path, verbose=verbose,
-                             include_instances=include_instances)
+                             include_instances=include_instances, z_up=z_up)
     elif os.path.isfile(scene_path) and scene_path.endswith('.pbrt'):
         # Single file — derive output folder name
         folder_name = os.path.basename(os.path.dirname(scene_path))
         stem = os.path.splitext(os.path.basename(scene_path))[0]
         out_dir = os.path.join(output_path, f"{folder_name}-{stem}")
         convert_scene(scene_path, out_dir, verbose=verbose,
-                      include_instances=include_instances)
+                      include_instances=include_instances, z_up=z_up)
     else:
         print(f"Error: not a .pbrt file or directory: {scene_path}", file=sys.stderr)
         sys.exit(1)

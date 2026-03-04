@@ -132,10 +132,10 @@ int main(int argc, char* argv[]) {
     {
         AppState& app = app_state();
         std::string folder = scene_folder_from_profile(SCENE_OBJ_PATH);
-        float yaw_init = 0.f, pitch_init = 0.f, light_init = DEFAULT_LIGHT_SCALE;
-        if (load_camera_from_file(camera, yaw_init, pitch_init, light_init, folder,
+        float yaw_init = 0.f, pitch_init = 0.f, roll_init = 0.f, light_init = DEFAULT_LIGHT_SCALE;
+        if (load_camera_from_file(camera, yaw_init, pitch_init, roll_init, light_init, folder,
                                   &envmap_path, &envmap_rotation, &envmap_scale_val)) {
-            app.yaw   = yaw_init;   app.pitch = pitch_init;
+            app.yaw   = yaw_init;   app.pitch = pitch_init;  app.roll = roll_init;
             app.light_scale = light_init;  app.light_scale_changed = true;
         }
     }
