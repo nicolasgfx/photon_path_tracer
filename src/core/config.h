@@ -40,19 +40,20 @@ constexpr bool ENABLE_GUIDE_STATS = false;
 // =====================================================================
 //  §0  SCENE SELECTION
 // =====================================================================
-// Uncomment exactly ONE.  Runtime switching via keys 1–9,0 uses
+// Uncomment exactly ONE.  Runtime switching via keys 1–9,0,Shift+1 uses
 // SCENE_PROFILES[] at the bottom of this file.
 
-//#define SCENE_CORNELL_BOX
-//#define SCENE_ZERO_DAY
-//#define SCENE_VILLA
-//#define SCENE_SAN_MIGUEL
-#define SCENE_STAIRCASE
-//#define SCENE_STAIRCASE_2
+#define SCENE_CORNELL_BOX
 //#define SCENE_FIREPLACE_ROOM
+//#define SCENE_STAIRCASE
+//#define SCENE_STAIRCASE_2
+//#define SCENE_BATHROOM
 //#define SCENE_LIVING_ROOM_2
 //#define SCENE_BEDROOM
-//#define SCENE_BATHROOM
+//#define SCENE_VILLA
+//#define SCENE_WATERCOLOR
+//#define SCENE_ZERO_DAY
+//#define SCENE_KROKEN
 
 
 // =====================================================================
@@ -223,6 +224,12 @@ constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 // subpixel (not per bounce).
 constexpr int DIR_MAP_NEIGHBOURHOOD_EXTENT = 2;   // ±2 cells = 5×5×5
 
+// ── Periodic photon + direction-map rebuild during final render ─────
+// Every N SPP, re-trace the photon map (with a fresh seed) and rebuild
+// the direction map.  Decorrelates guide directions across the render,
+// reducing structured guide bias.  0 = never rebuild (single map).
+constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 500;  // [R] SPP between rebuilds
+
 // ── Continuous guide radius (Epanechnikov kernel) ───────────────────
 // Tangential-distance cutoff for eligible photons in the direction map
 // histogram.  2.5× cell size covers the centre cell plus smooth
@@ -361,7 +368,7 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
 #elif defined(SCENE_ZERO_DAY)
-  constexpr const char* SCENE_OBJ_PATH    = "zero_day/zero-day-frame25/frame25.obj";
+  constexpr const char* SCENE_OBJ_PATH    = "zero_day/frame25.obj";
   constexpr const char* SCENE_DISPLAY_NAME = "Zero Day";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
@@ -441,6 +448,24 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
   constexpr float SCENE_CAM_FOV            = 70.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
+#elif defined(SCENE_WATERCOLOR)
+  constexpr const char* SCENE_OBJ_PATH    = "watercolor/camera-1.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Watercolor";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 26.5f;
+  constexpr float SCENE_CAM_SPEED          = 0.01f;
+
+#elif defined(SCENE_KROKEN)
+  constexpr const char* SCENE_OBJ_PATH    = "kroken/camera-1.obj";
+  constexpr const char* SCENE_DISPLAY_NAME = "Kroken";
+  constexpr bool  SCENE_IS_REFERENCE       = false;
+  constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
+  constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
+  constexpr float SCENE_CAM_FOV            = 17.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.01f;
+
 #else
   #error "No scene selected! Uncomment one SCENE_* define in config.h §0"
 #endif
@@ -462,31 +487,44 @@ struct SceneProfile {
     float          cam_fov;
     float          cam_speed;
     SceneLightMode light_mode;
-    bool           mirror_x;        // negate X to fix horizontal flip (false = no change)
+    bool           rotate_x_180;    // rotate geometry 180° around X axis (false = no change)
 };
 
-constexpr int NUM_SCENE_PROFILES = 10;
+constexpr int NUM_SCENE_PROFILES = 11;
 
 constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
+    // Key 1 – Cornell Box (reference scene)
     { "cornell_box/cornellbox.obj",              "Cornell Box",       true,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
-    { "zero_day/zero-day-frame25/frame25.obj",   "Zero Day",          false,
-      {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL, false },
-    { "villa/villa-daylight.obj",                "Villa",             false,
-      {0,0,0}, {0,0,-1}, 48.f, 0.1f, SceneLightMode::FromMTL, true },
-    { "sanmiguel/sanmiguel-courtyard.obj",       "San Miguel",        false,
-      {0,0,0}, {0,0,-1}, 84.f, 0.1f, SceneLightMode::FromMTL, true },
-    { "staircase/scene-v4.obj",                  "Staircase",         false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
-    { "staircase2/scene-v4.obj",                 "Staircase 2",       false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
+    // Key 2 – Fire Place
     { "fireplace_room/fireplace_room.obj",       "Fire Place",        false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
-    { "living_room_2/scene-v4.obj",              "Living Room 2",     false,
+    // Key 3 – Staircase
+    { "staircase/scene-v4.obj",                  "Staircase",         false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
-    { "bedroom/scene-v4.obj",                    "Bedroom",           false,
+    // Key 4 – Staircase 2
+    { "staircase2/scene-v4.obj",                 "Staircase 2",       false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
+    // Key 5 – Bathroom
     { "bathroom/scene-v4.obj",                   "Bathroom",          false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
+    // Key 6 – Living Room 2
+    { "living_room_2/scene-v4.obj",              "Living Room 2",     false,
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
+    // Key 7 – Bedroom
+    { "bedroom/scene-v4.obj",                    "Bedroom",           false,
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
+    // Key 8 – Villa
+    { "villa/villa-daylight.obj",                "Villa",             false,
+      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, true },
+    // Key 9 – Watercolor
+    { "watercolor/camera-1.obj",                 "Watercolor",        false,
+      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
+    // Key 0 – Zero Day
+    { "zero_day/zero-day-frame25/frame25.obj",   "Zero Day",          false,
+      {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL, false },
+    // Shift+1 – Kroken
+    { "kroken/camera-1.obj",                     "Kroken",            false,
+      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
 };
 

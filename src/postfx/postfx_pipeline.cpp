@@ -64,30 +64,49 @@ void PostFxPipeline::apply_bloom_(float* d_hdr, int width, int height,
     // Ensure scratch buffers match current resolution
     init(width, height);
 
-    // 1. Find max luminance for automatic threshold
+    // 1. Find max luminance (needed for both adaptive and fallback modes)
     launch_bloom_find_max_luminance(d_hdr, d_max_lum_, width, height);
     cudaDeviceSynchronize();
 
     float max_lum = 0.f;
     cudaMemcpy(&max_lum, d_max_lum_, sizeof(float), cudaMemcpyDeviceToHost);
+    if (max_lum < 1e-6f) return;  // scene is black — nothing to bloom
 
-    // Auto-threshold: bloom starts at 25% of peak luminance (ensures only
-    // the bright sources contribute, and the threshold scales with dynamic
-    // range automatically).
-    constexpr float BLOOM_THRESHOLD_FRACTION = 0.25f;
-    float threshold = max_lum * BLOOM_THRESHOLD_FRACTION;
-    if (threshold < 1e-6f) return;  // scene is black — nothing to bloom
+    // 2. Compute adaptive bright-extract thresholds from scene emissive range.
+    //    The scene scan gives us min_Le / max_Le (material emission radiance).
+    //    We map those to pixel luminance thresholds proportional to the
+    //    actual image's peak luminance — this keeps the ramp adaptive to
+    //    both the scene content and the camera exposure (light_scale).
+    float lo_threshold, hi_threshold;
 
-    // 2. Bright-pass extract → mip[0] (half-res)
-    launch_bloom_bright_extract(d_hdr, d_mip_[0], width, height, threshold);
+    if (params.bloom_scene_min_Le > 0.f && params.bloom_scene_max_Le > 0.f
+        && params.bloom_scene_max_Le > params.bloom_scene_min_Le * 1.01f)
+    {
+        // Adaptive mode: map emissive range to pixel luminance thresholds.
+        //   ratio = min/max emission  →  lo_threshold = ratio * max_lum
+        //   hi_threshold = max_lum (brightest pixels get full bloom).
+        // Clamp lo to at least 5% of peak so we don't bloom *everything*.
+        float ratio = params.bloom_scene_min_Le / params.bloom_scene_max_Le;
+        lo_threshold = fmaxf(ratio, 0.05f) * max_lum;
+        hi_threshold = max_lum;
+    } else {
+        // Fallback: single threshold at 25% of peak (original behaviour)
+        constexpr float BLOOM_THRESHOLD_FRACTION = 0.25f;
+        lo_threshold = max_lum * BLOOM_THRESHOLD_FRACTION;
+        hi_threshold = lo_threshold;  // lo == hi signals soft-knee mode in kernel
+    }
 
-    // 3. Downsample chain: mip[0] → mip[1] → … → mip[N-1]
+    // 3. Bright-pass extract → mip[0] (half-res)
+    launch_bloom_bright_extract(d_hdr, d_mip_[0], width, height,
+                                lo_threshold, hi_threshold);
+
+    // 4. Downsample chain: mip[0] → mip[1] → … → mip[N-1]
     for (int i = 1; i < NUM_MIP_LEVELS; ++i) {
         launch_bloom_downsample(d_mip_[i - 1], d_mip_[i],
                                 mip_w_[i - 1], mip_h_[i - 1]);
     }
 
-    // 4. Separable Gaussian blur at each mip level.
+    // 5. Separable Gaussian blur at each mip level.
     //    Radius scales with mip level: finer mips use the user radius,
     //    coarser mips use proportionally larger kernels (in mip-space pixels,
     //    which covers more screen area).
@@ -115,14 +134,14 @@ void PostFxPipeline::apply_bloom_(float* d_hdr, int width, int height,
         launch_bloom_blur_v(d_mip_tmp_[i], d_mip_[i],     w, h, radius_v);
     }
 
-    // 5. Upsample-accumulate: bottom up (coarsest → finest)
+    // 6. Upsample-accumulate: bottom up (coarsest → finest)
     //    mip[N-1] → upsample → add to mip[N-2] → … → mip[0]
     for (int i = NUM_MIP_LEVELS - 1; i >= 1; --i) {
         launch_bloom_upsample_accumulate(d_mip_[i], d_mip_[i - 1],
                                          mip_w_[i - 1], mip_h_[i - 1]);
     }
 
-    // 6. Composite: add mip[0] (half-res accumulated bloom) onto the
+    // 7. Composite: add mip[0] (half-res accumulated bloom) onto the
     //    full-resolution HDR buffer with user intensity.
     launch_bloom_composite(d_hdr, d_mip_[0], width, height,
                            params.bloom_intensity);

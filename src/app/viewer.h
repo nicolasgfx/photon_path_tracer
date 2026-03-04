@@ -80,7 +80,7 @@ struct AppState {
     // ── Idle tracking ───────────────────────────────────────────────
     std::chrono::steady_clock::time_point last_input_time;   // timestamp of last user interaction
     bool idle_rendering_active = false;  // true = full-quality accumulation after idle timeout
-    int  idle_photon_seed      = 0;      // incrementing seed for multi-map decorrelation
+    int  idle_photon_seed      = 0;      // incrementing seed for all interactive retrace calls
     int  base_num_photons      = 0;      // original config.num_photons (before idle boost)
 
     // Post-FX params (bloom, etc.) — per-scene, saved in camera JSON

@@ -785,6 +785,13 @@ void OptixRenderer::render_final(
     if (!adaptive) {
         // â”€â”€ Non-adaptive path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         for (int s = 0; s < total_spp; ++s) {
+            // Periodic photon + direction map rebuild
+            if (DEFAULT_GUIDE_REMAP_INTERVAL > 0 && s > 0
+                && (s % DEFAULT_GUIDE_REMAP_INTERVAL) == 0) {
+                std::printf("\n[Render] Rebuilding photon map + direction map (spp %d) ...\n", s);
+                trace_photons(scene, config, 0.f, /*photon_map_seed=*/s);
+                build_direction_map(camera, /*spp_seed=*/s);
+            }
             launch_pass(s, /*use_mask=*/false);
             print_progress(s + 1, total_spp, /*active=*/-1);
         }
@@ -824,6 +831,13 @@ void OptixRenderer::render_final(
         long long total_samples_done = (long long)min_spp * total_pixels;
 
         for (int s = min_spp; s < max_spp; ++s) {
+            // Periodic photon + direction map rebuild
+            if (DEFAULT_GUIDE_REMAP_INTERVAL > 0 && s > 0
+                && (s % DEFAULT_GUIDE_REMAP_INTERVAL) == 0) {
+                std::printf("\n[Render] Rebuilding photon map + direction map (spp %d) ...\n", s);
+                trace_photons(scene, config, 0.f, /*photon_map_seed=*/s);
+                build_direction_map(camera, /*spp_seed=*/s);
+            }
             // Recompute mask at start of adaptive phase and every N passes
             if ((s - min_spp) % update_interval == 0) {
                 AdaptiveParams ap;

@@ -102,13 +102,13 @@ struct DirectionMap {
         return index(sx, sy);
     }
 
-    /// Write direction map as debug PNG (normal-map encoding)
-    /// R = 0.5 + 0.5 * dir_x, G = 0.5 + 0.5 * dir_y, B = 0.5 + 0.5 * dir_z
+    /// Write direction map as debug PNG (dominant direction → RGB)
+    /// R = |dir_x|, G = |dir_y|, B = |dir_z|
     /// Subpixels with no guidance (num_eligible == 0) are rendered as black.
     bool write_debug_png(const std::string& path) const;
 
-    /// Write direction map strength heatmap PNG
-    /// Maps num_eligible to a viridis-like colormap.
+    /// Write direction map strength PNG (grayscale)
+    /// Brightness = num_eligible / max_eligible.  Black = no guidance.
     bool write_strength_png(const std::string& path) const;
 
     // Convenience accessors

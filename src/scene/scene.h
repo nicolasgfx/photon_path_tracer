@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <iostream>
 #include <memory>
+#include <cfloat>
 
 // ── BVH Node ────────────────────────────────────────────────────────
 struct BVHNode {
@@ -98,17 +99,23 @@ struct Scene {
     // ── Build emissive triangle distribution ────────────────────────
     void build_emissive_distribution();
 
+    // ── Compute min / max emissive radiance across all emittters ────
+    // Scans every emissive triangle and returns the smallest and largest
+    // material mean_emission() values.  Used for adaptive bloom.
+    void compute_emissive_radiance_range(float& out_min_Le,
+                                         float& out_max_Le) const;
+
     // ── Normalize geometry to reference frame ───────────────────────
     // Translates scene centre to origin and scales the
     // longest axis to 1.0 (reference frame).  Call AFTER load, BEFORE
     // build_bvh().  Skipped when SCENE_IS_REFERENCE == true.
     void normalize_to_reference();
 
-    // ── Mirror geometry across YZ plane (negate X) ──────────────────
-    // Fixes horizontally-flipped OBJ models.  Negates X on positions
-    // and normals, swaps v1↔v2 to preserve winding order.
+    // ── Rotate geometry 180° around X axis ──────────────────────────
+    // Negates Y and Z on positions and normals.  A rotation (not a
+    // reflection) so winding order is preserved automatically.
     // Call AFTER normalize, BEFORE build_bvh().
-    void mirror_x();
+    void rotate_x_180();
 
     // ── CPU ray intersection (BVH traversal) ────────────────────────
     HitRecord intersect(const Ray& ray) const;
@@ -164,21 +171,21 @@ inline void Scene::normalize_to_reference() {
     }
 }
 
-inline void Scene::mirror_x() {
+inline void Scene::rotate_x_180() {
     if (triangles.empty()) return;
 
     for (auto& t : triangles) {
-        // Negate X on positions
-        t.v0.x = -t.v0.x;  t.v1.x = -t.v1.x;  t.v2.x = -t.v2.x;
-        // Negate X on shading normals
-        t.n0.x = -t.n0.x;  t.n1.x = -t.n1.x;  t.n2.x = -t.n2.x;
-        // Swap v1↔v2 (and n1↔n2, uv1↔uv2) to preserve winding order
-        std::swap(t.v1, t.v2);
-        std::swap(t.n1, t.n2);
-        std::swap(t.uv1, t.uv2);
+        // Negate Y and Z on positions
+        t.v0.y = -t.v0.y;  t.v0.z = -t.v0.z;
+        t.v1.y = -t.v1.y;  t.v1.z = -t.v1.z;
+        t.v2.y = -t.v2.y;  t.v2.z = -t.v2.z;
+        // Negate Y and Z on shading normals
+        t.n0.y = -t.n0.y;  t.n0.z = -t.n0.z;
+        t.n1.y = -t.n1.y;  t.n1.z = -t.n1.z;
+        t.n2.y = -t.n2.y;  t.n2.z = -t.n2.z;
     }
 
-    std::printf("[Scene] Mirrored geometry across YZ plane (negated X)\n");
+    std::printf("[Scene] Rotated geometry 180 deg around X axis\n");
 }
 
 inline void Scene::build_emissive_distribution() {
@@ -200,9 +207,30 @@ inline void Scene::build_emissive_distribution() {
         emissive_alias_table = AliasTable::build(power_weights);
         total_emissive_power = emissive_alias_table.total_weight;
 
-        std::printf("[Scene] Emissive alias table: %d light triangles\n",
-                    (int)emissive_tri_indices.size());
     }
+}
+
+inline void Scene::compute_emissive_radiance_range(float& out_min_Le,
+                                                    float& out_max_Le) const {
+    out_min_Le = 0.f;
+    out_max_Le = 0.f;
+    if (emissive_tri_indices.empty()) return;
+
+    float lo = FLT_MAX;
+    float hi = 0.f;
+    for (uint32_t idx : emissive_tri_indices) {
+        const auto& mat = materials[triangles[idx].material_id];
+        float le = mat.mean_emission();
+        if (le > 0.f) {
+            lo = std::min(lo, le);
+            hi = std::max(hi, le);
+        }
+    }
+    if (lo > hi) lo = hi;  // single-value case
+    out_min_Le = lo;
+    out_max_Le = hi;
+    std::printf("[Scene] Emissive radiance range: min=%.4f  max=%.4f  (ratio=%.1fx)\n",
+                lo, hi, (lo > 0.f) ? hi / lo : 0.f);
 }
 
 inline uint32_t Scene::build_bvh_recursive(std::vector<uint32_t>& indices,

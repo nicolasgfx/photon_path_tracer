@@ -29,24 +29,26 @@
 static constexpr int scene_profile_index() {
     #if defined(SCENE_CORNELL_BOX)
         return 0;
-    #elif defined(SCENE_ZERO_DAY)
-        return 1;
-    #elif defined(SCENE_VILLA)
-        return 2;
-    #elif defined(SCENE_SAN_MIGUEL)
-        return 3;
-    #elif defined(SCENE_STAIRCASE)
-        return 4;
-    #elif defined(SCENE_STAIRCASE_2)
-        return 5;
     #elif defined(SCENE_FIREPLACE_ROOM)
-        return 6;
-    #elif defined(SCENE_LIVING_ROOM_2)
-        return 7;
-    #elif defined(SCENE_BEDROOM)
-        return 8;
+        return 1;
+    #elif defined(SCENE_STAIRCASE)
+        return 2;
+    #elif defined(SCENE_STAIRCASE_2)
+        return 3;
     #elif defined(SCENE_BATHROOM)
+        return 4;
+    #elif defined(SCENE_LIVING_ROOM_2)
+        return 5;
+    #elif defined(SCENE_BEDROOM)
+        return 6;
+    #elif defined(SCENE_VILLA)
+        return 7;
+    #elif defined(SCENE_WATERCOLOR)
+        return 8;
+    #elif defined(SCENE_ZERO_DAY)
         return 9;
+    #elif defined(SCENE_KROKEN)
+        return 10;
     #else
         return -1;
     #endif
@@ -85,8 +87,8 @@ int main(int argc, char* argv[]) {
             scene.normalize_to_reference();
         {
             constexpr int pidx = scene_profile_index();
-            if (pidx >= 0 && SCENE_PROFILES[pidx].mirror_x)
-                scene.mirror_x();
+            if (pidx >= 0 && SCENE_PROFILES[pidx].rotate_x_180)
+                scene.rotate_x_180();
         }
         auto t1 = std::chrono::high_resolution_clock::now();
         std::printf("[Timing] OBJ load:          %8.1f ms  (%zu tris, %zu mats, %zu textures)\n",
@@ -228,6 +230,10 @@ int main(int argc, char* argv[]) {
         app2.active_cam_speed = SCENE_CAM_SPEED;
 
         // Sync loaded postfx params to renderer
+        // Set adaptive bloom range from scene emissive triangles
+        scene.compute_emissive_radiance_range(
+            app2.postfx.bloom_scene_min_Le,
+            app2.postfx.bloom_scene_max_Le);
         optix_renderer.set_postfx_params(app2.postfx);
 
         // -- Interactive debug window ---------------------------------

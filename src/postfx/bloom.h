@@ -11,14 +11,17 @@ void launch_bloom_find_max_luminance(
     float*       d_max_lum,     // [1] output
     int width, int height);
 
-/// Extract bright pixels (luminance > threshold) into half-resolution
-/// scratch buffer.  Excess brightness (lum - threshold) drives the
-/// bloom intensity so dimmer lights get less glow.
+/// Extract bright pixels into half-resolution scratch buffer using an
+/// adaptive luminance ramp derived from the scene's emissive range.
+/// lo_threshold / hi_threshold define the dimmest-to-brightest emitter
+/// luminance; pixels ramp from 10% to 100% bloom strength across that
+/// range.  If lo >= hi, falls back to a single soft-knee threshold.
 void launch_bloom_bright_extract(
     const float* d_hdr,         // [W*H*4] full-res input
     float*       d_mip0,        // [W/2 * H/2 * 4] half-res output
     int src_w, int src_h,
-    float threshold);
+    float lo_threshold,
+    float hi_threshold);
 
 /// Bilinear 2× downsample: src → dst (each half the previous size).
 void launch_bloom_downsample(

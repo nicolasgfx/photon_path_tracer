@@ -9,7 +9,9 @@
 extern "C" int stbi_write_png(const char*, int, int, int, const void*, int);
 #endif
 
-// ── write_debug_png: normal-map encoding of sampled directions ──────
+// ── write_debug_png: dominant direction → RGB ───────────────────────
+// Maps abs(dir_x) → R, abs(dir_y) → G, abs(dir_z) → B so every
+// guided direction produces a visible colour.  Black = no guidance.
 bool DirectionMap::write_debug_png(const std::string& path) const {
     if (entries.empty()) return false;
 
@@ -24,16 +26,15 @@ bool DirectionMap::write_debug_png(const std::string& path) const {
             int dst = ((h - 1 - sy) * w + sx) * 4;
             const DirMapEntry& e = entries[src];
             if (e.num_eligible == 0) {
-                // No guidance — black
                 rgba[dst + 0] = 0;
                 rgba[dst + 1] = 0;
                 rgba[dst + 2] = 0;
                 rgba[dst + 3] = 255;
             } else {
-                // Normal-map encoding: R = 0.5+0.5*x, etc.
-                rgba[dst + 0] = (uint8_t)std::clamp(int(128.f + 127.f * e.dir_x), 0, 255);
-                rgba[dst + 1] = (uint8_t)std::clamp(int(128.f + 127.f * e.dir_y), 0, 255);
-                rgba[dst + 2] = (uint8_t)std::clamp(int(128.f + 127.f * e.dir_z), 0, 255);
+                // Absolute direction → RGB (always visible, no dark negatives)
+                rgba[dst + 0] = (uint8_t)std::clamp(int(std::fabsf(e.dir_x) * 255.f), 0, 255);
+                rgba[dst + 1] = (uint8_t)std::clamp(int(std::fabsf(e.dir_y) * 255.f), 0, 255);
+                rgba[dst + 2] = (uint8_t)std::clamp(int(std::fabsf(e.dir_z) * 255.f), 0, 255);
                 rgba[dst + 3] = 255;
             }
         }
@@ -44,7 +45,8 @@ bool DirectionMap::write_debug_png(const std::string& path) const {
     return ok != 0;
 }
 
-// ── write_strength_png: num_eligible → viridis-like heatmap ─────────
+// ── write_strength_png: guidance strength → grayscale ────────────────
+// Brightness = num_eligible / max_eligible.  Black = no guidance.
 bool DirectionMap::write_strength_png(const std::string& path) const {
     if (entries.empty()) return false;
 
@@ -65,22 +67,10 @@ bool DirectionMap::write_strength_png(const std::string& path) const {
             const DirMapEntry& e = entries[src];
 
             float t = (float)e.num_eligible / (float)max_elig;
-            // Simple viridis-like: black → blue → green → yellow
-            float r, g, b;
-            if (t < 0.33f) {
-                float s = t / 0.33f;
-                r = 0.f; g = 0.f; b = s;
-            } else if (t < 0.66f) {
-                float s = (t - 0.33f) / 0.33f;
-                r = 0.f; g = s; b = 1.f - s;
-            } else {
-                float s = (t - 0.66f) / 0.34f;
-                r = s; g = 1.f; b = 0.f;
-            }
-
-            rgba[dst + 0] = (uint8_t)(r * 255.f);
-            rgba[dst + 1] = (uint8_t)(g * 255.f);
-            rgba[dst + 2] = (uint8_t)(b * 255.f);
+            uint8_t v = (uint8_t)std::clamp(int(t * 255.f), 0, 255);
+            rgba[dst + 0] = v;
+            rgba[dst + 1] = v;
+            rgba[dst + 2] = v;
             rgba[dst + 3] = 255;
         }
     }

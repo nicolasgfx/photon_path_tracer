@@ -801,7 +801,7 @@ static OptixRenderer*  g_active_optix_renderer  = nullptr;
 static Options*        g_active_options         = nullptr;
 
 static void key_callback(GLFWwindow* window, int key,
-                          int /*scancode*/, int action, int /*mods*/) {
+                          int /*scancode*/, int action, int mods) {
     if (action != GLFW_PRESS) return;
 
     // Any key press counts as user interaction for idle tracking
@@ -855,9 +855,13 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // Scene switching – keys 1-9, 0
+    // Scene switching – keys 1-9, 0, Shift+1
     if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
         int idx = key - GLFW_KEY_1;  // 0-8
+        // Shift+1 = Kroken (index 10)
+        if (key == GLFW_KEY_1 && (mods & GLFW_MOD_SHIFT)) {
+            idx = 10;
+        }
         if (idx < NUM_SCENE_PROFILES && idx != s_app.active_scene_index) {
             s_app.scene_switch_requested = idx;
             printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
@@ -867,7 +871,7 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
     if (key == GLFW_KEY_0) {
-        int idx = 9;  // key 0 = profile index 9 (Bathroom)
+        int idx = 9;  // key 0 = profile index 9 (Zero Day)
         if (idx < NUM_SCENE_PROFILES && idx != s_app.active_scene_index) {
             s_app.scene_switch_requested = idx;
             printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
@@ -1250,8 +1254,8 @@ void run_interactive(
             } else {
                 if (!prof.is_reference)
                     new_scene.normalize_to_reference();
-                if (prof.mirror_x)
-                    new_scene.mirror_x();
+                if (prof.rotate_x_180)
+                    new_scene.rotate_x_180();
                 new_scene.build_bvh();
                 new_scene.build_emissive_distribution();
 
@@ -1265,6 +1269,11 @@ void run_interactive(
                 optix_renderer.build_accel(scene);
                 optix_renderer.upload_scene_data(scene);
                 optix_renderer.upload_emitter_data(scene);
+
+                // Scan emissive range for adaptive bloom
+                scene.compute_emissive_radiance_range(
+                    s_app.postfx.bloom_scene_min_Le,
+                    s_app.postfx.bloom_scene_max_Le);
 
                 // Reset camera to scene profile defaults
                 camera.position = make_f3(prof.cam_pos[0], prof.cam_pos[1], prof.cam_pos[2]);
@@ -1292,6 +1301,9 @@ void run_interactive(
                         s_app.roll  = saved_roll;
                         s_app.light_scale         = saved_light;
                         s_app.light_scale_changed = true;
+                        // Preserve the scene-scanned emissive range (not in JSON)
+                        loaded_postfx.bloom_scene_min_Le = s_app.postfx.bloom_scene_min_Le;
+                        loaded_postfx.bloom_scene_max_Le = s_app.postfx.bloom_scene_max_Le;
                         s_app.postfx = loaded_postfx;
                         optix_renderer.set_postfx_params(s_app.postfx);
                     } else {
@@ -1300,6 +1312,7 @@ void run_interactive(
                         s_app.yaw   = atan2f(fwd.x, -fwd.z);
                         s_app.pitch = asinf(fmaxf(-1.f, fminf(1.f, fwd.y)));
                         s_app.light_scale = DEFAULT_LIGHT_SCALE;
+                        optix_renderer.set_postfx_params(s_app.postfx);
                     }
                 }
 
@@ -1361,9 +1374,11 @@ void run_interactive(
         if (s_app.photon_retrace_requested) {
             s_app.photon_retrace_requested = false;
 
-            std::cout << "[Photon] Re-tracing photon maps...\n";
+            std::cout << "[Photon] Re-tracing photon maps (seed "
+                      << s_app.idle_photon_seed << ")...\n";
             auto tp0 = std::chrono::high_resolution_clock::now();
-            optix_renderer.trace_photons(scene, opt.config);
+            optix_renderer.trace_photons(
+                scene, opt.config, 0.f, s_app.idle_photon_seed++);
             auto tp1 = std::chrono::high_resolution_clock::now();
             double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
             std::cout << "[Photon] Retrace done in " << photon_ms << " ms\n";
@@ -1390,6 +1405,12 @@ void run_interactive(
             // Rebuild emissive distribution with new powers
             scene.build_emissive_distribution();
 
+            // Update adaptive bloom range after Le rescale
+            scene.compute_emissive_radiance_range(
+                s_app.postfx.bloom_scene_min_Le,
+                s_app.postfx.bloom_scene_max_Le);
+            optix_renderer.set_postfx_params(s_app.postfx);
+
             // Re-upload materials and emitter CDF
             optix_renderer.upload_scene_data(scene);
             optix_renderer.upload_emitter_data(scene);
@@ -1397,7 +1418,8 @@ void run_interactive(
             // Re-trace photons with updated emission
             std::cout << "[Light] Re-tracing photons at " << s_app.light_scale << "x brightness...\n";
             auto tp0 = std::chrono::high_resolution_clock::now();
-            optix_renderer.trace_photons(scene, opt.config);
+            optix_renderer.trace_photons(
+                scene, opt.config, 0.f, s_app.idle_photon_seed++);
             auto tp1 = std::chrono::high_resolution_clock::now();
             double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
             std::cout << "[Light] Photon re-trace done in " << photon_ms << " ms\n";
@@ -1505,7 +1527,8 @@ void run_interactive(
             if (s_app.idle_rendering_active) {
                 opt.config.num_photons = s_app.base_num_photons;
                 optix_renderer.set_preview_mode(true);
-                optix_renderer.trace_photons(scene, opt.config);
+                optix_renderer.trace_photons(
+                    scene, opt.config, 0.f, s_app.idle_photon_seed++);
                 s_app.idle_rendering_active = false;
             }
             optix_renderer.clear_buffers();
@@ -1578,6 +1601,7 @@ void run_interactive(
 
             // ── Direction map debug PNGs ─────────────────────────────
             {
+                optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
                 optix_renderer.download_direction_map();
                 const auto& dm = optix_renderer.direction_map();
                 if (dm.base_width > 0 && dm.base_height > 0) {

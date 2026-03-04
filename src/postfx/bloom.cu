@@ -125,15 +125,22 @@ void launch_bloom_find_max_luminance(
 }
 
 // =====================================================================
-// 2. Bright-pass extract (full-res → half-res)
+// 2. Bright-pass extract (full-res → half-res) — adaptive ramp
 // =====================================================================
+// When lo_threshold < hi_threshold, uses a ramp:
+//   lum < lo_threshold          → zero (no bloom)
+//   lum = lo_threshold          → BLOOM_MIN_STRENGTH (small glow for dim lights)
+//   lo_threshold < lum < hi     → linearly interpolated
+//   lum >= hi_threshold         → full strength
+// Fallback: if lo_threshold >= hi_threshold (no range info), uses a
+//           single hard threshold at lo_threshold with soft knee.
 
 __global__ void bloom_bright_extract_kernel(
     const float* __restrict__ hdr,
     float*       __restrict__ mip0,
     int src_w, int src_h,
     int dst_w, int dst_h,
-    float threshold)
+    float lo_threshold, float hi_threshold)
 {
     int dx = blockIdx.x * blockDim.x + threadIdx.x;
     int dy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -146,12 +153,35 @@ __global__ void bloom_bright_extract_kernel(
     sample_bilinear(hdr, src_w, src_h, u, v, r, g, b);
 
     float lum = luminance_rgb(r, g, b);
-    if (lum > threshold && threshold > 0.f) {
-        // Scale by (lum - threshold) / lum to keep colour proportional
-        float scale = (lum - threshold) / lum;
-        r *= scale;
-        g *= scale;
-        b *= scale;
+
+    // ── Compute bloom strength via adaptive ramp ────────────────────
+    float strength = 0.f;
+    constexpr float BLOOM_MIN_STRENGTH = 0.10f;  // 10% glow for the dimmest emitter
+
+    if (lo_threshold < hi_threshold && lo_threshold > 0.f) {
+        // Adaptive mode: ramp from min→max emissive luminance
+        if (lum >= hi_threshold) {
+            strength = 1.0f;
+        } else if (lum > lo_threshold) {
+            // Linear interpolation between min and max strength
+            float t = (lum - lo_threshold) / (hi_threshold - lo_threshold);
+            strength = BLOOM_MIN_STRENGTH + t * (1.0f - BLOOM_MIN_STRENGTH);
+        } else if (lum > lo_threshold * 0.5f) {
+            // Soft foot: fade-in from half the lo threshold to lo threshold
+            float t = (lum - lo_threshold * 0.5f) / (lo_threshold * 0.5f);
+            strength = t * BLOOM_MIN_STRENGTH;
+        }
+    } else if (lo_threshold > 0.f) {
+        // Fallback: single-threshold soft knee (original behaviour)
+        if (lum > lo_threshold) {
+            strength = (lum - lo_threshold) / lum;
+        }
+    }
+
+    if (strength > 0.f) {
+        r *= strength;
+        g *= strength;
+        b *= strength;
     } else {
         r = g = b = 0.f;
     }
@@ -165,14 +195,14 @@ __global__ void bloom_bright_extract_kernel(
 
 void launch_bloom_bright_extract(
     const float* d_hdr, float* d_mip0,
-    int src_w, int src_h, float threshold)
+    int src_w, int src_h, float lo_threshold, float hi_threshold)
 {
     int dst_w = max(src_w / 2, 1);
     int dst_h = max(src_h / 2, 1);
     dim3 block(16, 16);
     dim3 grid((dst_w + 15) / 16, (dst_h + 15) / 16);
     bloom_bright_extract_kernel<<<grid, block>>>(
-        d_hdr, d_mip0, src_w, src_h, dst_w, dst_h, threshold);
+        d_hdr, d_mip0, src_w, src_h, dst_w, dst_h, lo_threshold, hi_threshold);
 }
 
 // =====================================================================

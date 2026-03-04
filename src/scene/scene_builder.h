@@ -78,13 +78,6 @@ inline void add_scene_lights(Scene& scene, SceneLightMode mode) {
     if (mode == SceneLightMode::FromMTL && scene.num_emissive() > 0)
         return;  // MTL already has lights
 
-    const char* mode_name =
-        mode == SceneLightMode::FromMTL            ? "FromMTL/fallback" :
-        mode == SceneLightMode::DirectionalToFloor  ? "DirectionalToFloor" :
-        mode == SceneLightMode::HemisphereEnv       ? "HemisphereEnv" :
-                                                      "SphericalEnv";
-    std::cout << "[Scene] Adding lights (mode: " << mode_name << ")\n";
-
     // ── HemisphereEnv (Sponza): sky dome above the scene ────────────
     if (mode == SceneLightMode::HemisphereEnv) {
         Material sky_mat;
@@ -168,6 +161,4 @@ inline void add_scene_lights(Scene& scene, SceneLightMode mode) {
 
     scene.build_bvh();
     scene.build_emissive_distribution();
-    std::cout << "[Scene] Added area light ("
-              << scene.num_emissive() << " emissive triangles)\n";
 }
