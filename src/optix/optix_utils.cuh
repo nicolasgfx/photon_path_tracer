@@ -10,6 +10,25 @@ __forceinline__ __device__ float u2f(unsigned int u) {
     return __uint_as_float(u);
 }
 
+// == Instance transform helpers (3×4 row-major) =======================
+__forceinline__ __device__
+float3 transform_point_3x4(const float m[12], float3 p) {
+    return make_float3(
+        m[0]*p.x + m[1]*p.y + m[ 2]*p.z + m[ 3],
+        m[4]*p.x + m[5]*p.y + m[ 6]*p.z + m[ 7],
+        m[8]*p.x + m[9]*p.y + m[10]*p.z + m[11]);
+}
+
+// Normal transform by upper-left 3×3 (not inverse-transpose;
+// acceptable for rigid transforms + uniform scale).
+__forceinline__ __device__
+float3 transform_normal_3x4(const float m[12], float3 n) {
+    return normalize(make_float3(
+        m[0]*n.x + m[1]*n.y + m[ 2]*n.z,
+        m[4]*n.x + m[5]*n.y + m[ 6]*n.z,
+        m[8]*n.x + m[9]*n.y + m[10]*n.z));
+}
+
 // == Trace result struct ==============================================
 struct TraceResult {
     float3   position;

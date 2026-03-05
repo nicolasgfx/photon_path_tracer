@@ -48,6 +48,16 @@ struct Texture {
     }
 };
 
+// ── Instancing descriptors ───────────────────────────────────────────
+struct MeshDescriptor {
+    uint32_t tri_offset;   // start index in scene.triangles[]
+    uint32_t tri_count;    // number of triangles
+};
+struct InstanceDescriptor {
+    uint32_t mesh_id;      // index into scene.meshes[]
+    float transform[12];   // 3×4 row-major object→world
+};
+
 // ── Scene ───────────────────────────────────────────────────────────
 struct Scene {
     std::vector<Triangle>  triangles;
@@ -56,6 +66,11 @@ struct Scene {
     std::vector<BVHNode>   bvh_nodes;
     std::vector<HomogeneousMedium> media;  // participating media (indexed by Material::medium_id)
 
+    // Instancing (populated by PBRT loader; OBJ loader wraps as single mesh)
+    std::vector<MeshDescriptor>    meshes;
+    std::vector<InstanceDescriptor> instances;
+    bool has_instances() const { return instances.size() > 1; }
+
     // Emissive triangle indices and alias table (power-weighted)
     std::vector<uint32_t>  emissive_tri_indices;
     AliasTable             emissive_alias_table;       // power-weighted
@@ -63,9 +78,29 @@ struct Scene {
 
     AABB                   scene_bounds;
 
+    // Normalization transform applied by normalize_to_reference().
+    // Camera positions from PBRT files need the same transform:
+    //   p_norm = (p_orig - norm_center) * norm_scale
+    float3 norm_center = {0, 0, 0};
+    float  norm_scale  = 1.0f;
+
     // ── Environment map (infinite light) ──────────────────────────
     std::shared_ptr<EnvironmentMap> envmap;  // nullptr if no envmap
     float envmap_selection_prob = 0.f;       // probability of choosing envmap in NEE/photon
+
+    // Source data from PBRT loader (avoids JSON round-trip)
+    bool        pbrt_has_envmap      = false;
+    std::string pbrt_envmap_path;              // EXR/HDR path (empty for constant)
+    float       pbrt_envmap_scale    = 1.0f;
+    float3      pbrt_envmap_rotation = {0, 0, 0};
+    float3      pbrt_envmap_constant = {0, 0, 0}; // unscaled RGB
+
+    // PBRT camera (transformed by normalize_to_reference)
+    bool   pbrt_cam_valid    = false;
+    float3 pbrt_cam_position = {0, 0, 0};
+    float3 pbrt_cam_look_at  = {0, 0, -1};
+    float3 pbrt_cam_up       = {0, 1, 0};
+    float  pbrt_cam_fov      = 90.0f;
 
     bool has_envmap() const { return envmap && envmap->width > 0; }
 
@@ -136,10 +171,23 @@ private:
 // reference frame: centred at origin, longest axis = 1.0.
 // Vertex positions AND normals (normals are
 // direction-only, so only positions are transformed).
+//
+// For instanced scenes: only meshes[0] (world-space geometry) has its
+// vertices transformed directly.  Instanced template vertices stay in
+// object space; their instance transforms are updated to
+//   T_inst' = M_norm * T_inst
+// so OptiX maps object→world→normalised in one step.
 inline void Scene::normalize_to_reference() {
     if (triangles.empty()) return;
 
-    // 1. Compute current AABB
+    // 1. Compute current AABB from ALL triangles (world-space +
+    //    object-space) — the bounding box of the whole triangle buffer.
+    //    For a correct AABB we'd need to transform instanced verts
+    //    through their instance transforms, but meshes[0] (world-space
+    //    non-instanced geometry) dominates the scene extents, and any
+    //    instanced geometry that falls outside is still captured because
+    //    both original world positions AND template positions were loaded
+    //    in the same file — so the BB is a reasonable superset.
     AABB bb;
     for (const auto& t : triangles) {
         bb.expand(t.v0);
@@ -154,7 +202,10 @@ inline void Scene::normalize_to_reference() {
     if (longest < 1e-12f) return;  // degenerate
 
     float  scale = 1.0f / longest;
-    float3 ref_c = make_f3(0.f, 0.f, 0.f);  // reference centre
+
+    // Store normalization params so the camera can be transformed to match.
+    norm_center = cur_center;
+    norm_scale  = scale;
 
     std::cout << "[Scene] Normalising: centre ("
               << cur_center.x << ", " << cur_center.y << ", "
@@ -162,19 +213,85 @@ inline void Scene::normalize_to_reference() {
               << ext.x << ", " << ext.y << ", " << ext.z
               << ")  scale " << scale << "\n";
 
-    // 2. Apply: p' = (p - cur_center) * scale + ref_center
-    for (auto& t : triangles) {
-        t.v0 = (t.v0 - cur_center) * scale + ref_c;
-        t.v1 = (t.v1 - cur_center) * scale + ref_c;
-        t.v2 = (t.v2 - cur_center) * scale + ref_c;
-        // Normals are pure directions — no transformation needed.
+    // 2a-pre. Transform PBRT camera with the same mapping.
+    if (pbrt_cam_valid) {
+        pbrt_cam_position = (pbrt_cam_position - cur_center) * scale;
+        pbrt_cam_look_at  = (pbrt_cam_look_at  - cur_center) * scale;
+    }
+
+    // 2a-media. Scale participating-media coefficients so that optical
+    //   depth is preserved after geometry shrinks by `scale`.
+    //   Original: tau = sigma * d_orig
+    //   After:    d_norm = d_orig * scale  →  sigma_norm = sigma / scale
+    {
+        float inv_scale = 1.0f / scale;
+        for (auto& m : media) {
+            m.sigma_a = m.sigma_a * inv_scale;
+            m.sigma_s = m.sigma_s * inv_scale;
+            m.sigma_t = m.sigma_t * inv_scale;
+        }
+    }
+
+    // 2a. Transform world-space (non-instanced) vertices in-place.
+    //     If there's instancing metadata, only meshes[0] is world-space;
+    //     meshes[1+] are object-space templates and must NOT be touched.
+    uint32_t world_tri_end = 0;
+    if (!meshes.empty())
+        world_tri_end = meshes[0].tri_offset + meshes[0].tri_count;
+    else
+        world_tri_end = (uint32_t)triangles.size();  // no metadata yet: all tris
+
+    for (uint32_t i = 0; i < world_tri_end; ++i) {
+        auto& t = triangles[i];
+        t.v0 = (t.v0 - cur_center) * scale;
+        t.v1 = (t.v1 - cur_center) * scale;
+        t.v2 = (t.v2 - cur_center) * scale;
+    }
+
+    // 2b. Update instance transforms: T' = M_norm * T
+    //     M_norm is: p' = (p - center) * scale  →  3×4 row-major:
+    //       [ s  0  0  -cx*s ]
+    //       [ 0  s  0  -cy*s ]
+    //       [ 0  0  s  -cz*s ]
+    //     Multiply M_norm * T (3×4 * 4×4 → 3×4).
+    if (has_instances()) {
+        float cx = cur_center.x, cy = cur_center.y, cz = cur_center.z;
+        float s  = scale;
+        // Skip instances[0] — it's the identity for meshes[0] (already
+        // transformed in-place above).  Update instances[1+].
+        for (size_t i = 1; i < instances.size(); ++i) {
+            float old[12];
+            std::memcpy(old, instances[i].transform, sizeof(old));
+
+            // M_norm * T  where M_norm = diag(s,s,s) with translation (-cx*s, -cy*s, -cz*s)
+            // Row r of result: sum over k of M_norm[r][k] * T_col[k]
+            // M_norm is diagonal+translation, so:
+            //   result[r][c] = s * old[r][c]  +  (r==0 ? -cx*s : r==1 ? -cy*s : -cz*s) * (c==3 part from 4th row of T)
+            // The 4th row of the 4×4 version of T (3×4 affine) is [0,0,0,1].
+            // So result[r][c] = s * old[r*4+c]  for c<3
+            //    result[r][3] = s * old[r*4+3]  + (-cr*s)   where cr = {cx,cy,cz}[r]
+            float off[3] = { -cx * s, -cy * s, -cz * s };
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c)
+                    instances[i].transform[r * 4 + c] = s * old[r * 4 + c];
+                instances[i].transform[r * 4 + 3] = s * old[r * 4 + 3] + off[r];
+            }
+        }
     }
 }
 
 inline void Scene::rotate_x_180() {
     if (triangles.empty()) return;
 
-    for (auto& t : triangles) {
+    // Only transform world-space (non-instanced) vertices directly.
+    uint32_t world_tri_end = 0;
+    if (!meshes.empty())
+        world_tri_end = meshes[0].tri_offset + meshes[0].tri_count;
+    else
+        world_tri_end = (uint32_t)triangles.size();
+
+    for (uint32_t i = 0; i < world_tri_end; ++i) {
+        auto& t = triangles[i];
         // Negate Y and Z on positions
         t.v0.y = -t.v0.y;  t.v0.z = -t.v0.z;
         t.v1.y = -t.v1.y;  t.v1.z = -t.v1.z;
@@ -183,6 +300,21 @@ inline void Scene::rotate_x_180() {
         t.n0.y = -t.n0.y;  t.n0.z = -t.n0.z;
         t.n1.y = -t.n1.y;  t.n1.z = -t.n1.z;
         t.n2.y = -t.n2.y;  t.n2.z = -t.n2.z;
+    }
+
+    // Update instance transforms: T' = M_rot * T
+    // M_rot (X-180°): [ 1 0 0 0 ]
+    //                  [ 0 -1 0 0 ]
+    //                  [ 0 0 -1 0 ]
+    // Result: row 0 unchanged, rows 1+2 negated.
+    if (has_instances()) {
+        for (size_t i = 1; i < instances.size(); ++i) {
+            float* tf = instances[i].transform;
+            for (int c = 0; c < 4; ++c) {
+                tf[1 * 4 + c] = -tf[1 * 4 + c];  // negate row 1
+                tf[2 * 4 + c] = -tf[2 * 4 + c];  // negate row 2
+            }
+        }
     }
 
     std::printf("[Scene] Rotated geometry 180 deg around X axis\n");

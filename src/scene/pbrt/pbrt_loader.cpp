@@ -27,8 +27,10 @@
 
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -66,6 +68,26 @@ inline float3 transform_point(const pbrt::Mat4& m, float3 p) {
     return make_f3((float)r.x, (float)r.y, (float)r.z);
 }
 
+// ── Blackbody → linear sRGB (McCamy approximation) ──────────────────
+static void blackbody_to_rgb(float temp_K, float rgb[3]) {
+    float t = temp_K / 100.f;
+    float r, g, b;
+    if (t <= 66.f) {
+        r = 255.f;
+        g = std::max(0.f, 99.4708f * std::log(t) - 161.1196f);
+        b = (t <= 19.f) ? 0.f : std::max(0.f, 138.5177f * std::log(t - 10.f) - 305.0448f);
+    } else {
+        r = std::max(0.f, 329.6987f * std::pow(t - 60.f, -0.1332f));
+        g = std::max(0.f, 288.1222f * std::pow(t - 60.f, -0.0755f));
+        b = 255.f;
+    }
+    r = std::min(255.f, r) / 255.f;
+    g = std::min(255.f, g) / 255.f;
+    b = std::min(255.f, b) / 255.f;
+    float mx = std::max({r, g, b, 1e-10f});
+    rgb[0] = r / mx; rgb[1] = g / mx; rgb[2] = b / mx;
+}
+
 // Transform normal by inverse-transpose of the upper-left 3×3
 // We compute the cofactor matrix (transpose of adjugate) directly.
 inline float3 transform_normal(const pbrt::Mat4& m, float3 n) {
@@ -95,6 +117,10 @@ inline float3 transform_normal(const pbrt::Mat4& m, float3 n) {
     float rx = (float)(c00*n.x + c10*n.y + c20*n.z);
     float ry = (float)(c01*n.x + c11*n.y + c21*n.z);
     float rz = (float)(c02*n.x + c12*n.y + c22*n.z);
+    // adj(M) = det(M) * M^{-T}, so when det<0 the adjugate flips the
+    // normal direction.  Negate to keep the normal on the correct side.
+    double det = m.m[0][0]*c00 + m.m[0][1]*c01 + m.m[0][2]*c02;
+    if (det < 0.0) { rx = -rx; ry = -ry; rz = -rz; }
     return normalize(make_f3(rx, ry, rz));
 }
 
@@ -194,6 +220,62 @@ void process_shape(const pbrt::PbrtShape& shape,
                    Scene& scene,
                    ShapeStats& stats) {
     using namespace pbrt;
+
+    // ── Skip fully-transparent shapes (alpha = 0) ───────────────────
+    float shape_alpha = (float)get_float(shape.params, "alpha", 1.0f);
+    if (shape_alpha <= 0.f) {
+        if (shape.has_area_light) {
+            // Alpha=0 emissive: invisible geometry that still emits.
+            // Approximate as small emissive sphere (point light proxy).
+            float3 pos = make_f3((float)shape.transform.m[0][3],
+                                 (float)shape.transform.m[1][3],
+                                 (float)shape.transform.m[2][3]);
+
+            uint32_t emissive_id = mapper.create_emissive_material(
+                "alpha0_light", shape.area_light_params);
+            const Material& emat = scene.materials[emissive_id];
+
+            // Estimate original area for power scaling
+            float radius = 1.f;
+            if (shape.shape_type == "sphere")
+                radius = (float)get_float(shape.params, "radius", 1.0);
+            float big_area = 4.f * (float)M_PI * radius * radius;
+            float small_r  = 0.5f;
+            float small_area = 4.f * (float)M_PI * small_r * small_r;
+            float power_ratio = big_area / std::max(small_area, 1e-6f);
+
+            Material proxy_mat;
+            proxy_mat.name    = "__alpha0_proxy";
+            proxy_mat.type    = MaterialType::Emissive;
+            proxy_mat.pb_brdf = PbBrdf::Emissive;
+            for (int b = 0; b < NUM_LAMBDA; ++b)
+                proxy_mat.Le.value[b] = emat.Le.value[b] * power_ratio;
+            proxy_mat.Kd = Spectrum::zero();
+            uint32_t proxy_id = (uint32_t)scene.materials.size();
+            scene.materials.push_back(proxy_mat);
+
+            // Tessellate small sphere
+            std::vector<float3> sph_pos, sph_nrm;
+            std::vector<int3>   sph_faces;
+            tessellate_sphere(small_r, 8, 16, sph_pos, sph_nrm, sph_faces);
+            for (auto& p : sph_pos) p = p + pos;
+            for (const auto& f : sph_faces) {
+                Triangle tri;
+                tri.v0 = sph_pos[f.x]; tri.v1 = sph_pos[f.y]; tri.v2 = sph_pos[f.z];
+                tri.n0 = sph_nrm[f.x]; tri.n1 = sph_nrm[f.y]; tri.n2 = sph_nrm[f.z];
+                tri.uv0 = tri.uv1 = tri.uv2 = make_f2(0, 0);
+                tri.material_id = proxy_id;
+                scene.triangles.push_back(tri);
+            }
+
+            std::printf("[PBRT] Alpha=0 emissive %s → point light proxy at "
+                        "(%.1f, %.1f, %.1f) power_ratio=%.1f\n",
+                        shape.shape_type.c_str(), pos.x, pos.y, pos.z,
+                        power_ratio);
+        }
+        ++stats.skipped;
+        return;
+    }
 
     // ── Resolve material ────────────────────────────────────────────
     uint32_t mat_id = mapper.resolve_shape_material(shape);
@@ -482,6 +564,10 @@ struct LightInfo {
     float3 envmap_rotation = {0, 0, 0};
     float3 envmap_constant = {0, 0, 0};  // constant-colour envmap (no EXR)
 
+    // Portal quads (world-space, transformed by light.transform)
+    struct PortalQuad { float3 v[4]; };
+    std::vector<PortalQuad> portal_quads;
+
     // Point / spot lights → small emissive spheres
     struct PointLightGeo {
         float3 position;
@@ -507,21 +593,30 @@ LightInfo extract_lights(const pbrt::PbrtScene& pbrt_scene) {
                 info.envmap_path = pbrt_scene.source_dir + "/" + filename;
             }
 
-            // Scale
+            // Scale and colour
             auto L = get_rgb(light.params, "L");
             float scale_val = (float)get_float(light.params, "scale", 1.0);
+
+            // Handle blackbody L (type "blackbody", single float = temp K)
+            if (L.empty()) {
+                std::string L_type = get_param_type(light.params, "L");
+                if (L_type == "blackbody") {
+                    float temp_K = (float)get_float(light.params, "L", 6500.0);
+                    float rgb[3];
+                    blackbody_to_rgb(temp_K, rgb);
+                    L = {rgb[0], rgb[1], rgb[2]};
+                }
+            }
+
             if (!L.empty() && L.size() >= 3) {
                 info.envmap_scale = scale_val;
-                // If L is not white, encode it as constant colour + file
                 float lr = (float)L[0], lg = (float)L[1], lb = (float)L[2];
                 if (filename.empty()) {
-                    // No texture → constant colour envmap
-                    info.envmap_constant = make_f3(lr * scale_val,
-                                                   lg * scale_val,
-                                                   lb * scale_val);
+                    // No texture → constant colour envmap (unscaled;
+                    // scale is applied separately via envmap_scale).
+                    info.envmap_constant = make_f3(lr, lg, lb);
                 } else {
                     // Texture present — apply L as tint via scale
-                    // For simplicity, use average of L as scale multiplier
                     info.envmap_scale = scale_val * (lr + lg + lb) / 3.0f;
                 }
             } else {
@@ -534,6 +629,27 @@ LightInfo extract_lights(const pbrt::PbrtScene& pbrt_scene) {
             // so we leave rotation at 0 and let transform_point handle it
             // in the environment map evaluation.  For a future enhancement,
             // we could decompose the rotation matrix.
+
+            // Portal quads (directed envmap photon emission)
+            for (const auto& param : light.params) {
+                if (param.name == "portal" && param.floats.size() >= 12) {
+                    // Each portal param has 12 floats = 4 vertices (x,y,z each)
+                    // Vertices are in light-local space; transform to world
+                    LightInfo::PortalQuad pq;
+                    for (int vi = 0; vi < 4; ++vi) {
+                        float3 lp = make_f3((float)param.floats[vi * 3 + 0],
+                                            (float)param.floats[vi * 3 + 1],
+                                            (float)param.floats[vi * 3 + 2]);
+                        pq.v[vi] = transform_point(light.transform, lp);
+                    }
+                    info.portal_quads.push_back(pq);
+                    std::printf("[PBRT] Portal quad extracted: (%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
+                             pq.v[0].x, pq.v[0].y, pq.v[0].z,
+                             pq.v[1].x, pq.v[1].y, pq.v[1].z,
+                             pq.v[2].x, pq.v[2].y, pq.v[2].z,
+                             pq.v[3].x, pq.v[3].y, pq.v[3].z);
+                }
+            }
 
         } else if (light.light_type == "point") {
             auto I = get_rgb(light.params, "I");
@@ -631,9 +747,12 @@ CameraInfo extract_camera(const pbrt::PbrtScene& pbrt_scene) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Write saved_camera.json for PBRT scene
+// Write saved_camera.json for PBRT scene (envmap + light info only).
+// Camera position/look_at are NOT written here because this runs before
+// normalize_to_reference() — the PBRT camera is handled via scene.pbrt_cam_*
+// which gets properly normalised.  The user can save camera state at runtime.
 // ─────────────────────────────────────────────────────────────────────
-bool write_saved_camera(const std::string& folder, const CameraInfo& cam,
+bool write_saved_camera(const std::string& folder, const CameraInfo& /*cam*/,
                         const LightInfo& lights) {
     namespace fs = std::filesystem;
     fs::create_directories(folder);
@@ -646,19 +765,20 @@ bool write_saved_camera(const std::string& folder, const CameraInfo& cam,
     if (!f.is_open()) return false;
 
     f << "{\n";
-    f << "  \"position\": [" << cam.position.x << ", " << cam.position.y << ", " << cam.position.z << "],\n";
-    f << "  \"look_at\": [" << cam.look_at.x << ", " << cam.look_at.y << ", " << cam.look_at.z << "],\n";
-    f << "  \"up\": [" << cam.up.x << ", " << cam.up.y << ", " << cam.up.z << "],\n";
-    f << "  \"fov\": " << cam.fov << ",\n";
-    f << "  \"yaw\": 0.0,\n";
-    f << "  \"pitch\": 0.0,\n";
-    f << "  \"roll\": 0.0,\n";
     f << "  \"light_scale\": 1.0";
 
     // Add envmap if present
-    if (lights.has_envmap && !lights.envmap_path.empty()) {
-        f << ",\n  \"envmap\": \"" << lights.envmap_path << "\"";
-        f << ",\n  \"envmap_scale\": " << lights.envmap_scale;
+    if (lights.has_envmap) {
+        if (!lights.envmap_path.empty()) {
+            f << ",\n  \"environment_map\": \"" << lights.envmap_path << "\"";
+        } else if (lights.envmap_constant.x > 0.f || lights.envmap_constant.y > 0.f
+                   || lights.envmap_constant.z > 0.f) {
+            f << ",\n  \"envmap_constant\": ["
+              << lights.envmap_constant.x << ", "
+              << lights.envmap_constant.y << ", "
+              << lights.envmap_constant.z << "]";
+        }
+        f << ",\n  \"environment_scale\": " << lights.envmap_scale;
     }
 
     f << "\n}\n";
@@ -668,9 +788,13 @@ bool write_saved_camera(const std::string& folder, const CameraInfo& cam,
 
 // ─────────────────────────────────────────────────────────────────────
 // Handle NamedMedium → HomogeneousMedium
+// Returns map of medium name → index in scene.media[]
 // ─────────────────────────────────────────────────────────────────────
-void process_media(const pbrt::PbrtScene& pbrt_scene, Scene& scene) {
+std::unordered_map<std::string, int> process_media(
+    const pbrt::PbrtScene& pbrt_scene, Scene& scene) {
     using namespace pbrt;
+
+    std::unordered_map<std::string, int> name_to_id;
 
     for (const auto& [name, decl] : pbrt_scene.named_media) {
         if (decl.type != "homogeneous") {
@@ -706,10 +830,13 @@ void process_media(const pbrt::PbrtScene& pbrt_scene, Scene& scene) {
 
         int medium_id = (int)scene.media.size();
         scene.media.push_back(med);
+        name_to_id[name] = medium_id;
 
         std::printf("[PBRT] Medium '%s': id=%d, g=%.2f, scale=%.1f\n",
                     name.c_str(), medium_id, g_val, scale);
     }
+
+    return name_to_id;
 }
 
 } // anonymous namespace
@@ -733,12 +860,13 @@ bool load_pbrt(const std::string& filepath, Scene& scene) {
     }
 
     std::printf("[PBRT] Parsed: %zu shapes, %zu named materials, %zu textures, "
-                "%zu lights, %zu object templates, %zu media\n",
+                "%zu lights, %zu object templates, %zu instance refs, %zu media\n",
                 pbrt_scene.shapes.size(),
                 pbrt_scene.named_materials.size(),
                 pbrt_scene.textures.size(),
                 pbrt_scene.lights.size(),
                 pbrt_scene.object_templates.size(),
+                pbrt_scene.instance_refs.size(),
                 pbrt_scene.named_media.size());
 
     // ── 2. Map materials ────────────────────────────────────────────
@@ -750,21 +878,176 @@ bool load_pbrt(const std::string& filepath, Scene& scene) {
     std::fflush(stdout);
 
     // ── 3. Process media ────────────────────────────────────────────
-    process_media(pbrt_scene, scene);
+    auto medium_name_to_id = process_media(pbrt_scene, scene);
 
     // ── 4. Process shapes ───────────────────────────────────────────
-    std::fprintf(stderr, "[PBRT-DBG] About to process %zu shapes\n", pbrt_scene.shapes.size());
+    // Track which (material_name, medium_name) pairs have been cloned
+    // to avoid duplicates while still allowing the same named material
+    // to be used with different media (or no medium).
+    std::unordered_map<std::string, uint32_t> mat_medium_clone_map;
+
     ShapeStats stats;
     int shape_idx = 0;
     for (const auto& shape : pbrt_scene.shapes) {
-        std::fprintf(stderr, "[PBRT-DBG] shape %d/%zu type=%s mat=%s\n",
-                     shape_idx, (size_t)pbrt_scene.shapes.size(),
-                     shape.shape_type.c_str(), shape.material_name.c_str());
         process_shape(shape, pbrt_scene, mapper, scene, stats);
-        std::fprintf(stderr, "[PBRT-DBG] shape %d done, tris=%zu\n",
-                     shape_idx, scene.triangles.size());
+
+        // Link MediumInterface to material for shapes that have one
+        if (!shape.medium_interior.empty()) {
+            auto med_it = medium_name_to_id.find(shape.medium_interior);
+            if (med_it != medium_name_to_id.end()) {
+                // Find the mat_id on the last batch of triangles this shape added
+                if (!scene.triangles.empty()) {
+                    uint32_t mat_id = scene.triangles.back().material_id;
+                    std::string clone_key = std::to_string(mat_id) + "|" + shape.medium_interior;
+
+                    auto clone_it = mat_medium_clone_map.find(clone_key);
+                    if (clone_it != mat_medium_clone_map.end()) {
+                        // Already cloned this (material, medium) pair — reuse
+                        uint32_t cloned_id = clone_it->second;
+                        // Patch all triangles from this shape
+                        for (size_t t = scene.triangles.size(); t > 0; --t) {
+                            if (scene.triangles[t-1].material_id == mat_id)
+                                scene.triangles[t-1].material_id = cloned_id;
+                            else
+                                break;
+                        }
+                    } else {
+                        // Check if the material already has a medium assigned
+                        Material& existing = scene.materials[mat_id];
+                        if (existing.medium_id >= 0 && existing.medium_id != med_it->second) {
+                            // Different medium — need to clone the material
+                            Material cloned = existing;
+                            cloned.medium_id = med_it->second;
+                            cloned.pb_medium_enabled = true;
+                            if (cloned.type == MaterialType::Glass)
+                                cloned.type = MaterialType::Translucent;
+                            uint32_t cloned_id = (uint32_t)scene.materials.size();
+                            scene.materials.push_back(std::move(cloned));
+                            mat_medium_clone_map[clone_key] = cloned_id;
+                            // Patch triangles
+                            for (size_t t = scene.triangles.size(); t > 0; --t) {
+                                if (scene.triangles[t-1].material_id == mat_id)
+                                    scene.triangles[t-1].material_id = cloned_id;
+                                else
+                                    break;
+                            }
+                        } else {
+                            // First medium assignment or same medium — set directly
+                            existing.medium_id = med_it->second;
+                            existing.pb_medium_enabled = true;
+                            if (existing.type == MaterialType::Glass)
+                                existing.type = MaterialType::Translucent;
+                            mat_medium_clone_map[clone_key] = mat_id;
+                        }
+                    }
+                    std::printf("[PBRT] Linked medium '%s' (id=%d) to material '%s'\n",
+                                shape.medium_interior.c_str(), med_it->second,
+                                scene.materials[scene.triangles.back().material_id].name.c_str());
+                }
+            }
+        }
         ++shape_idx;
     }
+
+    // World-space geometry becomes meshes[0] + instances[0] (identity)
+    if (!scene.triangles.empty()) {
+        MeshDescriptor m0;
+        m0.tri_offset = 0;
+        m0.tri_count  = (uint32_t)scene.triangles.size();
+        scene.meshes.push_back(m0);
+
+        InstanceDescriptor inst0;
+        inst0.mesh_id = 0;
+        // Identity 3×4 row-major
+        std::memset(inst0.transform, 0, sizeof(inst0.transform));
+        inst0.transform[0] = 1.f; inst0.transform[5] = 1.f; inst0.transform[10] = 1.f;
+        scene.instances.push_back(inst0);
+    }
+
+    // ── 4b. Process instanced templates ─────────────────────────────
+    // Collect unique templates referenced by instance_refs
+    std::unordered_map<std::string, uint32_t> template_mesh_id; // template name → mesh index
+
+    for (const auto& iref : pbrt_scene.instance_refs) {
+        if (template_mesh_id.count(iref.template_name)) continue; // already loaded
+
+        auto it = pbrt_scene.object_templates.find(iref.template_name);
+        if (it == pbrt_scene.object_templates.end()) continue;
+
+        uint32_t tri_start = (uint32_t)scene.triangles.size();
+
+        // Load all shapes in this template ONCE (in template object space)
+        for (const auto& tpl_shape : it->second.shapes) {
+            size_t tri_before = scene.triangles.size();
+            process_shape(tpl_shape, pbrt_scene, mapper, scene, stats);
+
+            // Link MediumInterface for instanced shapes too
+            if (!tpl_shape.medium_interior.empty() && scene.triangles.size() > tri_before) {
+                auto med_it = medium_name_to_id.find(tpl_shape.medium_interior);
+                if (med_it != medium_name_to_id.end()) {
+                    uint32_t mat_id = scene.triangles.back().material_id;
+                    std::string clone_key = std::to_string(mat_id) + "|" + tpl_shape.medium_interior;
+                    auto clone_it = mat_medium_clone_map.find(clone_key);
+                    if (clone_it != mat_medium_clone_map.end()) {
+                        uint32_t cloned_id = clone_it->second;
+                        for (size_t t = scene.triangles.size(); t > tri_before; --t) {
+                            if (scene.triangles[t-1].material_id == mat_id)
+                                scene.triangles[t-1].material_id = cloned_id;
+                        }
+                    } else {
+                        Material& existing = scene.materials[mat_id];
+                        if (existing.medium_id >= 0 && existing.medium_id != med_it->second) {
+                            Material cloned = existing;
+                            cloned.medium_id = med_it->second;
+                            cloned.pb_medium_enabled = true;
+                            if (cloned.type == MaterialType::Glass)
+                                cloned.type = MaterialType::Translucent;
+                            uint32_t cloned_id = (uint32_t)scene.materials.size();
+                            scene.materials.push_back(std::move(cloned));
+                            mat_medium_clone_map[clone_key] = cloned_id;
+                            for (size_t t = scene.triangles.size(); t > tri_before; --t) {
+                                if (scene.triangles[t-1].material_id == mat_id)
+                                    scene.triangles[t-1].material_id = cloned_id;
+                            }
+                        } else {
+                            existing.medium_id = med_it->second;
+                            existing.pb_medium_enabled = true;
+                            if (existing.type == MaterialType::Glass)
+                                existing.type = MaterialType::Translucent;
+                            mat_medium_clone_map[clone_key] = mat_id;
+                        }
+                    }
+                }
+            }
+        }
+
+        uint32_t tri_end = (uint32_t)scene.triangles.size();
+        if (tri_end > tri_start) {
+            uint32_t mesh_id = (uint32_t)scene.meshes.size();
+            MeshDescriptor md;
+            md.tri_offset = tri_start;
+            md.tri_count  = tri_end - tri_start;
+            scene.meshes.push_back(md);
+            template_mesh_id[iref.template_name] = mesh_id;
+        }
+    }
+
+    // Create InstanceDescriptor for each instance ref
+    for (const auto& iref : pbrt_scene.instance_refs) {
+        auto it = template_mesh_id.find(iref.template_name);
+        if (it == template_mesh_id.end()) continue;
+
+        InstanceDescriptor inst;
+        inst.mesh_id = it->second;
+        // Convert Mat4 (4×4 row-major double) → float[12] (3×4 row-major)
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c)
+                inst.transform[r * 4 + c] = (float)iref.transform.m[r][c];
+        scene.instances.push_back(inst);
+    }
+
+    std::printf("[PBRT] Instancing: %zu meshes, %zu instances (%zu unique templates)\n",
+                scene.meshes.size(), scene.instances.size(), template_mesh_id.size());
 
     std::printf("[PBRT] Shapes: plymesh=%d trianglemesh=%d sphere=%d disk=%d "
                 "bilinear=%d skipped=%d\n",
@@ -776,10 +1059,63 @@ bool load_pbrt(const std::string& filepath, Scene& scene) {
     // ── 5. Process lights ───────────────────────────────────────────
     LightInfo lights = extract_lights(pbrt_scene);
 
+    // Pass envmap data directly to Scene (avoids saved_camera.json path issues)
+    scene.pbrt_has_envmap      = lights.has_envmap;
+    scene.pbrt_envmap_path     = lights.envmap_path;
+    scene.pbrt_envmap_scale    = lights.envmap_scale;
+    scene.pbrt_envmap_rotation = lights.envmap_rotation;
+    scene.pbrt_envmap_constant = lights.envmap_constant;
+
     for (const auto& pl : lights.point_lights) {
         add_point_light_geometry(pl, scene);
         std::printf("[PBRT] Point light at (%.2f, %.2f, %.2f) → emissive sphere\n",
                     pl.position.x, pl.position.y, pl.position.z);
+    }
+
+    // Convert portal quads → emissive triangles (opacity=0, Le from envmap)
+    if (!lights.portal_quads.empty() && lights.has_envmap) {
+        float3 c = lights.envmap_constant;
+        float  s = lights.envmap_scale;
+        Spectrum Le = rgb_to_spectrum_emission(c.x * s, c.y * s, c.z * s);
+
+        Material mat;
+        mat.name    = "__portal_emitter";
+        mat.type    = MaterialType::Emissive;
+        mat.Le      = Le;
+        mat.Kd      = Spectrum::zero();
+        mat.pb_brdf = PbBrdf::Emissive;
+        mat.opacity = 0.0f;  // transparent to camera/shadow rays
+        uint32_t mat_id = (uint32_t)scene.materials.size();
+        scene.materials.push_back(mat);
+
+        for (const auto& pq : lights.portal_quads) {
+            float3 edge0 = pq.v[1] - pq.v[0];
+            float3 edge1 = pq.v[3] - pq.v[0];
+            float3 cr = cross(edge0, edge1);
+            float  area = length(cr);
+            // Negate: PBRT portal normal is outward-facing; we need the
+            // triangle geo_n to point INWARD so photons emit into the room.
+            float3 n = (area > 1e-8f) ? cr * (-1.0f / area) : make_f3(0, 0, -1);
+
+            // Triangle 0: v0-v2-v1  (flipped winding → inward geo_n)
+            Triangle t0;
+            t0.v0 = pq.v[0]; t0.v1 = pq.v[2]; t0.v2 = pq.v[1];
+            t0.n0 = t0.n1 = t0.n2 = n;
+            t0.uv0 = t0.uv1 = t0.uv2 = make_f2(0, 0);
+            t0.material_id = mat_id;
+            scene.triangles.push_back(t0);
+
+            // Triangle 1: v0-v3-v2  (flipped winding → inward geo_n)
+            Triangle t1;
+            t1.v0 = pq.v[0]; t1.v1 = pq.v[3]; t1.v2 = pq.v[2];
+            t1.n0 = t1.n1 = t1.n2 = n;
+            t1.uv0 = t1.uv1 = t1.uv2 = make_f2(0, 0);
+            t1.material_id = mat_id;
+            scene.triangles.push_back(t1);
+
+            std::printf("[PBRT] Portal → emissive triangles: area=%.2f normal=(%.3f,%.3f,%.3f)\n",
+                        area, n.x, n.y, n.z);
+        }
     }
 
     // ── 6. Extract camera, write saved_camera.json if needed ────────
@@ -789,6 +1125,14 @@ bool load_pbrt(const std::string& filepath, Scene& scene) {
                     cam_info.position.x, cam_info.position.y, cam_info.position.z,
                     cam_info.look_at.x, cam_info.look_at.y, cam_info.look_at.z,
                     cam_info.fov);
+
+        // Populate Scene camera fields so normalize_to_reference() can
+        // transform them alongside geometry.
+        scene.pbrt_cam_valid    = true;
+        scene.pbrt_cam_position = cam_info.position;
+        scene.pbrt_cam_look_at  = cam_info.look_at;
+        scene.pbrt_cam_up       = cam_info.up;
+        scene.pbrt_cam_fov      = cam_info.fov;
 
         // Derive scene folder for saved_camera.json
         // The PBRT file lives e.g. in "scenes/kroken/" or "tools/pbrtv4_scenes/..."
@@ -807,9 +1151,9 @@ bool load_pbrt(const std::string& filepath, Scene& scene) {
             std::printf("[PBRT] Envmap: %s (scale=%.2f)\n",
                         lights.envmap_path.c_str(), lights.envmap_scale);
         else
-            std::printf("[PBRT] Constant envmap: (%.3f, %.3f, %.3f)\n",
+            std::printf("[PBRT] Constant envmap: (%.3f, %.3f, %.3f) scale=%.2f\n",
                         lights.envmap_constant.x, lights.envmap_constant.y,
-                        lights.envmap_constant.z);
+                        lights.envmap_constant.z, lights.envmap_scale);
     }
 
     std::printf("[PBRT] Loading complete: %zu triangles, %zu materials, "

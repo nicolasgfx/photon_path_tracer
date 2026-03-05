@@ -83,6 +83,7 @@ struct PbrtShape {
     std::string group_name;
     bool from_instance = false;
     bool reverse_orientation = false;
+    std::string medium_interior;                // MediumInterface interior name (may be empty)
 };
 
 struct PbrtLight {
@@ -111,6 +112,11 @@ struct PbrtObjectTemplate {
     std::vector<PbrtShape> shapes;
 };
 
+struct PbrtInstanceRef {
+    std::string template_name;
+    Mat4 transform;
+};
+
 struct PbrtMediumDecl {
     std::string name;
     std::string type;
@@ -127,6 +133,7 @@ struct PbrtScene {
     std::unordered_map<std::string, PbrtTextureDecl>  textures;
     std::unordered_map<std::string, PbrtMaterial>      named_materials;
     std::vector<PbrtShape> shapes;
+    std::vector<PbrtInstanceRef> instance_refs;
     std::unordered_map<std::string, PbrtObjectTemplate> object_templates;
     std::unordered_map<std::string, PbrtMediumDecl>     named_media;
 };

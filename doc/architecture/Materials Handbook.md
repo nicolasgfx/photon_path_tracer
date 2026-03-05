@@ -109,9 +109,8 @@ Renderer guidance:
 ### 4.3 Roughness and anisotropy
 
 - `pb_roughness <0..1>`
-  - Microfacet roughness parameter $\alpha$ (GGX recommended).
-  - **Convention:** interpret `pb_roughness` as **GGX alpha** directly (not “perceptual roughness”).
-    - If you prefer perceptual roughness internally, convert consistently (e.g., $\alpha = r^2$).
+  - **Perceptual roughness** — the GPU computes $\alpha_{\text{GGX}} = \text{pb\_roughness}^2$ via `bsdf_roughness_to_alpha()`.
+  - **Convention:** `pb_roughness` is **not** GGX alpha directly; it is the square root of alpha.
   - Clamp to `[0.001, 1.0]` for numerical stability.
 
 - `pb_anisotropy <0..1>`

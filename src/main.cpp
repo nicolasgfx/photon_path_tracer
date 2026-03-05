@@ -18,6 +18,7 @@
 #include <string>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -42,9 +43,9 @@ static constexpr int scene_profile_index() {
         return 5;
     #elif defined(SCENE_BEDROOM)
         return 6;
-    #elif defined(SCENE_VILLA)
+    #elif defined(SCENE_CROWN)
         return 7;
-    #elif defined(SCENE_WATERCOLOR)
+    #elif defined(SCENE_SSSDRAGON)
         return 8;
     #elif defined(SCENE_ZERO_DAY)
         return 9;
@@ -99,6 +100,18 @@ int main(int argc, char* argv[]) {
             std::cerr << "[Error] Failed to load scene: " << opt.scene_file << "\n";
             return 1;
         }
+        // Ensure instancing metadata is populated (OBJ scenes lack it)
+        if (scene.meshes.empty() && !scene.triangles.empty()) {
+            MeshDescriptor m0;
+            m0.tri_offset = 0;
+            m0.tri_count  = (uint32_t)scene.triangles.size();
+            scene.meshes.push_back(m0);
+            InstanceDescriptor inst0;
+            inst0.mesh_id = 0;
+            std::memset(inst0.transform, 0, sizeof(inst0.transform));
+            inst0.transform[0] = 1.f; inst0.transform[5] = 1.f; inst0.transform[10] = 1.f;
+            scene.instances.push_back(inst0);
+        }
         if (!SCENE_IS_REFERENCE)
             scene.normalize_to_reference();
         {
@@ -144,10 +157,18 @@ int main(int argc, char* argv[]) {
 
     // -- Setup camera -------------------------------------------------
     Camera camera;
-    camera.position = make_f3(SCENE_CAM_POS[0], SCENE_CAM_POS[1], SCENE_CAM_POS[2]);
-    camera.look_at  = make_f3(SCENE_CAM_LOOKAT[0], SCENE_CAM_LOOKAT[1], SCENE_CAM_LOOKAT[2]);
-    camera.up       = make_f3(0.0f, 1.0f, 0.0f);
-    camera.fov_deg  = SCENE_CAM_FOV;
+    // Use normalised PBRT camera if available, else config.h defaults
+    if (scene.pbrt_cam_valid) {
+        camera.position = scene.pbrt_cam_position;
+        camera.look_at  = scene.pbrt_cam_look_at;
+        camera.up       = scene.pbrt_cam_up;
+        camera.fov_deg  = scene.pbrt_cam_fov;
+    } else {
+        camera.position = make_f3(SCENE_CAM_POS[0], SCENE_CAM_POS[1], SCENE_CAM_POS[2]);
+        camera.look_at  = make_f3(SCENE_CAM_LOOKAT[0], SCENE_CAM_LOOKAT[1], SCENE_CAM_LOOKAT[2]);
+        camera.up       = make_f3(0.0f, 1.0f, 0.0f);
+        camera.fov_deg  = SCENE_CAM_FOV;
+    }
     camera.width    = opt.config.image_width;
     camera.height   = opt.config.image_height;
     camera.dof_enabled    = DEFAULT_DOF_ENABLED;
@@ -156,19 +177,21 @@ int main(int argc, char* argv[]) {
     camera.sensor_height  = DEFAULT_DOF_SENSOR_HEIGHT;
     camera.update();
 
+    // -- Envmap data (from PBRT loader, may be overridden by saved camera) --
+    std::string envmap_path      = scene.pbrt_envmap_path;
+    float3 envmap_rotation       = scene.pbrt_envmap_rotation;
+    float envmap_scale_val       = scene.pbrt_envmap_scale;
+    float3 envmap_constant       = scene.pbrt_envmap_constant;
+
     // -- Load saved camera position (if any) --------------------------
-    std::string envmap_path;
-    float3 envmap_rotation = make_f3(0, 0, 0);
-    float envmap_scale_val = 1.0f;
-    float3 envmap_constant = make_f3(0, 0, 0);
     {
         AppState& app = app_state();
         std::string folder = scene_folder_from_profile(SCENE_OBJ_PATH);
         float yaw_init = 0.f, pitch_init = 0.f, roll_init = 0.f, light_init = DEFAULT_LIGHT_SCALE;
         PostFxParams loaded_postfx;
         if (load_camera_from_file(camera, yaw_init, pitch_init, roll_init, light_init, folder,
-                                  &envmap_path, &envmap_rotation, &envmap_scale_val, &loaded_postfx,
-                                  &envmap_constant)) {
+                                  &envmap_path, &envmap_rotation, &envmap_scale_val,
+                                  &loaded_postfx, &envmap_constant)) {
             app.yaw   = yaw_init;   app.pitch = pitch_init;  app.roll = roll_init;
             app.light_scale = light_init;  app.light_scale_changed = true;
             app.postfx = loaded_postfx;

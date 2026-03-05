@@ -13,6 +13,7 @@
 #include <vector>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 
 #include <optix.h>
@@ -112,100 +113,107 @@ void OptixRenderer::build_accel(const Scene& scene) {
     host_triangles_ = scene.triangles;
     num_tris_ = (int)scene.triangles.size();
 
-    // Flatten triangle vertices into a contiguous float3 array
-    size_t num_tris = scene.triangles.size();
-    std::vector<float3> vertices(num_tris * 3);
-    for (size_t i = 0; i < num_tris; ++i) {
-        vertices[i * 3 + 0] = scene.triangles[i].v0;
-        vertices[i * 3 + 1] = scene.triangles[i].v1;
-        vertices[i * 3 + 2] = scene.triangles[i].v2;
+    // Detect instancing mode change → must rebuild module/pipeline
+    bool need_instanced = scene.has_instances();
+    bool pipeline_mode_changed = (module_ != nullptr) && (need_instanced != instanced_pipeline_);
+    instanced_pipeline_ = need_instanced;
+
+    if (need_instanced) {
+        build_accel_instanced(scene);
+    } else {
+        // ── Single GAS path (original) ─────────────────────────────
+        size_t num_tris = scene.triangles.size();
+        std::vector<float3> vertices(num_tris * 3);
+        for (size_t i = 0; i < num_tris; ++i) {
+            vertices[i * 3 + 0] = scene.triangles[i].v0;
+            vertices[i * 3 + 1] = scene.triangles[i].v1;
+            vertices[i * 3 + 2] = scene.triangles[i].v2;
+        }
+
+        d_vertices_.upload(vertices);
+
+        OptixBuildInput build_input = {};
+        build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+
+        auto& tri_input = build_input.triangleArray;
+        CUdeviceptr vertex_ptr = reinterpret_cast<CUdeviceptr>(d_vertices_.d_ptr);
+        tri_input.vertexBuffers       = &vertex_ptr;
+        tri_input.numVertices         = (unsigned int)(num_tris * 3);
+        tri_input.vertexFormat         = OPTIX_VERTEX_FORMAT_FLOAT3;
+        tri_input.vertexStrideInBytes  = sizeof(float3);
+
+        unsigned int flags = OPTIX_GEOMETRY_FLAG_NONE;
+        tri_input.flags                = &flags;
+        tri_input.numSbtRecords        = 1;
+
+        OptixAccelBuildOptions accel_options = {};
+        accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION |
+                                   OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+        accel_options.operation  = OPTIX_BUILD_OPERATION_BUILD;
+
+        OptixAccelBufferSizes buf_sizes;
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(
+            context_, &accel_options, &build_input, 1, &buf_sizes));
+
+        DeviceBuffer temp_buffer;
+        temp_buffer.alloc(buf_sizes.tempSizeInBytes);
+        DeviceBuffer output_buffer;
+        output_buffer.alloc(buf_sizes.outputSizeInBytes);
+
+        DeviceBuffer compacted_size_buf;
+        compacted_size_buf.alloc(sizeof(size_t));
+        OptixAccelEmitDesc emit_desc;
+        emit_desc.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+        emit_desc.result = reinterpret_cast<CUdeviceptr>(compacted_size_buf.d_ptr);
+
+        OPTIX_CHECK(optixAccelBuild(
+            context_, nullptr,
+            &accel_options,
+            &build_input, 1,
+            reinterpret_cast<CUdeviceptr>(temp_buffer.d_ptr), temp_buffer.bytes,
+            reinterpret_cast<CUdeviceptr>(output_buffer.d_ptr), output_buffer.bytes,
+            &gas_handle_,
+            &emit_desc, 1));
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        size_t compacted_size;
+        CUDA_CHECK(cudaMemcpy(&compacted_size, compacted_size_buf.d_ptr,
+                               sizeof(size_t), cudaMemcpyDeviceToHost));
+        gas_buffer_.alloc(compacted_size);
+        OPTIX_CHECK(optixAccelCompact(
+            context_, nullptr, gas_handle_,
+            reinterpret_cast<CUdeviceptr>(gas_buffer_.d_ptr), compacted_size,
+            &gas_handle_));
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::printf("[OptiX] GAS built: %zu tris  compacted=%.1f KB\n",
+                    num_tris, (double)compacted_size / 1024.0);
     }
-
-    // Upload vertices
-    d_vertices_.upload(vertices);
-
-    // Build input
-    OptixBuildInput build_input = {};
-    build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-
-    auto& tri_input = build_input.triangleArray;
-    CUdeviceptr vertex_ptr = reinterpret_cast<CUdeviceptr>(d_vertices_.d_ptr);
-    tri_input.vertexBuffers       = &vertex_ptr;
-    tri_input.numVertices         = (unsigned int)(num_tris * 3);
-    tri_input.vertexFormat         = OPTIX_VERTEX_FORMAT_FLOAT3;
-    tri_input.vertexStrideInBytes  = sizeof(float3);
-
-    // All triangles share one SBT record (single material group)
-    unsigned int flags = OPTIX_GEOMETRY_FLAG_NONE;
-    tri_input.flags                = &flags;
-    tri_input.numSbtRecords        = 1;
-
-    // Compute memory requirements
-    OptixAccelBuildOptions accel_options = {};
-    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION |
-                               OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-    accel_options.operation  = OPTIX_BUILD_OPERATION_BUILD;
-
-    OptixAccelBufferSizes buf_sizes;
-    OPTIX_CHECK(optixAccelComputeMemoryUsage(
-        context_, &accel_options, &build_input, 1, &buf_sizes));
-
-    // Allocate temp + output
-    DeviceBuffer temp_buffer;
-    temp_buffer.alloc(buf_sizes.tempSizeInBytes);
-
-    DeviceBuffer output_buffer;
-    output_buffer.alloc(buf_sizes.outputSizeInBytes);
-
-    // Build (with compaction property)
-    DeviceBuffer compacted_size_buf;
-    compacted_size_buf.alloc(sizeof(size_t));
-
-    OptixAccelEmitDesc emit_desc;
-    emit_desc.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
-    emit_desc.result = reinterpret_cast<CUdeviceptr>(compacted_size_buf.d_ptr);
-
-    auto t_gas0 = std::chrono::high_resolution_clock::now();
-    OPTIX_CHECK(optixAccelBuild(
-        context_, nullptr,
-        &accel_options,
-        &build_input, 1,
-        reinterpret_cast<CUdeviceptr>(temp_buffer.d_ptr), temp_buffer.bytes,
-        reinterpret_cast<CUdeviceptr>(output_buffer.d_ptr), output_buffer.bytes,
-        &gas_handle_,
-        &emit_desc, 1));
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-    auto t_gas1 = std::chrono::high_resolution_clock::now();
-
-    size_t compacted_size;
-    CUDA_CHECK(cudaMemcpy(&compacted_size, compacted_size_buf.d_ptr,
-                           sizeof(size_t), cudaMemcpyDeviceToHost));
-
-    gas_buffer_.alloc(compacted_size);
-    OPTIX_CHECK(optixAccelCompact(
-        context_, nullptr,
-        gas_handle_,
-        reinterpret_cast<CUdeviceptr>(gas_buffer_.d_ptr), compacted_size,
-        &gas_handle_));
-
-    CUDA_CHECK(cudaDeviceSynchronize());
-    auto t_gas2 = std::chrono::high_resolution_clock::now();
-
-    double ms_build   = std::chrono::duration<double, std::milli>(t_gas1 - t_gas0).count();
-    double ms_compact = std::chrono::duration<double, std::milli>(t_gas2 - t_gas1).count();
-    std::printf("[OptiX] GAS built: %zu tris  uncompressed=%.1f KB  compacted=%.1f KB  "
-                "build=%.1f ms  compact=%.1f ms\n",
-                num_tris,
-                (double)output_buffer.bytes / 1024.0,
-                (double)compacted_size / 1024.0,
-                ms_build, ms_compact);
 
     // Now create module, programs, pipeline, SBT
     // Module/programs/pipeline are shader-dependent, not scene-dependent.
-    // Only create them on the first call so build_accel is safe to re-invoke
-    // when hot-swapping scenes at runtime (keys 1-5).
-    if (!module_) {
+    // Rebuild if instancing mode changed (different traversableGraphFlags).
+    if (!module_ || pipeline_mode_changed) {
+        if (pipeline_mode_changed) {
+            std::printf("[OptiX] Pipeline mode changed → rebuilding module/programs/pipeline\n");
+            if (pipeline_) { optixPipelineDestroy(pipeline_); pipeline_ = nullptr; }
+            if (module_)   { optixModuleDestroy(module_); module_ = nullptr; }
+            // Program groups are destroyed implicitly by module destroy?
+            // Actually they need explicit destroy. Let's destroy them.
+            auto destroy_pg = [](OptixProgramGroup& pg) {
+                if (pg) { optixProgramGroupDestroy(pg); pg = nullptr; }
+            };
+            destroy_pg(raygen_pg_);
+            destroy_pg(raygen_photon_pg_);
+            destroy_pg(raygen_targeted_pg_);
+            destroy_pg(raygen_dirmap_pg_);
+            destroy_pg(miss_pg_);
+            destroy_pg(miss_shadow_pg_);
+            destroy_pg(miss_shadow_material_pg_);
+            destroy_pg(hitgroup_pg_);
+            destroy_pg(hitgroup_shadow_pg_);
+            destroy_pg(hitgroup_shadow_material_pg_);
+        }
         create_module();
         create_programs();
         create_pipeline();
@@ -239,7 +247,9 @@ void OptixRenderer::create_module() {
 
     OptixPipelineCompileOptions pipeline_options = {};
     pipeline_options.usesMotionBlur                  = false;
-    pipeline_options.traversableGraphFlags            = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    pipeline_options.traversableGraphFlags            = instanced_pipeline_
+        ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING
+        : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     pipeline_options.numPayloadValues                 = OPTIX_NUM_PAYLOAD_VALUES;
     pipeline_options.numAttributeValues               = OPTIX_NUM_ATTRIBUTE_VALUES;
     pipeline_options.exceptionFlags                   = OPTIX_EXCEPTION_FLAG_NONE;
@@ -398,7 +408,9 @@ void OptixRenderer::create_pipeline() {
 
     OptixPipelineCompileOptions pipeline_options = {};
     pipeline_options.usesMotionBlur                  = false;
-    pipeline_options.traversableGraphFlags            = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    pipeline_options.traversableGraphFlags            = instanced_pipeline_
+        ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING
+        : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     pipeline_options.numPayloadValues                 = OPTIX_NUM_PAYLOAD_VALUES;
     pipeline_options.numAttributeValues               = OPTIX_NUM_ATTRIBUTE_VALUES;
     pipeline_options.exceptionFlags                   = OPTIX_EXCEPTION_FLAG_NONE;
@@ -416,15 +428,161 @@ void OptixRenderer::create_pipeline() {
         &pipeline_));
 
     // Set stack sizes
-    // Last param is maxTraversableGraphDepth: 1 for single GAS (no IAS)
+    // maxTraversableGraphDepth: 1 for single GAS, 2 for IAS
     OPTIX_CHECK(optixPipelineSetStackSize(
         pipeline_,
         OPTIX_STACK_SIZE,
         OPTIX_STACK_SIZE,
         OPTIX_STACK_SIZE,
-        1));
+        instanced_pipeline_ ? 2 : 1));
 
     std::cout << "[OptiX] Pipeline created\n";
+}
+
+// =====================================================================
+// build_accel_instanced() -- Build per-mesh GAS + top-level IAS
+// =====================================================================
+void OptixRenderer::build_accel_instanced(const Scene& scene) {
+    // Upload global vertex buffer (all meshes concatenated)
+    size_t num_tris = scene.triangles.size();
+    std::vector<float3> vertices(num_tris * 3);
+    for (size_t i = 0; i < num_tris; ++i) {
+        vertices[i * 3 + 0] = scene.triangles[i].v0;
+        vertices[i * 3 + 1] = scene.triangles[i].v1;
+        vertices[i * 3 + 2] = scene.triangles[i].v2;
+    }
+    d_vertices_.upload(vertices);
+    CUdeviceptr base_vertex_ptr = reinterpret_cast<CUdeviceptr>(d_vertices_.d_ptr);
+
+    // Build one GAS per mesh
+    size_t num_meshes = scene.meshes.size();
+    ias_gas_handles_.resize(num_meshes);
+    ias_gas_buffers_.resize(num_meshes);
+
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION |
+                               OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    accel_options.operation  = OPTIX_BUILD_OPERATION_BUILD;
+
+    size_t total_gas_bytes = 0;
+
+    for (size_t mi = 0; mi < num_meshes; ++mi) {
+        const auto& mesh = scene.meshes[mi];
+
+        OptixBuildInput build_input = {};
+        build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        auto& tri = build_input.triangleArray;
+
+        // Point to this mesh's slice of the global vertex buffer
+        CUdeviceptr mesh_vertex_ptr = base_vertex_ptr +
+            (size_t)mesh.tri_offset * 3 * sizeof(float3);
+        tri.vertexBuffers       = &mesh_vertex_ptr;
+        tri.numVertices         = mesh.tri_count * 3;
+        tri.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
+        tri.vertexStrideInBytes = sizeof(float3);
+
+        // KEY: primitiveIndexOffset makes optixGetPrimitiveIndex() return
+        // global index (tri_offset + local_index), preserving all existing
+        // device code that indexes into params.vertices/normals/etc.
+        tri.primitiveIndexOffset = mesh.tri_offset;
+
+        unsigned int flags = OPTIX_GEOMETRY_FLAG_NONE;
+        tri.flags          = &flags;
+        tri.numSbtRecords  = 1;
+
+        // Compute memory
+        OptixAccelBufferSizes buf_sizes;
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(
+            context_, &accel_options, &build_input, 1, &buf_sizes));
+
+        DeviceBuffer temp_buf, out_buf;
+        temp_buf.alloc(buf_sizes.tempSizeInBytes);
+        out_buf.alloc(buf_sizes.outputSizeInBytes);
+
+        DeviceBuffer compact_size_buf;
+        compact_size_buf.alloc(sizeof(size_t));
+        OptixAccelEmitDesc emit_desc;
+        emit_desc.type   = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE;
+        emit_desc.result = reinterpret_cast<CUdeviceptr>(compact_size_buf.d_ptr);
+
+        OPTIX_CHECK(optixAccelBuild(
+            context_, nullptr,
+            &accel_options, &build_input, 1,
+            reinterpret_cast<CUdeviceptr>(temp_buf.d_ptr), temp_buf.bytes,
+            reinterpret_cast<CUdeviceptr>(out_buf.d_ptr), out_buf.bytes,
+            &ias_gas_handles_[mi],
+            &emit_desc, 1));
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        size_t compacted_size;
+        CUDA_CHECK(cudaMemcpy(&compacted_size, compact_size_buf.d_ptr,
+                               sizeof(size_t), cudaMemcpyDeviceToHost));
+
+        ias_gas_buffers_[mi].alloc(compacted_size);
+        OPTIX_CHECK(optixAccelCompact(
+            context_, nullptr, ias_gas_handles_[mi],
+            reinterpret_cast<CUdeviceptr>(ias_gas_buffers_[mi].d_ptr), compacted_size,
+            &ias_gas_handles_[mi]));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        total_gas_bytes += compacted_size;
+    }
+
+    std::printf("[OptiX] IAS: %zu per-mesh GAS built  total=%.1f MB\n",
+                num_meshes, (double)total_gas_bytes / (1024.0 * 1024.0));
+
+    // Build OptixInstance array
+    size_t num_instances = scene.instances.size();
+    std::vector<OptixInstance> optix_instances(num_instances);
+    std::memset(optix_instances.data(), 0, num_instances * sizeof(OptixInstance));
+
+    for (size_t i = 0; i < num_instances; ++i) {
+        const auto& desc = scene.instances[i];
+        auto& oi = optix_instances[i];
+
+        // Copy 3×4 row-major transform
+        std::memcpy(oi.transform, desc.transform, sizeof(float) * 12);
+
+        oi.instanceId        = (unsigned int)i;
+        oi.sbtOffset         = 0;
+        oi.visibilityMask    = 255;
+        oi.flags             = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING;
+        oi.traversableHandle = ias_gas_handles_[desc.mesh_id];
+    }
+
+    d_ias_instances_.upload(optix_instances);
+
+    // Build IAS
+    OptixBuildInput ias_input = {};
+    ias_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+    ias_input.instanceArray.instances    = reinterpret_cast<CUdeviceptr>(d_ias_instances_.d_ptr);
+    ias_input.instanceArray.numInstances = (unsigned int)num_instances;
+
+    OptixAccelBuildOptions ias_options = {};
+    ias_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    ias_options.operation  = OPTIX_BUILD_OPERATION_BUILD;
+
+    OptixAccelBufferSizes ias_buf_sizes;
+    OPTIX_CHECK(optixAccelComputeMemoryUsage(
+        context_, &ias_options, &ias_input, 1, &ias_buf_sizes));
+
+    DeviceBuffer ias_temp;
+    ias_temp.alloc(ias_buf_sizes.tempSizeInBytes);
+    ias_buffer_.alloc(ias_buf_sizes.outputSizeInBytes);
+
+    OPTIX_CHECK(optixAccelBuild(
+        context_, nullptr,
+        &ias_options, &ias_input, 1,
+        reinterpret_cast<CUdeviceptr>(ias_temp.d_ptr), ias_temp.bytes,
+        reinterpret_cast<CUdeviceptr>(ias_buffer_.d_ptr), ias_buffer_.bytes,
+        &ias_handle_,
+        nullptr, 0));
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Use IAS as the top-level traversable
+    gas_handle_ = ias_handle_;
+
+    std::printf("[OptiX] IAS built: %zu instances  IAS=%.1f KB\n",
+                num_instances, (double)ias_buf_sizes.outputSizeInBytes / 1024.0);
 }
 
 void OptixRenderer::build_sbt(const Scene& scene) {

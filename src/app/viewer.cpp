@@ -26,6 +26,7 @@
 #include "optix/optix_renderer.h"
 #include "scene/scene_builder.h"
 #include "scene/obj_loader.h"
+#include "scene/pbrt/pbrt_loader.h"
 #include "photon/photon_io.h"
 
 #include <GLFW/glfw3.h>
@@ -79,11 +80,14 @@ AppState& app_state() { return s_app; }
 // -- Camera persistence -----------------------------------------------
 
 std::string scene_folder_from_profile(const char* obj_path) {
-    std::string p(obj_path);
-    auto slash = p.find('/');
-    if (slash == std::string::npos) slash = p.find('\\');
-    std::string folder = (slash != std::string::npos) ? p.substr(0, slash) : ".";
-    return std::string(SCENES_DIR) + "/" + folder;
+    namespace fs = std::filesystem;
+    fs::path p(obj_path);
+    // For relative-to-scenes paths ("cornell_box/file.obj"), prepend SCENES_DIR.
+    // For paths starting with ".." ("../tools/.../kroken/camera-1.pbrt"),
+    // resolve relative to SCENES_DIR so we reach the actual scene folder.
+    fs::path base = fs::path(SCENES_DIR) / p.parent_path();
+    // Normalise (collapses ".." segments)
+    return fs::weakly_canonical(base).string();
 }
 
 static constexpr const char* SAVED_CAMERA_FILENAME = "saved_camera.json";
@@ -135,7 +139,8 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            std::string* out_envmap_path,
                            float3* out_envmap_rotation,
                            float* out_envmap_scale,
-                           PostFxParams* out_postfx) {
+                           PostFxParams* out_postfx,
+                           float3* out_envmap_constant) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ifstream f(path);
     if (!f.is_open()) {
@@ -207,13 +212,22 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
             std::string v = val;
             if (!v.empty() && v.front() == '"') v.erase(0, 1);
             if (!v.empty() && v.back()  == '"') v.pop_back();
-            if (!v.empty()) *out_envmap_path = scene_folder + "/" + v;
+            if (!v.empty()) {
+                namespace fs = std::filesystem;
+                if (fs::path(v).is_absolute())
+                    *out_envmap_path = v;
+                else
+                    *out_envmap_path = scene_folder + "/" + v;
+            }
         }
         else if (key == "environment_rotation_deg" && out_envmap_rotation) {
             parse_float3(val, *out_envmap_rotation);
         }
         else if (key == "environment_scale" && out_envmap_scale) {
             *out_envmap_scale = (float)std::atof(val.c_str());
+        }
+        else if (key == "envmap_constant" && out_envmap_constant) {
+            parse_float3(val, *out_envmap_constant);
         }
         // Bloom / post-FX settings
         else if (key == "bloom_enabled" && out_postfx) {
@@ -706,7 +720,7 @@ static void render_hover_cell_overlay(
         debug.hover_y < 0 || debug.hover_y >= win_h) return;
 
     const PhotonSoA& photons = optix_renderer.photons();
-    const DenseGridData& grid = optix_renderer.dense_grid();
+    const HashGrid& grid = optix_renderer.dm_hash_grid();
     if (photons.size() == 0 || grid.sorted_indices.empty()) return;
 
     float s = ((float)debug.hover_x + 0.5f) / (float)win_w;
@@ -1029,6 +1043,19 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
+    // X -> toggle spectral outlier clamp
+    if (key == GLFW_KEY_X) {
+        s_app.spectral_clamp_enabled = !s_app.spectral_clamp_enabled;
+        if (g_active_optix_renderer)
+            g_active_optix_renderer->set_spectral_clamp_enabled(s_app.spectral_clamp_enabled);
+        // camera_moved resets accumulation via clear_buffers() in the main loop;
+        // spectral_ref_buffer is NOT cleared by clear_buffers (it's a reference).
+        s_app.camera_moved = true;
+        printf("[Clamp] Spectral outlier clamp %s\n",
+               s_app.spectral_clamp_enabled ? "ENABLED" : "DISABLED");
+        return;
+    }
+
     // C -> toggle histogram-only conclusions (skip expensive analysis)
     if (key == GLFW_KEY_C) {
         if (!s_app.guided_enabled) {
@@ -1245,14 +1272,42 @@ void run_interactive(
             // Load new scene
             Scene new_scene;
             auto t0 = std::chrono::high_resolution_clock::now();
-            if (!load_obj(obj_path, new_scene)) {
+
+            // Dispatch by file extension (.pbrt vs .obj)
+            bool load_ok = false;
+            {
+                std::string ext;
+                auto dot = obj_path.rfind('.');
+                if (dot != std::string::npos) ext = obj_path.substr(dot);
+                for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+                if (ext == ".pbrt")
+                    load_ok = load_pbrt(obj_path, new_scene);
+                else
+                    load_ok = load_obj(obj_path, new_scene);
+            }
+
+            if (!load_ok) {
                 std::cerr << "[Error] Failed to load: " << obj_path << "\n";
             } else {
+                // Ensure instancing metadata is populated
+                if (new_scene.meshes.empty() && !new_scene.triangles.empty()) {
+                    MeshDescriptor m0;
+                    m0.tri_offset = 0;
+                    m0.tri_count  = (uint32_t)new_scene.triangles.size();
+                    new_scene.meshes.push_back(m0);
+                    InstanceDescriptor inst0;
+                    inst0.mesh_id = 0;
+                    std::memset(inst0.transform, 0, sizeof(inst0.transform));
+                    inst0.transform[0] = 1.f; inst0.transform[5] = 1.f; inst0.transform[10] = 1.f;
+                    new_scene.instances.push_back(inst0);
+                }
                 if (!prof.is_reference)
                     new_scene.normalize_to_reference();
                 if (prof.rotate_x_180)
                     new_scene.rotate_x_180();
-                new_scene.build_bvh();
+                constexpr size_t BVH_TRI_LIMIT = 10'000'000;
+                if (new_scene.triangles.size() <= BVH_TRI_LIMIT)
+                    new_scene.build_bvh();
                 new_scene.build_emissive_distribution();
 
                 // Add lights based on scene lighting mode
@@ -1271,18 +1326,26 @@ void run_interactive(
                     s_app.postfx.bloom_scene_min_Le,
                     s_app.postfx.bloom_scene_max_Le);
 
-                // Reset camera to scene profile defaults
-                camera.position = make_f3(prof.cam_pos[0], prof.cam_pos[1], prof.cam_pos[2]);
-                camera.look_at  = make_f3(prof.cam_lookat[0], prof.cam_lookat[1], prof.cam_lookat[2]);
-                camera.fov_deg  = prof.cam_fov;
+                // Reset camera to scene profile defaults (or PBRT camera)
+                if (scene.pbrt_cam_valid) {
+                    camera.position = scene.pbrt_cam_position;
+                    camera.look_at  = scene.pbrt_cam_look_at;
+                    camera.up       = scene.pbrt_cam_up;
+                    camera.fov_deg  = scene.pbrt_cam_fov;
+                } else {
+                    camera.position = make_f3(prof.cam_pos[0], prof.cam_pos[1], prof.cam_pos[2]);
+                    camera.look_at  = make_f3(prof.cam_lookat[0], prof.cam_lookat[1], prof.cam_lookat[2]);
+                    camera.fov_deg  = prof.cam_fov;
+                }
                 camera.width    = win_w;
                 camera.height   = win_h;
                 camera.update();
 
-                // Override with saved camera position + envmap config
-                std::string new_envmap_path;
-                float3 new_envmap_rotation = make_f3(0, 0, 0);
-                float  new_envmap_scale    = 1.0f;
+                // Envmap data from PBRT loader (may be overridden by saved camera)
+                std::string new_envmap_path      = scene.pbrt_envmap_path;
+                float3 new_envmap_rotation       = scene.pbrt_envmap_rotation;
+                float  new_envmap_scale          = scene.pbrt_envmap_scale;
+                float3 new_envmap_constant       = scene.pbrt_envmap_constant;
                 {
                     std::string folder = scene_folder_from_profile(prof.obj_path);
                     float saved_yaw = 0.f, saved_pitch = 0.f, saved_roll = 0.f;
@@ -1291,7 +1354,8 @@ void run_interactive(
                     if (load_camera_from_file(camera, saved_yaw, saved_pitch,
                                               saved_roll, saved_light, folder,
                                               &new_envmap_path, &new_envmap_rotation,
-                                              &new_envmap_scale, &loaded_postfx)) {
+                                              &new_envmap_scale, &loaded_postfx,
+                                              &new_envmap_constant)) {
                         s_app.yaw   = saved_yaw;
                         s_app.pitch = saved_pitch;
                         s_app.roll  = saved_roll;
@@ -1331,12 +1395,27 @@ void run_interactive(
                                     new_envmap_path.c_str());
                         scene.envmap.reset();
                     }
+                } else if (new_envmap_constant.x > 0.f || new_envmap_constant.y > 0.f
+                           || new_envmap_constant.z > 0.f) {
+                    scene.envmap = std::make_shared<EnvironmentMap>();
+                    if (create_constant_envmap(new_envmap_constant.x,
+                                              new_envmap_constant.y,
+                                              new_envmap_constant.z,
+                                              new_envmap_scale,
+                                              new_envmap_rotation, *scene.envmap)) {
+                        scene.envmap->scene_center = scene.scene_bounding_center();
+                        scene.envmap->scene_radius = scene.scene_bounding_radius() * 1.1f;
+                        scene.compute_envmap_selection_prob();
+                    } else {
+                        scene.envmap.reset();
+                    }
                 }
                 optix_renderer.upload_envmap_data(scene);
 
                 // ── Trace photons on GPU (after envmap is available) ──
                 auto tp0 = std::chrono::high_resolution_clock::now();
                 optix_renderer.trace_photons(scene, opt.config);
+                optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
                 auto tp1 = std::chrono::high_resolution_clock::now();
                 double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
 
@@ -1375,6 +1454,7 @@ void run_interactive(
             auto tp0 = std::chrono::high_resolution_clock::now();
             optix_renderer.trace_photons(
                 scene, opt.config, 0.f, s_app.idle_photon_seed++);
+            optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
             auto tp1 = std::chrono::high_resolution_clock::now();
             double photon_ms = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
             std::cout << "[Photon] Retrace done in " << photon_ms << " ms\n";
@@ -1525,6 +1605,7 @@ void run_interactive(
                 optix_renderer.set_preview_mode(true);
                 optix_renderer.trace_photons(
                     scene, opt.config, 0.f, s_app.idle_photon_seed++);
+                optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
                 s_app.idle_rendering_active = false;
             }
             optix_renderer.clear_buffers();
@@ -1543,6 +1624,7 @@ void run_interactive(
                 opt.config.num_photons = s_app.base_num_photons;
                 optix_renderer.trace_photons(
                     scene, opt.config, 0.f, s_app.idle_photon_seed++);
+                optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
                 optix_renderer.set_preview_mode(false);
                 optix_renderer.clear_buffers();
 
@@ -1741,7 +1823,7 @@ void run_interactive(
                         g_active_optix_renderer->photons());
                     // Grid occupancy
                     rs.grid_occupancy = compute_grid_occupancy(
-                        g_active_optix_renderer->dense_grid());
+                        g_active_optix_renderer->dm_hash_grid());
                 }
                 // Timing
                 rs.timing.total_render_ms = s_app.last_render_ms;
@@ -1779,7 +1861,7 @@ void run_interactive(
 
                 // ── Save photon cache + launch analysis tool ─────────
                 const auto& snap_photons = optix_renderer.photons();
-                const auto& snap_grid    = optix_renderer.dense_grid();
+                const auto& snap_grid    = optix_renderer.dm_hash_grid();
                 if (snap_photons.size() > 0) {
                     std::string cache_path = snap_dir + "/photons.bin";
                     uint64_t snap_hash = compute_scene_hash(

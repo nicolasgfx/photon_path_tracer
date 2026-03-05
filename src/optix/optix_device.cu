@@ -109,6 +109,18 @@ extern "C" __global__ void __raygen__render() {
         // v3: photon-guided iterative path tracer (Part 2 §4)
         {
             PathTraceResult ptr = full_path_trace_v3(origin, direction, rng, pixel_idx, s, params.samples_per_pixel);
+
+            // ── Spectral outlier clamp (photon-referenced) ──────────
+            if (params.spectral_clamp_enabled && params.spectral_ref_buffer) {
+                for (int b = 0; b < NUM_LAMBDA; ++b) {
+                    float ref = params.spectral_ref_buffer[pixel_idx * NUM_LAMBDA + b];
+                    if (ref > 0.f) {
+                        float limit = ref * params.spectral_clamp_threshold;
+                        ptr.combined.value[b] = fminf(ptr.combined.value[b], limit);
+                    }
+                }
+            }
+
             L_accum        += ptr.combined;
             L_nee_accum    += ptr.nee_direct;
             L_photon_accum += ptr.photon_indirect;
@@ -307,6 +319,18 @@ extern "C" __global__ void __closesthit__radiance() {
     float3 n1 = params.normals[prim_idx * 3 + 1];
     float3 n2 = params.normals[prim_idx * 3 + 2];
     float3 shading_normal = normalize(n0 * alpha + n1 * beta + n2 * gamma);
+
+    // Apply instance object→world transform when IAS instancing is active.
+    // For single-GAS scenes (has_instances==0) this block is skipped entirely.
+    // For instanced scenes, optixGetObjectToWorldTransformMatrix gives us
+    // the 3×4 row-major transform set on the OptixInstance.
+    if (params.has_instances) {
+        float xform[12];
+        optixGetObjectToWorldTransformMatrix(xform);
+        pos             = transform_point_3x4(xform, pos);
+        geo_normal      = transform_normal_3x4(xform, geo_normal);
+        shading_normal  = transform_normal_3x4(xform, shading_normal);
+    }
 
     // Interpolate texture coordinates
     float2 uv0 = params.texcoords[prim_idx * 3 + 0];

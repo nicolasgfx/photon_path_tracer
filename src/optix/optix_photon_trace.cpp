@@ -105,10 +105,13 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     d_photon_norm_x_.alloc(max_total * sizeof(float));
     d_photon_norm_y_.alloc(max_total * sizeof(float));
     d_photon_norm_z_.alloc(max_total * sizeof(float));
+    d_photon_flux_.alloc(max_total * HERO_WAVELENGTHS * sizeof(float));
+    d_photon_lambda_.alloc(max_total * HERO_WAVELENGTHS * sizeof(uint16_t));
 
     // Build launch params for photon trace
     LaunchParams lp = {};
     lp.traversable      = gas_handle_;
+    lp.has_instances     = instanced_pipeline_ ? 1 : 0;
     lp.vertices          = d_vertices_.as<float3>();
     lp.normals           = d_normals_.as<float3>();
     lp.texcoords         = d_texcoords_.as<float2>();
@@ -151,6 +154,7 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         ? d_emissive_local_idx_.as<int>() : nullptr;
     lp.num_emissive         = num_emissive_;
     lp.total_emissive_power = scene.total_emissive_power;
+    lp.guide_radius         = gather_radius_;
 
     // Photon output buffers
     lp.out_photon_pos_x  = d_out_photon_pos_x_.as<float>();
@@ -197,6 +201,27 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
 
     // Multi-map seed for RNG decorrelation
     lp.photon_map_seed = photon_map_seed;
+
+    // Environment map data (needed for envmap-based photon emission)
+    if (envmap_uploaded_) {
+        lp.has_envmap             = 1;
+        lp.envmap_pixels          = d_envmap_pixels_.as<float>();
+        lp.envmap_marginal_cdf    = d_envmap_marginal_cdf_.as<float>();
+        lp.envmap_conditional_cdf = d_envmap_conditional_cdf_.as<float>();
+        lp.envmap_width           = envmap_width_;
+        lp.envmap_height          = envmap_height_;
+        lp.envmap_scale           = envmap_scale_;
+        lp.envmap_total_power     = envmap_total_power_;
+        lp.envmap_scene_center    = envmap_scene_center_;
+        lp.envmap_scene_radius    = envmap_scene_radius_;
+        lp.envmap_rot_row0        = envmap_rot_row0_;
+        lp.envmap_rot_row1        = envmap_rot_row1_;
+        lp.envmap_rot_row2        = envmap_rot_row2_;
+        lp.envmap_inv_rot_row0    = envmap_inv_rot_row0_;
+        lp.envmap_inv_rot_row1    = envmap_inv_rot_row1_;
+        lp.envmap_inv_rot_row2    = envmap_inv_rot_row2_;
+        lp.envmap_selection_prob  = envmap_selection_prob_;
+    }
 
     // Upload params
     d_launch_params_.ensure_alloc(sizeof(LaunchParams));
@@ -257,6 +282,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
     CUDA_CHECK(cudaMemcpy(d_photon_norm_x_.d_ptr, d_out_photon_norm_x_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemcpy(d_photon_norm_y_.d_ptr, d_out_photon_norm_y_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaMemcpy(d_photon_norm_z_.d_ptr, d_out_photon_norm_z_.d_ptr, stored_count*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_flux_.d_ptr,   d_out_photon_flux_.d_ptr,   stored_count*HERO_WAVELENGTHS*sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_photon_lambda_.d_ptr,  d_out_photon_lambda_.d_ptr, stored_count*HERO_WAVELENGTHS*sizeof(uint16_t), cudaMemcpyDeviceToDevice));
 
     // Download photon data to CPU (still needed for diagnostics, irradiance
     // heatmap, and k-NN adaptive radius).
@@ -390,6 +417,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_x_.d_ptr + boff, d_out_photon_norm_x_.d_ptr, caustic_stored*sizeof(float), d2d));
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_y_.d_ptr + boff, d_out_photon_norm_y_.d_ptr, caustic_stored*sizeof(float), d2d));
                 CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_z_.d_ptr + boff, d_out_photon_norm_z_.d_ptr, caustic_stored*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((float*)d_photon_flux_.d_ptr   + boff*HERO_WAVELENGTHS, d_out_photon_flux_.d_ptr,   caustic_stored*HERO_WAVELENGTHS*sizeof(float), d2d));
+                CUDA_CHECK(cudaMemcpy((uint16_t*)d_photon_lambda_.d_ptr + boff*HERO_WAVELENGTHS, d_out_photon_lambda_.d_ptr, caustic_stored*HERO_WAVELENGTHS*sizeof(uint16_t), d2d));
             }
 
             // Update stored_count to include caustic photons
@@ -539,6 +568,8 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_x_.d_ptr + boff, d_out_photon_norm_x_.d_ptr, targeted_stored*sizeof(float), d2d));
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_y_.d_ptr + boff, d_out_photon_norm_y_.d_ptr, targeted_stored*sizeof(float), d2d));
                         CUDA_CHECK(cudaMemcpy((float*)d_photon_norm_z_.d_ptr + boff, d_out_photon_norm_z_.d_ptr, targeted_stored*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((float*)d_photon_flux_.d_ptr   + boff*HERO_WAVELENGTHS, d_out_photon_flux_.d_ptr,   targeted_stored*HERO_WAVELENGTHS*sizeof(float), d2d));
+                        CUDA_CHECK(cudaMemcpy((uint16_t*)d_photon_lambda_.d_ptr + boff*HERO_WAVELENGTHS, d_out_photon_lambda_.d_ptr, targeted_stored*HERO_WAVELENGTHS*sizeof(uint16_t), d2d));
                     }
 
                     stored_count = (unsigned int)total;

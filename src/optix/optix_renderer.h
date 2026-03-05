@@ -264,6 +264,10 @@ public:
     void set_guide_fraction(float f) { guide_fraction_ = f; }
     float get_guide_fraction() const  { return guide_fraction_; }
 
+    /// Runtime spectral outlier clamp (X key toggle).
+    void set_spectral_clamp_enabled(bool v) { runtime_spectral_clamp_enabled_ = v; }
+    bool is_spectral_clamp_enabled() const  { return runtime_spectral_clamp_enabled_; }
+
     /// Preview mode: skip kNN guide, caustic gather, photon final gather.
     /// Used during interactive navigation for real-time frame rates.
     void set_preview_mode(bool v) { preview_mode_ = v; }
@@ -378,6 +382,7 @@ private:
     void create_programs();
     void create_pipeline();
     void build_sbt(const Scene& scene);
+    void build_accel_instanced(const Scene& scene);  // IAS path
 
     // Denoiser
     void setup_denoiser(int w, int h, bool guide_albedo, bool guide_normal);
@@ -413,9 +418,17 @@ private:
     // SBT
     OptixShaderBindingTable  sbt_          = {};
 
-    // Acceleration structure
+    // Acceleration structure (single GAS path)
     OptixTraversableHandle   gas_handle_   = 0;
     DeviceBuffer             gas_buffer_;
+
+    // Acceleration structure (IAS path — per-mesh GAS + top-level IAS)
+    std::vector<OptixTraversableHandle> ias_gas_handles_;
+    std::vector<DeviceBuffer>           ias_gas_buffers_;
+    OptixTraversableHandle              ias_handle_ = 0;
+    DeviceBuffer                        ias_buffer_;
+    DeviceBuffer                        d_ias_instances_;  // OptixInstance array
+    bool                                instanced_pipeline_ = false;
 
     // Device buffers
     DeviceBuffer d_spectrum_buffer_;   // float [W*H*NUM_LAMBDA]
@@ -493,6 +506,8 @@ private:
     DeviceBuffer d_photon_pos_x_, d_photon_pos_y_, d_photon_pos_z_;
     DeviceBuffer d_photon_wi_x_,  d_photon_wi_y_,  d_photon_wi_z_;
     DeviceBuffer d_photon_norm_x_, d_photon_norm_y_, d_photon_norm_z_;  // surface normals
+    DeviceBuffer d_photon_flux_;    // [num_photons * HERO_WAVELENGTHS] hero flux values
+    DeviceBuffer d_photon_lambda_;  // [num_photons * HERO_WAVELENGTHS] hero wavelength bins
 
     // Direction-map hash grid device buffers (Teschner spatial hash for kNN)
     DeviceBuffer d_dm_hash_sorted_indices_, d_dm_hash_cell_start_, d_dm_hash_cell_end_;
@@ -500,6 +515,7 @@ private:
     // Direction map device buffer + host container
     DeviceBuffer d_dir_map_buffer_;            // DirMapEntry [dir_map_width * dir_map_height]
     DirectionMap direction_map_;               // host-side copy for debug PNG output
+    DeviceBuffer d_spectral_ref_buffer_;       // [width * height * NUM_LAMBDA] photon irradiance ref
 
     // Emitter data (device -- for GPU photon tracing)
     DeviceBuffer d_emissive_indices_;
@@ -611,6 +627,9 @@ private:
     float guide_fraction_ = DEFAULT_GUIDE_FRACTION;
     bool  preview_mode_   = true;   // interactive preview: unguided PT, reduced bounce cap
 
+    // Runtime spectral outlier clamp (X key toggle)
+    bool  runtime_spectral_clamp_enabled_ = DEFAULT_SPECTRAL_CLAMP_ENABLED;
+
     // Post-FX pipeline (bloom, etc.)
     PostFxPipeline postfx_pipeline_;
     PostFxParams   postfx_params_;
@@ -658,6 +677,9 @@ inline void OptixRenderer::resize(int w, int h) {
     d_nee_direct_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
     d_photon_indirect_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
 
+    // Spectral outlier clamp reference buffer
+    d_spectral_ref_buffer_.alloc(pixels * NUM_LAMBDA * sizeof(float));
+
     // Per-bounce AOV buffers (DB-04)
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
         d_bounce_aov_[b].alloc(pixels * NUM_LAMBDA * sizeof(float));
@@ -684,6 +706,7 @@ inline void OptixRenderer::resize(int w, int h) {
     CUDA_CHECK(cudaMemset(d_pixel_max_spp_.d_ptr,   0, d_pixel_max_spp_.bytes));
     CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+    CUDA_CHECK(cudaMemset(d_spectral_ref_buffer_.d_ptr, 0, d_spectral_ref_buffer_.bytes));
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
         CUDA_CHECK(cudaMemset(d_bounce_aov_[b].d_ptr, 0, d_bounce_aov_[b].bytes));
 
@@ -719,6 +742,8 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     if (d_photon_indirect_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
+    // NOTE: d_spectral_ref_buffer_ is NOT cleared here — it is a precomputed
+    // reference (populated by build_direction_map), not a progressive accumulator.
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
         if (d_bounce_aov_[b].d_ptr)
             CUDA_CHECK(cudaMemset(d_bounce_aov_[b].d_ptr, 0, d_bounce_aov_[b].bytes));

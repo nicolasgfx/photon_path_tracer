@@ -8,7 +8,66 @@
 #include <algorithm>
 #include <cstring>
 
+// stb zlib decompression (implementation lives in obj_loader.cpp)
+extern "C" {
+    extern char* stbi_zlib_decode_noheader_malloc(const char* buffer, int len, int* outlen);
+    extern void  stbi_image_free(void* retval_from_stbi_load);
+}
+
 namespace pbrt {
+
+// ── Gzip decompression helper ───────────────────────────────────────
+// Returns decompressed data, or empty string on failure.
+static std::string decompress_gzip(const std::string& filepath) {
+    std::ifstream f(filepath, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) return {};
+
+    auto file_size = f.tellg();
+    if (file_size < 18) return {};           // too small for valid gzip
+    f.seekg(0);
+
+    std::vector<char> gz(file_size);
+    f.read(gz.data(), file_size);
+    if (!f) return {};
+
+    const auto* hdr = reinterpret_cast<const unsigned char*>(gz.data());
+    if (hdr[0] != 0x1f || hdr[1] != 0x8b || hdr[2] != 0x08)
+        return {};                            // not a gzip file
+
+    // Skip gzip header (RFC 1952)
+    size_t pos = 10;
+    uint8_t flags = hdr[3];
+    if (flags & 0x04) {                       // FEXTRA
+        if (pos + 2 > (size_t)file_size) return {};
+        uint16_t xlen;
+        std::memcpy(&xlen, gz.data() + pos, 2);
+        pos += 2 + xlen;
+    }
+    if (flags & 0x08)                         // FNAME
+        while (pos < (size_t)file_size && gz[pos++] != '\0') {}
+    if (flags & 0x10)                         // FCOMMENT
+        while (pos < (size_t)file_size && gz[pos++] != '\0') {}
+    if (flags & 0x02) pos += 2;              // FHCRC
+
+    if (pos >= (size_t)file_size) return {};
+
+    // Uncompressed size is last 4 bytes (mod 2^32)
+    uint32_t orig_size;
+    std::memcpy(&orig_size, gz.data() + file_size - 4, 4);
+
+    // Deflate payload
+    int deflate_len = (int)((size_t)file_size - pos - 8);
+    if (deflate_len <= 0) return {};
+
+    int out_len = 0;
+    char* decompressed = stbi_zlib_decode_noheader_malloc(
+        gz.data() + pos, deflate_len, &out_len);
+    if (!decompressed) return {};
+
+    std::string result(decompressed, out_len);
+    stbi_image_free(decompressed);
+    return result;
+}
 
 // ── Property descriptor from PLY header ─────────────────────────────
 enum class PlyPropType { Float, Double, Int8, UInt8, Int16, UInt16, Int32, UInt32, List };
@@ -99,12 +158,37 @@ struct PlyElement {
     std::vector<PlyProperty> properties;
 };
 
+// Internal implementation that reads from any std::istream.
+static bool load_ply_from_stream(std::istream& file, const std::string& filepath, PlyMesh& out);
+
 bool load_ply(const std::string& filepath, PlyMesh& out) {
+    // Detect .gz extension
+    bool is_gz = false;
+    {
+        auto len = filepath.size();
+        if (len >= 3 && filepath.compare(len - 3, 3, ".gz") == 0)
+            is_gz = true;
+    }
+
+    if (is_gz) {
+        std::string decompressed = decompress_gzip(filepath);
+        if (decompressed.empty()) {
+            std::cerr << "[PLY] Failed to decompress gzip: " << filepath << "\n";
+            return false;
+        }
+        std::istringstream stream(std::move(decompressed));
+        return load_ply_from_stream(stream, filepath, out);
+    }
+
     std::ifstream file(filepath, std::ios::binary);
     if (!file.is_open()) {
         std::cerr << "[PLY] Cannot open: " << filepath << "\n";
         return false;
     }
+    return load_ply_from_stream(file, filepath, out);
+}
+
+static bool load_ply_from_stream(std::istream& file, const std::string& filepath, PlyMesh& out) {
 
     // ── Parse header ────────────────────────────────────────────────
     std::string line;

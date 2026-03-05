@@ -4796,6 +4796,97 @@ TEST(CellBinGrid, NormalGate_FluxConservation_SingleSurface) {
 }
 
 // =====================================================================
+//  SECTION – IAS Instancing metadata
+// =====================================================================
+
+TEST(Instancing, HasInstancesRequiresMultiple) {
+    Scene scene;
+    // Empty → no instances
+    EXPECT_FALSE(scene.has_instances());
+
+    // Single mesh + single instance → NOT instanced (single-GAS path)
+    MeshDescriptor m0; m0.tri_offset = 0; m0.tri_count = 100;
+    scene.meshes.push_back(m0);
+    InstanceDescriptor i0{};
+    i0.mesh_id = 0;
+    i0.transform[0] = 1.f; i0.transform[5] = 1.f; i0.transform[10] = 1.f;
+    scene.instances.push_back(i0);
+    EXPECT_FALSE(scene.has_instances());
+
+    // Two instances of mesh 0 → instanced (IAS path)
+    InstanceDescriptor i1{};
+    i1.mesh_id = 0;
+    i1.transform[0] = 1.f; i1.transform[5] = 1.f; i1.transform[10] = 1.f;
+    i1.transform[3] = 5.f;  // translated +5 in X
+    scene.instances.push_back(i1);
+    EXPECT_TRUE(scene.has_instances());
+}
+
+TEST(Instancing, MeshDescriptorOffsets) {
+    Scene scene;
+    // Two meshes: mesh0 = tris [0..99], mesh1 = tris [100..249]
+    MeshDescriptor m0; m0.tri_offset = 0;   m0.tri_count = 100;
+    MeshDescriptor m1; m1.tri_offset = 100; m1.tri_count = 150;
+    scene.meshes.push_back(m0);
+    scene.meshes.push_back(m1);
+
+    EXPECT_EQ(scene.meshes[0].tri_offset, 0u);
+    EXPECT_EQ(scene.meshes[0].tri_count, 100u);
+    EXPECT_EQ(scene.meshes[1].tri_offset, 100u);
+    EXPECT_EQ(scene.meshes[1].tri_count, 150u);
+
+    // Three instances: mesh0 ×1, mesh1 ×2
+    InstanceDescriptor i0{}; i0.mesh_id = 0;
+    i0.transform[0] = 1.f; i0.transform[5] = 1.f; i0.transform[10] = 1.f;
+    InstanceDescriptor i1{}; i1.mesh_id = 1;
+    i1.transform[0] = 1.f; i1.transform[5] = 1.f; i1.transform[10] = 1.f;
+    InstanceDescriptor i2{}; i2.mesh_id = 1;
+    i2.transform[0] = 1.f; i2.transform[5] = 1.f; i2.transform[10] = 1.f;
+    i2.transform[3] = 10.f;
+    scene.instances.push_back(i0);
+    scene.instances.push_back(i1);
+    scene.instances.push_back(i2);
+
+    EXPECT_EQ(scene.instances.size(), 3u);
+    EXPECT_TRUE(scene.has_instances());
+    EXPECT_EQ(scene.instances[1].mesh_id, 1u);
+    EXPECT_EQ(scene.instances[2].mesh_id, 1u);
+}
+
+TEST(Instancing, ObjBackwardCompat) {
+    // Load Cornell Box via OBJ (has no instancing metadata)
+    Scene scene;
+    std::string path = std::string(SCENES_DIR) + "/cornell_box/cornellbox.obj";
+    ASSERT_TRUE(load_obj(path, scene));
+    ASSERT_GT(scene.triangles.size(), 0u);
+
+    // Before wrapping: meshes/instances should be empty
+    EXPECT_TRUE(scene.meshes.empty());
+    EXPECT_TRUE(scene.instances.empty());
+
+    // Apply the same wrapping logic as main.cpp
+    if (scene.meshes.empty() && !scene.triangles.empty()) {
+        MeshDescriptor m0;
+        m0.tri_offset = 0;
+        m0.tri_count  = (uint32_t)scene.triangles.size();
+        scene.meshes.push_back(m0);
+
+        InstanceDescriptor inst0{};
+        inst0.mesh_id = 0;
+        inst0.transform[0] = 1.f; inst0.transform[5] = 1.f; inst0.transform[10] = 1.f;
+        scene.instances.push_back(inst0);
+    }
+
+    // After wrapping: single mesh, single instance, NOT instanced
+    EXPECT_EQ(scene.meshes.size(), 1u);
+    EXPECT_EQ(scene.instances.size(), 1u);
+    EXPECT_FALSE(scene.has_instances());
+    EXPECT_EQ(scene.meshes[0].tri_offset, 0u);
+    EXPECT_EQ(scene.meshes[0].tri_count, (uint32_t)scene.triangles.size());
+    EXPECT_EQ(scene.instances[0].mesh_id, 0u);
+}
+
+// =====================================================================
 //  Main
 // =====================================================================
 

@@ -50,8 +50,8 @@ constexpr bool ENABLE_GUIDE_STATS = false;
 //#define SCENE_BATHROOM
 //#define SCENE_LIVING_ROOM_2
 //#define SCENE_BEDROOM
-//#define SCENE_VILLA
-//#define SCENE_WATERCOLOR
+//#define SCENE_CROWN
+//#define SCENE_SSSDRAGON
 //#define SCENE_ZERO_DAY
 //#define SCENE_KROKEN
 
@@ -84,8 +84,8 @@ constexpr int DEFAULT_SPP = STRATA_X * STRATA_Y;       // [R]
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 3000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 3000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -183,7 +183,7 @@ constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
 //   5. Sample one direction per SPP for MIS.
 
 // Master switch — disables the entire first-hit guide when false.
-constexpr bool  DEFAULT_USE_GUIDE = true;           // [K]
+constexpr bool  DEFAULT_USE_GUIDE = !true;           // [K]
 
 // Max photons gathered by kNN before shadow-ray filtering.
 constexpr int MAX_GUIDE_PDF_PHOTONS = 64;
@@ -244,6 +244,13 @@ constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 1000;  // [R] SPP between rebuilds
 // Set to very large values — if they fire, investigate the root cause.
 constexpr float MAX_BOUNCE_CONTRIBUTION  = 1e4f;
 constexpr float MAX_PATH_THROUGHPUT      = 1e4f;
+
+// ── Spectral outlier clamp (photon-referenced) ──────────────────────
+// Uses per-pixel photon irradiance estimates as a low-variance reference
+// to soft-clamp high-variance PT samples per wavelength channel.
+// A PT sample value above threshold × photon_ref is clamped to that limit.
+constexpr bool  DEFAULT_SPECTRAL_CLAMP_ENABLED   = true;    // [K] X key toggle
+constexpr float DEFAULT_SPECTRAL_CLAMP_THRESHOLD = 20.0f;   // max ratio PT/ref before clamping
 
 
 // =====================================================================
@@ -376,14 +383,14 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
   constexpr float SCENE_CAM_FOV            = 70.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
-#elif defined(SCENE_VILLA)
-  constexpr const char* SCENE_OBJ_PATH    = "villa/villa-daylight.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Villa";
+#elif defined(SCENE_CROWN)
+  constexpr const char* SCENE_OBJ_PATH    = "../tools/pbrtv4_scenes/pbrt-v4-scenes/crown/crown.pbrt";
+  constexpr const char* SCENE_DISPLAY_NAME = "Crown";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 48.0f;
-  constexpr float SCENE_CAM_SPEED          = 0.1f;
+  constexpr float SCENE_CAM_FOV            = 47.0f;
+  constexpr float SCENE_CAM_SPEED          = 0.01f;
 
 #elif defined(SCENE_SAN_MIGUEL)
   constexpr const char* SCENE_OBJ_PATH    = "sanmiguel/sanmiguel-courtyard.obj";
@@ -448,13 +455,13 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
   constexpr float SCENE_CAM_FOV            = 70.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
-#elif defined(SCENE_WATERCOLOR)
-  constexpr const char* SCENE_OBJ_PATH    = "watercolor/camera-1.obj";
-  constexpr const char* SCENE_DISPLAY_NAME = "Watercolor";
+#elif defined(SCENE_SSSDRAGON)
+  constexpr const char* SCENE_OBJ_PATH    = "../tools/pbrtv4_scenes/pbrt-v4-scenes/sssdragon/dragon_10.pbrt";
+  constexpr const char* SCENE_DISPLAY_NAME = "SSS Dragon";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 26.5f;
+  constexpr float SCENE_CAM_FOV            = 28.8f;
   constexpr float SCENE_CAM_SPEED          = 0.01f;
 
 #elif defined(SCENE_KROKEN)
@@ -514,17 +521,17 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     // Key 7 – Bedroom
     { "bedroom/scene-v4.obj",                    "Bedroom",           false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
-    // Key 8 – Villa
-    { "villa/villa-daylight.obj",                "Villa",             false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, true },
-    // Key 9 – Watercolor
-    { "watercolor/camera-1.obj",                 "Watercolor",        false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
+    // Key 8 – Crown
+    { "../tools/pbrtv4_scenes/pbrt-v4-scenes/crown/crown.pbrt", "Crown", false,
+      {0,0,0}, {0,0,-1}, 47.f, 0.01f, SceneLightMode::FromMTL, false },
+    // Key 9 – SSS Dragon
+    { "../tools/pbrtv4_scenes/pbrt-v4-scenes/sssdragon/dragon_10.pbrt", "SSS Dragon", false,
+      {0,0,0}, {0,0,-1}, 28.8f, 0.01f, SceneLightMode::FromMTL, false },
     // Key 0 – Zero Day
     { "zero_day/frame25.obj",   "Zero Day",          false,
       {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
     // Shift+1 – Kroken
     { "../tools/pbrtv4_scenes/pbrt-v4-scenes/kroken/camera-1.pbrt", "Kroken", false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.05f, SceneLightMode::FromMTL, false },
+      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
 };
 

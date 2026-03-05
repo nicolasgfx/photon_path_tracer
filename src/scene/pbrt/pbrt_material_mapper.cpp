@@ -60,6 +60,29 @@ static float safe_float(const Param* p, float def) {
     return def;
 }
 
+// ── Spectrum-aware eta extraction ───────────────────────────────────
+// PBRT "spectrum eta" stores wavelength/value pairs: [λ0 v0 λ1 v1 ...].
+// A plain "float eta" stores a single scalar.
+// get_float() returns floats[0] which is the wavelength for spectrum
+// params — wrong.  This helper averages the value entries instead.
+static float get_spectrum_eta(const std::vector<Param>& params,
+                              const std::string& name, float def) {
+    auto* p = get_param(params, name);
+    if (!p) return def;
+    if (p->type == "spectrum" && p->floats.size() >= 2) {
+        // Wavelength/value pairs: average the values (odd indices)
+        double sum = 0;
+        int count = 0;
+        for (size_t i = 1; i < p->floats.size(); i += 2) {
+            sum += p->floats[i];
+            ++count;
+        }
+        return count > 0 ? (float)(sum / count) : def;
+    }
+    if (!p->floats.empty()) return (float)p->floats[0];
+    return def;
+}
+
 static float safe_float_or_lum(const Param* p, float def) {
     if (!p) return def;
     if (p->floats.size() >= 3)
@@ -184,6 +207,7 @@ uint32_t MaterialMapper::map_one_material(const std::string& name,
     else if (mt == "coatedconductor") map_coated_conductor(mat, params);
     else if (mt == "measured")        map_measured(mat, params);
     else if (mt == "diffusetransmission") map_diffuse_transmission(mat, params);
+    else if (mt == "subsurface")      map_subsurface(mat, params);
     else if (mt == "mix")             map_mix(mat, pbrt_mat);
     else {
         // Unknown → default lambert
@@ -256,7 +280,7 @@ void MaterialMapper::map_coated_diffuse(Material& mat, const std::vector<Param>&
     mat.pb_clearcoat_set = true;
 
     // Coat IOR
-    float eta = (float)get_float(params, "eta", 1.5);
+    float eta = get_spectrum_eta(params, "eta", 1.5f);
     mat.pb_eta = eta;
     mat.pb_eta_set = true;
     mat.ior = eta;
@@ -267,6 +291,25 @@ void MaterialMapper::map_coated_diffuse(Material& mat, const std::vector<Param>&
         std::string tex_name = get_texture_ref(params, "displacement");
         int tid = resolve_texture(tex_name);
         if (tid >= 0) mat.bump_tex = tid;
+    }
+
+    // Pearl-like translucency: very smooth coat over bright diffuse base
+    // → add synthetic scattering medium for sub-surface translucency.
+    float coat_rough = mat.pb_clearcoat_roughness;
+    auto ref_rgb = get_rgb(params, "reflectance", {0.5, 0.5, 0.5});
+    float lum = 0.2126f * (float)ref_rgb[0] + 0.7152f * (float)ref_rgb[1]
+              + 0.0722f * (float)ref_rgb[2];
+    if (coat_rough >= 0.f && coat_rough < 0.01f && lum > 0.4f) {
+        mat.pb_brdf = PbBrdf::Dielectric;
+        mat.pb_transmission = 1.0f;
+        mat.pb_transmission_set = true;
+        mat.pb_medium_enabled = true;
+        mat.pb_sigma_s_rgb[0] = 20.f; mat.pb_sigma_s_rgb[1] = 20.f; mat.pb_sigma_s_rgb[2] = 20.f;
+        mat.pb_sigma_s_set = true;
+        mat.pb_sigma_a_rgb[0] = 0.5f; mat.pb_sigma_a_rgb[1] = 0.3f; mat.pb_sigma_a_rgb[2] = 0.3f;
+        mat.pb_sigma_a_set = true;
+        mat.pb_g = 0.8f;
+        mat.Kd = rgb_to_spectrum_reflectance((float)ref_rgb[0], (float)ref_rgb[1], (float)ref_rgb[2]);
     }
 }
 
@@ -303,19 +346,20 @@ void MaterialMapper::map_conductor(Material& mat, const std::vector<Param>& para
 }
 
 void MaterialMapper::map_coated_conductor(Material& mat, const std::vector<Param>& params) {
-    mat.pb_brdf = PbBrdf::Clearcoat;
-    mat.pb_base_brdf = PbBrdf::Conductor;
+    // GPU Clearcoat BSDF base is always Lambert — conductor base would be
+    // black (Kd=0).  Map to GlossyMetal instead: sacrifices the thin coat
+    // highlight (~4% at normal incidence for IOR 1.5) but gives correct
+    // metallic appearance with angular colour shift.
+    mat.pb_brdf = PbBrdf::Conductor;
     mat.Kd = Spectrum::zero();
 
     // Conductor base
     float eta_rgb[3], k_rgb[3];
-    // Try conductor.eta / conductor.k, fallback to eta/k
     auto* ce_p = get_param(params, "conductor.eta");
     auto* ck_p = get_param(params, "conductor.k");
     if (!ce_p) ce_p = get_param(params, "eta");
     if (!ck_p) ck_p = get_param(params, "k");
 
-    // Build a temporary params list for resolve_conductor_eta_k
     std::vector<Param> cond_params;
     if (ce_p) { Param p = *ce_p; p.name = "eta"; cond_params.push_back(p); }
     if (ck_p) { Param p = *ck_p; p.name = "k"; cond_params.push_back(p); }
@@ -325,7 +369,7 @@ void MaterialMapper::map_coated_conductor(Material& mat, const std::vector<Param
     mat.pb_conductor_k_rgb[0] = k_rgb[0]; mat.pb_conductor_k_rgb[1] = k_rgb[1]; mat.pb_conductor_k_rgb[2] = k_rgb[2];
     mat.pb_conductor_set = true;
 
-    // Reflectance texture
+    // Reflectance texture (modulates Kd for subtle tinting)
     std::string ref_type = get_param_type(params, "reflectance");
     if (ref_type == "texture") {
         int tid = resolve_texture(get_texture_ref(params, "reflectance"));
@@ -335,41 +379,44 @@ void MaterialMapper::map_coated_conductor(Material& mat, const std::vector<Param
         mat.Kd = rgb_to_spectrum_reflectance((float)rgb[0], (float)rgb[1], (float)rgb[2]);
     }
 
-    // Base roughness
+    // Use conductor roughness (not interface roughness) for GlossyMetal
     bool remap = get_bool(params, "remaproughness", true);
     auto* br_p = get_param(params, "conductor.roughness");
     if (!br_p) br_p = get_param(params, "roughness");
-    mat.pb_base_roughness = br_p ? pbrt_roughness_to_ours(safe_float(br_p, 0.f), remap) : 0.0f;
-
-    // Coat
-    float coat_eta = (float)get_float(params, "interface.eta", 1.5);
-    mat.pb_eta = coat_eta;
-    mat.pb_eta_set = true;
-    mat.ior = coat_eta;
-
-    float coat_roughness = (float)get_float(params, "interface.roughness", 0.0);
-    mat.pb_clearcoat_roughness = pbrt_roughness_to_ours(coat_roughness, remap);
-    mat.pb_clearcoat = 1.0f;
-    mat.pb_clearcoat_set = true;
+    mat.pb_roughness = br_p ? pbrt_roughness_to_ours(safe_float(br_p, 0.f), remap) : 0.0f;
+    mat.pb_roughness_set = true;
 }
 
 void MaterialMapper::map_dielectric(Material& mat, const std::vector<Param>& params) {
-    mat.pb_brdf = PbBrdf::Dielectric;
-    mat.pb_transmission = 1.0f;
-    mat.pb_transmission_set = true;
-    mat.Kd = Spectrum::zero();
-    mat.Ks = Spectrum::constant(1.0f);
-
-    float eta = (float)get_float(params, "eta", 1.5);
+    float eta = get_spectrum_eta(params, "eta", 1.5f);
     mat.pb_eta = eta;
     mat.pb_eta_set = true;
     mat.ior = eta;
 
     auto* r_p = get_param(params, "roughness");
     bool remap = get_bool(params, "remaproughness", true);
+    float our_roughness = 0.f;
     if (r_p) {
-        mat.pb_roughness = pbrt_roughness_to_ours(safe_float(r_p, 0.f), remap);
+        our_roughness = pbrt_roughness_to_ours(safe_float(r_p, 0.f), remap);
+        mat.pb_roughness = our_roughness;
         mat.pb_roughness_set = true;
+    }
+
+    // Rough dielectrics: no microfacet refraction model exists, so map to
+    // GlossyDielectric (correct rough appearance, loses refraction).
+    // Smooth dielectrics: map to Glass (delta BSDF with Fresnel refraction).
+    if (our_roughness > 0.05f) {
+        mat.pb_brdf = PbBrdf::Dielectric;
+        mat.pb_transmission = 0.f;
+        mat.pb_transmission_set = true;
+        mat.Kd = Spectrum::constant(1.0f);
+        mat.Ks = Spectrum::constant(1.0f);
+    } else {
+        mat.pb_brdf = PbBrdf::Dielectric;
+        mat.pb_transmission = 1.0f;
+        mat.pb_transmission_set = true;
+        mat.Kd = Spectrum::zero();
+        mat.Ks = Spectrum::constant(1.0f);
     }
 
     // Displacement/bump
@@ -388,7 +435,7 @@ void MaterialMapper::map_thin_dielectric(Material& mat, const std::vector<Param>
     mat.Kd = Spectrum::zero();
     mat.Ks = Spectrum::constant(1.0f);
 
-    float eta = (float)get_float(params, "eta", 1.5);
+    float eta = get_spectrum_eta(params, "eta", 1.5f);
     mat.pb_eta = eta;
     mat.pb_eta_set = true;
     mat.ior = eta;
@@ -426,6 +473,33 @@ void MaterialMapper::map_diffuse_transmission(Material& mat, const std::vector<P
     }
 }
 
+void MaterialMapper::map_subsurface(Material& mat, const std::vector<Param>& params) {
+    // PBRT "subsurface" — approximate as Lambert diffuse.
+    // Renderer has no true SSS, so use reflectance or named preset colour.
+    mat.pb_brdf = PbBrdf::Lambert;
+    mat.pb_semantic = PbSemantic::Subsurface;
+
+    // Try explicit reflectance first
+    std::string ref_type = get_param_type(params, "reflectance");
+    if (ref_type == "texture") {
+        int tid = resolve_texture(get_texture_ref(params, "reflectance"));
+        if (tid >= 0) mat.diffuse_tex = tid;
+    } else {
+        auto rgb = get_rgb(params, "reflectance", {-1, -1, -1});
+        if (rgb[0] >= 0) {
+            mat.Kd = rgb_to_spectrum_reflectance((float)rgb[0], (float)rgb[1], (float)rgb[2]);
+        } else {
+            // Fallback: skin-like colour for named presets
+            mat.Kd = rgb_to_spectrum_reflectance(0.8f, 0.6f, 0.5f);
+        }
+    }
+
+    // Eta (index of refraction) — store but not critical for Lambert
+    float eta = (float)get_float(params, "eta", 1.5);
+    mat.pb_eta = eta;
+    mat.pb_eta_set = true;
+}
+
 void MaterialMapper::map_mix(Material& mat, const PbrtMaterial& pbrt_mat) {
     auto& params = pbrt_mat.params;
 
@@ -457,6 +531,7 @@ void MaterialMapper::map_mix(Material& mat, const PbrtMaterial& pbrt_mat) {
             else if (sub_mt == "coatedconductor") map_coated_conductor(mat, sub_params);
             else if (sub_mt == "measured")        map_measured(mat, sub_params);
             else if (sub_mt == "diffusetransmission") map_diffuse_transmission(mat, sub_params);
+            else if (sub_mt == "subsurface")      map_subsurface(mat, sub_params);
             else                                  map_diffuse(mat, sub_params);
             return;
         }

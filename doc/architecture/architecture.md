@@ -16,7 +16,8 @@ from a dense 3D grid. The sidecar returns irradiance that is mixed with
 next-event estimation (NEE) to form the bounce contribution. Photon rays
 carry the transport information that seeds the guide; the camera path
 carries the actual radiance integration. All light transport is computed
-over 32 discrete wavelength bins spanning 380–780 nm. The pipeline runs on
+over `NUM_LAMBDA` (= 4) discrete wavelength bins spanning 380–780 nm
+(100 nm per bin, centres at 430, 530, 630, 730 nm). The pipeline runs on
 the GPU via **NVIDIA OptiX 9.x** for ray tracing and **CUDA** for
 auxiliary kernels, with a full **CPU reference renderer** for validation.
 
@@ -305,8 +306,8 @@ Companions are deterministic stratified offsets:
 companion[h] = (hero_bin + h * NUM_LAMBDA / HERO_WAVELENGTHS) % NUM_LAMBDA
 ```
 
-This produces 4 evenly-spaced bins across the 32-bin spectrum, maximising
-wavelength diversity per photon.
+Since `NUM_LAMBDA` = `HERO_WAVELENGTHS` = 4, this produces a full
+permutation of all bins for every photon, maximising wavelength diversity.
 
 **Flux per hero:** Each hero channel carries:
 
@@ -986,15 +987,251 @@ one-sample MIS.
 
 ---
 
-## 8. Spectral → RGB Output
+## 8. Spectral Representation & Colour Pipeline
 
-1. Integrate spectrum against CIE XYZ curves (Wyman Gaussian fit)
-2. Convert XYZ → linear sRGB
-3. Tone map: **ACES Filmic** (replaces Reinhard)
-4. Gamma correct (sRGB transfer function)
+All light transport operates in the spectral domain. Conversion to
+displayable sRGB happens only at the very end of the pipeline, after
+progressive accumulation and averaging.
 
-Same pipeline for all component buffers. Both CPU and GPU use the identical
-ACES pipeline for fair PSNR comparison.
+### 8.1 Spectral Discretisation
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Wavelength range | 380 – 780 nm | `LAMBDA_MIN`, `LAMBDA_MAX` |
+| Number of bins | 4 | `NUM_LAMBDA` |
+| Bin width | 100 nm | `LAMBDA_STEP` |
+| Bin centres | 430, 530, 630, 730 nm | `lambda_of_bin(i)` |
+| Hero wavelengths per photon | 4 | `HERO_WAVELENGTHS` (= `NUM_LAMBDA`) |
+
+Bin centres are computed as $\lambda_i = 380 + (i + 0.5) \times 100$ nm.
+Bin 3 (730 nm) lies in the near-infrared where CIE colour-matching
+response is negligible ($\bar{y} \approx 0.0003$), so the system is
+effectively 3-bin for visible colour reproduction.
+
+The `Spectrum` struct stores one `float` per bin (`spectrum.h`).
+All arithmetic (add, multiply, scale) is per-bin and never mixes bins
+during transport — spectral bins are independent channels until the final
+conversion.
+
+### 8.2 Hero Wavelength System (PBRT v4 §14.3)
+
+See also §5.1.2. Since `HERO_WAVELENGTHS` = `NUM_LAMBDA` = 4, every
+photon always carries **all** wavelength bins. The hero/companion
+terminology still applies for **dispersion**: the hero bin determines
+the refraction direction through glass, while companion bins receive
+weighted dispersion filters (§5.1.2).
+
+**Hero selection:** The primary hero bin is sampled proportionally to
+the emission spectrum (importance sampling):
+
+$$
+p_{\lambda}(i) = \frac{L_e(\lambda_i)}{\sum_j L_e(\lambda_j)}
+$$
+
+Companion bins are deterministic stratified offsets:
+`hero_bins[h] = (hero_bin + h) % NUM_LAMBDA` (since `NUM_LAMBDA/HERO_WAVELENGTHS = 1`,
+the offset step is 1).
+
+**Per-hero flux:** Each channel carries:
+
+$$
+\Phi_h = \frac{L_e(\lambda_h)}{p_{\text{combined}} \cdot p_{\lambda}(h)} \cdot \frac{1}{H}
+$$
+
+where $p_{\text{combined}}$ includes triangle selection, position, and
+direction PDFs, and $H = 4$. The $L_e / p_\lambda$ ratio cancels to
+$\sum_j L_e(\lambda_j)$, making the estimator well-behaved even for
+non-uniform emission spectra.
+
+**Photon storage:** GPU photons store `lambda_bin[4]` and `flux[4]`.
+On CPU readback, these are "splatted" into the full `spectral_flux[NUM_LAMBDA]`
+array so that `get_flux()` returns a proper `Spectrum`.
+
+### 8.3 RGB → Spectrum Conversion
+
+Scene materials are authored as sRGB (OBJ `Kd`/`Ks`/`Ke` values).
+These are converted to spectral at load time.
+
+**Matrix:** An optimal 4×3 pseudoinverse matrix $M$ maps
+$(R, G, B) \to (s_0, s_1, s_2, s_3)$ with non-negative clamping:
+
+```
+bin 0 (430 nm):  0.01382  R + 0.07280  G + 0.78052  B
+bin 1 (530 nm):  0.06840  R + 0.82079  G + 0.09599  B
+bin 2 (630 nm):  0.69628  R + 0.39308  G − 0.03413  B
+bin 3 (730 nm):  0.00013  R + 0.00030  G + 0.00002  B
+```
+
+Each row is clamped to $\geq 0$ after evaluation.
+
+**Derivation:** $M = \text{pinv}(C)$ where $C$ is the $3 \times 4$ matrix
+that maps spectral bins to linear sRGB via the CIE colour-matching
+functions and the sRGB D65 transform. This guarantees near-perfect
+round-trip accuracy: `spectrum_to_srgb(rgb_to_spectrum(c)) ≈ c`
+(max error < 0.06 per channel, including the non-negative clamp).
+
+The same matrix is used for both `rgb_to_spectrum_reflectance()` (values
+in $[0,1]$) and `rgb_to_spectrum_emission()` (values may exceed 1.0).
+
+### 8.4 Spectrum → XYZ (CIE Colour Matching)
+
+The CIE 1931 2° observer functions $\bar{x}(\lambda)$, $\bar{y}(\lambda)$,
+$\bar{z}(\lambda)$ are approximated analytically using the **Wyman et al.
+2013 multi-lobe Gaussian fit** (no lookup table needed):
+
+$$
+\bar{x}(\lambda) = 0.362\,e^{-0.5 t_1^2}
+             + 1.056\,e^{-0.5 t_2^2}
+             - 0.065\,e^{-0.5 t_3^2}
+$$
+
+with piecewise-linear $t_i(\lambda)$ parameters (see `cie_x()` in
+`spectrum.h`). Similar for $\bar{y}$ (2 lobes) and $\bar{z}$ (2 lobes).
+
+**Integration:**
+
+$$
+X = \frac{\sum_{i=0}^{3} s_i \cdot \bar{x}(\lambda_i)}{\sum_{i=0}^{3} \bar{y}(\lambda_i)},
+\quad
+Y = \frac{\sum_{i=0}^{3} s_i \cdot \bar{y}(\lambda_i)}{\sum_{i=0}^{3} \bar{y}(\lambda_i)},
+\quad
+Z = \frac{\sum_{i=0}^{3} s_i \cdot \bar{z}(\lambda_i)}{\sum_{i=0}^{3} \bar{y}(\lambda_i)}
+$$
+
+Division by $\sum \bar{y}_i$ normalises so that a flat-1.0 spectrum
+produces $Y = 1$ (unit luminance). This cancels the $\Delta\lambda$
+factor that would otherwise appear in a Riemann sum.
+
+**Precomputed GPU LUT** (`tonemap.cu`): The CIE values at the 4 bin
+centres are baked into `__device__` constants to avoid recomputing
+Gaussians per pixel:
+
+```
+CIE_XBAR = { 0.27339, 0.15961, 0.65621, 0.00015 }
+CIE_YBAR = { 0.01038, 0.86905, 0.26367, 0.00030 }
+CIE_ZBAR = { 1.38682, 0.04304, 0.00000, 0.00000 }
+CIE_YBAR_SUM_INV = 1.0 / 1.14340
+```
+
+### 8.5 XYZ → Linear sRGB
+
+The standard IEC 61966-2-1 D65 matrix:
+
+$$
+\begin{pmatrix} R \\ G \\ B \end{pmatrix}
+=
+\begin{pmatrix}
+ 3.2406 & -1.5372 & -0.4986 \\
+-0.9689 &  1.8758 &  0.0415 \\
+ 0.0557 & -0.2040 &  1.0570
+\end{pmatrix}
+\begin{pmatrix} X \\ Y \\ Z \end{pmatrix}
+$$
+
+Negative values from out-of-gamut spectra are clamped to 0 before tone
+mapping.
+
+### 8.6 Exposure
+
+A scalar multiplier applied to XYZ **before** tone mapping:
+
+$$
+X' = X \cdot E, \quad Y' = Y \cdot E, \quad Z' = Z \cdot E
+$$
+
+Default `DEFAULT_EXPOSURE = 1.0`. Adjustable at runtime via the
+renderer UI.
+
+### 8.7 Tone Mapping
+
+**ACES Filmic** (Narkowicz 2015 fit), applied per-channel in linear sRGB:
+
+$$
+f(x) = \frac{x(2.51x + 0.03)}{x(2.43x + 0.59) + 0.14}
+$$
+
+Maps $[0, \infty) \to [0, 1)$ with a smooth shoulder roll-off and no hard
+clip. Enabled by `USE_ACES_TONEMAPPING = true` (default).
+
+**Fallback:** When ACES is disabled, values are simply clamped to
+$[0, \infty)$ (no compression — highlights clip at the gamma stage).
+
+**Per-channel application note:** ACES is applied independently to each
+of R, G, B in linear sRGB space. This is standard practice for fitted
+curves but can **shift chromaticity** in bright regions: each channel
+is compressed by a different amount, slightly boosting apparent
+saturation in mid-tones compared to luminance-only tone mapping.
+
+### 8.8 sRGB Gamma Encoding
+
+IEC 61966-2-1 transfer function (the "sRGB gamma"):
+
+$$
+\gamma(c) = \begin{cases}
+12.92 \cdot c & c \leq 0.0031308 \\
+1.055 \cdot c^{1/2.4} - 0.055 & c > 0.0031308
+\end{cases}
+$$
+
+Applied per channel after tone mapping. Output is clamped to $[0, 1]$
+and quantised to 8-bit (`uint8_t(c × 255)`).
+
+### 8.9 Pipeline Summary (End to End)
+
+```
+Scene RGB (Kd/Ks/Ke)          ← authored in sRGB
+  │
+  ├─ rgb_to_spectrum_reflectance()   (4×3 pseudoinverse matrix, clamp ≥ 0)
+  │  rgb_to_spectrum_emission()      (same matrix, no upper clamp)
+  ▼
+Spectrum[4]                    ← transport domain
+  │
+  ├─ Light transport (photon + camera paths)
+  │  All bounces, NEE, Russian roulette — per-bin, never mixed
+  ▼
+Accumulated Spectrum[4] per pixel   ← progressive sum / sample_count
+  │
+  ├─ spectrum_to_xyz()         (Wyman CIE fit × bin values, normalised by Σȳ)
+  ▼
+CIE XYZ
+  │
+  ├─ × exposure
+  ├─ xyz_to_linear_srgb()      (D65 3×3 matrix, clamp negatives)
+  ▼
+Linear sRGB
+  │
+  ├─ ACES Filmic tone map      (per-channel, Narkowicz 2015)
+  ├─ sRGB gamma                (IEC 61966-2-1)
+  ▼
+sRGB uint8[4] per pixel         ← display / PNG output
+```
+
+Both CPU (`spectrum_to_srgb_aces()` in `spectrum.h`) and GPU
+(`dev_spectrum_to_srgb()` in `optix_material.cuh`, `tonemap_kernel()`
+in `tonemap.cu`) implement the same pipeline. The GPU has two paths:
+an inline tonemap inside the raygen kernel (for interactive preview)
+and a separate post-process kernel (for denoiser input → HDR → tonemap).
+
+### 8.10 Known Limitations
+
+1. **Coarse 4-bin discretisation.** With 100 nm bins, sharp spectral
+   features (e.g. fluorescent materials, narrow-band emitters) cannot
+   be represented. Multi-bounce colour bleeding is slightly more
+   saturated than a fine-grained (e.g. 80-bin) spectral renderer because
+   the spectral product sharpens more aggressively in fewer bins.
+
+2. **Bin 3 (730 nm) is effectively dead.** CIE response at 730 nm is
+   $\bar{y} \approx 0.0003$. This bin contributes negligibly to visible
+   colour but still carries transport cost.
+
+3. **Per-channel ACES saturation.** Applying the tone curve independently
+   per sRGB channel can shift hue and boost saturation in mid-tones
+   relative to a chromaticity-preserving operator (e.g. ACES RRT+ODT
+   in ACEScg space, or AgX / Tony McMapface).
+
+4. **No spectral texture support.** Textures are sampled as sRGB and
+   converted to spectral on the fly via the pseudoinverse matrix. True
+   measured spectral textures are not supported.
 
 ---
 
@@ -1535,7 +1772,7 @@ All tunable constants in `src/core/config.h`:
 ### Spectrum
 ```cpp
 struct Spectrum {
-    float value[NUM_LAMBDA];  // 32 bins, 380-780 nm
+    float value[NUM_LAMBDA];  // 4 bins, 380-780 nm (100 nm each)
 };
 ```
 
@@ -1743,7 +1980,7 @@ Configuration: `PHOTON_MAP_POOL_SIZE` in `config.h`.
 
 ## 21. Strengths
 
-1. **Full spectral transport.** 32 wavelength bins; dispersion, metamerism,
+1. **Full spectral transport.** 4 wavelength bins (100 nm each); dispersion, metamerism,
    and spectral emission naturally captured without RGB approximations.
 
 2. **Guided sub-path sidecar.** Photon directions seed full sub-paths at

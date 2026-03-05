@@ -72,7 +72,8 @@ DirMapEntry dev_build_direction_map_entry(
     int sub_x, int sub_y,
     int sub_width, int sub_height,
     int spp_seed,   // varies per SPP to get different sampled direction
-    const DirMapFibSphere& fib)
+    const DirMapFibSphere& fib,
+    int pixel_idx = -1)  // pixel index for spectral_ref_buffer write (-1 = skip)
 {
     DirMapEntry entry = {};
 
@@ -252,6 +253,10 @@ DirMapEntry dev_build_direction_map_entry(
     int n_eligible = 0;
     float total_weight = 0.f;
 
+    // Spectral flux accumulation for reference buffer
+    float spec_irrad[NUM_LAMBDA] = {0.f, 0.f, 0.f, 0.f};
+    float spec_weight_sum = 0.f;
+
     for (int i = 0; i < knn_count; ++i) {
         uint32_t idx = knn_idx[i];
         float d2     = knn_d2[i];
@@ -306,9 +311,33 @@ DirMapEntry dev_build_direction_map_entry(
         bins[bin].centroid  = bins[bin].centroid + pw * w;
         bins[bin].count    += 1;
         total_weight       += w;
+
+        // Accumulate spectral flux for outlier-clamp reference buffer
+        if (pixel_idx >= 0 && params.photon_flux && params.photon_lambda) {
+            for (int h = 0; h < HERO_WAVELENGTHS; ++h) {
+                int fi = idx * HERO_WAVELENGTHS + h;
+                int lambda_bin = (int)params.photon_lambda[fi];
+                if (lambda_bin >= 0 && lambda_bin < NUM_LAMBDA) {
+                    spec_irrad[lambda_bin] += params.photon_flux[fi] * w;
+                }
+            }
+            spec_weight_sum += w;
+        }
     }
 
     entry.num_eligible = (uint16_t)n_eligible;
+
+    // Write spectral reference buffer: normalise by πr_k² × N_emitted
+    if (pixel_idx >= 0 && params.spectral_ref_buffer &&
+        spec_weight_sum > 0.f && params.num_photons_emitted > 0) {
+        float r_k = sqrtf(r_k2);
+        float area = PI * r_k * r_k;
+        float norm = 1.0f / (area * (float)params.num_photons_emitted);
+        for (int b = 0; b < NUM_LAMBDA; ++b) {
+            params.spectral_ref_buffer[pixel_idx * NUM_LAMBDA + b] =
+                spec_irrad[b] * norm;
+        }
+    }
 
     if (n_eligible == 0 || total_weight <= 0.f) return entry;
 
@@ -402,8 +431,14 @@ void dev_build_direction_map_pixel(
     DirMapFibSphere fib;
     fib.init();
 
+    // Compute pixel index for spectral reference buffer
+    int factor = DIR_MAP_SUBPIXEL_FACTOR;
+    int px = sub_x / factor;
+    int py = sub_y / factor;
+    int pixel_idx = py * params.width + px;
+
     DirMapEntry entry = dev_build_direction_map_entry(
-        sub_x, sub_y, sub_width, sub_height, spp_seed, fib);
+        sub_x, sub_y, sub_width, sub_height, spp_seed, fib, pixel_idx);
 
     int flat = sub_y * sub_width + sub_x;
     dir_map_buffer[flat] = entry;

@@ -35,6 +35,7 @@ struct AppState {
     DebugState debug;
     bool       snapshot_requested = false;  // R key: save PNG + EXR snapshot
     bool       volume_enabled   = DEFAULT_VOLUME_ENABLED;  // V key toggle
+    bool       use_dense_grid   = true;                        // G key toggle
 
     // Scene switching (keys 1-9, 0)
     int        scene_switch_requested = -1;  // -1 = none, 0-9 = profile index
@@ -52,6 +53,9 @@ struct AppState {
     bool       guided_enabled    = DEFAULT_USE_GUIDE;   // true = photon-guided, false = brute force
     // Histogram-only conclusion mode (C key, only effective when guided)
     bool       histogram_only    = false;
+
+    // Spectral outlier clamp toggle (X key)
+    bool       spectral_clamp_enabled = DEFAULT_SPECTRAL_CLAMP_ENABLED;
 
     // Show statistics overlay (S key)
     bool       show_stats_overlay = false;

@@ -183,6 +183,7 @@ void OptixRenderer::render_caustic_debug_pass(
             config.volume_enabled, config.volume_density, config.volume_falloff,
             config.volume_albedo, config.volume_samples, config.volume_max_t);
         fill_clearcoat_fabric_params(lp);
+        lp.has_instances = instanced_pipeline_ ? 1 : 0;
         fill_cell_grid_params(lp);
 
         // Disable dual-budget for this debug pass — all photons are

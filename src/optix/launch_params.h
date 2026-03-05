@@ -62,6 +62,9 @@ struct LaunchParams {
     int    min_bounces_rr;        // [v3] guaranteed bounces before RR
     float  rr_threshold;          // [v3] max RR survival probability
     float  guide_fraction;        // [v3] photon-guided fraction (0..1)
+    int    spectral_clamp_enabled; // [v3] X key: photon-referenced spectral outlier clamp
+    float  spectral_clamp_threshold; // max ratio PT_sample / photon_ref before clamping
+    float* spectral_ref_buffer;   // [width * height * NUM_LAMBDA] photon irradiance reference
     int    photon_final_gather;   // [v3] 1 = use photon map at terminal bounce
     int    preview_mode;          // 1 = fast preview (unguided PT, PREVIEW_MAX_BOUNCES cap)
     int    photon_max_bounces;    // max bounces for photon tracing (separate from render)
@@ -117,6 +120,8 @@ struct LaunchParams {
     float*    photon_norm_x;   // geometric surface normal at photon hit
     float*    photon_norm_y;
     float*    photon_norm_z;
+    float*    photon_flux;      // [num_photons * HERO_WAVELENGTHS] hero flux values
+    uint16_t* photon_lambda;   // [num_photons * HERO_WAVELENGTHS] hero wavelength bins
     int       num_photons;
     int       num_photons_emitted; // N_emitted (for density normalisation, §5.3)
     int       photon_map_seed;     // RNG seed offset for multi-map re-tracing
@@ -289,6 +294,7 @@ struct LaunchParams {
 
 #ifdef PPT_USE_OPTIX
     OptixTraversableHandle traversable;
+    int has_instances;  // 1 when IAS instancing is active (apply object→world xform)
 #endif
 };
 

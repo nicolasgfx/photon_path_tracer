@@ -51,6 +51,7 @@ private:
     void map_diffuse_transmission(Material& mat, const std::vector<Param>& params);
     void map_mix(Material& mat, const PbrtMaterial& pbrt_mat);
     void map_measured(Material& mat, const std::vector<Param>& params);
+    void map_subsurface(Material& mat, const std::vector<Param>& params);
 
     // Texture resolution
     int resolve_texture(const std::string& tex_name);

@@ -561,20 +561,31 @@ void PbrtParser::dispatch(const std::vector<std::string>& tokens, const std::str
             std::string obj_name = unquote(tokens[pos]); ++pos;
             auto it = scene_.object_templates.find(obj_name);
             if (it != scene_.object_templates.end()) {
-                Mat4 xform = current_transform_;
-                for (auto& tpl_shape : it->second.shapes) {
-                    PbrtShape s;
-                    s.shape_type = tpl_shape.shape_type;
-                    s.params = tpl_shape.params;
-                    s.material_name = tpl_shape.material_name;
-                    s.inline_mat = tpl_shape.inline_mat;
-                    s.transform = xform * tpl_shape.transform;
-                    s.has_area_light = tpl_shape.has_area_light;
-                    s.area_light_params = tpl_shape.area_light_params;
-                    s.group_name = tpl_shape.group_name;
-                    s.from_instance = true;
-                    s.reverse_orientation = tpl_shape.reverse_orientation;
-                    scene_.shapes.push_back(std::move(s));
+                // Check if any shape in the template is emissive — must flatten those
+                bool has_emissive = false;
+                for (const auto& s : it->second.shapes)
+                    if (s.has_area_light) { has_emissive = true; break; }
+
+                if (has_emissive) {
+                    // Flatten emissive templates (lights need world-space tris)
+                    Mat4 xform = current_transform_;
+                    for (auto& tpl_shape : it->second.shapes) {
+                        PbrtShape s;
+                        s.shape_type = tpl_shape.shape_type;
+                        s.params = tpl_shape.params;
+                        s.material_name = tpl_shape.material_name;
+                        s.inline_mat = tpl_shape.inline_mat;
+                        s.transform = xform * tpl_shape.transform;
+                        s.has_area_light = tpl_shape.has_area_light;
+                        s.area_light_params = tpl_shape.area_light_params;
+                        s.group_name = tpl_shape.group_name;
+                        s.from_instance = true;
+                        s.reverse_orientation = tpl_shape.reverse_orientation;
+                        scene_.shapes.push_back(std::move(s));
+                    }
+                } else {
+                    // Non-emissive: store as instance reference (hardware instancing)
+                    scene_.instance_refs.push_back(PbrtInstanceRef{obj_name, current_transform_});
                 }
             } else {
                 std::cerr << "[PBRT] ObjectInstance references unknown object: "
@@ -667,6 +678,7 @@ void PbrtParser::dispatch(const std::vector<std::string>& tokens, const std::str
             shape.has_area_light = has_area_light_;
             shape.area_light_params = current_area_light_params_;
             shape.reverse_orientation = reverse_orientation_;
+            shape.medium_interior = current_medium_interior_;
 
             if (in_object_)
                 in_object_->shapes.push_back(std::move(shape));

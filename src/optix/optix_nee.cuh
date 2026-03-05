@@ -401,9 +401,7 @@ NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
         if (xi < p_env) {
             // Sample envmap
             ONB frame = ONB::from_normal(normal);
-            NeeSampleResult sr = dev_nee_envmap_sample(
-                pos, normal, wo_local, mat_id, frame, uv, rng);
-            // Divide by selection probability (already accounts for MIS inside)
+            NeeSampleResult sr = dev_nee_envmap_sample(pos, normal, wo_local, mat_id, frame, uv, rng);
             for (int i = 0; i < NUM_LAMBDA; ++i)
                 result.L.value[i] = sr.L.value[i];
             result.visibility = sr.visible ? 1.f : 0.f;
@@ -418,8 +416,7 @@ NeeResult dev_nee_dispatch(float3 pos, float3 normal, float3 wo_local,
     } else if (use_envmap) {
         // Envmap only (no triangle lights)
         ONB frame = ONB::from_normal(normal);
-        NeeSampleResult sr = dev_nee_envmap_sample(
-            pos, normal, wo_local, mat_id, frame, uv, rng);
+        NeeSampleResult sr = dev_nee_envmap_sample(pos, normal, wo_local, mat_id, frame, uv, rng);
         result.L = sr.L;
         result.visibility = sr.visible ? 1.f : 0.f;
     } else {

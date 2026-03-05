@@ -147,6 +147,8 @@ void fill_common_params(
     p.photon_norm_x     = photon_norm_x.d_ptr ? const_cast<float*>(photon_norm_x.as<float>()) : nullptr;
     p.photon_norm_y     = photon_norm_y.d_ptr ? const_cast<float*>(photon_norm_y.as<float>()) : nullptr;
     p.photon_norm_z     = photon_norm_z.d_ptr ? const_cast<float*>(photon_norm_z.as<float>()) : nullptr;
+    p.photon_flux       = nullptr;  // set by callers that have flux data
+    p.photon_lambda     = nullptr;  // set by callers that have lambda data
 
     p.gather_radius       = gather_radius;
 
@@ -158,6 +160,7 @@ void fill_common_params(
     p.total_emissive_power = total_emissive_power;
 
     p.traversable = gas_handle;
+    p.has_instances = 0;  // callers set to 1 when IAS is active
 
     // â”€â”€ Participating medium â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     p.volume_enabled = volume_enabled ? 1 : 0;
@@ -329,6 +332,7 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
+    lp.has_instances = instanced_pipeline_ ? 1 : 0;
     fill_dm_hash_grid_params(lp);
 
     // Direction map specific fields
@@ -338,6 +342,14 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
     lp.dir_map_valid    = 1;
     lp.dir_map_spp_seed = spp_seed;
     lp.guide_radius     = DEFAULT_GUIDE_RADIUS;
+
+    // Spectral reference data for outlier clamp
+    lp.photon_flux   = d_photon_flux_.d_ptr
+        ? reinterpret_cast<float*>(d_photon_flux_.d_ptr) : nullptr;
+    lp.photon_lambda = d_photon_lambda_.d_ptr
+        ? reinterpret_cast<uint16_t*>(d_photon_lambda_.d_ptr) : nullptr;
+    lp.spectral_ref_buffer = d_spectral_ref_buffer_.d_ptr
+        ? reinterpret_cast<float*>(d_spectral_ref_buffer_.d_ptr) : nullptr;
 
     // ── Debug: dump LaunchParams state before launch ──────────────
     std::printf("[DirMap] build_direction_map: dm_w=%d dm_h=%d  spp_seed=%d\n", dm_w, dm_h, spp_seed);
@@ -372,6 +384,18 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
 
     CUDA_CHECK(cudaDeviceSynchronize());
     std::printf("[DirMap] OptiX launch completed\n");
+
+    // Diagnostic: sample spectral_ref_buffer at center pixel
+    if (d_spectral_ref_buffer_.d_ptr) {
+        int cx = width_ / 2, cy = height_ / 2;
+        int center_idx = cy * width_ + cx;
+        float ref_sample[NUM_LAMBDA] = {};
+        CUDA_CHECK(cudaMemcpy(ref_sample,
+            reinterpret_cast<float*>(d_spectral_ref_buffer_.d_ptr) + center_idx * NUM_LAMBDA,
+            NUM_LAMBDA * sizeof(float), cudaMemcpyDeviceToHost));
+        std::printf("[DirMap] spectral_ref center pixel (%d,%d): [%.6e, %.6e, %.6e, %.6e]\n",
+                   cx, cy, ref_sample[0], ref_sample[1], ref_sample[2], ref_sample[3]);
+    }
 }
 
 void OptixRenderer::download_direction_map() {
@@ -448,6 +472,7 @@ void OptixRenderer::render_debug_frame(
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
+    lp.has_instances = instanced_pipeline_ ? 1 : 0;
     fill_cell_grid_params(lp);
     fill_direction_map_params(lp);
 
@@ -468,6 +493,14 @@ void OptixRenderer::render_debug_frame(
     lp.frame_number      = frame_number;
     lp.render_mode       = mode;
     lp.exposure           = exposure_;
+    lp.spectral_clamp_enabled   = (int)runtime_spectral_clamp_enabled_;
+    lp.spectral_clamp_threshold = DEFAULT_SPECTRAL_CLAMP_THRESHOLD;
+    lp.spectral_ref_buffer = d_spectral_ref_buffer_.d_ptr
+        ? reinterpret_cast<float*>(d_spectral_ref_buffer_.d_ptr) : nullptr;
+    lp.photon_flux   = d_photon_flux_.d_ptr
+        ? reinterpret_cast<float*>(d_photon_flux_.d_ptr) : nullptr;
+    lp.photon_lambda = d_photon_lambda_.d_ptr
+        ? reinterpret_cast<uint16_t*>(d_photon_lambda_.d_ptr) : nullptr;
 
     // Per-triangle photon irradiance heatmap
     lp.tri_photon_irradiance = d_tri_photon_irradiance_.d_ptr
@@ -543,6 +576,7 @@ void OptixRenderer::render_one_spp(
         DEFAULT_VOLUME_ENABLED, DEFAULT_VOLUME_DENSITY, DEFAULT_VOLUME_FALLOFF,
         DEFAULT_VOLUME_ALBEDO, DEFAULT_VOLUME_SAMPLES, DEFAULT_VOLUME_MAX_T);
     fill_clearcoat_fabric_params(lp);
+    lp.has_instances = instanced_pipeline_ ? 1 : 0;
     fill_cell_grid_params(lp);
     fill_direction_map_params(lp);
 
@@ -563,6 +597,14 @@ void OptixRenderer::render_one_spp(
     lp.frame_number       = frame_number;
     lp.render_mode        = RenderMode::Full;
     lp.exposure           = exposure_;
+    lp.spectral_clamp_enabled   = (int)runtime_spectral_clamp_enabled_;
+    lp.spectral_clamp_threshold = DEFAULT_SPECTRAL_CLAMP_THRESHOLD;
+    lp.spectral_ref_buffer = d_spectral_ref_buffer_.d_ptr
+        ? reinterpret_cast<float*>(d_spectral_ref_buffer_.d_ptr) : nullptr;
+    lp.photon_flux   = d_photon_flux_.d_ptr
+        ? reinterpret_cast<float*>(d_photon_flux_.d_ptr) : nullptr;
+    lp.photon_lambda = d_photon_lambda_.d_ptr
+        ? reinterpret_cast<uint16_t*>(d_photon_lambda_.d_ptr) : nullptr;
 
     last_launch_params_host_ = lp;
 
@@ -702,6 +744,7 @@ void OptixRenderer::render_final(
             config.volume_enabled, config.volume_density, config.volume_falloff,
             config.volume_albedo, config.volume_samples, config.volume_max_t);
         fill_clearcoat_fabric_params(lp);
+        lp.has_instances = instanced_pipeline_ ? 1 : 0;
         fill_cell_grid_params(lp);
         fill_direction_map_params(lp);
 
@@ -722,6 +765,14 @@ void OptixRenderer::render_final(
         lp.render_mode        = RenderMode::Full;
         lp.exposure           = exposure_;
         lp.skip_tonemap       = 1;  // defer tonemap to post-process kernel
+        lp.spectral_clamp_enabled   = (int)runtime_spectral_clamp_enabled_;
+        lp.spectral_clamp_threshold = DEFAULT_SPECTRAL_CLAMP_THRESHOLD;
+        lp.spectral_ref_buffer = d_spectral_ref_buffer_.d_ptr
+            ? reinterpret_cast<float*>(d_spectral_ref_buffer_.d_ptr) : nullptr;
+        lp.photon_flux   = d_photon_flux_.d_ptr
+            ? reinterpret_cast<float*>(d_photon_flux_.d_ptr) : nullptr;
+        lp.photon_lambda = d_photon_lambda_.d_ptr
+            ? reinterpret_cast<uint16_t*>(d_photon_lambda_.d_ptr) : nullptr;
 
         // Denoiser AOV buffers (written on first sample of first frame)
         lp.albedo_buffer = d_albedo_buffer_.d_ptr
