@@ -173,42 +173,40 @@ constexpr bool DEFAULT_PHOTON_FINAL_GATHER = true;
 // importance sample.  One-sample MIS (balance heuristic) weights the
 // result.  All subsequent bounces use pure BSDF + NEE (brute force).
 //
-// The direction map is built once per photon pass from the hash grid:
-//   - Cast a primary ray per subpixel to find the 1st hitpoint.
-//   - Gather nearby photons and build a 128-bin Fibonacci sphere
-//     histogram (full spherical weighting), weighted by Epanechnikov
-//     kernel.  Delta-material photon directions receive a boost.
-//   - Per SPP, a direction is sampled from this histogram for MIS.
+// Direction map build (one per photon pass, per subpixel):
+//   1. Cast primary ray → first non-delta hitpoint.
+//   2. Max-heap kNN: find the K=64 closest photons (3D Euclidean).
+//   3. Shadow-ray filter: for each of the K photons trace a shadow ray
+//      from the hitpoint.  Accept/reject by material type.
+//   4. Epanechnikov-weighted Fibonacci sphere histogram (128 bins) from
+//      accepted photons.  Distance kernel: w × max(0, 1 − d²/r_k²).
+//   5. Sample one direction per SPP for MIS.
 
 // Master switch — disables the entire first-hit guide when false.
-constexpr bool  DEFAULT_USE_GUIDE = false;         // [K]
+constexpr bool  DEFAULT_USE_GUIDE = true;           // [K]
 
-constexpr int MAX_GUIDE_PDF_PHOTONS = 64;  // max eligible photons per dir-map build (was 32)
+// Max photons gathered by kNN before shadow-ray filtering.
+constexpr int MAX_GUIDE_PDF_PHOTONS = 64;
 
 // Probability of choosing the guided strategy vs pure BSDF (1st hit only).
 //   0.0 = BSDF only  |  0.5 = balanced  |  1.0 = guide only
 constexpr float DEFAULT_GUIDE_FRACTION   = 0.5f;        // [R]
 
-// ── Directional SPP framebuffer ("direction map") ───────────────────
-// Resolution multiplier: subpixel grid is (W * FACTOR) × (H * FACTOR).
-//   1 = 1:1 with framebuffer (one direction map entry per pixel)
-constexpr int   DIR_MAP_SUBPIXEL_FACTOR  = 1;
-
+// ── Directional histogram ───────────────────────────────────────────
 // Number of Fibonacci sphere directional bins for the per-subpixel
 // histogram.  128 bins ≈ 0.10 sr per bin ≈ 18° angular radius.
-// This is 4× finer than the old volume guide (32 bins).
 constexpr int   DIR_MAP_SPHERE_BINS      = 128;
 
-// ── Photon weighting for shadow-ray-filtered direction map ──────────
-// Shadow rays from the camera hitpoint to each kNN photon determine
-// acceptance.  Accepted photons are weighted before entering the
-// Fibonacci sphere histogram.
+// Resolution multiplier: subpixel grid is (W * FACTOR) × (H * FACTOR).
+constexpr int   DIR_MAP_SUBPIXEL_FACTOR  = 1;
+
+// ── Shadow-ray photon weights ───────────────────────────────────────
+// After kNN, a shadow ray from the hitpoint to each photon classifies
+// the path.  These flat weights are multiplied by the Epanechnikov
+// kernel value before accumulation into the histogram.
 constexpr float DIR_MAP_DEFAULT_WEIGHT     = 1.0f;  // miss (no obstruction)
 constexpr float DIR_MAP_DELTA_WEIGHT       = 4.0f;  // hit delta material (glass/mirror)
 constexpr float DIR_MAP_TRANSLUCENT_WEIGHT = 4.0f;  // hit translucent material
-
-// Legacy alias (kept for any remaining references)
-constexpr float DIR_MAP_DELTA_BOOST        = DIR_MAP_DELTA_WEIGHT;
 
 // ── Cone jitter ─────────────────────────────────────────────────────
 // Half-angle (radians) applied when sampling a guided direction from
@@ -216,33 +214,23 @@ constexpr float DIR_MAP_DELTA_BOOST        = DIR_MAP_DELTA_WEIGHT;
 // centroid, improving convergence.
 constexpr float DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE = 0.15f; // [R] radians
 
-// ── Direction map hash grid cell size ────────────────────────────────
-// Teschner spatial hash grid for kNN photon lookup in the direction
-// map build.  Cell size = 0.01 m (1 cm) supports multiple photons per
-// cell.  Hash collisions must stay under 5%.
-constexpr float DIR_MAP_HASH_CELL_SIZE = 0.01f;  // 0.0f 1 cm cell side-length
+// ── Direction map hash grid ─────────────────────────────────────────
+// Teschner spatial hash for kNN photon lookup.  Cell edge length (m).
+// Chosen so the search sphere covers ~5×5×5 – 7×7×7 cells for good
+// kNN performance.  Built with radius = cell_size / 2.
+constexpr float DIR_MAP_HASH_CELL_SIZE = 0.02f;  // 2 cm cell side-length
 
-// ── 3×3×3 neighbourhood pre-filter for kNN ──────────────────────────
-// When true, the kNN search only considers photons in the 3×3×3 cell
-// neighbourhood (27 cells) centred on the query point's hash cell.
-// This caps the search volume and avoids pulling distant photons from
-// hash-colliding cells, giving tighter adaptive radii in dense regions
-// at a small cost in sparse regions where the radius would exceed 1.5
-// cell widths.  Set false to allow unbounded shell expansion.
-constexpr bool  KNN_3X3X3_FILTER             = false;
+// ── Guide search radius (kNN cap) ──────────────────────────────────
+// Max 3D Euclidean distance for the kNN photon gather.  The adaptive
+// radius (distance to the K-th nearest photon) is usually smaller;
+// this is the upper bound for sparse regions.  Matches the main
+// photon gather radius so photon density is consistent.
+constexpr float DEFAULT_GUIDE_RADIUS = DEFAULT_GATHER_RADIUS;  // 0.05 m
 
 // ── Periodic photon + direction-map rebuild during final render ─────
 // Every N SPP, re-trace the photon map (with a fresh seed) and rebuild
-// the direction map.  Decorrelates guide directions across the render,
-// reducing structured guide bias.  0 = never rebuild (single map).
+// the direction map.  Decorrelates guide directions across the render.
 constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 500;  // [R] SPP between rebuilds
-
-// ── Continuous guide radius (Epanechnikov kernel) ───────────────────
-// Tangential-distance cutoff for eligible photons in the direction map
-// histogram.  3.5× cell size provides a wider, smoother Epanechnikov
-// falloff that eliminates hard seams at cell boundaries.  Fully
-// contained within the ±3-cell (7×7×7) neighbourhood search.
-constexpr float DEFAULT_GUIDE_RADIUS = 3.5f * DIR_MAP_HASH_CELL_SIZE;  // 0.035f;3.5 cm Epanechnikov cutoff
 
 // ── NaN / infinity safety net ────────────────────────────────────────
 // With correct one-sample MIS (balance heuristic) and physical BSDFs,
@@ -303,6 +291,12 @@ constexpr float PLANE_TAU_EPSILON_FACTOR   = 10.0f;   // robust τ floor = facto
 // Adaptive radius = distance to the k-th nearest photon.
 // CPU: KD-tree.  GPU: grid shell expansion (capped by MAX_GATHER_RADIUS).
 constexpr int   DEFAULT_KNN_K                = 100;
+
+// ── 3×3×3 neighbourhood filter for CPU/volume kNN ───────────────────
+// When true, CPU shell expansion and GPU volume photon kNN are
+// limited to the 3×3×3 cell neighbourhood.  Does NOT affect the
+// direction map (which always uses full max-heap kNN).
+constexpr bool  KNN_3X3X3_FILTER             = false;
 
 // ── Cell cache (per-cell photon statistics) ─────────────────────────
 // Adaptive gather radius, empty-region skip, caustic hotspot detection.

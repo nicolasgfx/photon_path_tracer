@@ -58,8 +58,8 @@ struct DirMapFibSphere {
 
 // ── Direction map histogram bin (per-subpixel, in registers) ────────
 struct DirMapBin {
-    float   weight;         // accumulated Epanechnikov-weighted flux
-    float3  centroid;       // flux-weighted direction centroid
+    float   weight;         // accumulated shadow-ray-classified weight
+    float3  centroid;       // weight-averaged direction centroid
     int     count;          // number of photons in this bin
 };
 
@@ -142,7 +142,7 @@ DirMapEntry dev_build_direction_map_entry(
     entry.norm_z = hit.shading_normal.z;
     entry.mat_type = params.mat_type[hit.material_id];
 
-    // ── Hash grid photon gathering + shadow ray filtering ───────────
+    // ── Phase 1: Max-heap kNN — find K closest photons ─────────────
     if (!params.dm_hash_valid || params.num_photons == 0) return entry;
 
     float3 pos = hit.position;
@@ -152,30 +152,94 @@ DirMapEntry dev_build_direction_map_entry(
     float3 wo = cur_dir * (-1.f);
     if (dot(wo, N) < 0.f) N = N * (-1.f);
 
-    const float r_search = params.guide_radius;
+    const float r_search  = params.guide_radius;
     const float r2_search = r_search * r_search;
     const float cell_size = params.dm_hash_cell_size;
     const uint32_t origin_tri = hit.triangle_id;
 
+    constexpr int KNN_K = MAX_GUIDE_PDF_PHOTONS;   // 64
+    float    knn_d2[KNN_K];
+    uint32_t knn_idx[KNN_K];
+    int      knn_count = 0;
+
     // Compute cell range covering the search sphere
-    int cc_x = (int)floorf(pos.x / cell_size);
-    int cc_y = (int)floorf(pos.y / cell_size);
-    int cc_z = (int)floorf(pos.z / cell_size);
     int cx0 = (int)floorf((pos.x - r_search) / cell_size);
     int cy0 = (int)floorf((pos.y - r_search) / cell_size);
     int cz0 = (int)floorf((pos.z - r_search) / cell_size);
     int cx1 = (int)floorf((pos.x + r_search) / cell_size);
     int cy1 = (int)floorf((pos.y + r_search) / cell_size);
     int cz1 = (int)floorf((pos.z + r_search) / cell_size);
-    // KNN_3X3X3_FILTER: clamp to ±1 cell from centre (27 cells max)
-    if constexpr (KNN_3X3X3_FILTER) {
-        cx0 = max(cx0, cc_x - 1); cy0 = max(cy0, cc_y - 1); cz0 = max(cz0, cc_z - 1);
-        cx1 = min(cx1, cc_x + 1); cy1 = min(cy1, cc_y + 1); cz1 = min(cz1, cc_z + 1);
+
+    // Visited-key deduplication (sized for the cell range)
+    constexpr int MAX_VISITED = 256;
+    uint32_t visited_keys[MAX_VISITED];
+    int num_visited = 0;
+
+    for (int iz = cz0; iz <= cz1; ++iz)
+    for (int iy = cy0; iy <= cy1; ++iy)
+    for (int ix = cx0; ix <= cx1; ++ix) {
+        uint32_t key = teschner_hash(make_i3(ix, iy, iz),
+                                     params.dm_hash_table_size);
+        // Deduplicate buckets (different cells can hash to same bucket)
+        bool already = false;
+        for (int v = 0; v < num_visited; ++v)
+            if (visited_keys[v] == key) { already = true; break; }
+        if (already) continue;
+        if (num_visited < MAX_VISITED) visited_keys[num_visited++] = key;
+
+        uint32_t cs = params.dm_hash_cell_start[key];
+        uint32_t ce = params.dm_hash_cell_end[key];
+        if (cs == 0xFFFFFFFFu) continue;
+
+        for (uint32_t j = cs; j < ce; ++j) {
+            uint32_t idx = params.dm_hash_sorted_indices[j];
+
+            float3 pp = make_f3(
+                params.photon_pos_x[idx],
+                params.photon_pos_y[idx],
+                params.photon_pos_z[idx]);
+            float3 diff = pos - pp;
+            float d2 = dot(diff, diff);
+            if (d2 > r2_search) continue;
+            if (knn_count >= KNN_K && d2 >= knn_d2[0]) continue;
+
+            // ── Insert into max-heap (sorted by largest d² at root) ──
+            if (knn_count < KNN_K) {
+                knn_d2[knn_count]  = d2;
+                knn_idx[knn_count] = idx;
+                knn_count++;
+                // Bubble up
+                int ci = knn_count - 1;
+                while (ci > 0) {
+                    int pi = (ci - 1) / 2;
+                    if (knn_d2[ci] <= knn_d2[pi]) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
+                    ci = pi;
+                }
+            } else {
+                // Replace root (furthest) and sift down
+                knn_d2[0]  = d2;
+                knn_idx[0] = idx;
+                int ci = 0;
+                while (true) {
+                    int left = 2*ci+1, right = 2*ci+2, largest = ci;
+                    if (left  < KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
+                    if (right < KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
+                    if (largest == ci) break;
+                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
+                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
+                    ci = largest;
+                }
+            }
+        }
     }
 
-    // Visited-key deduplication (max 27 cells in 3×3×3)
-    uint32_t visited_keys[27];
-    int num_visited = 0;
+    // ── Phase 2: Shadow-ray filter + Epanechnikov-weighted histogram ──
+
+    // Adaptive radius = distance to the K-th nearest (heap root)
+    float r_k2 = (knn_count >= KNN_K) ? knn_d2[0] : r2_search;
+    r_k2 = fmaxf(r_k2, 1e-12f);
 
     // Histogram bins (in registers / local memory)
     DirMapBin bins[DIR_MAP_SPHERE_BINS];
@@ -188,91 +252,61 @@ DirMapEntry dev_build_direction_map_entry(
     int n_eligible = 0;
     float total_weight = 0.f;
 
-    for (int iz = cz0; iz <= cz1; ++iz)
-    for (int iy = cy0; iy <= cy1; ++iy)
-    for (int ix = cx0; ix <= cx1; ++ix) {
-        uint32_t key = teschner_hash(make_i3(ix, iy, iz),
-                                     params.dm_hash_table_size);
-        // Deduplicate buckets (different cells can hash to same bucket)
-        bool already = false;
-        for (int v = 0; v < num_visited; ++v)
-            if (visited_keys[v] == key) { already = true; break; }
-        if (already) continue;
-        if (num_visited < 27) visited_keys[num_visited++] = key;
+    for (int i = 0; i < knn_count; ++i) {
+        uint32_t idx = knn_idx[i];
+        float d2     = knn_d2[i];
 
-        uint32_t cs = params.dm_hash_cell_start[key];
-        uint32_t ce = params.dm_hash_cell_end[key];
-        if (cs == 0xFFFFFFFFu) continue;
+        float3 pp = make_f3(
+            params.photon_pos_x[idx],
+            params.photon_pos_y[idx],
+            params.photon_pos_z[idx]);
 
-        for (uint32_t j = cs; j < ce; ++j) {
-            uint32_t idx = params.dm_hash_sorted_indices[j];
+        float3 to_photon = pp - pos;
+        float  dist      = sqrtf(d2);
+        if (dist < 1e-6f) continue;  // degenerate: photon at hitpoint
+        float3 ray_dir   = to_photon * (1.f / dist);
 
-            // ── Radius gate (3D Euclidean) ──
-            float3 pp = make_f3(
-                params.photon_pos_x[idx],
-                params.photon_pos_y[idx],
-                params.photon_pos_z[idx]);
-            float3 diff = pos - pp;
-            float d2 = dot(diff, diff);
-            if (d2 > r2_search) continue;
+        // Shadow ray from hitpoint to photon (shorten slightly to
+        // avoid self-intersection at t ≈ dist)
+        ShadowMaterialResult sr = trace_shadow_material(
+            pos, ray_dir, dist * 0.999f, origin_tri);
 
-            // ── Shadow ray from hitpoint to photon ──
-            float3 to_photon = pp - pos;
-            float  dist      = sqrtf(d2);
-            if (dist < 1e-6f) continue;  // degenerate: photon at hitpoint
-            float3 ray_dir   = to_photon * (1.f / dist);
+        float w = 0.f;  // weight for this photon (0 = rejected)
 
-            // Shorten max distance slightly so we don't hit the
-            // photon's own surface triangle at t ≈ dist.
-            float shadow_dist = dist * 0.999f;
-
-            ShadowMaterialResult sr = trace_shadow_material(
-                pos, ray_dir, shadow_dist, origin_tri);
-
-            float w = 0.f;  // weight for this photon (0 = rejected)
-
-            if (!sr.hit) {
-                // Miss: no geometry between hitpoint and photon → accept
-                w = DIR_MAP_DEFAULT_WEIGHT;
+        if (!sr.hit) {
+            w = DIR_MAP_DEFAULT_WEIGHT;
+        } else {
+            uint32_t sr_mat = sr.material_id;
+            if (dev_is_emissive(sr_mat)) {
+                continue;      // light source → reject
+            } else if (dev_is_specular(sr_mat)) {
+                w = DIR_MAP_DELTA_WEIGHT;
+            } else if (dev_is_translucent(sr_mat)) {
+                w = DIR_MAP_TRANSLUCENT_WEIGHT;
             } else {
-                // Hit something — classify by material type
-                uint32_t sr_mat = sr.material_id;
-
-                if (dev_is_emissive(sr_mat)) {
-                    // Light source → reject
-                    continue;
-                } else if (dev_is_specular(sr_mat)) {
-                    // Delta material (glass/mirror) → accept with boost
-                    w = DIR_MAP_DELTA_WEIGHT;
-                } else if (dev_is_translucent(sr_mat)) {
-                    // Translucent material → accept with boost
-                    w = DIR_MAP_TRANSLUCENT_WEIGHT;
-                } else {
-                    // Non-delta diffuse surface → reject
-                    continue;
-                }
+                continue;      // non-delta diffuse → reject
             }
-
-            ++n_eligible;
-
-            // Accumulate into Fibonacci bin using the photon's
-            // incoming direction (wi)
-            float3 pw = make_f3(
-                params.photon_wi_x[idx],
-                params.photon_wi_y[idx],
-                params.photon_wi_z[idx]);
-
-            int bin = fib.find_nearest(pw);
-            bins[bin].weight += w;
-            bins[bin].centroid = bins[bin].centroid + pw * w;
-            bins[bin].count += 1;
-            total_weight += w;
-
-            // Cap eligible count
-            if (n_eligible >= MAX_GUIDE_PDF_PHOTONS) goto gather_done;
         }
+
+        // Epanechnikov kernel: weight falls off smoothly to zero at r_k
+        float epan = fmaxf(0.f, 1.f - d2 / r_k2);
+        w *= epan;
+
+        ++n_eligible;
+
+        // Accumulate into Fibonacci bin using the photon's
+        // incoming direction (wi)
+        float3 pw = make_f3(
+            params.photon_wi_x[idx],
+            params.photon_wi_y[idx],
+            params.photon_wi_z[idx]);
+
+        int bin = fib.find_nearest(pw);
+        bins[bin].weight   += w;
+        bins[bin].centroid  = bins[bin].centroid + pw * w;
+        bins[bin].count    += 1;
+        total_weight       += w;
     }
-gather_done:
 
     entry.num_eligible = (uint16_t)n_eligible;
 
@@ -282,7 +316,7 @@ gather_done:
     // Discrete CDF sampling over non-empty bins.
     float u_sample = rng.next_float() * total_weight;
     float cumulative = 0.f;
-    int chosen_bin = 0;
+    int chosen_bin = DIR_MAP_SPHERE_BINS - 1;  // default to last bin (float safety)
 
     for (int k = 0; k < DIR_MAP_SPHERE_BINS; ++k) {
         cumulative += bins[k].weight;
@@ -293,18 +327,20 @@ gather_done:
     }
 
     // Direction: use the flux-weighted centroid of the chosen bin
-    // (or the Fibonacci direction if the centroid is degenerate)
-    float3 wi_dir;
+    // (or the Fibonacci direction if the centroid is degenerate).
+    // This is the cone axis for the jitter step below.
+    float3 cone_axis;
     if (bins[chosen_bin].count > 0 && length(bins[chosen_bin].centroid) > 1e-6f) {
-        wi_dir = normalize(bins[chosen_bin].centroid);
+        cone_axis = normalize(bins[chosen_bin].centroid);
     } else {
-        wi_dir = fib.dirs[chosen_bin];
+        cone_axis = fib.dirs[chosen_bin];
     }
 
     // Apply cone jitter for smoothness
+    float3 wi_dir = cone_axis;
     float cos_half = cosf(DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE);
     if (cos_half < 1.f - 1e-6f) {
-        ONB cone_frame = ONB::from_normal(wi_dir);
+        ONB cone_frame = ONB::from_normal(cone_axis);
         float3 cone_local = sample_cosine_cone(
             rng.next_float(), rng.next_float(), cos_half);
         wi_dir = cone_frame.local_to_world(cone_local);
@@ -321,12 +357,14 @@ gather_done:
     entry.dir_z = wi_dir.z;
 
     // ── Compute marginal guide PDF ──────────────────────────────────
-    // pdf = weight_of_chosen_bin / total_weight × cone_pdf (or 1/(2π) if no jitter)
+    // pdf = weight_of_chosen_bin / total_weight × cone_pdf
+    // The cone_pdf must be evaluated relative to the actual cone axis
+    // (centroid-based), not the Fibonacci bin center.
     float bin_prob = bins[chosen_bin].weight / total_weight;
     float cone_pdf_val;
     if (cos_half < 1.f - 1e-6f) {
-        // Cosine-cone PDF at the jittered direction (matches sample_cosine_cone)
-        float cos_theta = dot(wi_dir, fib.dirs[chosen_bin]);
+        // Cosine-cone PDF: angle between jittered direction and cone axis
+        float cos_theta = dot(wi_dir, cone_axis);
         cone_pdf_val = cosine_cone_pdf(cos_theta, cos_half);
     } else {
         // No jitter: Dirac-like — use 1/(2π) as a stand-in
