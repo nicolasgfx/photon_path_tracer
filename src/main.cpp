@@ -6,6 +6,7 @@
 #include "app/cli_args.h"
 #include "core/config.h"
 #include "scene/obj_loader.h"
+#include "scene/pbrt/pbrt_loader.h"
 #include "scene/scene.h"
 #include "scene/scene_builder.h"
 #include "scene/envmap.h"
@@ -79,7 +80,22 @@ int main(int argc, char* argv[]) {
     Scene scene;
     {
         auto t0 = std::chrono::high_resolution_clock::now();
-        if (!load_obj(opt.scene_file, scene)) {
+
+        // Dispatch by file extension: .pbrt → native PBRT loader, else OBJ
+        bool load_ok = false;
+        {
+            std::string ext;
+            auto dot = opt.scene_file.rfind('.');
+            if (dot != std::string::npos)
+                ext = opt.scene_file.substr(dot);
+            for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+
+            if (ext == ".pbrt")
+                load_ok = load_pbrt(opt.scene_file, scene);
+            else
+                load_ok = load_obj(opt.scene_file, scene);
+        }
+        if (!load_ok) {
             std::cerr << "[Error] Failed to load scene: " << opt.scene_file << "\n";
             return 1;
         }
@@ -95,11 +111,19 @@ int main(int argc, char* argv[]) {
                     std::chrono::duration<double, std::milli>(t1 - t0).count(),
                     scene.triangles.size(), scene.materials.size(), scene.textures.size());
 
-        scene.build_bvh();
-        auto t2 = std::chrono::high_resolution_clock::now();
-        std::printf("[Timing] BVH build:         %8.1f ms  (%zu nodes)\n",
-                    std::chrono::duration<double, std::milli>(t2 - t1).count(),
-                    scene.bvh_nodes.size());
+        // CPU BVH is only used for CPU-side intersection (tests).
+        // Skip for large scenes to avoid OOM (OptiX builds its own GPU BVH).
+        constexpr size_t BVH_TRI_LIMIT = 10'000'000;
+        if (scene.triangles.size() <= BVH_TRI_LIMIT) {
+            scene.build_bvh();
+            auto t2 = std::chrono::high_resolution_clock::now();
+            std::printf("[Timing] BVH build:         %8.1f ms  (%zu nodes)\n",
+                        std::chrono::duration<double, std::milli>(t2 - t1).count(),
+                        scene.bvh_nodes.size());
+        } else {
+            std::printf("[Timing] BVH build:         SKIPPED  (%zu tris > %zu limit, OptiX will handle)\n",
+                        scene.triangles.size(), BVH_TRI_LIMIT);
+        }
 
         scene.build_emissive_distribution();
         std::printf("[Scene]  Emissive tris: %d   total power = %.4f\n",

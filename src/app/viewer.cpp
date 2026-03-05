@@ -135,8 +135,7 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
                            std::string* out_envmap_path,
                            float3* out_envmap_rotation,
                            float* out_envmap_scale,
-                           PostFxParams* out_postfx,
-                           float3* out_envmap_constant) {
+                           PostFxParams* out_postfx) {
     std::string path = scene_folder + "/" + SAVED_CAMERA_FILENAME;
     std::ifstream f(path);
     if (!f.is_open()) {
@@ -228,9 +227,6 @@ bool load_camera_from_file(Camera& cam, float& yaw, float& pitch, float& roll,
         }
         else if (key == "bloom_radius_v" && out_postfx) {
             out_postfx->bloom_radius_v = (float)std::atof(val.c_str());
-        }
-        else if (key == "environment_constant" && out_envmap_constant) {
-            parse_float3(val, *out_envmap_constant);
         }
     }
 
@@ -356,6 +352,7 @@ static void render_help_overlay(int win_w, int win_h,
                                  const DebugState& debug,
                                  const Camera& camera,
                                  bool volume_enabled,
+                                 bool use_dense_grid,
                                  int active_scene_index = -1,
                                  float light_scale = 1.0f) {
     // ---------- 2D orthographic projection for overlay ----------
@@ -541,6 +538,7 @@ static void render_help_overlay(int win_w, int win_h,
     // -- Volume Scattering --
     section(ry, rx, "Volume Scattering");
     toggle_line(ry, rx, "V", "Volume",     volume_enabled);
+    toggle_line(ry, rx, "G", "Dense Grid", use_dense_grid);
 
     // -- Scenes --
     section(ry, rx, "Scenes (1-9, 0)");
@@ -708,7 +706,7 @@ static void render_hover_cell_overlay(
         debug.hover_y < 0 || debug.hover_y >= win_h) return;
 
     const PhotonSoA& photons = optix_renderer.photons();
-    const HashGrid& grid = optix_renderer.dm_hash_grid();
+    const DenseGridData& grid = optix_renderer.dense_grid();
     if (photons.size() == 0 || grid.sorted_indices.empty()) return;
 
     float s = ((float)debug.hover_x + 0.5f) / (float)win_w;
@@ -803,7 +801,7 @@ static OptixRenderer*  g_active_optix_renderer  = nullptr;
 static Options*        g_active_options         = nullptr;
 
 static void key_callback(GLFWwindow* window, int key,
-                          int /*scancode*/, int action, int mods) {
+                          int /*scancode*/, int action, int /*mods*/) {
     if (action != GLFW_PRESS) return;
 
     // Any key press counts as user interaction for idle tracking
@@ -848,13 +846,18 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // Scene switching – keys 1-9, 0, Shift+1
+    // Gather mode toggle – G key (dense cell-bin grid vs per-photon hash walk)
+    if (key == GLFW_KEY_G) {
+        s_app.use_dense_grid = !s_app.use_dense_grid;
+        // Dense grid is always active now (no hash grid fallback)
+        printf("[Gather] Dense grid: %s\n", s_app.use_dense_grid ? "ON" : "OFF");
+        s_app.camera_moved  = true;  // reset accumulation
+        return;
+    }
+
+    // Scene switching – keys 1-9, 0
     if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) {
         int idx = key - GLFW_KEY_1;  // 0-8
-        // Shift+1 = Kroken (index 10)
-        if (key == GLFW_KEY_1 && (mods & GLFW_MOD_SHIFT)) {
-            idx = 10;
-        }
         if (idx < NUM_SCENE_PROFILES && idx != s_app.active_scene_index) {
             s_app.scene_switch_requested = idx;
             printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
@@ -864,7 +867,7 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
     if (key == GLFW_KEY_0) {
-        int idx = 9;  // key 0 = profile index 9 (Zero Day)
+        int idx = 9;  // key 0 = profile index 9 (Bathroom)
         if (idx < NUM_SCENE_PROFILES && idx != s_app.active_scene_index) {
             s_app.scene_switch_requested = idx;
             printf("[Scene] Switching to %s ...\n", SCENE_PROFILES[idx].display_name);
@@ -1176,6 +1179,7 @@ void run_interactive(
     optix_renderer.set_volume_enabled(s_app.volume_enabled);
     optix_renderer.set_guide_fraction(
         s_app.guided_enabled ? DEFAULT_GUIDE_FRACTION : 0.0f);
+    // Dense grid is always active now (no toggle needed)
 
     // Compute initial yaw/pitch from camera look direction
     {
@@ -1279,7 +1283,6 @@ void run_interactive(
                 std::string new_envmap_path;
                 float3 new_envmap_rotation = make_f3(0, 0, 0);
                 float  new_envmap_scale    = 1.0f;
-                float3 new_envmap_constant = make_f3(0, 0, 0);
                 {
                     std::string folder = scene_folder_from_profile(prof.obj_path);
                     float saved_yaw = 0.f, saved_pitch = 0.f, saved_roll = 0.f;
@@ -1288,8 +1291,7 @@ void run_interactive(
                     if (load_camera_from_file(camera, saved_yaw, saved_pitch,
                                               saved_roll, saved_light, folder,
                                               &new_envmap_path, &new_envmap_rotation,
-                                              &new_envmap_scale, &loaded_postfx,
-                                              &new_envmap_constant)) {
+                                              &new_envmap_scale, &loaded_postfx)) {
                         s_app.yaw   = saved_yaw;
                         s_app.pitch = saved_pitch;
                         s_app.roll  = saved_roll;
@@ -1327,21 +1329,6 @@ void run_interactive(
                     } else {
                         std::printf("[Warning] Failed to load envmap: %s\n",
                                     new_envmap_path.c_str());
-                        scene.envmap.reset();
-                    }
-                } else if (new_envmap_constant.x > 0.f || new_envmap_constant.y > 0.f
-                           || new_envmap_constant.z > 0.f) {
-                    scene.envmap = std::make_shared<EnvironmentMap>();
-                    if (create_constant_envmap(new_envmap_constant.x,
-                                               new_envmap_constant.y,
-                                               new_envmap_constant.z,
-                                               new_envmap_scale,
-                                               new_envmap_rotation,
-                                               *scene.envmap)) {
-                        scene.envmap->scene_center = scene.scene_bounding_center();
-                        scene.envmap->scene_radius = scene.scene_bounding_radius() * 1.1f;
-                        scene.compute_envmap_selection_prob();
-                    } else {
                         scene.envmap.reset();
                     }
                 }
@@ -1754,7 +1741,7 @@ void run_interactive(
                         g_active_optix_renderer->photons());
                     // Grid occupancy
                     rs.grid_occupancy = compute_grid_occupancy(
-                        g_active_optix_renderer->dm_hash_grid());
+                        g_active_optix_renderer->dense_grid());
                 }
                 // Timing
                 rs.timing.total_render_ms = s_app.last_render_ms;
@@ -1792,7 +1779,7 @@ void run_interactive(
 
                 // ── Save photon cache + launch analysis tool ─────────
                 const auto& snap_photons = optix_renderer.photons();
-                const auto& snap_grid    = optix_renderer.dm_hash_grid();
+                const auto& snap_grid    = optix_renderer.dense_grid();
                 if (snap_photons.size() > 0) {
                     std::string cache_path = snap_dir + "/photons.bin";
                     uint64_t snap_hash = compute_scene_hash(
@@ -1894,7 +1881,7 @@ void run_interactive(
         // Draw debug help overlay (if enabled)
         if (s_app.debug.show_help_overlay) {
             render_help_overlay(win_w, win_h, s_app.debug, camera, s_app.volume_enabled,
-                                s_app.active_scene_index, s_app.light_scale);
+                                s_app.use_dense_grid, s_app.active_scene_index, s_app.light_scale);
         }
 
         // Draw stats overlay (S key)

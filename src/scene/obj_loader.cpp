@@ -443,7 +443,8 @@ static bool load_mtl(const std::string& filepath, Scene& scene,
 // Called once after all MTL files are loaded.  Resolves pb_brdf → 
 // MaterialType, applies pb_roughness/pb_eta overrides, creates
 // HomogeneousMedium entries for pb_medium, etc.
-static void finalize_pb_materials(Scene& scene) {
+// Non-static: also called by the PBRT loader (pbrt_loader.cpp).
+void finalize_pb_materials(Scene& scene) {
     int pb_count = 0;
     int media_created = 0;
 

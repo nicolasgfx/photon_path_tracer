@@ -14,3 +14,8 @@
 //   - mtllib file.mtl
 //   - usemtl name
 bool load_obj(const std::string& filepath, Scene& scene);
+
+// Apply pb_* material extensions (shared between OBJ and PBRT loaders).
+// Resolves pb_brdf → MaterialType, pb_roughness, pb_eta, conductor
+// complex IOR, creates HomogeneousMedium entries, etc.
+void finalize_pb_materials(Scene& scene);

@@ -409,6 +409,16 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
         }
         if (wo_local.z <= 0.f) break;  // grazing angle — still reject
 
+        // ── First-hit direction-map guidance ─────────────────────
+        // At the FIRST non-delta hit (including after a specular
+        // chain through glass/mirror), use the precomputed direction
+        // map for a 50/50 coin flip between guided direction and BSDF.
+        // All subsequent bounces use pure BSDF sampling (brute-force PT).
+        //
+        // Must check aov_written BEFORE setting it, so that camera
+        // rays that followed a specular chain still get guidance.
+        bool is_first_non_delta = !aov_written;
+
         // AOV: capture albedo + normal at first non-specular hit
         if (!aov_written) {
             Spectrum Kd_aov = dev_get_Kd(mat_id, hit.uv);
@@ -420,17 +430,29 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
             aov_written = true;
         }
 
-        // ── First-hit direction-map guidance (bounce 0 only) ─────────
-        // At the FIRST non-delta hit, use the precomputed direction map
-        // for a 50/50 coin flip between guided direction and BSDF.
-        // All subsequent bounces use pure BSDF sampling (brute-force PT).
-        //
         // The direction map is indexed by the pixel's subpixel grid.
         // We pick the centre subpixel for the current pixel.
-        bool is_first_non_delta = (bounce == 0 || !aov_written);
+        // Read DirMapEntry BEFORE the coin flip so that p_guide is
+        // set to 0 when the entry is invalid — avoids 2× brightness
+        // in the fallback BSDF path.
         float p_guide = (is_first_non_delta && !params.preview_mode
                         && params.dir_map_valid && params.dir_map_buffer)
                       ? params.guide_fraction : 0.f;
+
+        DirMapEntry de = {};
+        if (p_guide > 0.f) {
+            int factor = DIR_MAP_SUBPIXEL_FACTOR;
+            int sx = pixel_idx % params.width * factor + factor / 2;
+            int sy = pixel_idx / params.width * factor + factor / 2;
+            if (sx < params.dir_map_width && sy < params.dir_map_height) {
+                int dir_idx = sy * params.dir_map_width + sx;
+                de = params.dir_map_buffer[dir_idx];
+            }
+            // If the entry has no eligible photons or a negligible PDF,
+            // disable the guide for this pixel (pure BSDF, no 2× bias).
+            if (de.num_eligible == 0 || de.pdf <= 1e-10f)
+                p_guide = 0.f;
+        }
 
         // ── NEE: 1 shadow ray ───────────────────────────────────────
         // §4.1: Standard Veach-style MIS: sample a light, weight against BSDF.
@@ -459,39 +481,31 @@ PathTraceResult full_path_trace_v3(float3 origin, float3 direction, PCGRng& rng,
 
         if (chose_guide) {
             // ── Direction-map guided sample (1st hit only) ──────────
-            // Look up the precomputed DirMapEntry for this pixel's
-            // centre subpixel.
-            int factor = DIR_MAP_SUBPIXEL_FACTOR;
-            int sx = pixel_idx % params.width * factor + factor / 2;
-            int sy = pixel_idx / params.width * factor + factor / 2;
-            if (sx < params.dir_map_width && sy < params.dir_map_height) {
-                int dir_idx = sy * params.dir_map_width + sx;
-                DirMapEntry de = params.dir_map_buffer[dir_idx];
-                if (de.num_eligible > 0 && de.pdf > 1e-10f) {
-                    float3 guide_dir = make_f3(de.dir_x, de.dir_y, de.dir_z);
-                    float3 wi_local = frame.world_to_local(guide_dir);
-                    if (wi_local.z > 0.f) {
-                        Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
-                        float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
-                        combined_pdf = p_guide * de.pdf + (1.f - p_guide) * pdf_bsdf;
-                        if (combined_pdf > 1e-8f) {
-                            float cos_theta = wi_local.z;
-                            for (int i = 0; i < NUM_LAMBDA; ++i) {
-                                f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
-                                f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
-                            }
-                            wi_world = guide_dir;
-                            sample_valid = true;
-                        }
+            // DirMapEntry was already read and validated above
+            // (p_guide > 0 guarantees de.num_eligible > 0 and de.pdf > 1e-10).
+            float3 guide_dir = make_f3(de.dir_x, de.dir_y, de.dir_z);
+            float3 wi_local = frame.world_to_local(guide_dir);
+            if (wi_local.z > 0.f) {
+                Spectrum f_eval = bsdf_evaluate(mat_id, wo_local, wi_local, hit.uv);
+                float pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local);
+                combined_pdf = p_guide * de.pdf + (1.f - p_guide) * pdf_bsdf;
+                if (combined_pdf > 1e-8f) {
+                    float cos_theta = wi_local.z;
+                    for (int i = 0; i < NUM_LAMBDA; ++i) {
+                        f_over_pdf.value[i] = f_eval.value[i] * cos_theta / combined_pdf;
+                        f_over_pdf.value[i] = fminf(f_over_pdf.value[i], MAX_BOUNCE_CONTRIBUTION);
                     }
+                    wi_world = guide_dir;
+                    sample_valid = true;
                 }
             }
-            // Defensive fallback: if guide couldn't produce a valid sample
+            // Defensive fallback: guide direction below horizon.
+            // Treat as unguided (p_guide = 0) to avoid 2× energy bias.
             if (!sample_valid) {
                 BSDFSample bs = bsdf_sample(mat_id, wo_local, hit.uv, rng, pixel_idx);
                 if (bs.pdf < 1e-8f || bs.wi.z <= 0.f) break;
                 wi_world = frame.local_to_world(bs.wi);
-                combined_pdf = (1.f - p_guide) * bs.pdf;
+                combined_pdf = bs.pdf;
                 if (combined_pdf < 1e-8f) break;
                 float cos_theta = bs.wi.z;
                 for (int i = 0; i < NUM_LAMBDA; ++i) {

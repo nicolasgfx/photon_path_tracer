@@ -85,6 +85,10 @@ set(CORE_SOURCES
     src/app/viewer.cpp
     src/scene/obj_loader.cpp
     src/scene/envmap_loader.cpp
+    src/scene/pbrt/pbrt_parser.cpp
+    src/scene/pbrt/ply_reader.cpp
+    src/scene/pbrt/pbrt_material_mapper.cpp
+    src/scene/pbrt/pbrt_loader.cpp
     src/photon/photon_io.cpp
     src/photon/direction_map.cpp
     src/renderer/renderer.cpp
@@ -278,6 +282,10 @@ if(PPT_BUILD_TESTS)
         tests/test_caustics.cpp
         tests/test_tri_photon_irradiance.cpp
         src/scene/obj_loader.cpp
+        src/scene/pbrt/pbrt_parser.cpp
+        src/scene/pbrt/ply_reader.cpp
+        src/scene/pbrt/pbrt_material_mapper.cpp
+        src/scene/pbrt/pbrt_loader.cpp
         src/renderer/renderer.cpp
         src/optix/optix_renderer.cpp
         src/optix/optix_setup.cpp
@@ -331,6 +339,10 @@ endif()
 add_executable(photon_map_analysis
     tools/photon_map_analysis/main.cpp
     src/scene/obj_loader.cpp
+    src/scene/pbrt/pbrt_parser.cpp
+    src/scene/pbrt/ply_reader.cpp
+    src/scene/pbrt/pbrt_material_mapper.cpp
+    src/scene/pbrt/pbrt_loader.cpp
     src/photon/photon_io.cpp
 )
 target_include_directories(photon_map_analysis PRIVATE

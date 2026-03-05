@@ -84,8 +84,8 @@ constexpr int DEFAULT_SPP = STRATA_X * STRATA_Y;       // [R]
 // Total photons emitted per pass.  The photon map carries ALL indirect
 // transport in the v2 architecture.
 //   Fast: 100k  |  Balanced: 500k–1M  |  Quality: 2M–5M
-constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 1000000;   // [R]  diffuse indirect
-constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 1000000;   // [R]  specular→diffuse caustics
+constexpr int DEFAULT_GLOBAL_PHOTON_BUDGET  = 3000000;   // [R]  diffuse indirect
+constexpr int DEFAULT_CAUSTIC_PHOTON_BUDGET = 3000000;   // [R]  specular→diffuse caustics
 
 // ── Gather radii (max kNN search radius) ────────────────────────────
 // These set the MAXIMUM search radius for k-NN photon gathering.
@@ -230,7 +230,7 @@ constexpr float DEFAULT_GUIDE_RADIUS = DEFAULT_GATHER_RADIUS;  // 0.05 m
 // ── Periodic photon + direction-map rebuild during final render ─────
 // Every N SPP, re-trace the photon map (with a fresh seed) and rebuild
 // the direction map.  Decorrelates guide directions across the render.
-constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 500;  // [R] SPP between rebuilds
+constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 1000;  // [R] SPP between rebuilds
 
 // ── NaN / infinity safety net ────────────────────────────────────────
 // With correct one-sample MIS (balance heuristic) and physical BSDFs,
@@ -458,7 +458,7 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
   constexpr float SCENE_CAM_SPEED          = 0.01f;
 
 #elif defined(SCENE_KROKEN)
-  constexpr const char* SCENE_OBJ_PATH    = "kroken/camera-1.obj";
+  constexpr const char* SCENE_OBJ_PATH    = "../tools/pbrtv4_scenes/pbrt-v4-scenes/kroken/camera-1.pbrt";
   constexpr const char* SCENE_DISPLAY_NAME = "Kroken";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
@@ -521,10 +521,10 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     { "watercolor/camera-1.obj",                 "Watercolor",        false,
       {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
     // Key 0 – Zero Day
-    { "zero_day/zero-day-frame25/frame25.obj",   "Zero Day",          false,
-      {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL, false },
+    { "zero_day/frame25.obj",   "Zero Day",          false,
+      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
     // Shift+1 – Kroken
-    { "kroken/camera-1.obj",                     "Kroken",            false,
+    { "../tools/pbrtv4_scenes/pbrt-v4-scenes/kroken/camera-1.pbrt", "Kroken", false,
       {0,0,0}, {0,0,-1}, 90.f, 0.05f, SceneLightMode::FromMTL, false },
 };
 
