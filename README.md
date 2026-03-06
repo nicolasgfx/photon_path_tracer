@@ -9,11 +9,11 @@
 </p>
 <p align="center">
   <img src="doc/gallery/render4.png" alt="Render 4" width="49%"/>
-  <img src="doc/gallery/render5.png" alt="Render 5" width="49%"/>
+  <img src="doc/gallery/render6.png" alt="Render 6" width="49%"/>
 </p>
 <p align="center">
-  <img src="doc/gallery/render6.png" alt="Render 6" width="49%"/>
   <img src="doc/gallery/render7.png" alt="Render 7" width="49%"/>
+  <img src="doc/gallery/dirmap..png" alt="Direction Map" width="49%"/>
 </p>
 
 <p align="center"><sub>
