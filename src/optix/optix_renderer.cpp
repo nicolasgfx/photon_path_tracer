@@ -374,6 +374,12 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
     OptixShaderBindingTable dirmap_sbt = sbt_;
     dirmap_sbt.raygenRecord = reinterpret_cast<CUdeviceptr>(d_raygen_dirmap_record_.d_ptr);
 
+    // A2: CUDA event timing for the direction map kernel
+    cudaEvent_t dm_start, dm_stop;
+    CUDA_CHECK(cudaEventCreate(&dm_start));
+    CUDA_CHECK(cudaEventCreate(&dm_stop));
+    CUDA_CHECK(cudaEventRecord(dm_start, nullptr));
+
     OPTIX_CHECK(optixLaunch(
         pipeline_,
         nullptr,
@@ -382,8 +388,14 @@ void OptixRenderer::build_direction_map(const Camera& camera, int spp_seed) {
         &dirmap_sbt,
         dm_w, dm_h, 1));
 
-    CUDA_CHECK(cudaDeviceSynchronize());
-    std::printf("[DirMap] OptiX launch completed\n");
+    CUDA_CHECK(cudaEventRecord(dm_stop, nullptr));
+    CUDA_CHECK(cudaEventSynchronize(dm_stop));
+    float dm_kernel_ms = 0.f;
+    CUDA_CHECK(cudaEventElapsedTime(&dm_kernel_ms, dm_start, dm_stop));
+    CUDA_CHECK(cudaEventDestroy(dm_start));
+    CUDA_CHECK(cudaEventDestroy(dm_stop));
+    std::printf("[Timing] DirMap kernel:      %8.1f ms  (%dx%d = %d subpixels)\n",
+               (double)dm_kernel_ms, dm_w, dm_h, dm_w * dm_h);
 
     // Diagnostic: sample spectral_ref_buffer at center pixel
     if (d_spectral_ref_buffer_.d_ptr) {

@@ -104,7 +104,25 @@ inline Spectrum estimate_photon_density(
         r_k2 = std::max(r_k2, 1e-12f);
         candidates.resize(K);  // keep only the K nearest
     } else {
-        r_k2 = r2;  // fallback: fixed radius
+        // B4: Sparse region — extrapolate adaptive radius from found photons
+        int n_found = (int)candidates.size();
+        if (n_found < SPARSE_GATHER_MIN_PHOTONS) {
+            return L_estimate;  // Too few photons — suppress entirely
+        }
+        // Extrapolate: farthest found distance scaled by K/n_found
+        float max_d2 = 0.f;
+        for (auto& c : candidates)
+            max_d2 = std::max(max_d2, c.d_tan2);
+        r_k2 = max_d2 * ((float)K / (float)n_found);
+        r_k2 = std::min(r_k2, r2);  // clamp to gather radius
+        r_k2 = std::max(r_k2, 1e-12f);
+    }
+
+    // B4: Reliability weighting — smoothly suppress sparse contributions
+    float reliability = 1.0f;
+    if ((int)candidates.size() < K) {
+        float threshold = SPARSE_GATHER_RELIABILITY_K * (float)K;
+        reliability = std::min(1.0f, (float)candidates.size() / threshold);
     }
 
     // Use tangential disk normalization (§6.3, §15.1.3):
@@ -113,6 +131,7 @@ inline Spectrum estimate_photon_density(
     float inv_area_knn = config.use_kernel
                        ? 2.0f / (PI * r_k2)
                        : 1.0f / (PI * r_k2);
+    inv_area_knn *= reliability;
 
     // ── Phase 3: Accumulate contributions ───────────────────────────
     for (const auto& c : candidates) {

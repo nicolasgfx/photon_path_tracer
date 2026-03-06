@@ -215,6 +215,86 @@ inline GridOccupancy compute_grid_occupancy(const HashGrid& grid) {
     return g;
 }
 
+// ── Extended cell occupancy histogram (A3 diagnostic) ───────────────
+// Always computed (lightweight O(N) pass), printed unconditionally.
+struct CellOccupancyHistogram {
+    int total_buckets      = 0;
+    int empty_buckets      = 0;
+    int populated_buckets  = 0;
+    int bin_0         = 0;   // 0 photons (empty)
+    int bin_1_5       = 0;   // 1–5
+    int bin_6_20      = 0;   // 6–20
+    int bin_21_100    = 0;   // 21–100
+    int bin_101_plus  = 0;   // 101+
+    int max_per_cell  = 0;
+    long long total_photons = 0;
+    float avg_per_populated = 0.f;
+    float occupancy_pct     = 0.f;
+    // Gini coefficient: 0 = perfectly uniform, 1 = all in one cell
+    float gini              = 0.f;
+};
+
+inline CellOccupancyHistogram compute_cell_histogram(const HashGrid& grid) {
+    CellOccupancyHistogram h;
+    if (grid.table_size == 0) return h;
+
+    h.total_buckets = (int)grid.table_size;
+
+    // Collect per-bucket counts for Gini computation
+    std::vector<int> counts;
+    counts.reserve(grid.table_size / 4);
+
+    for (uint32_t i = 0; i < grid.table_size; ++i) {
+        if (grid.cell_start[i] == 0xFFFFFFFFu) {
+            h.empty_buckets++;
+            h.bin_0++;
+            continue;
+        }
+        int c = (int)(grid.cell_end[i] - grid.cell_start[i]);
+        h.populated_buckets++;
+        h.total_photons += c;
+        h.max_per_cell = (std::max)(h.max_per_cell, c);
+        counts.push_back(c);
+
+        if      (c <= 5)   h.bin_1_5++;
+        else if (c <= 20)  h.bin_6_20++;
+        else if (c <= 100) h.bin_21_100++;
+        else               h.bin_101_plus++;
+    }
+
+    h.occupancy_pct = h.total_buckets > 0
+        ? 100.f * (float)h.populated_buckets / (float)h.total_buckets : 0.f;
+    h.avg_per_populated = h.populated_buckets > 0
+        ? (float)h.total_photons / (float)h.populated_buckets : 0.f;
+
+    // Gini coefficient from sorted counts
+    if (!counts.empty()) {
+        std::sort(counts.begin(), counts.end());
+        double n = (double)counts.size();
+        double cumsum = 0.0, weighted_sum = 0.0;
+        for (size_t i = 0; i < counts.size(); ++i) {
+            cumsum += counts[i];
+            weighted_sum += (double)(i + 1) * counts[i];
+        }
+        if (cumsum > 0.0)
+            h.gini = (float)((2.0 * weighted_sum) / (n * cumsum) - (n + 1.0) / n);
+    }
+
+    return h;
+}
+
+inline void print_cell_histogram(const CellOccupancyHistogram& h,
+                                 const char* label = "Hash Grid") {
+    std::printf("[%s] Cell Occupancy Histogram:\n", label);
+    std::printf("  Buckets: %d total, %d populated (%.1f%%), %d empty\n",
+                h.total_buckets, h.populated_buckets, h.occupancy_pct, h.empty_buckets);
+    std::printf("  Photons: %lld total, avg %.1f/populated cell, max %d\n",
+                h.total_photons, h.avg_per_populated, h.max_per_cell);
+    std::printf("  Distribution: [0]=%d  [1-5]=%d  [6-20]=%d  [21-100]=%d  [101+]=%d\n",
+                h.bin_0, h.bin_1_5, h.bin_6_20, h.bin_21_100, h.bin_101_plus);
+    std::printf("  Gini coefficient: %.3f (0=uniform, 1=concentrated)\n", h.gini);
+}
+
 // ── Print grouped statistics to console ─────────────────────────────
 inline void print_stats_console(const RendererStats& s) {
     if constexpr (!ENABLE_STATS) return;

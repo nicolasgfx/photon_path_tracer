@@ -776,7 +776,7 @@ direction are filtered out by the surface consistency check.  Only floor
 photons survive, the heap needs to reach further ($r_k$ grows), and the
 larger denominator $\pi r_k^2$ compensates exactly — **no dark edge**.
 
-#### 6.5.4 GPU Implementation (Register Max-Heap)
+#### 6.5.4 GPU Implementation (Register Max-Heap + Shell Expansion)
 
 The GPU implementation in `optix_device.cu` uses a **register-allocated
 max-heap** of size $K$ (default 100).  Key details:
@@ -786,8 +786,27 @@ max-heap** of size $K$ (default 100).  Key details:
 - **Max-heap property**: the root (`knn_d2[0]`) is always the farthest
   photon.  New photons are accepted only if `d_tan² < knn_d2[0]`.
 - **Sift-down**: standard binary heap sift-down after eviction.
-- Hash-grid cell traversal is flat (no recursion, no warp divergence).
 - Capped at `DEFAULT_GPU_MAX_GATHER_RADIUS` to prevent pathological search.
+
+**Shell expansion (direction map kNN):**  The direction map build kernel
+uses concentric shell expansion instead of iterating the full bounding box
+of cells.  Layer 0 = center cell, layer 1 = 3×3×3 shell, layer 2 = 5×5×5
+shell, etc.  Only cells on the outer shell are visited (Chebyshev distance
+= layer).  After each layer, early termination fires when the K-th nearest
+photon is closer than the minimum distance to the next shell boundary:
+
+$$
+\min\bigl(\text{bd}_x,\,\text{bd}_y,\,\text{bd}_z\bigr)^2 > d_K^2 \;\Rightarrow\; \text{break}
+$$
+
+where $\text{bd}_{x} = \min\bigl((\ell{+}1)\,c_s - f_x,\; \ell\,c_s + f_x\bigr)$
+and $f_x$ is the fractional position within the center cell.
+Capped at `DM_KNN_MAX_LAYERS` (default 8).  For dense regions the kernel
+exits after 1–2 layers; the original flat loop iterated up to $11^3 = 1{,}331$
+cells regardless of density.
+
+Visited-key deduplication prevents re-scanning hash-colliding buckets
+across layers.
 
 #### 6.5.5 CPU Implementation (std::nth_element)
 
@@ -835,6 +854,23 @@ $$
 When the dual-budget system is inactive (no targeted caustics), all
 photons receive `1/N_global` normalization.
 
+**Sparse region handling (B4):**  When fewer than $K$ photons are found:
+
+1. If count < `SPARSE_GATHER_MIN_PHOTONS` (5): suppress entirely
+   (return zero).  Too few photons for a meaningful estimate.
+2. Otherwise, extrapolate an adaptive radius:
+   $r_k^2 = d_{\max}^2 \cdot K \mathbin{/} n_{\text{found}}$, clamped to
+   the gather radius.  This avoids the old fallback to the full
+   `gather_radius²`, which over-diluted sparse contributions.
+3. Apply a reliability weight:
+   $\rho = \min\bigl(1,\; n_{\text{found}} \mathbin{/} (0.25\,K)\bigr)$.
+   The density normalization is scaled by $\rho$, smoothly attenuating
+   contributions in sparse regions rather than hard-cutting them.
+
+Configuration: `SPARSE_GATHER_MIN_PHOTONS` (5),
+`SPARSE_GATHER_RELIABILITY_K` (0.25).  Implementation:
+`density_estimator.h`.
+
 ### 6.7 Gather Radius Strategy
 
 | Mode | Radius per hitpoint |
@@ -861,6 +897,122 @@ For scenes with clean, watertight geometry, store `triangle_id` per photon
 and accept only photons deposited on the same triangle or smoothing group.
 The tangential metric + surface consistency filter is sufficient for most
 scenes.
+
+---
+
+## 6A. Direction Map Build
+
+After the photon pass and hash grid construction, the renderer builds a
+**per-pixel direction map** — a precomputed framebuffer of guided
+directions and PDFs used by the camera pass.  This runs as a separate
+OptiX raygen program (`__raygen__direction_map`) before the camera pass.
+
+Implementation: `src/optix/optix_direction_map.cuh` (device kernel),
+`OptixRenderer::build_direction_map()` in `src/optix/optix_renderer.cpp`
+(host launch wrapper).
+
+### 6A.1 Per-Subpixel Algorithm
+
+For each subpixel in a `(W × factor) × (H × factor)` grid (factor =
+`DIR_MAP_SUBPIXEL_FACTOR`, default 1):
+
+```
+1. Cast primary ray → find first hitpoint
+2. If delta material: follow specular chain (up to
+   DEFAULT_MAX_SPECULAR_CHAIN bounces) until a non-delta surface
+3. Gather K nearest photons from the DM hash grid (shell-expansion
+   kNN, §6.5.4) around the hitpoint
+4. Sort kNN heap by distance ascending (insertion sort, K ≤ 64)
+5. For the closest min(knn_count, MAX_DM_SHADOW_RAYS) photons:
+   a. Trace shadow ray from hitpoint to photon
+   b. Classify by first intersection material:
+      - miss              → accept (w = DIR_MAP_DEFAULT_WEIGHT)
+      - delta (glass/mirror) → accept (w = DIR_MAP_DELTA_WEIGHT)
+      - translucent       → accept (w = DIR_MAP_TRANSLUCENT_WEIGHT)
+      - emissive          → reject
+      - non-delta diffuse → reject
+   c. Apply Epanechnikov kernel:  w × max(0, 1 − d²/r_k²)
+   d. Accumulate into 128-bin Fibonacci sphere histogram
+   e. Accumulate spectral flux per wavelength for outlier clamp ref
+6. Write spectral reference buffer (normalised by πr_k² × N_emitted)
+7. If knn_count < MIN_GUIDE_PHOTONS: skip histogram → return empty entry
+8. Sample one direction from histogram CDF
+9. Apply cone jitter (DEFAULT_PHOTON_GUIDE_CONE_HALF_ANGLE)
+10. Compute marginal guide PDF
+11. Write DirMapEntry to device buffer
+```
+
+### 6A.2 kNN Shell Expansion
+
+The direction map uses a separate hash grid (`dm_hash_grid_`) with cell
+size `DIR_MAP_HASH_CELL_SIZE × 0.5`.  The kNN search uses concentric
+shell expansion (§6.5.4) with `DM_KNN_MAX_LAYERS` (8) and K =
+`MAX_GUIDE_PDF_PHOTONS` (64).  After the heap is built, an insertion
+sort orders results by distance ascending so that the shadow-ray budget
+evaluates the **closest** photons first.
+
+### 6A.3 Shadow Ray Budget (B3)
+
+The shadow ray loop is capped at `MAX_DM_SHADOW_RAYS` (32).  Because
+the heap is sorted closest-first, the 32 evaluated photons are the most
+spatially relevant and carry the strongest Epanechnikov weight.  This
+halves BVH traversal cost with negligible quality loss — most of the
+discarded far photons would contribute near-zero weight anyway.
+
+### 6A.4 Sparse Region Gate (B5)
+
+If the kNN phase finds fewer than `MIN_GUIDE_PHOTONS` (8) photons, the
+shadow ray loop still runs (for the spectral reference buffer) but the
+histogram is skipped and the DirMapEntry is returned empty.  The camera
+pass falls back to pure BSDF sampling for that pixel.
+
+### 6A.5 Spectral Reference Buffer (Outlier Clamp)
+
+During the shadow loop, accepted photons accumulate per-wavelength
+spectral irradiance (visibility-filtered).  This is normalised and
+written to `spectral_ref_buffer[pixel]`.  The camera pass uses this
+reference for per-wavelength outlier clamping:
+
+$$
+L_{\text{sample}}(\lambda) = \min\bigl(L_{\text{sample}}(\lambda),\;
+  \text{ref}(\lambda) \times \text{threshold}\bigr)
+$$
+
+where threshold = `DEFAULT_SPECTRAL_CLAMP_THRESHOLD` (20×).  This
+suppresses fireflies caused by rare high-energy path samples while
+preserving physically correct expected values.
+
+**Critical invariant:** Spectral reference and visibility must stay
+coupled.  Decoupling them (e.g. computing reference from all kNN
+photons without shadow filtering) inflates the reference and loosens
+the clamp, defeating its purpose.
+
+### 6A.6 Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MAX_GUIDE_PDF_PHOTONS` | 64 | kNN K for direction map |
+| `MAX_DM_SHADOW_RAYS` | 32 | Shadow ray budget per pixel |
+| `MIN_GUIDE_PHOTONS` | 8 | Min photons before building histogram |
+| `DM_KNN_MAX_LAYERS` | 8 | Max shell expansion layers |
+| `DIR_MAP_SPHERE_BINS` | 128 | Fibonacci sphere histogram bins |
+| `DIR_MAP_SUBPIXEL_FACTOR` | 1 | Subpixel grid resolution multiplier |
+| `DIR_MAP_HASH_CELL_SIZE` | 0.02 | DM hash grid cell size (×0.5 at build) |
+| `DEFAULT_GUIDE_RADIUS` | 0.05 | kNN search radius |
+| `DEFAULT_SPECTRAL_CLAMP_THRESHOLD` | 20.0 | Max ratio PT sample / photon reference |
+
+### 6A.7 Diagnostics
+
+- **CUDA event timing** (`[Timing] DirMap kernel`): wall-clock GPU
+  time for the OptiX direction map launch, reported separately from
+  the hash grid build time.
+- **Cell occupancy histogram** (`[CellHist]`): distribution of photons
+  per hash cell (empty, 1–5, 6–20, 21–100, 101+) plus Gini
+  coefficient.  High empty-cell fraction indicates sparse photon
+  distribution.
+- **Emitter distribution audit** (`[Emitter]`): top-10 emitters by
+  stored photon count.  Reveals budget imbalances in many-emitter
+  scenes.
 
 ---
 

@@ -1876,6 +1876,27 @@ void run_interactive(
                 }
             }
 
+            // ── Photon map PNG ───────────────────────────────────────
+            {
+                const PhotonSoA& photons = optix_renderer.photons();
+                if (photons.size() > 0) {
+                    FrameBuffer photon_fb;
+                    photon_fb.width  = display_fb.width;
+                    photon_fb.height = display_fb.height;
+                    photon_fb.srgb.resize(photon_fb.width * photon_fb.height * 4, 0);
+                    for (int p = 0; p < photon_fb.width * photon_fb.height; ++p)
+                        photon_fb.srgb[p * 4 + 3] = 255;
+                    overlay_photon_points(
+                        photon_fb, camera, photons,
+                        /*spectral_color=*/true,
+                        /*filter_flag=*/0,
+                        /*point_brightness=*/2.0f);
+                    std::string photon_path = prefix + "_photonmap.png";
+                    write_png(photon_path, photon_fb);
+                    std::cout << "  [Snapshot] " << photon_path << " (photon map)\n";
+                }
+            }
+
             std::cout << "========================================\n\n";
 
             // ── Lightweight metadata JSON (always written, no GPU queries) ──

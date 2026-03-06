@@ -18,6 +18,8 @@
 #include <cstdio>
 #include <iostream>
 #include <unordered_set>
+#include <unordered_map>
+#include "debug/stats_collector.h"
 
 #include <optix.h>
 #include <optix_stubs.h>
@@ -657,6 +659,33 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         }
     }
 
+    // ── A5: Emitter distribution audit ──────────────────────────────
+    // Histogram of source_emissive_idx → find which emitters dominate.
+    {
+        std::unordered_map<uint16_t, uint32_t> emitter_counts;
+        for (uint32_t i = 0; i < stored_count; ++i)
+            ++emitter_counts[stored_photons_.source_emissive_idx[i]];
+
+        // Sort by count descending → print top 10
+        std::vector<std::pair<uint32_t, uint16_t>> sorted_emitters;
+        sorted_emitters.reserve(emitter_counts.size());
+        for (auto& kv : emitter_counts)
+            sorted_emitters.push_back({kv.second, kv.first});
+        std::sort(sorted_emitters.begin(), sorted_emitters.end(),
+                  [](auto& a, auto& b){ return a.first > b.first; });
+
+        std::printf("[Emitter] %zu unique emitters across %u stored photons\n",
+                    emitter_counts.size(), stored_count);
+        int shown = 0;
+        for (auto& [count, idx] : sorted_emitters) {
+            if (shown >= 10) break;
+            float pct = 100.f * (float)count / (float)stored_count;
+            std::printf("[Emitter]   #%d: emissive_idx=%u  count=%u (%.1f%%)\n",
+                        shown, (unsigned)idx, count, (double)pct);
+            ++shown;
+        }
+    }
+
     // ── Build and upload direction-map hash grid ─────────────────────
     {
         dm_hash_grid_.build(stored_photons_, DIR_MAP_HASH_CELL_SIZE * 0.5f);
@@ -664,6 +693,10 @@ void OptixRenderer::trace_photons(const Scene& scene, const RenderConfig& config
         d_dm_hash_sorted_indices_.upload(dm_hash_grid_.sorted_indices);
         d_dm_hash_cell_start_.upload(dm_hash_grid_.cell_start);
         d_dm_hash_cell_end_.upload(dm_hash_grid_.cell_end);
+
+        // A3: Cell occupancy histogram for the DM hash grid
+        auto hist = compute_cell_histogram(dm_hash_grid_);
+        print_cell_histogram(hist);
 
         auto t_now = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_now - t_lap).count();

@@ -60,8 +60,8 @@ constexpr bool ENABLE_GUIDE_STATS = false;
 //  §1  IMAGE OUTPUT
 // =====================================================================
 
-constexpr int DEFAULT_IMAGE_WIDTH  = 1920;           // [R]
-constexpr int DEFAULT_IMAGE_HEIGHT = 1080;           // [R]
+constexpr int DEFAULT_IMAGE_WIDTH  = 2560;           // [R]
+constexpr int DEFAULT_IMAGE_HEIGHT = 1440;           // [R]
 
 
 // =====================================================================
@@ -137,7 +137,7 @@ constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 // IDLE_TIMEOUT_SEC of no input the viewer switches to full-quality
 // photon-guided accumulation.
 constexpr int   PREVIEW_MAX_BOUNCES = 2;             //  bounce cap in preview mode
-constexpr float IDLE_TIMEOUT_SEC    = 1.0f;
+constexpr float IDLE_TIMEOUT_SEC    = 4.0f;
 
 
 // =====================================================================
@@ -187,6 +187,24 @@ constexpr bool  DEFAULT_USE_GUIDE = !true;           // [K]
 
 // Max photons gathered by kNN before shadow-ray filtering.
 constexpr int MAX_GUIDE_PDF_PHOTONS = 64;
+
+// Max shadow rays per pixel in direction map build.  Set lower than
+// MAX_GUIDE_PDF_PHOTONS to cap GPU workload on complex BVH scenes.
+// Closest photons are evaluated first (most likely to be unoccluded).
+//   32 halves shadow-ray cost vs. 64 with negligible quality loss.
+constexpr int MAX_DM_SHADOW_RAYS = 32;
+
+// Minimum photons found by kNN before proceeding to shadow-ray
+// filtering & histogram.  Below this threshold the guide data is
+// too noisy to be useful — skip shadow rays (saves GPU work in
+// photon-sparse regions).  0 = disabled (legacy behaviour).
+constexpr int MIN_GUIDE_PHOTONS = 8;
+
+// Maximum shell-expansion layers in the direction-map kNN search.
+// Layer 0 = center cell, layer 1 = 3×3×3, layer 2 = 5×5×5, etc.
+// Early termination (heap root < next-shell boundary) usually exits
+// well before this limit.  Caps worst-case cell visits.
+constexpr int DM_KNN_MAX_LAYERS = 8;
 
 // Probability of choosing the guided strategy vs pure BSDF (1st hit only).
 //   0.0 = BSDF only  |  0.5 = balanced  |  1.0 = guide only
@@ -360,6 +378,13 @@ constexpr int   MAX_AOV_BOUNCES = 4;                    // first N bounces captu
 
 constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses direct-only proxy
 
+// ── Sparse-gather photon reliability thresholds (B4: §6 edge-case) ──
+// When fewer than K photons are found within gather_radius, the
+// density estimate falls back to a wider radius.  These constants
+// control how that fallback behaves.
+constexpr int   SPARSE_GATHER_MIN_PHOTONS     = 5;     // below this, suppress photon contribution
+constexpr float SPARSE_GATHER_RELIABILITY_K   = 0.25f; // fraction of DEFAULT_KNN_K used as soft reliability threshold
+
 
 // =====================================================================
 //  §10  SCENE PROFILES
@@ -511,7 +536,7 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
     // Key 4 – Staircase 2
     { "staircase2/scene-v4.obj",                 "Staircase 2",       false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
+      {0,0,0}, {0,0,-1}, 70.f, 0.1f, SceneLightMode::FromMTL, false },
     // Key 5 – Bathroom
     { "bathroom/scene-v4.obj",                   "Bathroom",          false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },
@@ -529,7 +554,7 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
       {0,0,0}, {0,0,-1}, 36.f, 0.01f, SceneLightMode::FromMTL, false },
     // Key 0 – Zero Day
     { "zero_day/frame25.obj",   "Zero Day",          false,
-      {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
+      {0,0,0}, {0,0,-1}, 70.f, 0.01f, SceneLightMode::FromMTL, false },
     // Shift+1 – Kroken
     { "../tools/pbrtv4_scenes/pbrt-v4-scenes/kroken/camera-1.pbrt", "Kroken", false,
       {0,0,0}, {0,0,-1}, 90.f, 0.1f, SceneLightMode::FromMTL, false },

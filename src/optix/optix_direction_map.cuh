@@ -163,76 +163,109 @@ DirMapEntry dev_build_direction_map_entry(
     uint32_t knn_idx[KNN_K];
     int      knn_count = 0;
 
-    // Compute cell range covering the search sphere
-    int cx0 = (int)floorf((pos.x - r_search) / cell_size);
-    int cy0 = (int)floorf((pos.y - r_search) / cell_size);
-    int cz0 = (int)floorf((pos.z - r_search) / cell_size);
-    int cx1 = (int)floorf((pos.x + r_search) / cell_size);
-    int cy1 = (int)floorf((pos.y + r_search) / cell_size);
-    int cz1 = (int)floorf((pos.z + r_search) / cell_size);
+    // ── Shell-expansion kNN: expand outward from center cell ────────
+    // Instead of iterating the full bounding box (11³ = 1331 cells for
+    // r_search/cell_size ≈ 5), iterate in concentric shells and stop
+    // early when the K-th nearest photon is closer than the next shell.
+    int cc_x = (int)floorf(pos.x / cell_size);
+    int cc_y = (int)floorf(pos.y / cell_size);
+    int cc_z = (int)floorf(pos.z / cell_size);
 
-    // Visited-key deduplication (sized for the cell range)
+    // Fractional offset of pos within center cell (world units, [0, cell_size))
+    float frac_x = pos.x - (float)cc_x * cell_size;
+    float frac_y = pos.y - (float)cc_y * cell_size;
+    float frac_z = pos.z - (float)cc_z * cell_size;
+
+    const int geom_max = (int)ceilf(r_search / cell_size);
+    const int max_layer = (geom_max < DM_KNN_MAX_LAYERS) ? geom_max : DM_KNN_MAX_LAYERS;
+
+    // Visited-key deduplication
     constexpr int MAX_VISITED = 256;
     uint32_t visited_keys[MAX_VISITED];
     int num_visited = 0;
 
-    for (int iz = cz0; iz <= cz1; ++iz)
-    for (int iy = cy0; iy <= cy1; ++iy)
-    for (int ix = cx0; ix <= cx1; ++ix) {
-        uint32_t key = teschner_hash(make_i3(ix, iy, iz),
-                                     params.dm_hash_table_size);
-        // Deduplicate buckets (different cells can hash to same bucket)
-        bool already = false;
-        for (int v = 0; v < num_visited; ++v)
-            if (visited_keys[v] == key) { already = true; break; }
-        if (already) continue;
-        if (num_visited < MAX_VISITED) visited_keys[num_visited++] = key;
+    for (int layer = 0; layer <= max_layer; ++layer) {
+        for (int dz = -layer; dz <= layer; ++dz)
+        for (int dy = -layer; dy <= layer; ++dy)
+        for (int dx = -layer; dx <= layer; ++dx) {
+            // Only process cells on the outer shell (Chebyshev dist == layer)
+            if (layer > 0) {
+                int ax = dx < 0 ? -dx : dx;
+                int ay = dy < 0 ? -dy : dy;
+                int az = dz < 0 ? -dz : dz;
+                int chebyshev = ax;
+                if (ay > chebyshev) chebyshev = ay;
+                if (az > chebyshev) chebyshev = az;
+                if (chebyshev < layer) continue;
+            }
 
-        uint32_t cs = params.dm_hash_cell_start[key];
-        uint32_t ce = params.dm_hash_cell_end[key];
-        if (cs == 0xFFFFFFFFu) continue;
+            uint32_t key = teschner_hash(
+                make_i3(cc_x + dx, cc_y + dy, cc_z + dz),
+                params.dm_hash_table_size);
 
-        for (uint32_t j = cs; j < ce; ++j) {
-            uint32_t idx = params.dm_hash_sorted_indices[j];
+            bool already = false;
+            for (int v = 0; v < num_visited; ++v)
+                if (visited_keys[v] == key) { already = true; break; }
+            if (already) continue;
+            if (num_visited < MAX_VISITED) visited_keys[num_visited++] = key;
 
-            float3 pp = make_f3(
-                params.photon_pos_x[idx],
-                params.photon_pos_y[idx],
-                params.photon_pos_z[idx]);
-            float3 diff = pos - pp;
-            float d2 = dot(diff, diff);
-            if (d2 > r2_search) continue;
-            if (knn_count >= KNN_K && d2 >= knn_d2[0]) continue;
+            uint32_t cs = params.dm_hash_cell_start[key];
+            uint32_t ce = params.dm_hash_cell_end[key];
+            if (cs == 0xFFFFFFFFu) continue;
 
-            // ── Insert into max-heap (sorted by largest d² at root) ──
-            if (knn_count < KNN_K) {
-                knn_d2[knn_count]  = d2;
-                knn_idx[knn_count] = idx;
-                knn_count++;
-                // Bubble up
-                int ci = knn_count - 1;
-                while (ci > 0) {
-                    int pi = (ci - 1) / 2;
-                    if (knn_d2[ci] <= knn_d2[pi]) break;
-                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
-                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
-                    ci = pi;
-                }
-            } else {
-                // Replace root (furthest) and sift down
-                knn_d2[0]  = d2;
-                knn_idx[0] = idx;
-                int ci = 0;
-                while (true) {
-                    int left = 2*ci+1, right = 2*ci+2, largest = ci;
-                    if (left  < KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
-                    if (right < KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
-                    if (largest == ci) break;
-                    float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
-                    uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
-                    ci = largest;
+            for (uint32_t j = cs; j < ce; ++j) {
+                uint32_t idx = params.dm_hash_sorted_indices[j];
+
+                float3 pp = make_f3(
+                    params.photon_pos_x[idx],
+                    params.photon_pos_y[idx],
+                    params.photon_pos_z[idx]);
+                float3 diff = pos - pp;
+                float d2 = dot(diff, diff);
+                if (d2 > r2_search) continue;
+                if (knn_count >= KNN_K && d2 >= knn_d2[0]) continue;
+
+                // ── Insert into max-heap (sorted by largest d² at root) ──
+                if (knn_count < KNN_K) {
+                    knn_d2[knn_count]  = d2;
+                    knn_idx[knn_count] = idx;
+                    knn_count++;
+                    int ci = knn_count - 1;
+                    while (ci > 0) {
+                        int pi = (ci - 1) / 2;
+                        if (knn_d2[ci] <= knn_d2[pi]) break;
+                        float td = knn_d2[ci]; knn_d2[ci] = knn_d2[pi]; knn_d2[pi] = td;
+                        uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[pi]; knn_idx[pi] = ti;
+                        ci = pi;
+                    }
+                } else {
+                    knn_d2[0]  = d2;
+                    knn_idx[0] = idx;
+                    int ci = 0;
+                    while (true) {
+                        int left = 2*ci+1, right = 2*ci+2, largest = ci;
+                        if (left  < KNN_K && knn_d2[left]  > knn_d2[largest]) largest = left;
+                        if (right < KNN_K && knn_d2[right] > knn_d2[largest]) largest = right;
+                        if (largest == ci) break;
+                        float td = knn_d2[ci]; knn_d2[ci] = knn_d2[largest]; knn_d2[largest] = td;
+                        uint32_t ti = knn_idx[ci]; knn_idx[ci] = knn_idx[largest]; knn_idx[largest] = ti;
+                        ci = largest;
+                    }
                 }
             }
+        }
+
+        // Early termination: K-th nearest is closer than nearest face
+        // of the next shell → no closer photon can exist beyond here.
+        if (knn_count >= KNN_K && layer < max_layer) {
+            float bd_x = fminf((float)(layer + 1) * cell_size - frac_x,
+                               (float)layer * cell_size + frac_x);
+            float bd_y = fminf((float)(layer + 1) * cell_size - frac_y,
+                               (float)layer * cell_size + frac_y);
+            float bd_z = fminf((float)(layer + 1) * cell_size - frac_z,
+                               (float)layer * cell_size + frac_z);
+            float min_boundary_d = fminf(bd_x, fminf(bd_y, bd_z));
+            if (knn_d2[0] < min_boundary_d * min_boundary_d) break;
         }
     }
 
@@ -241,6 +274,24 @@ DirMapEntry dev_build_direction_map_entry(
     // Adaptive radius = distance to the K-th nearest (heap root)
     float r_k2 = (knn_count >= KNN_K) ? knn_d2[0] : r2_search;
     r_k2 = fmaxf(r_k2, 1e-12f);
+
+    // Sort kNN heap by distance ascending so the B3 shadow-ray budget
+    // evaluates the CLOSEST photons first.  This ensures:
+    //   (a) best spatial locality — most relevant for local irradiance
+    //   (b) uniform wavelength coverage across the evaluated subset
+    // Simple insertion sort — KNN_K <= 64, fully in registers.
+    for (int i = 1; i < knn_count; ++i) {
+        float    key_d2  = knn_d2[i];
+        uint32_t key_idx = knn_idx[i];
+        int j = i - 1;
+        while (j >= 0 && knn_d2[j] > key_d2) {
+            knn_d2[j + 1]  = knn_d2[j];
+            knn_idx[j + 1] = knn_idx[j];
+            --j;
+        }
+        knn_d2[j + 1]  = key_d2;
+        knn_idx[j + 1] = key_idx;
+    }
 
     // Histogram bins (in registers / local memory)
     DirMapBin bins[DIR_MAP_SPHERE_BINS];
@@ -253,11 +304,14 @@ DirMapEntry dev_build_direction_map_entry(
     int n_eligible = 0;
     float total_weight = 0.f;
 
-    // Spectral flux accumulation for reference buffer
+    // Spectral flux accumulation for reference buffer (visibility-filtered)
     float spec_irrad[NUM_LAMBDA] = {0.f, 0.f, 0.f, 0.f};
     float spec_weight_sum = 0.f;
 
-    for (int i = 0; i < knn_count; ++i) {
+    // B3: Cap shadow rays — closest photons evaluated first (sorted above)
+    const int shadow_budget = (knn_count < MAX_DM_SHADOW_RAYS)
+                              ? knn_count : MAX_DM_SHADOW_RAYS;
+    for (int i = 0; i < shadow_budget; ++i) {
         uint32_t idx = knn_idx[i];
         float d2     = knn_d2[i];
 
@@ -338,6 +392,10 @@ DirMapEntry dev_build_direction_map_entry(
                 spec_irrad[b] * norm;
         }
     }
+
+    // B5: Skip histogram sampling for sparse regions
+    // (Spectral reference is already written above.)
+    if (knn_count < MIN_GUIDE_PHOTONS) return entry;
 
     if (n_eligible == 0 || total_weight <= 0.f) return entry;
 
