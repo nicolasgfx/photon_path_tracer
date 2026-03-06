@@ -501,12 +501,14 @@ static void render_help_overlay(int win_w, int win_h,
                  DebugState::render_mode_name(debug.current_mode));
         line(ly, lx, buf, 0.35f, 1.0f, 0.55f);
     }
-    line(ly, lx, "R       Save snapshot (PNG + EXR)");
+    line(ly, lx, "R       Save snapshot (PNG + EXR + JSON)");
+    line(ly, lx, "T       Screenshot sequence (optimized)");
+    line(ly, lx, "U       Screenshot sequence (unoptimized)");
+    line(ly, lx, "F12     Save snapshot (PNG + EXR + JSON)");
     line(ly, lx, "ESC     Cancel / release / quit");
 
     // -- Statistics & Guidance --
     section(ly, lx, "Statistics & Guidance");
-    toggle_line(ly, lx, "T", "Guided path tracing", true);   // always shown
     line(ly, lx, "C       Toggle histogram-only");
     line(ly, lx, "S       Toggle stats overlay");
 
@@ -854,8 +856,8 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // "Z" -> unoptimized screenshot sequence (no guide, no clamp), restarts from frame 0
-    if (key == GLFW_KEY_Z) {
+    // "U" -> unoptimized screenshot sequence (no guide, no clamp), restarts from frame 0
+    if (key == GLFW_KEY_U) {
         s_app.render_key_mode = AppState::RenderKeyMode::Z_UnoptScreenshot;
         s_app.render_key_next_screenshot_spp = 1;
         s_app.render_key_output_dir.clear();
@@ -866,7 +868,7 @@ static void key_callback(GLFWwindow* window, int key,
             g_active_optix_renderer->set_guide_fraction(0.0f);
             g_active_optix_renderer->set_spectral_clamp_enabled(false);
         }
-        printf("[Render] Z: unoptimized screenshot sequence, restarting...\n");
+        printf("[Render] U: unoptimized screenshot sequence, restarting...\n");
         return;
     }
 
@@ -1256,7 +1258,8 @@ void run_interactive(
     std::cout << "  WASD = move | Mouse = look | M = release/capture mouse\n";
     std::cout << "  ESC = release mouse / quit | Q = quit\n";
     std::cout << "  F1-F9 = debug toggles | TAB = cycle mode\n";
-    std::cout << "  R = save snapshot (PNG + EXR)\n";
+    std::cout << "  R = save snapshot | T = opt screenshot seq | U = unopt screenshot seq\n";
+    std::cout << "  F12 = save snapshot (PNG + EXR + JSON)\n";
     std::cout << "  H = toggle help overlay\n";
     std::cout << "  1-9 = switch scene\n";
     std::cout << "  +/- = adjust light brightness (re-traces photons)\n";
@@ -1564,7 +1567,11 @@ void run_interactive(
             s_app.last_mx = mx;
             s_app.last_my = my;
 
-            if (dx != 0.f || dy != 0.f) {
+            // Freeze camera during render-key screenshot sequences (T/Z).
+            // Still track position above so there's no accumulated delta
+            // jump when the mode ends.
+            if (s_app.render_key_mode == AppState::RenderKeyMode::None
+                && (dx != 0.f || dy != 0.f)) {
                 s_app.yaw   += dx * kMouseSens;
                 s_app.pitch -= dy * kMouseSens; // inverted Y
                 // Clamp pitch to avoid gimbal lock
@@ -1631,8 +1638,14 @@ void run_interactive(
         // Reset progressive accumulation if camera moved
         if (s_app.camera_moved) {
             // Skip camera-moved reset if a render-key transition is pending
-            // (R/T/Z key press on the same frame as mouse movement)
+            // (R/T/U key press on the same frame as mouse movement)
             if (s_app.render_key_requested) {
+                s_app.camera_moved = false;
+            } else if (s_app.render_key_mode != AppState::RenderKeyMode::None) {
+                // During a render-key screenshot sequence (T/Z): restart
+                // accumulation but keep the mode active.
+                optix_renderer.clear_buffers();
+                frame = 0;
                 s_app.camera_moved = false;
             } else {
                 // ── Exit idle/full-quality mode on any user interaction ──
@@ -1685,7 +1698,7 @@ void run_interactive(
             optix_renderer.trace_photons(
                 scene, opt.config, 0.f, s_app.idle_photon_seed++);
 
-            // Build direction map only when guided (R/T) — skip for Z
+            // Build direction map only when guided (R/T) — skip for U
             if (s_app.render_key_mode != AppState::RenderKeyMode::Z_UnoptScreenshot)
                 optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
 
@@ -1698,7 +1711,7 @@ void run_interactive(
 
             const char* tag =
                 s_app.render_key_mode == AppState::RenderKeyMode::T_OptScreenshot   ? "T (opt+screenshots)" :
-                s_app.render_key_mode == AppState::RenderKeyMode::Z_UnoptScreenshot ? "Z (unopt+screenshots)" :
+                s_app.render_key_mode == AppState::RenderKeyMode::Z_UnoptScreenshot ? "U (unopt+screenshots)" :
                 "?";
             printf("[Render] %s: full-quality mode active\n", tag);
         }
@@ -2190,7 +2203,7 @@ void run_interactive(
 
             frame++;
 
-            // ── Auto-screenshot at n² SPP milestones (T / Z keys) ───
+            // ── Auto-screenshot at doubling SPP milestones (T / U keys) ───
             if ((s_app.render_key_mode == AppState::RenderKeyMode::T_OptScreenshot
               || s_app.render_key_mode == AppState::RenderKeyMode::Z_UnoptScreenshot)
                 && frame >= s_app.render_key_next_screenshot_spp) {
@@ -2236,7 +2249,7 @@ void run_interactive(
                 std::printf("[Viewer] Periodic rebuild at frame %d ...\n", frame);
                 optix_renderer.trace_photons(
                     scene, opt.config, 0.f, s_app.idle_photon_seed++);
-                // Skip direction map in Z mode (unoptimized rendering)
+                // Skip direction map in U mode (unoptimized rendering)
                 if (s_app.render_key_mode != AppState::RenderKeyMode::Z_UnoptScreenshot)
                     optix_renderer.build_direction_map(camera, /*spp_seed=*/frame);
             }

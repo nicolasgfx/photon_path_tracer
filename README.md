@@ -92,6 +92,34 @@ chains, glossy reflections, and fine geometric detail.
 > wall over there," and the camera path tracer sends its guided sidecar
 > in that direction on the very first frame.*
 
+### Convergence Comparison
+
+Side-by-side at equal sample counts — **path tracing only** (left) vs
+**photon-guided hybrid** (right). Same scene, same camera, same light setup.
+
+<table>
+<tr>
+<th align="center">Path Tracing Only</th>
+<th align="center">Photon-Guided Hybrid</th>
+</tr>
+<tr>
+<td align="center"><b>64 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/no_photons/unopt_spp64.png" width="100%"/></td>
+<td align="center"><b>64 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/with_photons/opt_spp64.png" width="100%"/></td>
+</tr>
+<tr>
+<td align="center"><b>256 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/no_photons/unopt_spp256.png" width="100%"/></td>
+<td align="center"><b>256 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/with_photons/opt_spp256.png" width="100%"/></td>
+</tr>
+<tr>
+<td align="center"><b>1024 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/no_photons/unopt_spp1024.png" width="100%"/></td>
+<td align="center"><b>1024 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/with_photons/opt_spp1024.png" width="100%"/></td>
+</tr>
+<tr>
+<td align="center"><b>4096 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/no_photons/unopt_spp4096.png" width="100%"/></td>
+<td align="center"><b>4096 spp</b><br/><img src="doc/gallery/comparison_photonmap_vs_pathtracing/with_photons/opt_spp4096.png" width="100%"/></td>
+</tr>
+</table>
+
 ---
 
 ## Physics
