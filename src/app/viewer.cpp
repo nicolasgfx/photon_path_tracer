@@ -835,8 +835,47 @@ static void key_callback(GLFWwindow* window, int key,
 
     // Q is now used for camera roll (polled per-frame in WASD section)
 
-    // "R" -> save snapshot (PNG + EXR)
+    // "R" -> save debug pictures (direction map, snapshot, stats)
     if (key == GLFW_KEY_R) {
+        s_app.snapshot_requested = true;
+        printf("[Snapshot] R: saving debug pictures...\n");
+        return;
+    }
+
+    // "T" -> optimized screenshot sequence (guided + clamp), restarts from frame 0
+    if (key == GLFW_KEY_T) {
+        s_app.render_key_mode = AppState::RenderKeyMode::T_OptScreenshot;
+        s_app.render_key_next_screenshot_spp = 1;
+        s_app.render_key_output_dir.clear();
+        s_app.render_key_requested = true;
+        s_app.guided_enabled = true;
+        s_app.spectral_clamp_enabled = true;
+        if (g_active_optix_renderer) {
+            g_active_optix_renderer->set_guide_fraction(DEFAULT_GUIDE_FRACTION);
+            g_active_optix_renderer->set_spectral_clamp_enabled(true);
+        }
+        printf("[Render] T: optimized screenshot sequence, restarting...\n");
+        return;
+    }
+
+    // "Z" -> unoptimized screenshot sequence (no guide, no clamp), restarts from frame 0
+    if (key == GLFW_KEY_Z) {
+        s_app.render_key_mode = AppState::RenderKeyMode::Z_UnoptScreenshot;
+        s_app.render_key_next_screenshot_spp = 1;
+        s_app.render_key_output_dir.clear();
+        s_app.render_key_requested = true;
+        s_app.guided_enabled = false;
+        s_app.spectral_clamp_enabled = false;
+        if (g_active_optix_renderer) {
+            g_active_optix_renderer->set_guide_fraction(0.0f);
+            g_active_optix_renderer->set_spectral_clamp_enabled(false);
+        }
+        printf("[Render] Z: unoptimized screenshot sequence, restarting...\n");
+        return;
+    }
+
+    // "F12" -> save snapshot (PNG + EXR) — manual screenshot
+    if (key == GLFW_KEY_F12) {
         s_app.snapshot_requested = true;
         return;
     }
@@ -1029,17 +1068,10 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // T -> toggle guided/unguided path tracing
-    if (key == GLFW_KEY_T) {
-        s_app.guided_enabled = !s_app.guided_enabled;
-        if (g_active_optix_renderer) {
-            float frac = s_app.guided_enabled ? DEFAULT_GUIDE_FRACTION : 0.0f;
-            g_active_optix_renderer->set_guide_fraction(frac);
-        }
-        s_app.camera_moved = true;  // reset accumulation
-        printf("[Stats] Guided path tracing %s (guide_fraction = %.2f)\n",
-               s_app.guided_enabled ? "ENABLED" : "DISABLED",
-               s_app.guided_enabled ? DEFAULT_GUIDE_FRACTION : 0.0f);
+    // N -> render animation sequence
+    if (key == GLFW_KEY_N) {
+        s_app.animation_requested = true;
+        printf("[Animation] Sequence requested\n");
         return;
     }
 
@@ -1412,6 +1444,9 @@ void run_interactive(
                 }
                 optix_renderer.upload_envmap_data(scene);
 
+                // ── Wipe stale guidance data before rebuilding ──
+                optix_renderer.clear_guidance_buffers();
+
                 // ── Trace photons on GPU (after envmap is available) ──
                 auto tp0 = std::chrono::high_resolution_clock::now();
                 optix_renderer.trace_photons(scene, opt.config);
@@ -1599,18 +1634,27 @@ void run_interactive(
 
         // Reset progressive accumulation if camera moved
         if (s_app.camera_moved) {
-            // ── Exit idle/full-quality mode on any user interaction ──
-            if (s_app.idle_rendering_active) {
-                opt.config.num_photons = s_app.base_num_photons;
-                optix_renderer.set_preview_mode(true);
-                optix_renderer.trace_photons(
-                    scene, opt.config, 0.f, s_app.idle_photon_seed++);
-                optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
-                s_app.idle_rendering_active = false;
+            // Skip camera-moved reset if a render-key transition is pending
+            // (R/T/Z key press on the same frame as mouse movement)
+            if (s_app.render_key_requested) {
+                s_app.camera_moved = false;
+            } else {
+                // ── Exit idle/full-quality mode on any user interaction ──
+                if (s_app.idle_rendering_active) {
+                    opt.config.num_photons = s_app.base_num_photons;
+                    optix_renderer.set_preview_mode(true);
+                    optix_renderer.trace_photons(
+                        scene, opt.config, 0.f, s_app.idle_photon_seed++);
+                    // Direction map + spectral ref are only built in quality mode
+                    s_app.idle_rendering_active = false;
+                }
+                s_app.render_key_mode = AppState::RenderKeyMode::None;
+                s_app.render_key_output_dir.clear();
+                optix_renderer.clear_buffers();
+                optix_renderer.clear_guidance_buffers();  // wipe stale dir map + spectral ref
+                frame = 0;
+                s_app.camera_moved = false;
             }
-            optix_renderer.clear_buffers();
-            frame = 0;
-            s_app.camera_moved = false;
         }
 
         // ── Idle-to-full-quality transition ──────────────────────────
@@ -1630,11 +1674,142 @@ void run_interactive(
 
                 frame = 0;
                 s_app.idle_rendering_active = true;
+                s_app.render_start_time = std::chrono::steady_clock::now();
+                s_app.render_timing_active = true;
                 printf("[Idle] Full-quality mode\n");
             }
         }
 
-        // ── Handle "R" key: save timestamped snapshot (PNG + EXR) ───
+        // ── Handle R/T/Z render-key transition ──────────────────────
+        if (s_app.render_key_requested) {
+            s_app.render_key_requested = false;
+
+            // Retrace photons and enter full-quality mode
+            opt.config.num_photons = s_app.base_num_photons;
+            optix_renderer.trace_photons(
+                scene, opt.config, 0.f, s_app.idle_photon_seed++);
+
+            // Build direction map only when guided (R/T) — skip for Z
+            if (s_app.render_key_mode != AppState::RenderKeyMode::Z_UnoptScreenshot)
+                optix_renderer.build_direction_map(camera, /*spp_seed=*/0);
+
+            optix_renderer.set_preview_mode(false);
+            optix_renderer.clear_buffers();
+            frame = 0;
+            s_app.idle_rendering_active = true;
+            s_app.render_start_time = std::chrono::steady_clock::now();
+            s_app.render_timing_active = true;
+
+            const char* tag =
+                s_app.render_key_mode == AppState::RenderKeyMode::T_OptScreenshot   ? "T (opt+screenshots)" :
+                s_app.render_key_mode == AppState::RenderKeyMode::Z_UnoptScreenshot ? "Z (unopt+screenshots)" :
+                "?";
+            printf("[Render] %s: full-quality mode active\n", tag);
+        }
+
+        // ── Handle "N" key: render animation sequence ────────────────
+        if (s_app.animation_requested) {
+            s_app.animation_requested = false;
+
+            constexpr int   ANIM_FPS           = 30;
+            constexpr float ANIM_DURATION_SEC  = 5.0f;
+            constexpr int   ANIM_TOTAL_FRAMES  = (int)(ANIM_DURATION_SEC * ANIM_FPS); // 150
+            constexpr int   ANIM_SPP_PER_FRAME = 5000;
+            constexpr float ANIM_TRAVEL_DIST   = 0.25f; // 25% of scene length (1.0)
+
+            // Compute forward direction from current yaw/pitch
+            float3 anim_forward = make_f3(
+                sinf(s_app.yaw) * cosf(s_app.pitch),
+                sinf(s_app.pitch),
+                -cosf(s_app.yaw) * cosf(s_app.pitch));
+            float3 anim_step = anim_forward * (ANIM_TRAVEL_DIST / (float)ANIM_TOTAL_FRAMES);
+
+            // Save original camera position to restore after
+            float3 anim_start_pos = camera.position;
+
+            // Build timestamped output folder: output/animation_YYYYMMDD_HHMMSS/
+            auto anim_now = std::chrono::system_clock::now();
+            std::time_t anim_t = std::chrono::system_clock::to_time_t(anim_now);
+            std::tm anim_tm;
+            localtime_s(&anim_tm, &anim_t);
+            char anim_ts[64];
+            std::strftime(anim_ts, sizeof(anim_ts), "%Y%m%d_%H%M%S", &anim_tm);
+            std::string anim_dir = std::string("output/animation_") + anim_ts;
+            fs::create_directories(anim_dir);
+
+            printf("[Animation] Rendering %d frames, %d spp each, travel=%.3f, output=%s\n",
+                   ANIM_TOTAL_FRAMES, ANIM_SPP_PER_FRAME, ANIM_TRAVEL_DIST, anim_dir.c_str());
+
+            auto anim_wall_start = std::chrono::steady_clock::now();
+
+            for (int af = 0; af < ANIM_TOTAL_FRAMES; ++af) {
+                // Position camera for this frame
+                camera.position = anim_start_pos + anim_step * (float)af;
+                camera.look_at  = camera.position + anim_forward;
+                camera.update();
+
+                // Clear accumulation and render ANIM_SPP_PER_FRAME passes
+                optix_renderer.clear_buffers();
+                for (int spp_i = 0; spp_i < ANIM_SPP_PER_FRAME; ++spp_i) {
+                    // Periodic photon + direction map rebuild (matches render_final)
+                    if (DEFAULT_GUIDE_REMAP_INTERVAL > 0 && spp_i > 0
+                        && (spp_i % DEFAULT_GUIDE_REMAP_INTERVAL) == 0) {
+                        optix_renderer.trace_photons(
+                            scene, opt.config, 0.f, /*photon_map_seed=*/spp_i);
+                        optix_renderer.build_direction_map(camera, /*spp_seed=*/spp_i);
+                    }
+                    optix_renderer.render_debug_frame(
+                        camera, spp_i, s_app.debug.current_mode, 1);
+                }
+
+                // Download and save PNG
+                optix_renderer.download_framebuffer(display_fb);
+                char frame_name[128];
+                std::snprintf(frame_name, sizeof(frame_name),
+                              "%s/frame_%04d.png", anim_dir.c_str(), af);
+                write_png(std::string(frame_name), display_fb);
+
+                // Blit to screen so user can see progress
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                display_fb.width, display_fb.height,
+                                GL_RGBA, GL_UNSIGNED_BYTE,
+                                display_fb.srgb.data());
+                glClear(GL_COLOR_BUFFER_BIT);
+                glColor4f(1.f, 1.f, 1.f, 1.f);
+                glBegin(GL_QUADS);
+                glTexCoord2f(0, 0); glVertex2f(-1, -1);
+                glTexCoord2f(1, 0); glVertex2f( 1, -1);
+                glTexCoord2f(1, 1); glVertex2f( 1,  1);
+                glTexCoord2f(0, 1); glVertex2f(-1,  1);
+                glEnd();
+                glfwSwapBuffers(window);
+                glfwPollEvents();
+
+                // Check if window should close (ESC during animation)
+                if (glfwWindowShouldClose(window)) break;
+
+                float elapsed = std::chrono::duration<float>(
+                    std::chrono::steady_clock::now() - anim_wall_start).count();
+                printf("[Animation] Frame %d/%d saved (%s) [%.1fs elapsed]\n",
+                       af + 1, ANIM_TOTAL_FRAMES, frame_name, elapsed);
+            }
+
+            float total_sec = std::chrono::duration<float>(
+                std::chrono::steady_clock::now() - anim_wall_start).count();
+            printf("[Animation] Done — %d frames in %.1fs  (%s)\n",
+                   ANIM_TOTAL_FRAMES, total_sec, anim_dir.c_str());
+
+            // Restore camera to starting position
+            camera.position = anim_start_pos;
+            camera.look_at  = anim_start_pos + anim_forward;
+            camera.update();
+            optix_renderer.clear_buffers();
+            frame = 0;
+            s_app.camera_moved = false;
+        }
+
+        // ── Handle "F12" key: save timestamped snapshot (PNG + EXR) ─
         if (s_app.snapshot_requested) {
             s_app.snapshot_requested = false;
 
@@ -1694,9 +1869,97 @@ void run_interactive(
 
             std::cout << "========================================\n\n";
 
+            // ── Lightweight metadata JSON (always written, no GPU queries) ──
+            {
+                std::string meta_path = prefix + "_meta.json";
+                std::ofstream mf(meta_path);
+                mf << std::fixed << std::setprecision(6);
+                mf << "{\n";
+                mf << "  \"timestamp\": \"" << ts << "\",\n";
+                mf << "  \"png_file\": \"" << png_path << "\",\n";
+
+                // Hardware
+                mf << "  \"hardware\": {\n";
+                if (g_active_optix_renderer) {
+                    mf << "    \"gpu\": \"" << g_active_optix_renderer->gpu_name() << "\",\n";
+                    mf << "    \"vram_bytes\": " << g_active_optix_renderer->gpu_vram_total() << ",\n";
+                    mf << "    \"sm_count\": " << g_active_optix_renderer->gpu_sm_count() << ",\n";
+                    mf << "    \"compute_capability\": \"" << g_active_optix_renderer->gpu_cc_major()
+                       << "." << g_active_optix_renderer->gpu_cc_minor() << "\"\n";
+                } else {
+                    mf << "    \"gpu\": \"unknown\"\n";
+                }
+                mf << "  },\n";
+
+                // Rendering duration
+                mf << "  \"duration\": {\n";
+                if (s_app.render_timing_active) {
+                    auto elapsed = std::chrono::steady_clock::now() - s_app.render_start_time;
+                    double elapsed_sec = std::chrono::duration<double>(elapsed).count();
+                    mf << "    \"seconds\": " << elapsed_sec << ",\n";
+                    mf << "    \"accumulated_spp\": " << frame << "\n";
+                } else {
+                    mf << "    \"seconds\": 0,\n";
+                    mf << "    \"accumulated_spp\": " << frame << "\n";
+                }
+                mf << "  },\n";
+
+                // Scene geometry
+                mf << "  \"scene\": {\n";
+                const char* scene_disp = (s_app.active_scene_index >= 0
+                    && s_app.active_scene_index < NUM_SCENE_PROFILES)
+                    ? SCENE_PROFILES[s_app.active_scene_index].display_name
+                    : SCENE_DISPLAY_NAME;
+                mf << "    \"name\": \"" << scene_disp << "\",\n";
+                mf << "    \"num_triangles\": " << scene.num_triangles() << ",\n";
+                mf << "    \"num_emissive\": " << scene.num_emissive() << "\n";
+                mf << "  },\n";
+
+                // Photon map
+                mf << "  \"photons\": {\n";
+                mf << "    \"num_photons\": " << opt.config.num_photons << ",\n";
+                mf << "    \"gather_radius\": " << opt.config.gather_radius << "\n";
+                mf << "  },\n";
+
+                // Camera
+                mf << "  \"camera\": {\n";
+                mf << "    \"position\": [" << camera.position.x << ", "
+                   << camera.position.y << ", " << camera.position.z << "],\n";
+                mf << "    \"look_at\": [" << camera.look_at.x << ", "
+                   << camera.look_at.y << ", " << camera.look_at.z << "],\n";
+                mf << "    \"fov_deg\": " << camera.fov_deg << ",\n";
+                mf << "    \"dof_enabled\": " << (camera.dof_enabled ? "true" : "false") << ",\n";
+                mf << "    \"dof_f_number\": " << camera.dof_f_number << ",\n";
+                mf << "    \"dof_focus_dist\": " << camera.dof_focus_dist << "\n";
+                mf << "  },\n";
+
+                // Post-FX
+                mf << "  \"postfx\": {\n";
+                mf << "    \"bloom_enabled\": " << (s_app.postfx.bloom_enabled ? "true" : "false") << ",\n";
+                mf << "    \"bloom_intensity\": " << s_app.postfx.bloom_intensity << "\n";
+                mf << "  },\n";
+
+                // Modes / toggles
+                mf << "  \"modes\": {\n";
+                mf << "    \"guided_pt\": " << (s_app.guided_enabled ? "true" : "false") << ",\n";
+                mf << "    \"spectral_clamp\": " << (s_app.spectral_clamp_enabled ? "true" : "false") << ",\n";
+                mf << "    \"denoiser\": " << (opt.config.denoiser_enabled ? "true" : "false") << ",\n";
+                mf << "    \"exposure\": " << opt.config.exposure << ",\n";
+                mf << "    \"light_scale\": " << s_app.light_scale << ",\n";
+                const char* rk_tag =
+                    s_app.render_key_mode == AppState::RenderKeyMode::T_OptScreenshot   ? "T_OptScreenshot" :
+                    s_app.render_key_mode == AppState::RenderKeyMode::Z_UnoptScreenshot ? "Z_UnoptScreenshot" :
+                    "None";
+                mf << "    \"render_key_mode\": \"" << rk_tag << "\"\n";
+                mf << "  }\n";
+
+                mf << "}\n";
+                std::cout << "  [Snapshot] " << meta_path << " (metadata)\n";
+            }
+
             // ── Statistics gathering, JSON export, analysis report ────
             // Entire block gated by ENABLE_STATS: when false, snapshot
-            // saves only the PNG(s) with zero stats overhead.
+            // saves only the PNG(s) + lightweight metadata above.
             if constexpr (ENABLE_STATS) {
                 const char* scene_name = (s_app.active_scene_index >= 0
                     && s_app.active_scene_index < NUM_SCENE_PROFILES)
@@ -1930,6 +2193,57 @@ void run_interactive(
             }
 
             frame++;
+
+            // ── Auto-screenshot at n² SPP milestones (T / Z keys) ───
+            if ((s_app.render_key_mode == AppState::RenderKeyMode::T_OptScreenshot
+              || s_app.render_key_mode == AppState::RenderKeyMode::Z_UnoptScreenshot)
+                && frame >= s_app.render_key_next_screenshot_spp) {
+                // Create session folder once per R/T/Z press
+                if (s_app.render_key_output_dir.empty()) {
+                    auto ss_now = std::chrono::system_clock::now();
+                    std::time_t ss_t = std::chrono::system_clock::to_time_t(ss_now);
+                    std::tm ss_tm;
+                    localtime_s(&ss_tm, &ss_t);
+                    char ss_ts[64];
+                    std::strftime(ss_ts, sizeof(ss_ts), "%Y%m%d_%H%M%S", &ss_tm);
+                    const char* mode_tag =
+                        s_app.render_key_mode == AppState::RenderKeyMode::T_OptScreenshot
+                        ? "opt" : "unopt";
+                    s_app.render_key_output_dir = std::string("output/render_")
+                        + mode_tag + "_" + ss_ts;
+                    fs::create_directories(s_app.render_key_output_dir);
+                }
+                const char* mode_tag =
+                    s_app.render_key_mode == AppState::RenderKeyMode::T_OptScreenshot
+                    ? "opt" : "unopt";
+                char spp_buf[64];
+                std::snprintf(spp_buf, sizeof(spp_buf), "%s_spp%d", mode_tag, frame);
+                std::string ss_prefix = s_app.render_key_output_dir + "/" + spp_buf;
+
+                // Save PNG
+                optix_renderer.download_framebuffer(display_fb);
+                write_png(ss_prefix + ".png", display_fb);
+
+                printf("[Render] Auto-screenshot at SPP %d -> %s\n",
+                       frame, (ss_prefix + ".png").c_str());
+
+                // Advance to next doubling milestone
+                s_app.render_key_next_screenshot_spp =
+                    next_screenshot_spp(s_app.render_key_next_screenshot_spp);
+            }
+
+            // Periodic photon + direction map rebuild (same logic as render_final)
+            if (s_app.idle_rendering_active
+                && DEFAULT_GUIDE_REMAP_INTERVAL > 0
+                && frame > 0
+                && (frame % DEFAULT_GUIDE_REMAP_INTERVAL) == 0) {
+                std::printf("[Viewer] Periodic rebuild at frame %d ...\n", frame);
+                optix_renderer.trace_photons(
+                    scene, opt.config, 0.f, s_app.idle_photon_seed++);
+                // Skip direction map in Z mode (unoptimized rendering)
+                if (s_app.render_key_mode != AppState::RenderKeyMode::Z_UnoptScreenshot)
+                    optix_renderer.build_direction_map(camera, /*spp_seed=*/frame);
+            }
         }
 
         // Blit to OpenGL texture (handle resolution changes between preview and render)

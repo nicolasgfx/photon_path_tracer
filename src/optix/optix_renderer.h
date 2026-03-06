@@ -236,6 +236,7 @@ public:
     int height() const { return height_; }
     void resize(int w, int h);
     void clear_buffers();  ///< Zero accumulation buffers (camera moved)
+    void clear_guidance_buffers();  ///< Zero direction map + spectral ref (scene change)
     bool is_initialised() const { return initialised_; }
 
     /// Runtime toggle for participating medium (V key in interactive viewer).
@@ -742,8 +743,12 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_nee_direct_buffer_.d_ptr, 0, d_nee_direct_buffer_.bytes));
     if (d_photon_indirect_buffer_.d_ptr)
         CUDA_CHECK(cudaMemset(d_photon_indirect_buffer_.d_ptr, 0, d_photon_indirect_buffer_.bytes));
-    // NOTE: d_spectral_ref_buffer_ is NOT cleared here — it is a precomputed
-    // reference (populated by build_direction_map), not a progressive accumulator.
+    // NOTE: d_spectral_ref_buffer_ and d_dir_map_buffer_ are NOT cleared here;
+    // they are precomputed guidance data. Use clear_guidance_buffers() on scene change.
+    if (d_hdr_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_hdr_buffer_.d_ptr, 0, d_hdr_buffer_.bytes));
+    if (d_hdr_denoised_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_hdr_denoised_.d_ptr, 0, d_hdr_denoised_.bytes));
     for (int b = 0; b < MAX_AOV_BOUNCES; ++b)
         if (d_bounce_aov_[b].d_ptr)
             CUDA_CHECK(cudaMemset(d_bounce_aov_[b].d_ptr, 0, d_bounce_aov_[b].bytes));
@@ -757,6 +762,14 @@ inline void OptixRenderer::clear_buffers() {
         CUDA_CHECK(cudaMemset(d_prof_photon_gather_.d_ptr, 0, d_prof_photon_gather_.bytes));
     if (d_prof_bsdf_.d_ptr)
         CUDA_CHECK(cudaMemset(d_prof_bsdf_.d_ptr, 0, d_prof_bsdf_.bytes));
+}
+
+/// Zero guidance buffers (direction map + spectral reference) — call on scene change.
+inline void OptixRenderer::clear_guidance_buffers() {
+    if (d_dir_map_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_dir_map_buffer_.d_ptr, 0, d_dir_map_buffer_.bytes));
+    if (d_spectral_ref_buffer_.d_ptr)
+        CUDA_CHECK(cudaMemset(d_spectral_ref_buffer_.d_ptr, 0, d_spectral_ref_buffer_.bytes));
 }
 
 inline void OptixRenderer::download_framebuffer(FrameBuffer& fb) const {

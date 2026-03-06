@@ -59,11 +59,17 @@ out/
 # Large test data binary files (exceed GitHub 100MB limit)
 tests/data/*.bin
 
-# Exclude scenes (keep only cornell_box and conference)
-scenes/
-tests/data/cornell_box.bin
+# Exclude scenes (keep only cornell_box)
+/scenes/
+!/scenes/cornell_box/
+
+# Exclude tools
+/tools/
+
+# Exclude test data and output
+/tests/data/
+/tests/output/
 
 # Debug data
 output/
 scenes/*.json
-tools/*

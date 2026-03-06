@@ -86,9 +86,19 @@ struct AppState {
     int  idle_photon_seed      = 0;      // incrementing seed for all interactive retrace calls
     int  base_num_photons      = 0;      // original config.num_photons (before idle boost)
 
+    // ── Render-key modes (T / Z screenshot sequences) ────────────────
+    enum class RenderKeyMode { None, T_OptScreenshot, Z_UnoptScreenshot };
+    RenderKeyMode render_key_mode = RenderKeyMode::None;
+    int  render_key_next_screenshot_spp = 0;  // next SPP milestone for auto-screenshot
+    bool render_key_requested = false;        // flag: key callback → main loop transition
+    std::string render_key_output_dir;        // session folder for T/Z auto-screenshots
+
     // Post-FX params (bloom, etc.) — per-scene, saved in camera JSON
     PostFxParams postfx;
 };
+
+// Doubling sequence for T/Z screenshot milestones: 1,2,4,8,16,32,64,128...
+inline int next_screenshot_spp(int n) { return n * 2; }
 
 // Global application state — shared between main() and viewer internals
 AppState& app_state();

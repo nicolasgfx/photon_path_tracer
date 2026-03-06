@@ -45,7 +45,7 @@ static constexpr int scene_profile_index() {
         return 6;
     #elif defined(SCENE_CROWN)
         return 7;
-    #elif defined(SCENE_SSSDRAGON)
+    #elif defined(SCENE_CLASSROOM)
         return 8;
     #elif defined(SCENE_ZERO_DAY)
         return 9;

@@ -111,7 +111,9 @@ extern "C" __global__ void __raygen__render() {
             PathTraceResult ptr = full_path_trace_v3(origin, direction, rng, pixel_idx, s, params.samples_per_pixel);
 
             // ── Spectral outlier clamp (photon-referenced) ──────────
-            if (params.spectral_clamp_enabled && params.spectral_ref_buffer) {
+            // Disabled in preview mode — ref buffer may be stale/zeroed.
+            if (params.spectral_clamp_enabled && params.spectral_ref_buffer
+                && !params.preview_mode) {
                 for (int b = 0; b < NUM_LAMBDA; ++b) {
                     float ref = params.spectral_ref_buffer[pixel_idx * NUM_LAMBDA + b];
                     if (ref > 0.f) {

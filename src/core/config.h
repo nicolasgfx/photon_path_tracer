@@ -51,7 +51,7 @@ constexpr bool ENABLE_GUIDE_STATS = false;
 //#define SCENE_LIVING_ROOM_2
 //#define SCENE_BEDROOM
 //#define SCENE_CROWN
-//#define SCENE_SSSDRAGON
+//#define SCENE_CLASSROOM
 //#define SCENE_ZERO_DAY
 //#define SCENE_KROKEN
 
@@ -137,7 +137,7 @@ constexpr float DEFAULT_LIGHT_CONE_HALF_ANGLE_DEG = 90.0f;
 // IDLE_TIMEOUT_SEC of no input the viewer switches to full-quality
 // photon-guided accumulation.
 constexpr int   PREVIEW_MAX_BOUNCES = 2;             //  bounce cap in preview mode
-constexpr float IDLE_TIMEOUT_SEC    = 2.0f;
+constexpr float IDLE_TIMEOUT_SEC    = 1.0f;
 
 
 // =====================================================================
@@ -230,7 +230,7 @@ constexpr float DEFAULT_GUIDE_RADIUS = DEFAULT_GATHER_RADIUS;  // 0.05 m
 // ── Periodic photon + direction-map rebuild during final render ─────
 // Every N SPP, re-trace the photon map (with a fresh seed) and rebuild
 // the direction map.  Decorrelates guide directions across the render.
-constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 1000;  // [R] SPP between rebuilds
+constexpr int DEFAULT_GUIDE_REMAP_INTERVAL = 500;  // [R] SPP between rebuilds
 
 // ── NaN / infinity safety net ────────────────────────────────────────
 // With correct one-sample MIS (balance heuristic) and physical BSDFs,
@@ -455,13 +455,13 @@ constexpr bool ADAPTIVE_NOISE_USE_DIRECT_ONLY = false; // adaptive noise uses di
   constexpr float SCENE_CAM_FOV            = 70.0f;
   constexpr float SCENE_CAM_SPEED          = 0.1f;
 
-#elif defined(SCENE_SSSDRAGON)
-  constexpr const char* SCENE_OBJ_PATH    = "../tools/pbrtv4_scenes/pbrt-v4-scenes/sssdragon/dragon_10.pbrt";
-  constexpr const char* SCENE_DISPLAY_NAME = "SSS Dragon";
+#elif defined(SCENE_CLASSROOM)
+  constexpr const char* SCENE_OBJ_PATH    = "../tools/pbrtv4_scenes/pbrt-v4-scenes/classroom/scene-v4.pbrt";
+  constexpr const char* SCENE_DISPLAY_NAME = "Classroom";
   constexpr bool  SCENE_IS_REFERENCE       = false;
   constexpr float SCENE_CAM_POS[]          = { 0.0f, 0.0f, 0.0f };
   constexpr float SCENE_CAM_LOOKAT[]       = { 0.0f, 0.0f, -1.0f };
-  constexpr float SCENE_CAM_FOV            = 28.8f;
+  constexpr float SCENE_CAM_FOV            = 36.0f;
   constexpr float SCENE_CAM_SPEED          = 0.01f;
 
 #elif defined(SCENE_KROKEN)
@@ -524,9 +524,9 @@ constexpr SceneProfile SCENE_PROFILES[NUM_SCENE_PROFILES] = {
     // Key 8 – Crown
     { "../tools/pbrtv4_scenes/pbrt-v4-scenes/crown/crown.pbrt", "Crown", false,
       {0,0,0}, {0,0,-1}, 47.f, 0.01f, SceneLightMode::FromMTL, false },
-    // Key 9 – SSS Dragon
-    { "../tools/pbrtv4_scenes/pbrt-v4-scenes/sssdragon/dragon_10.pbrt", "SSS Dragon", false,
-      {0,0,0}, {0,0,-1}, 28.8f, 0.01f, SceneLightMode::FromMTL, false },
+    // Key 9 – Classroom
+    { "../tools/pbrtv4_scenes/pbrt-v4-scenes/classroom/scene-v4.pbrt", "Classroom", false,
+      {0,0,0}, {0,0,-1}, 36.f, 0.01f, SceneLightMode::FromMTL, false },
     // Key 0 – Zero Day
     { "zero_day/frame25.obj",   "Zero Day",          false,
       {0,0,0}, {0,0,-1}, 90.f, 0.01f, SceneLightMode::FromMTL, false },
