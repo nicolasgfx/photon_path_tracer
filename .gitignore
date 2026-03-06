@@ -7,7 +7,6 @@
 *.o
 # Note: *.obj excluded below but scene .obj files are in scenes/
 *.obj
-!scenes/**/*.obj
 
 # Precompiled Headers
 *.gch
@@ -49,7 +48,6 @@ out/
 
 # Renderer output
 *.ppm
-*.png
 *.hdr
 *.exr
 

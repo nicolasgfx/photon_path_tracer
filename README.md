@@ -1,18 +1,25 @@
-<p align="center">
-  <img src="doc/gallery/render1.png" alt="Staircase — Spectral Photon-Guided Path Tracer" width="100%"/>
-</p>
+<h1 align="center">Spectral Photon-Guided Path Tracer</h1>
 
 <p align="center">
-  <img src="doc/gallery/render2.png" alt="Bathroom — Spectral Photon-Guided Path Tracer" width="49%"/>
-  <img src="doc/gallery/render3.png" alt="Bedroom — Spectral Photon-Guided Path Tracer" width="49%"/>
+  <img src="doc/gallery/render1.png" alt="Staircase" width="100%"/>
+</p>
+<p align="center">
+  <img src="doc/gallery/render2.png" alt="Bathroom" width="49%"/>
+  <img src="doc/gallery/render3.png" alt="Bedroom" width="49%"/>
+</p>
+<p align="center">
+  <img src="doc/gallery/render4.png" alt="Render 4" width="49%"/>
+  <img src="doc/gallery/render5.png" alt="Render 5" width="49%"/>
+</p>
+<p align="center">
+  <img src="doc/gallery/render6.png" alt="Render 6" width="49%"/>
+  <img src="doc/gallery/render7.png" alt="Render 7" width="49%"/>
 </p>
 
 <p align="center"><sub>
   Scenes from <a href="https://benedikt-bitterli.me/resources/">Rendering resources</a> by Benedikt Bitterli (2016).
   Original scene geometry and materials by their respective authors — see <a href="#third-party-scene-credits">credits</a>.
 </sub></p>
-
-<h1 align="center">Spectral Photon-Guided Path Tracer</h1>
 
 <p align="center">
   A physically-based GPU renderer that combines <b>photon mapping</b> with
@@ -92,7 +99,7 @@ chains, glossy reflections, and fine geometric detail.
 All light transport is spectral. The renderer discretises the visible
 spectrum (380–780 nm) into `NUM_LAMBDA = 4` bins at 100 nm intervals
 (centres at 430, 530, 630, 730 nm). Each photon carries 4 stratified
-hero wavelengths following the PBRT v4 approach. Spectral bins never
+hero wavelengths. Spectral bins never
 mix during transport; conversion to display colour happens only at output.
 
 ### Rendering Equation
@@ -136,8 +143,7 @@ total internal reflection checks.
 ### Adjoint Correction
 
 At refractive interfaces the solid angle changes, requiring an
-$\eta^2$ correction for photon (importance) transport
-(PBRT v4 §5.6.2):
+$\eta^2$ correction for photon (importance) transport:
 
 $$\Phi' = \Phi \cdot T_f \cdot \left(\frac{\eta_i}{\eta_t}\right)^{\!2}$$
 

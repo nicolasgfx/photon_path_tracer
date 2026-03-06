@@ -842,19 +842,15 @@ static void key_callback(GLFWwindow* window, int key,
         return;
     }
 
-    // "T" -> optimized screenshot sequence (guided + clamp), restarts from frame 0
+    // "T" -> screenshot sequence using current settings (same as idle rendering)
     if (key == GLFW_KEY_T) {
         s_app.render_key_mode = AppState::RenderKeyMode::T_OptScreenshot;
         s_app.render_key_next_screenshot_spp = 1;
         s_app.render_key_output_dir.clear();
         s_app.render_key_requested = true;
-        s_app.guided_enabled = true;
-        s_app.spectral_clamp_enabled = true;
-        if (g_active_optix_renderer) {
-            g_active_optix_renderer->set_guide_fraction(DEFAULT_GUIDE_FRACTION);
-            g_active_optix_renderer->set_spectral_clamp_enabled(true);
-        }
-        printf("[Render] T: optimized screenshot sequence, restarting...\n");
+        // Do NOT override guided/clamp settings — use whatever the normal
+        // idle rendering mode would use (matches default behaviour exactly).
+        printf("[Render] T: screenshot sequence (current settings), restarting...\n");
         return;
     }
 
