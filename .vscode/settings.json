@@ -1,0 +1,19 @@
+{
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/node_modules/*/**": true,
+        "**/build/**": true,
+        "**/out/**": true,
+        "**/bin/**": true
+    },
+    "search.exclude": {
+        "**/build": true,
+        "**/bin": true,
+        "**/out": true
+    },
+    "cmake.configureOnOpen": true,
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "cmake.generator": "Visual Studio 17 2022",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+}

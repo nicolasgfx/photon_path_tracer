@@ -1,0 +1,853 @@
+---
+name: renderer
+description: 'Full GPU render pipeline: acceleration, camera, materials, direct lighting, path integrator, photon system, path guide. Use when: modifying any renderer subsystem, tuning render parameters, debugging noise/fireflies/energy loss, fixing intersection or material bugs, optimizing GPU throughput, or adjusting convergence strategies.'
+---
+
+# Renderer
+
+The `photon_tracer` executable — a photon-guided RGB path tracer with OptiX 9 acceleration, Müller SD-tree guidance, progressive accumulation, and one-sample bilateral MIS.
+
+## Current Implementation Stage
+
+**Two-pass photon-guided path tracing** (architecture v4):
+- **Pass 1 — Photon tracing:** GPU photon emission, bounce loop, hash grid storage, SD-tree training (geometric doubling)
+- **Pass 2 — Camera path tracing:** iterative bounce loop with one-sample bilateral MIS between SD-tree guide and BSDF; NEE with power-heuristic MIS; Russian roulette
+- All 9 material types fully implemented (Lambertian, Mirror, Glass, GlossyMetal, Emissive, GlossyDielectric, Translucent, Clearcoat, Fabric)
+- RGB color model (3-channel float3)
+- Progressive 1 SPP/frame accumulation in interactive viewer; geometric-doubling SD-tree training on idle
+- Post-processing: firefly filter, bloom, ACES/linear tonemap, OptiX AI denoiser
+
+**Not yet implemented:** Participating media (volume transport), chromatic dispersion, stochastic opacity. Stubs exist for volume photon deposits but are not wired into the render loop.
+
+---
+
+## Theoretical Foundations
+
+All Monte Carlo rendering builds on Kajiya's **rendering equation** (SIGGRAPH 1986): $L_o(x, \omega_o) = L_e(x, \omega_o) + \int_{\mathcal{H}^2} f_s(x, \omega_i, \omega_o) \, L_i(x, \omega_i) \, |\cos\theta_i| \, d\omega_i$. This single recursive integral defines the physically correct light transport we approximate. Every design decision in this renderer — NEE, MIS, photon mapping, path guiding — is a variance-reduction strategy for estimating this integral.
+
+This section documents the academic lineage behind the renderer's design: Jensen's photon mapping (1996–2001), Müller et al.'s practical path guiding (2017), and PBRT v4's implementation patterns (Pharr, Jakob, Humphreys 2023). Understanding these foundations is critical when modifying any subsystem.
+
+### TF-1. Jensen's Photon Mapping (1996, 2001)
+
+**Papers:** "Global Illumination using Photon Maps" (EGWR 1996); *Realistic Image Synthesis Using Photon Mapping* (AK Peters, 2001).
+
+**Core idea:** Two-pass algorithm — (1) trace photons from light sources and store hits, (2) gather stored photons at camera hitpoints for indirect illumination density estimation.
+
+#### TF-1.1 Photon Emission & Tracing
+
+Photons are emitted from light sources proportional to emitted power. At each surface interaction, Russian roulette decides absorption vs. scattering — the photon's throughput is maintained implicitly (no throughput multiplication needed when using RR for path termination). This is the **splitting-free** variant Jensen advocates for simplicity.
+
+**Our implementation differs:** We use explicit throughput tracking with `flux *= f_s * cos_theta / pdf` at each bounce, combined with RR for termination. The throughput approach is equivalent but makes flux conservation easier to verify per-photon.
+
+#### TF-1.2 Photon Map Structure & kd-Tree
+
+Jensen's original uses a **balanced kd-tree** built via median-split for O(log N) nearest-neighbour queries. Our GPU implementation uses a hash grid instead:
+- O(1) hash grid with register-allocated max-heap for k-NN
+- Cell size = `2 × max_radius`; Teschner spatial hash: $h(c_x, c_y, c_z) = (c_x \cdot 73856093 \oplus c_y \cdot 19349663 \oplus c_z \cdot 83492791) \bmod T$
+- Shell expansion for k-NN: concentric shells (layer 0 = centre cell, layer 1 = 3³ shell, etc.) with early termination when kth-nearest < next shell boundary
+
+#### TF-1.3 Radiance Estimate (Density Estimation)
+
+Jensen's radiance estimate at point $x$ with outgoing direction $\omega_o$:
+
+$$L_r(x, \omega_o) \approx \frac{1}{\pi r^2} \sum_{i=1}^{N} f_s(x, \omega_{p,i}, \omega_o) \cdot \Delta\Phi_i(\omega_{p,i})$$
+
+where $r$ is the radius containing $N$ nearest photons, $f_s$ is the BSDF, and $\Delta\Phi_i$ is the photon's flux. The $\pi r^2$ denominator represents the area of the tangential disk enclosing the k-NN.
+
+**Bias property:** This is a biased but consistent estimator. The bias is $O(r^2)$ (proportional to the curvature of the irradiance field within the gather disk). As $N \to \infty$ and $r \to 0$, the estimate converges to the true value.
+
+**Our refinements over Jensen's original:**
+- **Tangential distance metric** (§6.3 in architecture.md) — replaces spherical Euclidean distance to prevent cross-surface bleed at 90° edges. Jensen's original used pure 3D distance.
+- **Surface consistency filter** (§6.4) — normal compatibility + plane distance + direction consistency. Jensen used only normal checking.
+- **Epanechnikov kernel** — $w_i = 1 - d_{\text{tan},i}^2 / r_k^2$ instead of Jensen's cone filter or uniform kernel. Provides bias reduction with minimal variance increase.
+- **Dual-budget normalization** — separate normalization for global/caustic photon maps (`1/N_global` vs `1/N_caustic`), extending Jensen's two-map approach.
+
+#### TF-1.4 Separate Caustic Map
+
+Jensen introduced the concept of maintaining a **separate caustic photon map** with higher photon density for sharp caustic features. This is critical because caustics require many more photons per area than diffuse indirect illumination to resolve their sharp spatial gradients.
+
+**Our extension:** Three-valued tag system (non-caustic / global-caustic / targeted-caustic) with adaptive caustic shooting (§5.6 in architecture.md) that refines caustic hotspot regions based on coefficient of variation.
+
+#### TF-1.5 Jensen's Rendering Equation Decomposition
+
+Jensen decomposes the final radiance into four components:
+1. **Direct illumination** — computed by shadow rays (NEE), not photon map
+2. **Specular reflection/refraction** — recursive ray tracing
+3. **Caustics** — caustic photon map (high density, small radius)
+4. **Soft indirect** — global photon map (lower density, larger radius)
+
+**Never double-count direct lighting** — this is the most critical invariant. Our architecture enforces it through the deposition rule: photons deposited only when `bounce > 0` (first surface hit after emission = bounce 0; skip it).
+
+### TF-2. Müller et al. — Practical Path Guiding (EGSR 2017, Best Paper)
+
+**Paper:** "Practical Path Guiding for Efficient Light-Transport Simulation," T. Müller, M. Gross, J. Novák, *Computer Graphics Forum* (EGSR), 2017. Code: github.com/Tom94/practical-path-guiding.
+
+**Core idea:** Learn the incident radiance field online using an SD-tree (Spatial-Directional tree), then use it to guide camera path tracing via one-sample bilateral MIS.
+
+#### TF-2.1 The SD-Tree Data Structure
+
+The SD-tree combines two hierarchical structures:
+
+**Spatial component (binary KD-tree):** Partitions the scene bounding box into leaves. Each leaf represents a spatial region. Axis cycling (x→y→z→x) or largest-extent splitting. Refinement based on deposit count exceeding a threshold.
+
+**Directional component (quadtree per leaf):** Each spatial leaf stores a directional quadtree (DQuad) that represents the learned directional distribution of incident radiance. The full sphere is mapped to $[0,1]^2$ via **cylindrical equal-area projection**:
+
+$$u = \frac{\phi}{2\pi}, \quad v = \frac{1 - \cos\theta}{2}$$
+
+The DQuad stores accumulated flux at each node. Sampling traverses from root to leaf, selecting children proportionally to their flux. The PDF for a sampled direction is:
+
+$$p(\omega) = \frac{\text{leaf\_flux}}{\text{root\_flux}} \cdot \frac{1}{\text{leaf\_area} \cdot 4\pi}$$
+
+The $4\pi$ factor accounts for the Jacobian of the cylindrical equal-area mapping from $[0,1]^2$ to the sphere.
+
+#### TF-2.2 Geometric Doubling Training Schedule (Müller §5.1)
+
+The key innovation for online learning: training proceeds in iterations with geometrically increasing sample counts. Each iteration $k$:
+
+1. Render $2^k$ SPP using bilateral MIS with current guide distribution
+2. Deposit samples (photons + camera vertices) into the SD-tree
+3. Refine spatial structure (split leaves exceeding threshold)
+4. Refine directional structure (split high-flux DQuad nodes)
+5. Reset flux counters (keep structure)
+
+**Why geometric doubling?** Early iterations with few samples build coarse structure quickly. Later iterations with many samples refine the distribution. The exponential growth means total training cost is $O(2 \times \text{final\_iteration\_cost})$, so training wastes at most 50% of the total sample budget.
+
+**Training threshold (Müller §5.3):** $\theta_k = c \cdot \sqrt{2^k}$ — the split threshold grows with $\sqrt{N}$ to prevent over-splitting in early iterations when few samples are available.
+
+**Frozen phase:** After training, the SD-tree structure is locked. Remaining SPP budget is rendered with the frozen guide, and **all training samples are discarded** — only the frozen phase contributes to the final image. This prevents the noisy early-iteration estimates from contaminating the result.
+
+#### TF-2.3 One-Sample Bilateral MIS (Müller §4)
+
+At each non-delta bounce, the renderer chooses between two sampling strategies with a fixed mixing weight $\alpha$ (our `guide_fraction`):
+
+$$p_{\text{combined}}(\omega) = \alpha \cdot p_{\text{guide}}(\omega) + (1 - \alpha) \cdot p_{\text{bsdf}}(\omega)$$
+
+A coin flip with probability $\alpha$ selects which strategy generates $\omega_i$; then the combined PDF is used for the MIS weight. This is the **one-sample MIS** estimator (also called the balance heuristic with one sample per strategy):
+
+$$\hat{L} = \frac{f_s(x, \omega_i, \omega_o) \cdot L_i(x, \omega_i) \cdot \cos\theta}{\alpha \cdot p_{\text{guide}}(\omega_i) + (1-\alpha) \cdot p_{\text{bsdf}}(\omega_i)}$$
+
+**Why one-sample, not two-sample?** Drawing one sample from the mixture is cheaper than drawing one from each strategy. The variance from the lost sample is more than compensated by the ability to trace twice as many paths in the same time budget.
+
+**Our `guide_fraction` = 0.5** by default (equal weighting). Müller recommends 0.5 as a robust default; higher values (0.7–0.8) can help in caustic-dominated scenes but risk poor performance when the guide distribution is inaccurate.
+
+#### TF-2.4 Camera Training Samples (Müller §4.3)
+
+In addition to photon deposits, the SD-tree also learns from **camera-visible vertices**: at each non-delta bounce during camera path tracing, the scattered direction and path throughput are recorded and deposited into the guide tree. This is view-dependent and captures the actual importance of each direction from the camera's perspective.
+
+**Our implementation:** GPU atomic buffer `cam_train_data` (7 floats per sample: pos(3) + dir(3) + weight(1)), capped at `DEFAULT_MAX_CAMERA_SAMPLES`. Downloaded to CPU and deposited alongside photon samples in `build_sd_tree()`.
+
+#### TF-2.5 Relation to Photon-Guided Approach
+
+Müller's original paper describes path guiding trained from **camera samples only**. Our architecture extends this to include photon deposits as the **primary** training signal, with camera samples as supplementary. This photon-guided approach has two advantages:
+1. Photon deposits naturally discover illumination from all light paths, including caustics that camera paths rarely find
+2. The photon map provides a spatial density signal that improves guide resolution in regions with complex illumination
+
+Delta-material photons (glass/mirror caustic chains) receive a **boosted weight** during SD-tree deposit, ensuring the guide learns caustic directions despite their rarity.
+
+### TF-3. PBRT v4 — Implementation Patterns
+
+**Book:** *Physically Based Rendering: From Theory to Implementation*, 4th ed., Pharr, Jakob, Humphreys (MIT Press, 2023). Full text: pbr-book.org/4ed.
+
+#### TF-3.1 PathIntegrator Architecture
+
+PBRT v4's `PathIntegrator` establishes the standard patterns our renderer follows:
+
+1. **Incremental path construction** — paths are built one vertex at a time by tracing rays and sampling BSDFs, rather than sampling complete paths at once. This ensures BSDF-proportional sampling at each vertex.
+
+2. **NEE + BSDF MIS** — at each non-specular vertex, one sample from the light source and one from the BSDF are combined via power heuristic: $w_l = p_l^2 / (p_l^2 + p_b^2)$. Delta lights skip the BSDF term; delta BSDFs skip the light term.
+
+3. **Emission MIS on path hits** — when a BSDF-sampled ray hits an emitter, the BSDF PDF from the previous bounce (`p_b`) is used with the light's PDF to compute the MIS weight. This avoids double-counting with NEE. First-bounce and post-specular-bounce hits take full contribution (no MIS needed since NEE was not performed).
+
+4. **Russian roulette with η²-correction** — PBRT v4 computes termination probability from throughput β but **excludes** accumulated refraction scaling `etaScale`: `rrBeta = beta * etaScale`. This prevents premature termination of rays inside glass objects where β temporarily drops due to the $1/\eta^2$ non-symmetric transport correction, only to be restored when the ray exits. Our implementation follows the same pattern.
+
+5. **Maximum component for RR** — PBRT v4 uses `MaxComponentValue(rrBeta)` rather than average, preventing over-termination when one spectral channel is much darker than others (saturated colored surfaces). We use `max(throughput.x, throughput.y, throughput.z)`.
+
+#### TF-3.2 Path Regularization (PBRT v4 §13.4.1)
+
+After the first non-specular bounce, the renderer optionally **roughens** all subsequent BSDFs to prevent variance spikes from difficult-to-sample indirect specular paths.
+
+**Key insight:** This introduces bias but dramatically reduces fireflies from SDS (specular-diffuse-specular) paths where indirect lighting bounces off a near-mirror surface toward a small bright source. It acts on the sampling distribution rather than the estimator value.
+
+**Our approach:** We do not currently implement path regularization; instead we use three-level clamping (per-bounce, per-path, per-sample) as a simpler firefly mitigation strategy. Path regularization is a potential future improvement for SDS paths.
+
+#### TF-3.3 PBRT v4 LightSampler & BVH Light Sampling
+
+PBRT v4 introduces `BVHLightSampler` — a spatial data structure over lights that allows efficient importance sampling of nearby/bright lights. For scenes with many lights (> 100), this dramatically outperforms uniform or power-weighted light selection.
+
+**Our approach:** Single power-weighted CDF / alias table over emissive triangles. BVH light sampling is a future consideration for many-light scenes.
+
+#### TF-3.4 Adjoint BSDF Correction for Light Tracing
+
+PBRT v4 §9.5.2 documents the **non-symmetric scattering correction** for light transport: when tracing paths from lights (as photons), the BSDF throughput at refractive interfaces must be corrected by $\eta^2$ to account for the change in solid angle measure across the interface. For camera paths, no correction is needed (the radiance definition already accounts for this).
+
+**Our implementation:** `dev_specular_bounce()` applies the adjoint $\eta^2$ correction during photon tracing. This is critical for energy conservation in scenes with glass objects — without it, photon flux through glass would be systematically wrong by a factor of $\eta^2 \approx 2.3$ for crown glass.
+
+### Key Invariants from Literature
+
+These invariants are mathematically mandated by the referenced papers. Violating them introduces bias or breaks energy conservation:
+
+1. **Every MC estimator divides by its exact sampling PDF** (Veach 1997) — no approximations in PDF computation
+2. **NEE + emission MIS: mutual exclusivity** (PBRT v4 §13.4) — emission on BSDF-hit is MIS-weighted against NEE; first bounce / post-specular takes full weight
+3. **Delta BSDFs: no NEE, pdf_prev = 0** (Veach 1997 §9.2) — delta distributions have zero measure; attempting NEE at delta surfaces produces infinite variance
+4. **Photon flux ≠ radiance** (Jensen 1996) — stored photons carry power packets; conversion to radiance happens only at density estimation time
+5. **Adjoint correction at refractive interfaces** (Veach 1997 §5.2) — photon throughput must include η² factor; camera paths must not
+6. **Geometric doubling discards training samples** (Müller 2017 §5) — final image uses only frozen-phase samples to avoid bias from evolving guide distribution
+7. **Bilateral MIS combined PDF must use both terms** (Müller 2017 §4) — even when one strategy generated the sample, the denominator must account for both: `p_combined = α × p_guide + (1-α) × p_bsdf`
+
+## Source Map
+
+All renderer subsystem source lives under `src/renderer/`:
+
+| Subsystem | Files | Purpose |
+|-----------|-------|---------|
+| `accel/` | accel_builder.cpp/.h, accel_types.h, launch_params.h, optix_programs.cu, optix_utils.cuh | OptiX pipeline, GAS/IAS, SBT, ray launch |
+| `camera/` | camera.h | Ray generation, thin-lens DOF, sub-pixel jitter |
+| `material/` | bsdf.h, bsdf_shared.h, specular.h | BSDF evaluate/sample/PDF for 9 material types |
+| `lighting/` | nee_shared.h, optix_nee.cuh, lighting_upload.h/.cpp | NEE, emitter CDF, MIS |
+| `integrator/` | path_tracer.cuh, path_state.h, russian_roulette.h, sample_clamping.h | Core bounce loop, throughput, RR, clamping |
+| `photon/` | photon.h, photon_storage.h, photon_tracer.cuh | Photon emission, tracing, storage |
+| `guide/` | sd_tree.h/.cpp, sd_tree_gpu.h, dquad_gpu.h, sd_tree_device.cuh | SD-tree (Müller 2017): spatial KD-tree + directional quadtree |
+| `postfx/` | postfx_pipeline.h/.cpp, postfx_params.h, bloom.h/.cu, tonemap.h/.cu, firefly_filter.h/.cu, optix_denoiser.h/.cpp | Post-processing (see post-processing skill) |
+| `app/` | viewer.h/.cpp, render_session.h/.cpp, render_config.h, cli_args.h, stb_tinyexr_impl.cpp | Application layer, interactive viewer, config |
+| `debug/` | font_overlay.h, render_log.h, render_log_gpu.h | Debug overlays and JSON render logging |
+| `main.cpp` | `src/renderer/main.cpp` | CLI → scene load → analyze → render → output |
+
+Shared types live under `src/core/`: types.h, config.h, color.h, random.h, device_buffer.h, error.h, alias_table.h, hash.h, ior_stack.h, material_flags.h, scene_profile.h, stage_metrics.h.
+
+## Render Loop Architecture
+
+### Host-Side Viewer Loop (`viewer.cpp`)
+
+```
+while (!glfwWindowShouldClose(window_)):
+    glfwPollEvents()
+    process_input(dt)                          // WASD/mouse → camera
+    if camera_moved: reset_accumulation()      // zeros GPU buffers, spp=0
+
+    // Idle timeout state machine
+    idle_sec = now - last_input_time
+    if idle_sec > IDLE_TIMEOUT_SEC (1.0s) && !idle_rendering_active:
+        idle_rendering_active = true
+        if guide_enabled: guide_rebuild_requested = true
+
+    render_frame(scene)                        // see below
+    display_frame()                            // GL texture upload
+
+    if guide_rebuild_requested:
+        gpu_->train_guide(cam_, config_)       // CPU-blocking photon pass
+        reset_accumulation()
+
+    glfwSwapBuffers(window_)                   // VSync blocks here (60 Hz)
+```
+
+### Per-Frame GPU Invocation (`render_session.cpp` → `accel_builder.cpp`)
+
+```
+render_frame():
+    guard: if !(idle_rendering_active || current_spp < 1): return
+    fill_launch_params(camera, frame_number, config)
+    lp_.samples_per_pixel = 1                  // always 1 SPP per launch
+    optixLaunch(pipeline_, nullptr, ...)       // default CUDA stream
+    cudaDeviceSynchronize()                    // ← SYNC POINT 1: CPU blocks
+    ++accumulated_spp_
+
+    apply_postfx(params):                      // multiple kernels
+        launch_rgb_to_hdr(...)
+        if firefly_enabled: apply_firefly_(...)
+        if bloom_enabled:
+            launch_bloom_find_max_luminance(...)
+            cudaDeviceSynchronize()            // ← SYNC POINT 2: bloom threshold
+            cudaMemcpy(&max_lum, D2H)         // ← SYNC POINT 3: CPU reads 1 float
+            launch_bloom_bright_extract → downsample → blur → upsample → composite
+            cudaDeviceSynchronize()            // ← SYNC POINT 4: bloom complete
+        launch_tonemap_hdr(...)
+        cudaDeviceSynchronize()                // ← SYNC POINT 5: final postfx
+
+    download_srgb(fb_.srgb)                    // ← SYNC POINT 6: cudaMemcpy D2H
+    download_color(fb_.rgb)                    // ← SYNC POINT 7: cudaMemcpy D2H
+```
+
+**VSync**: `glfwSwapInterval(1)` — hard-synced to monitor refresh (typically 60 Hz).
+
+### Progressive Accumulation (GPU kernel)
+
+Frame 0: write color directly. Frame N>0: weighted running average.
+
+```
+old_count = sample_counts[pixel]
+new_count = old_count + 1
+color_buffer[pixel] = color_buffer[pixel] * (old_count/new_count) + new_color * (1/new_count)
+sample_counts[pixel] = new_count
+```
+
+Reset on camera move: `d_color_.zero()`, `d_sample_counts_.zero()`, `accumulated_spp_ = 0`.
+
+## Pipeline Data Flow
+
+```
+Scene load → analyze_scene() → apply_scene_profile() → RenderConfig
+    ↓
+AccelBuilder.build(scene) → GAS/IAS + SBT → LaunchParams
+    ↓
+Viewer loop (VSync-gated, 1 SPP/frame):
+    Camera ray gen (__raygen__render) → trace_path() bounce loop:
+        ├── Emissive hit (MIS weighted)
+        ├── Delta surface → specular bounce
+        ├── Non-delta → NEE (emitter CDF + shadow ray)
+        ├── BSDF sample (cosine/GGX/delta) [+ guide MIS when active]
+        ├── Three-level clamping (bounce, path, sample)
+        ├── Russian roulette termination
+        └── Progressive accumulation (weighted running average)
+    ↓
+PostFx (firefly → bloom → tonemap) → cudaMemcpy D2H → GL display
+```
+
+## Subsystem Reference
+
+### 1. Acceleration (GAS/IAS, SBT, Launch Params)
+
+- **GAS build**: Triangles → compacted GAS via `optixAccelBuild` + compaction query; compacted = faster traversal
+- **IAS**: Multi-instance scenes; per-instance 3×4 row-major transform; SBT offset = instance_id × `NUM_RAY_TYPES`
+- **SBT layout**: RayGenRecord, MissRecord, HitGroupRecord; hit programs return position, shading_normal, geo_normal, texcoords, material_id
+- **Ray types**: `RAY_TYPE_RADIANCE = 0` (path tracer), `RAY_TYPE_SHADOW = 1` (visibility test); `NUM_RAY_TYPES = 2`
+- **Self-intersection avoidance**: origin offset = `hit_pos + normal * epsilon`. Too small → self-hits; too large → shadow leaks.
+
+### 2. Camera (Ray Generation, DOF, Jitter)
+
+- **Camera basis**: `w = normalize(position - look_at)`, `u = normalize(cross(up, w))`, `v = cross(w, u)`
+- **Ray gen** (per pixel): sub-pixel jitter `(px + uniform[0,1)) / width` → NDC; `direction = normalize(cam_w + cam_u * (2*u_ndc-1) + cam_v * (2*v_ndc-1))`
+- **DOF**: Thin-lens model; `sensor_height = 0.024m` (24mm film); `lens_radius = focus_dist / (2 * f_number)`; concentric disk sampling on aperture → re-aim at focus plane point
+- **Jitter**: PCG per-pixel RNG seeded with `pixel_idx * 7919 + sample * 104729 + 42, frame_number + 1`
+
+### 3. Materials (BSDF Evaluate/Sample/PDF)
+
+**9 material types** (enum values 0–8 in `material_flags.h`):
+
+| ID | Type | Sampling | Key Properties |
+|----|------|----------|----------------|
+| 0 | **Lambertian** | Cosine hemisphere | Pure diffuse Kd; `f = Kd / π`, `pdf = cosθ / π` |
+| 1 | **Mirror** | Perfect reflection | Delta BSDF; `f = Ks / |cosθ|` (built-in δ/pdf) |
+| 2 | **Glass** | Fresnel stochastic reflect/refract | Delta; scalar IOR, Color3 Tf transmission filter, TIR fallback |
+| 3 | **GlossyMetal** | Coin flip: GGX specular vs Lambert diffuse | Cook-Torrance metallic; Ks = Fresnel F0, roughness α |
+| 4 | **Emissive** | — | Emits Le; no scattering; path terminates |
+| 5 | **GlossyDielectric** | Coin flip: GGX vs Lambert | F0 from IOR: `((ior-1)/(ior+1))²`; diffuse term `Kd*(1-Fr)` |
+| 6 | **Translucent** | Same as Glass + medium stack | Delta surface + interior medium tracking (IOR stack push/pop) |
+| 7 | **Clearcoat** | Coin flip: coat GGX vs base | Layered: `f_base *= (1 - coat_weight * Fr_coat)` |
+| 8 | **Fabric** | Cosine hemisphere + sheen | Sheen: `sheen_w * sheen_col * (1 - VoH)^5` where VoH = `dot(wo, h)` |
+
+**Delta materials**: {Mirror (1), Glass (2), Translucent (6)} — `is_delta() = true`; no NEE at these surfaces; `pdf_prev = 0` disables emission MIS on next hit.
+
+**GGX Microfacet Model** (`bsdf_shared.h`):
+
+- **NDF**: `D(h,α) = α² / [π × (cos²θ_h × (α²-1) + 1)²]`
+- **Smith G1**: `G1(v,α) = 2×NdotV / (NdotV + √(α² + (1-α²)×NdotV²))`
+- **Smith G (separable)**: `G(wo,wi,α) = G1(wo) × G1(wi)`
+- **VNDF sampling** (importance-sample visible half-vector):
+  1. Stretch `wo` by `(α, α, 1)` → normalized hemisphere
+  2. Build ONB from stretched `wo`
+  3. Sample uniform disk → project onto hemisphere
+  4. Unstretch → half-vector `h`; reflect `wo` around `h` → `wi`
+- **Roughness**: `alpha = max(roughness², BSDF_MIN_ALPHA)` (roughness floor prevents mirror singularity)
+
+**Fresnel**:
+- **Exact dielectric** (Glass/Translucent): `sin²_t = η² × (1 - cos²_i)`; if `sin²_t ≥ 1` → TIR (F=1); `rs = (η cos_i - cos_t)/(η cos_i + cos_t)`; `rp = (cos_i - η cos_t)/(cos_i + η cos_t)`; `F = 0.5(rs² + rp²)`
+- **Schlick** (GlossyMetal/GlossyDielectric/Clearcoat): `F = F0 + (1-F0)(1-cosθ)⁵` where `F0 = ((ior-1)/(ior+1))²`
+
+**Lobe probability clamping** (GlossyMetal, GlossyDielectric, Clearcoat):
+```
+p_spec = spec_weight / (spec_weight + diff_weight)
+p_spec = clamp(p_spec, 0.05, 0.95)
+p_diff = 1 - p_spec
+```
+
+**Glass refraction**:
+1. Determine entering/exiting: `entering = (wo.z > 0)`; `eta = entering ? (1/ior) : ior`
+2. Compute exact Fresnel `F` at interface
+3. Stochastic choice: `if (random < F)` → reflect; else → refract via Snell's law
+4. TIR fallback: if `sin²_t ≥ 1`, always reflect
+5. **Adjoint η² correction**: for importance transport (light tracing), multiply throughput by `η²` to conserve energy across refractive interface
+6. IOR stack: push on enter, pop on exit (for nested dielectrics)
+7. Medium stack: push/pop medium_id for Translucent interior
+
+**Energy conservation invariants**:
+- Lambertian: `∫(Kd/π)×cosθ dω = Kd ≤ 1.0`
+- Cook-Torrance: `D×G×F / (4×cosθ_o×cosθ_i) × cosθ_i` integrates to `≤ 1.0` by construction
+- Furnace test: uniform white illumination → material should return albedo ±1%
+
+### 4. Direct Lighting (NEE, Emitter CDF, MIS)
+
+**Triangle light NEE** (`optix_nee.cuh`):
+1. **Select emitter**: Power-weighted CDF (alias table); `p_tri = cdf[i] - cdf[i-1]`
+2. **Sample point**: Uniform barycentric on triangle → `light_pos = v0*α + v1*β + v2*γ`
+3. **Geometry**: `wi = normalize(light_pos - hit_pos)`, `dist = ||light_pos - hit_pos||`; check `cos_i > 0` (receiver) and `cos_o > 0` (emitter facing)
+4. **PDF conversion** (area → solid angle): `p_ω = p_tri × p_area × dist² / cos_o`
+5. **Shadow ray**: `trace(hit_pos + ε*normal, wi, dist - 2ε)`; if occluded → return 0
+6. **BSDF evaluate**: `f = bsdf_evaluate(wi_local)` at hit point
+7. **MIS weight** (power heuristic): `w = p_nee² / (p_nee² + p_bsdf²)`
+8. **Result**: `L = w × f × Le × cos_i / p_nee`
+
+**Emission MIS on path hits** (bounce > 0):
+- Emissive surface hit: `w_bsdf = pdf_prev² / (pdf_prev² + p_nee²)` — only when `pdf_prev > 0`
+- Bounce 0 (camera ray direct hits): no MIS weight (full contribution)
+- Post-delta hits (`pdf_prev == 0`): full contribution (NEE was not performed at delta surface)
+
+### 5. Path Integrator (Bounce Loop, Throughput, RR, Clamping)
+
+**Exact `trace_path()` loop** (`path_tracer.cuh`):
+
+```
+for bounce in [0, max_bounces):
+
+    hit = trace_radiance(origin, direction)
+
+    if NO HIT:
+        break
+
+    if EMISSIVE:
+        Le = get_Le(mat_id)
+        if bounce == 0: L += throughput * Le
+        else if pdf_prev > 0:
+            p_nee = light_pdf(tri_id, geo_normal, direction, t)
+            w = mis_weight_2(pdf_prev, p_nee)
+            L += throughput * Le * w
+        else:                                  // post-delta: full weight
+            L += throughput * Le
+        break                                  // stop at light
+
+    if DELTA (mirror/glass/translucent):
+        bs = bsdf_sample(mat_id, wo_local, rng)
+        if bs.pdf <= 0: break
+        throughput *= bs.f * |cos_theta|
+        throughput = clamp_path_throughput(throughput, max_path_throughput)
+        pdf_prev = 0                           // no emission MIS for delta
+        continue
+
+    // NON-DELTA SURFACE
+    wo_local = frame.world_to_local(-direction)
+    faceforward: if wo_local.z < 0 → flip normal
+    if wo_local.z <= 0: break                  // backface cull
+
+    // AOV capture (first non-specular hit)
+    if !aov_written: albedo = Kd, normal = shading_normal
+
+    // NEE (direct lighting)
+    nee = nee_dispatch(pos, shading_normal, geo_normal, wo_local, mat_id, rng)
+    nee_contrib = clamp_f3(throughput * nee.L, max_nee_contribution)
+    L += nee_contrib
+
+    // BSDF sample (with optional guide MIS when guide active)
+    gf = (sd_tree_valid && !is_delta) ? guide_fraction : 0
+    if (gf > 0 && random < gf):
+        wi_world = sd_tree_sample(pos, rng, pdf_guide)
+        bsdf_val = bsdf_evaluate(mat_id, wo_local, wi_local)
+        pdf_bsdf = bsdf_pdf(mat_id, wo_local, wi_local)
+        combined_pdf = gf * pdf_guide + (1-gf) * pdf_bsdf
+    else:
+        bs = bsdf_sample(mat_id, wo_local, rng)
+        if bs.pdf < 1e-8 || bs.wi.z <= 0: break
+        bsdf_val = bs.f; combined_pdf = bs.pdf
+        if gf > 0: combined_pdf = gf * sd_tree_pdf(pos, wi) + (1-gf) * bs.pdf
+
+    if combined_pdf < 1e-8: break
+
+    // Per-bounce contribution clamp
+    f_over_pdf.x = min(bsdf_val.x * cos_theta / combined_pdf, max_bounce_contribution)
+    f_over_pdf.y = min(bsdf_val.y * cos_theta / combined_pdf, max_bounce_contribution)
+    f_over_pdf.z = min(bsdf_val.z * cos_theta / combined_pdf, max_bounce_contribution)
+
+    throughput *= f_over_pdf
+    throughput = clamp_path_throughput(throughput, max_path_throughput)
+
+    // Russian roulette
+    if bounce >= min_bounces_rr:
+        p_survive = min(max(throughput.xyz), rr_threshold)
+        if p_survive < 1e-4: break
+        if random >= p_survive: break
+        throughput *= 1 / p_survive            // unbiased inverse
+
+    origin = hit_pos + offset_normal * PATH_EPSILON
+    direction = wi_world
+    pdf_prev = combined_pdf
+
+// Final per-sample luminance clamp
+L = clamp_sample_luminance(L, max_sample_luminance)
+// NaN/Inf guard
+if !isfinite(L): L = (0,0,0)
+```
+
+**Three-level clamping** (`sample_clamping.h`):
+
+| Level | Function | Applied |
+|-------|----------|---------|
+| Per-bounce | `clamp_bounce_contribution`: per-channel `min(f*cos/pdf, limit)` | Each bounce f/pdf |
+| Per-path | `clamp_path_throughput`: if `max(tp) > limit`, scale `tp *= limit/max` | After each bounce + after RR |
+| Per-sample | `clamp_sample_luminance`: if `lum > limit`, scale `L *= limit/lum` | End of trace_path |
+
+**Russian roulette** (`russian_roulette.h`):
+```
+p_survive = min(rr_threshold, max_component(throughput))
+if p_survive < 1e-4: terminate
+if random >= p_survive: terminate
+throughput *= 1 / p_survive                    // unbiased compensation
+```
+
+### 6. Photon System
+
+The photon subsystem implements Jensen's two-pass photon mapping with extensions for guided path tracing. Photons are traced from light sources, stored in a hash grid, and used to train the SD-tree guide (§7). The photon map also serves as a final-gather estimator and a caustic density source.
+
+#### 6.1 Theoretical Basis (Jensen 1996, 2001)
+
+The photon system implements Jensen's two-pass photon mapping with our extensions. Key theoretical points that constrain the implementation:
+
+**Flux representation:** Each stored photon carries radiant flux $\Delta\Phi$ (watts), NOT radiance. The distinction matters: flux is a power packet that is independent of the gather area, while radiance depends on both area and solid angle. The density estimator converts flux to radiance at query time by dividing by the gather area $\pi r_k^2$.
+
+**Throughput-tracking vs. Russian-roulette-only:** Jensen's original paper uses RR to implicitly encode throughput (no explicit throughput multiplication — the photon that survives RR represents the full path contribution). Our implementation uses explicit throughput tracking: `flux *= f_s * cos_theta / pdf` at each bounce, with RR for path termination and throughput boost (`flux /= p_survive`). Both approaches are unbiased; ours makes per-photon flux conservation easier to verify.
+
+**Deposit rule — no double counting (Jensen's decomposition):** Direct illumination at camera hitpoints is computed by NEE, so the photon map must NOT contain direct-light deposits. We enforce: deposit only when `bounce > 0` (first surface hit after emission = bounce 0; deposit only after at least one non-emissive bounce).
+
+**Delta surfaces — continue, don't deposit:** Mirror and glass surfaces have delta BSDFs with zero measure — depositing photons there would produce infinite density. Instead, photons must pass through delta surfaces (updating their throughput) and deposit only when they reach a non-delta surface. This is what creates caustics: L → S+ → D (light, one or more specular bounces, then diffuse deposit).
+
+#### 6.2 Implementation Design
+
+- **Emission**: Power-weighted alias table over emissive triangles; `flux = Le × cosθ / (p_tri × p_pos × p_dir)`
+- **Budget**: `num_global_photons` default 2M; `num_caustic_photons` default 2M
+- **Path flags**: `PHOTON_FLAG_TRAVERSED_GLASS (0x01)`, `PHOTON_FLAG_VOLUME_SCATTER (0x04)`, `PHOTON_FLAG_DISPERSION (0x08)`, `PHOTON_FLAG_CAUSTIC_SPECULAR (0x10)`
+- **Flux conservation**: deposited/emitted ≈ 1.0 ±5%
+- **Delta photon boost**: caustic-path photons receive boosted weight when deposited into the SD-tree
+- **Photon struct**: `{position, wi, geom_normal, flux[3], source_emissive_idx, triangle_id, path_flags}`
+- **Launch**: 1 thread per photon; photon count via atomic counter; `cudaDeviceSynchronize()` after launch + `cudaMemcpy` D2H for photon data
+
+#### 6.3 Density Estimation Theory
+
+**k-NN adaptive gather (Jensen → modern extension):**
+
+Jensen's original used fixed-radius range search. Modern practice (and our implementation) uses k-NN: find the $K$ nearest photons, then use the distance to the $K$-th photon as the adaptive radius $r_k$. Advantages:
+- **Automatic adaptation** — dense regions get small radii (sharp features), sparse regions get large radii (smooth fill)
+- **Edge bias correction** — at 90° edges, the missing half-disk causes $r_k$ to grow, compensating for reduced photon density
+- **Bias reduction** — $r_k = O(N^{-1/(d+2)})$ for $d$-dimensional queries, giving optimal bias-variance tradeoff
+
+**Kernel function (bias reduction):**
+
+Jensen recommended a **cone filter** with parameter $k$: $w_i = 1 - d_i / (k \cdot r_k)$. We use the **Epanechnikov kernel**: $w_i = 1 - d_{\text{tan},i}^2 / r_k^2$, which is the minimum-variance kernel among all second-order kernels (Silverman 1986). The tangential distance $d_{\text{tan}}$ replaces 3D Euclidean distance for surface irradiance estimation.
+
+**Sparse region handling:**
+
+When fewer than $K$ photons are found within the maximum search radius:
+- If count < 5: return zero (insufficient data for meaningful estimate)
+- Otherwise: extrapolate $r_k^2 = d_{\max}^2 \cdot K / n_{\text{found}}$ with reliability weight $\rho = \min(1, n / 0.25K)$
+
+#### 6.4 GPU Hash Grid
+
+The GPU spatial index for photon storage and k-NN gather:
+
+| Property | Value |
+|----------|-------|
+| Build | $O(N)$ sort + prefix sum |
+| k-NN query | $O(\text{cells\_visited} \times \text{photons\_per\_cell})$ |
+| GPU suitability | Excellent (register heap, shell expansion) |
+| Dynamic radius | Bounded by `max_search_radius` |
+| Hash function | Teschner primes: $(c_x \cdot 73856093 \oplus c_y \cdot 19349663 \oplus c_z \cdot 83492791) \bmod T$ |
+| Cell size | `2 × gather_radius` |
+| k-NN heap | Register-allocated max-heap of size $K$ (default 100) |
+
+**Shell expansion:** Concentric shells from centre cell outward. Layer 0 = centre cell, layer 1 = 3³ shell, layer 2 = 5³ shell. Only shell-boundary cells visited. Early termination when $K$-th nearest photon is closer than next shell boundary. Capped at 2 layers.
+
+**Tangential distance metric (mandatory):** All gather operations use tangential distance instead of 3D Euclidean:
+
+$$v = x_i - x, \quad d_{\text{plane}} = n_x \cdot v, \quad v_{\text{tan}} = v - n_x \, d_{\text{plane}}, \quad d_{\text{tan}}^2 = \|v_{\text{tan}}\|^2$$
+
+This prevents cross-surface photon bleed at 90° edges — the root cause of planar blocking artifacts. Additional surface consistency filters: plane distance threshold, normal compatibility (`dot(n_{photon}, n_{query}) > 0`), direction consistency (`dot(ω_i, n_{query}) > 0`).
+
+### 7. SD-Tree Path Guide (Müller 2017)
+
+The renderer uses a true Müller-style **SD-tree** (Spatial-Directional tree) to guide camera path tracing. The SD-tree learns the incident radiance field from photon deposits and camera training samples, then provides a directional sampling PDF at every non-delta camera bounce via one-sample bilateral MIS.
+
+**Source files:** `src/renderer/guide/sd_tree.h/.cpp` (CPU tree), `src/renderer/guide/dquad_gpu.h` (directional quadtree), `src/renderer/guide/sd_tree_gpu.h` (GPU structs: `SDNodeGPU`, `DQuadNodeGPU`, 8 B each), `src/renderer/guide/sd_tree_device.cuh` (device sampling/PDF functions).
+
+#### 7.1 Data Structure
+
+**Spatial component — binary KD-tree:** Partitions the scene bounding box into leaves. Axis cycling (x→y→z→x) or largest-extent splitting. Each leaf represents a spatial region that stores its own directional distribution.
+
+**Directional component — quadtree per leaf:** Each spatial leaf stores a directional quadtree (DQuad) over the full sphere, parameterised by **cylindrical equal-area projection**:
+
+$$u = \frac{\phi}{2\pi}, \quad v = \frac{1 - \cos\theta}{2}$$
+
+The DQuad stores accumulated flux at each node. Sampling traverses from root to leaf, selecting children proportionally to their flux. The PDF for a sampled direction is:
+
+$$p(\omega) = \frac{\text{leaf\_flux}}{\text{root\_flux}} \cdot \frac{1}{\text{leaf\_area} \cdot 4\pi}$$
+
+The $4\pi$ factor accounts for the Jacobian of the cylindrical equal-area mapping from $[0,1]^2$ to the sphere.
+
+#### 7.2 Two-Phase Training (Müller §5.1)
+
+Rendering proceeds in two phases:
+
+**Phase 1 — Training iterations (geometric doubling):** For each iteration $k = 0 \ldots \text{NUM\_TRAINING\_ITERS}$:
+
+1. Render $2^k$ SPP using bilateral MIS with current guide distribution (iteration 0: pure BSDF, no guide)
+2. Re-trace all photons with fresh seed (`photon_map_seed = k`)
+3. `build_sd_tree(k)`:
+   a. Deposit photons (delta-path photons boosted by configurable weight multiplier)
+   b. Deposit camera training samples (view-dependent vertices from the camera pass, Müller §4.3)
+   c. `refine_spatial(k)` — split high-density leaves; threshold $\theta_k = c \cdot \sqrt{2^k}$ prevents over-splitting in early iterations
+   d. `refine()` — split high-flux DQuad leaves
+   e. Reset flux counters (keep tree structure)
+
+Total training SPP: $2^{12} - 1 = 4095$. Capped at 50% of total SPP to avoid wasting budget on short renders.
+
+**Phase 2 — Frozen distribution:** Clear all accumulators (Müller 2017: discard training samples). Render remaining SPP budget with fixed guide distribution. `guide_fraction = 0.5f` (MIS balance heuristic). No photon re-tracing; no SD-tree rebuilding.
+
+**Why geometric doubling?** Early iterations with few samples build coarse structure quickly. Later iterations with many samples refine the distribution. Exponential growth means training wastes at most 50% of the total sample budget.
+
+**Why discard training samples?** Training iterations use an evolving (unconverged) guide distribution. Including their samples in the final image would introduce variance from the early, inaccurate iterations.
+
+#### 7.4 Periodic Rebuilds (Interactive Mode)
+
+During idle-mode interactive rendering (post-training), the SD-tree is periodically rebuilt every `DEFAULT_GUIDE_REMAP_INTERVAL` (250) SPP:
+
+```
+if (frame > 0 && (frame % 250) == 0):
+    trace_photons(scene, config, seed++)
+    build_sd_tree()   // training_iter=0 → no spatial refinement scaling
+```
+
+This keeps the guide distribution fresh as accumulation progresses, without the full geometric-doubling ceremony.
+
+#### 7.5 One-Sample Bilateral MIS
+
+At each non-delta camera bounce, the path tracer draws one direction from a mixture of guide and BSDF:
+
+$$p_{\text{combined}}(\omega) = \alpha \cdot p_{\text{guide}}(\omega) + (1 - \alpha) \cdot p_{\text{bsdf}}(\omega)$$
+
+A coin flip with probability $\alpha$ (`guide_fraction`) selects which strategy generates $\omega_i$; then the combined PDF is used for the MIS weight:
+
+$$\hat{L} = \frac{f_s(x, \omega_i, \omega_o) \cdot L_i(x, \omega_i) \cdot \cos\theta}{p_{\text{combined}}(\omega_i)}$$
+
+When the guided direction hits an emitter, emission MIS uses `pdf_prev = combined_pdf` (not just `pdf_bsdf`) against `p_nee`.
+
+**Why one-sample, not two-sample?** Drawing one sample from the mixture is cheaper than drawing one from each strategy. The variance from the lost sample is more than compensated by tracing twice as many paths in the same time budget.
+
+#### 7.6 Delta Photons in Guidance
+
+Photons that traversed specular/delta surfaces (identified by `PHOTON_FLAG_TRAVERSED_GLASS | PHOTON_FLAG_CAUSTIC_SPECULAR`) receive a **4× weight multiplier** during SD-tree deposit. This ensures the guide learns caustic directions despite their rarity — caustic paths (L→S→D) are harder to find via BSDF sampling, so higher weight makes the SD-tree prioritize caustic directions in refinement. Camera training samples are NOT boosted.
+
+#### 7.7 GPU Integration
+
+The CPU builds and refines the SD-tree, then flattens it into two contiguous GPU arrays:
+- `sd_nodes[]` — spatial KD-tree nodes (`SDNodeGPU`, 8 B each)
+- `sd_dquad_nodes[]` — directional quadtree nodes (`DQuadNodeGPU`, 8 B each)
+
+Uploaded via `cudaMemcpy`. LaunchParams fields: `sd_nodes`, `sd_dquad_nodes`, `sd_num_internal`, `sd_bbox_min/max_x/y/z`, `sd_tree_valid`.
+
+Device functions (`sd_tree_device.cuh`):
+- `dev_sd_tree_sample(pos, rng, &pdf)` — traverse spatial tree to leaf, sample DQuad proportional to flux, convert `(u,v)` → world direction
+- `dev_sd_tree_pdf(pos, dir)` — O(1) lookup: spatial traverse → DQuad leaf → `leaf_flux / root_flux / leaf_area / (4π)`
+
+When `sd_tree_valid == false`, both functions fall back to uniform sphere PDF ($1 / 4\pi$).
+
+### 8. Photon Analysis Framework
+
+At every non-delta camera bounce, the path tracer reads local photon neighbourhood statistics to make adaptive sampling decisions. Five analysis dimensions drive five actionable measures:
+
+#### 8.1 Five Analysis Dimensions
+
+| Dimension | Source | What it reveals |
+|-----------|--------|-----------------|
+| **D1. Directional signal** | SD-tree DQuad flux distribution | Which directions carry the most light |
+| **D2. Spatial density** | Photon count per cell area | Lighting complexity (high density = high frequency) |
+| **D3. Spatial variance** | Flux coefficient of variation across neighbouring cells | Undersampled regions (high CV = noisy photon map) |
+| **D4. Photon type** | `path_flags` (caustic flags, glass fraction) | Presence of caustic L→S→D transport |
+| **D5. Photon energy** | Total flux in cell | Saturation (high flux = diminishing perceptual return) |
+
+#### 8.2 Five Actionable Measures
+
+**M1 — Guide fraction** (`p_guide`): How much to trust the SD-tree vs the BSDF.
+
+| Condition | Effect on `p_guide` |
+|-----------|---------------------|
+| Few active DQuad bins (≤ 2) → strong directional signal | Increase to 0.7 |
+| `directional_spread > 0.9` → isotropic, guide unhelpful | Set to 0 |
+| Low photon count → histogram unreliable | Scale down proportionally |
+| High flux CV → photon map not converged | Scale down proportionally |
+| Caustic edge (high CV, few bins) → guide is precise | Increase to 0.7+ |
+
+**M2 — Sample budget per pixel** (adaptive SPP): Distribute total SPP budget non-uniformly.
+
+| Signal | Effect |
+|--------|--------|
+| High flux CV → noisy region | ↑ more samples |
+| Caustic cell → high-frequency transport | ↑ more samples |
+| High total flux → saturated | ↓ fewer samples |
+
+**M3 — Gather radius**: k-NN adaptive radius scales with local density. Caustic photons use tighter kernel.
+
+**M4 — Photon re-trace budget**: View-adaptive budgeting — re-weight emitter CDF toward lights that contribute to visible pixels (per `source_emissive_idx`).
+
+**M5 — Caustic additive contribution**: Caustic photon density estimate is always **added directly** to the pixel — never folded into the path throughput. L→S→D transport is nearly impossible for camera paths to discover; the photon estimate is the authority. Double-counting is self-correcting via MIS (probability of randomly finding the caustic path ≈ 0).
+
+#### 8.3 Guide Fraction Logic
+
+```
+compute_guide_fraction(cell, histogram):
+    if !histogram.valid || cell.photon_count == 0: return 0
+    p = DEFAULT_GUIDE_FRACTION  (0.5)
+    if histogram.active_bins <= 2: p = 0.7       // strong directional signal
+    p *= min(1.0, cell.photon_count / 30.0)      // reliability scaling
+    cv = cell.flux_variance / (cell.irradiance + 1e-6)
+    p *= max(0.1, 1.0 - cv / 2.0)               // convergence scaling
+    if cell.directional_spread > 0.9: p = 0      // too diffuse to guide
+    return p
+```
+
+### 9. Photon Deposit & Delta Rules
+
+These rules govern when photons are stored, which map they enter, and how they interact with the density estimator. They are **non-negotiable invariants** from Jensen's decomposition — violating any one causes double-counting, energy loss, or infinite density.
+
+#### 9.1 Deposit Decision Table
+
+| Material | Delta? | Photon deposited? | Bounce type | Caustic flag |
+|----------|--------|-------------------|-------------|--------------|
+| Lambertian | No | Yes (bounce > 0) | Cosine hemisphere | — |
+| Mirror | Yes | **No** | Deterministic reflection | `CAUSTIC_SPECULAR` |
+| Glass | Yes | **No** | Fresnel reflect/refract | `TRAVERSED_GLASS` |
+| GlossyMetal | No | Yes (bounce > 0) | GGX VNDF + cosine mix | — |
+| Emissive | No | Yes (bounce > 0) | Cosine hemisphere | — |
+| GlossyDielectric | No | Yes (bounce > 0) | GGX VNDF + cosine mix | — |
+| Translucent | Yes (surface) | **No** | Fresnel reflect/refract + medium | `TRAVERSED_GLASS` |
+| Clearcoat | No | Yes (bounce > 0) | GGX coat + cosine base | — |
+| Fabric | No | Yes (bounce > 0) | Cosine hemisphere | — |
+
+**Rule:** Deposit at non-delta surfaces when `bounce > 0`. Never deposit at delta surfaces (infinite density). Never deposit at bounce 0 (would double-count direct lighting already computed by NEE).
+
+#### 9.2 Caustic Path Lifecycle
+
+The `on_caustic_path` flag tracks whether the current photon path has traversed at least one caustic caster (Mirror, Glass, or Translucent) without an intervening diffuse bounce:
+
+1. Starts `false` at emission.
+2. Set `true` when photon hits a caustic caster (delta material).
+3. Reset `false` when photon deposits at a diffuse/glossy surface.
+4. While `true`, any deposit enters **both** the global and caustic photon maps.
+
+**L→D→S→D paths:** A photon that bounces diffusely, then hits glass, then deposits on the next diffuse surface is a valid caustic. The `caustic_only_store` mode (GPU) skips non-caustic deposits but **continues bouncing** — this allows the photon to eventually reach a specular surface and produce a caustic deposit downstream.
+
+#### 9.3 Emissive Surface Termination
+
+The GPU photon bounce loop **terminates** when a photon hits an emissive surface at any bounce. Rationale: re-bouncing a photon off a light source is physically valid but wastes budget — the camera pass handles light-to-eye transport via NEE.
+
+#### 9.4 Diffuse-Only Gather
+
+**Critical insight from legacy renderer:** The density estimator uses `evaluate_diffuse()` — **not** the full `evaluate()` — when gathering photon contributions. Only the diffuse BSDF lobe is evaluated.
+
+**Why?** GGX specular lobes (Cook-Torrance) are sharply peaked around the mirror direction. When a photon arrives from a direction near the specular peak, the BSDF value can be enormous, creating coloured hotspot fireflies in the density estimate. The diffuse-only approach excludes specular lobes entirely — photon density estimation captures diffuse/soft indirect only; specular transport is handled by the path tracer's own BSDF continuation.
+
+**Per-material behaviour in gather:**
+- **Lambertian**: $f_{\text{gather}} = K_d / \pi$ (unchanged)
+- **GlossyMetal/GlossyDielectric**: diffuse lobe only → $f_{\text{gather}} = K_d / \pi$
+- **Clearcoat**: diffuse with coat attenuation → $f_{\text{gather}} = (1 - w_{\text{coat}} \cdot F_r) \cdot K_d / \pi$
+- **Fabric**: base diffuse only (no sheen — sheen is low-energy grazing effect)
+- **Mirror/Glass/Translucent (delta)**: `evaluate_diffuse()` returns zero — these surfaces never receive photon density estimates
+
+### 10. Volume Photon Design
+
+> This section documents the planned design for participating media. Stubs exist but the volume system is not yet wired into the render loop.
+
+The architecture uses **volumetric photon mapping** (Jensen 2001 Ch. 10, PBRT v4 §14) — point deposits at scatter events, NOT beam tracing. This reuses the same infrastructure as surface photon mapping (SoA, hash grid) in 3D.
+
+#### 10.1 Why Point Deposits, Not Beams
+
+Beam tracing stores line segments, requires computing line-point distances, and needs a custom beam estimator. For **homogeneous** participating media, volumetric photon mapping with point deposits at scatter events is simpler, uses identical infrastructure (PhotonSoA + hash grid), and produces equivalent results. Beam tracing is only advantageous for extremely thin media or short-range scattering — not our target.
+
+#### 10.2 Photon-Side: Volume Photon Deposit
+
+When a photon is inside a participating medium (tracked by `MediumStack`) and scatters:
+
+1. Sample free-flight distance: $t = -\ln(\xi) / \sigma_t$
+2. If $t < d_{\text{surface}}$ → **scatter event** at $\mathbf{x}_s = \mathbf{x} + t \cdot \omega$:
+   - Deposit a **volume photon** at the scatter point (position, direction $\omega_i$, flux, `VOLUME_SCATTER` flag)
+   - Store in dedicated `volume_photons` SoA, indexed by a 3D hash grid (`volume_grid`)
+   - Sample new direction from Henyey-Greenstein phase function
+   - Continue bouncing
+3. If $t \geq d_{\text{surface}}$ → apply Beer-Lambert transmittance: $T(\lambda, d) = \exp(-\sigma_t \cdot d)$; proceed to surface hit
+
+#### 10.3 Camera-Side: Volumetric Path Tracing
+
+When a camera ray is inside a participating medium, each bounce iteration starts with a free-flight decision:
+
+1. **Free-flight sampling:** $t = -\ln(\xi) / \sigma_t$
+2. **If $t < t_{\text{surface}}$ → medium scatter:**
+   - Apply transmittance up to scatter point
+   - **NEE** toward a light source (Beer-Lambert shadow attenuation along shadow ray)
+   - Query **volume photon guide** (3D hash grid of directional histograms from volume photon `wi` vectors) for scatter direction
+   - Sample direction from HG + volume guide mixture: $p_{\text{scatter}} = \alpha_v \cdot p_{\text{vol\_guide}} + (1-\alpha_v) \cdot p_{\text{HG}}$
+   - Russian roulette at scatter events (survival probability from single-scatter albedo: $p = \min(\text{RR\_thresh}, \max_\lambda(\sigma_s / \sigma_t))$ )
+   - Continue bounce loop from scatter point
+3. **If $t \geq t_{\text{surface}}$ → transmittance only:** apply $T(\lambda, d)$; process surface hit normally
+
+#### 10.4 Henyey-Greenstein Phase Function
+
+$$p_{\text{HG}}(\cos\theta, g) = \frac{1 - g^2}{4\pi(1 + g^2 - 2g\cos\theta)^{3/2}}$$
+
+Sampling: $\cos\theta = \frac{1}{2g}\left(1 + g^2 - \left(\frac{1 - g^2}{1 - g + 2g\xi}\right)^2\right)$ for $g \neq 0$; isotropic ($\cos\theta = 1 - 2\xi$) for $g = 0$.
+
+#### 10.5 Double-Attenuation Guard
+
+When a photon or camera ray is inside an object-attached medium (tracked by `MediumStack`), any global atmospheric volume system is **skipped** to prevent double-attenuation. Guard: `in_object_medium = medium_stack.current_medium_id() >= 0`.
+
+---
+
+## Academic References
+
+| Ref | Citation | Key Concepts |
+|-----|----------|-------------|
+| Kajiya 1986 | "The Rendering Equation," SIGGRAPH | Path integral formulation, recursive LTE |
+| Cook & Torrance 1982 | "A Reflectance Model for Computer Graphics," SIGGRAPH | Microfacet BRDF, specular highlights from roughness |
+| Jensen 1996 | "Global Illumination using Photon Maps," EGWR | Two-pass PM, kd-tree, density estimation |
+| Jensen 2001 | *Realistic Image Synthesis Using Photon Mapping*, AK Peters | Caustic map, rendering equation decomposition, volume photons |
+| Veach 1997 | *Robust Monte Carlo Methods for Light Transport Simulation*, PhD | MIS balance/power heuristic, adjoint η² correction |
+| Walter et al. 2007 | "Microfacet Models for Refraction through Rough Surfaces," EGSR | GGX NDF, microfacet BTDF |
+| Heitz 2014 | "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs," JCGT | Smith G, VNDF importance sampling |
+| Müller 2017 | "Practical Path Guiding," EGSR (Best Paper) | SD-tree, bilateral MIS, geometric doubling |
+| Silverman 1986 | *Density Estimation for Statistics and Data Analysis* | Epanechnikov kernel optimality |
+| PBRT v4 2023 | Pharr, Jakob, Humphreys, MIT Press | PathIntegrator, path regularization, RR η²-correction |
+
+## Future Features
+
+### Stochastic Opacity ⚠️ NOT YET IMPLEMENTED
+
+- **Per-intersection RNG**: TEA-4 hash `tea4(pixel_seed, prim_id ^ float_as_uint(tmax))` → deterministic but varied per ray
+- **Alpha textures** (`map_d`): if `tex_alpha < 0.5` → `optixIgnoreIntersection()` (cutout)
+- **Partial opacity** ∈ (0,1): stochastic accept/reject via TEA hash output
+
+### Render Logging ⚠️ COMPILE-TIME ONLY
+
+When `ENABLE_RENDER_LOG` is defined:
+- Sample representative rays per frame (stride-based selection)
+- Record full bounce chain: position, direction, BSDF value, NEE info, MIS weights
+- Output structured JSON (~2–8 KB per frame)
+- Buffers: `RENDER_LOG_MAX_PHOTON_PATHS`, `_MAX_CAMERA_PATHS`, `_MAX_BOUNCES`
+
+---
+
+## Related Skills
+
+| Skill | Interface | Shared Vocabulary |
+|-------|-----------|-------------------|
+| **post-processing** | Runs inside `photon_tracer`; receives HDR float3 from integrator | `PostFxParams`, bloom/firefly/tonemap config |
+| **quality** | `ppt_diagnose` analyzes renderer output EXR + render_log | Convergence rate α, artifact types, corrections → `RenderConfig` |
+| **scene-analysis** | `ppt_analyze` produces `SceneProfile` → `apply_scene_profile()` → `RenderConfig` | `SceneProfile`, `LightingType`, material census |
+| **orchestrator** | Coordinates `ppt_analyze → photon_tracer → ppt_diagnose` pipeline | Config override cascade, gate checks |
+| **test-harness** | Furnace / reciprocity / chi-squared tests validate renderer correctness | `TestCounters`, `ConvergenceBaseline`, reference scenes |
+
+---
+
+## Cross-Reference
+
+| Concept | Paper Source | SKILL.md Section | Code Location |
+|---------|-------------|-----------------|--------------|
+| No direct-light deposits | Jensen 1996 §3.2 | §TF-1.5, §9.1 | `photon_tracer.cuh` |
+| SD-tree structure | Müller 2017 §3 | §TF-2.1, §7 | `sd_tree.h/.cpp`, `sd_tree_gpu.h` |
+| One-sample bilateral MIS | Müller 2017 §4 | §TF-2.3, §7.5 | `path_tracer.cuh` |
+| NEE + BSDF MIS (power heuristic) | Veach 1997 §9.2, PBRT v4 §13.4 | §TF-3.1, §4 | `optix_nee.cuh` |
+| Path regularization | PBRT v4 §13.4.1 | §TF-3.2 | Not implemented |
+| Adjoint η² correction | Veach 1997 §5.2, PBRT v4 §9.5.2 | §TF-3.4 | `specular.h` |
+| Russian roulette (η²-excluded) | PBRT v4 §13.4 | §TF-3.1, §5 | `path_tracer.cuh` |

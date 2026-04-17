@@ -1,0 +1,440 @@
+---
+name: orchestrator
+description: 'Multi-stage pipeline orchestration using 3 executables (ppt_analyze → photon_tracer → ppt_diagnose). Use when: wiring the analyze→render→diagnose pipeline, setting up preview or production rendering, coordinating skill invocation order, configuring render parameters, or debugging stage-to-stage data flow.'
+---
+
+# Orchestrator
+
+Meta-skill that coordinates the rendering pipeline across 3 executables. Owns no source files — determines **which tools to invoke, in what order, with what config, and how to verify**.
+
+## 3-Executable Pipeline
+
+```
+ppt_analyze scene.pbrt           → stdout: profile.json (scene metrics + recommended config)
+    ↓
+photon_tracer --config profile.json scene.pbrt → output.exr + render_log.json
+    ↓
+ppt_diagnose output.exr render_log.json → stdout: report.json (artifacts + corrections)
+```
+
+### Feedback Loop
+
+```
+for iteration in 1..3:
+    profile = ppt_analyze(scene)
+    render(scene, profile)
+    report = ppt_diagnose(output)
+    if report.artifacts.empty(): break
+    apply report.corrections to profile
+```
+
+### Data Flow
+
+| Producer | Output | Consumer |
+|----------|--------|----------|
+| `ppt_analyze` | `profile.json` (SceneProfile + RenderConfig) | `photon_tracer` (via --config) |
+| `photon_tracer` | `output.exr` + `render_log.json` | `ppt_diagnose` |
+| `ppt_diagnose` | `report.json` (artifacts + corrections) | orchestrator (feedback) |
+
+## Skills → Executables
+
+| Skill | Executable | Invocation |
+|-------|-----------|------------|
+| **scene-analysis** | `ppt_analyze` | `ppt_analyze <scene>` |
+| **renderer** | `photon_tracer` | `photon_tracer [--config X] <scene>` |
+| **post-processing** | `photon_tracer` | Built into renderer; params via config |
+| **quality** | `ppt_diagnose` | `ppt_diagnose <output.exr> [render_log.json]` |
+| **test-harness** | `ppt_tests` | Test runner |
+| **scene-editor** | `scene_editor` | `scene_editor <scene>` |
+
+## Config Override Cascade
+
+CLI args > JSON config (`--config`) > SceneProfile auto-tune > compile-time defaults (`config.h`)
+
+## CLI Reference
+
+All flags supported by `photon_tracer`:
+
+| Flag | Type | Default | Controls |
+|------|------|---------|----------|
+| `--config FILE` | string | — | Load JSON config |
+| `--save-config FILE` | string | — | Save current config to JSON |
+| `--width N` | int | 768 | Image width |
+| `--height N` | int | 768 | Image height |
+| `--spp N` | int | 256 | Samples per pixel |
+| `--bounces N` | int | 8 | Max camera bounces |
+| `--photons N` | int | 2M | Global photon budget |
+| `--caustic-photons N` | int | 2M | Caustic photon budget |
+| `--exposure F` | float | 1.0 | Tone map exposure |
+| `--light-scale F` | float | 1.0 | Light intensity multiplier (combined with exposure) |
+| `--output FILE` | string | output/render.png | Output PNG path |
+| `--guide-fraction F` | float | 0.5 | Guided sampling fraction |
+| `--no-guide` | flag | — | Disable guided path tracing |
+| `--no-denoiser` | flag | — | Disable OptiX AI denoiser |
+| `--no-aces` | flag | — | Disable ACES tonemapping |
+| `--no-bloom` | flag | — | Disable bloom post-FX |
+| `--no-firefly` | flag | — | Disable firefly filter |
+| `--no-path-clamp` | flag | — | Disable per-path throughput clamping (sets limit to 1e30) |
+| `--mode MODE` | string | full | full\|direct\|indirect\|photon\|normals\|material\|depth\|guide |
+| `--gather-radius F` | float | 0.05 | Max photon gather radius |
+| `--knn-k N` | int | 100 | k-NN neighbors |
+| `--adaptive` | flag | — | Enable adaptive sampling |
+| `--rr-threshold F` | float | 0.95 | Russian roulette threshold |
+| `--max-sample-luminance F` | float | 10000 | Per-sample luminance clamp |
+| `--nee-light-samples N` | int | 4 | NEE light samples per hit |
+| `--sweep [SPP,...]` | int list | 16,64,256,512,1024,2048 | Convergence sweep (implies --headless) |
+| `--headless` | flag | — | No window (batch render + save) |
+
+All 60 `RenderConfig` fields can also be set via `--config` JSON files. See `src/renderer/app/render_config_json.cpp` for the full list.
+## RenderConfig Defaults
+
+All compile-time defaults from `src/core/config.h`. Edit this table when defaults change.
+
+| Field | Default | JSON key | Notes |
+|-------|---------|----------|-------|
+| `image_width` | 768 | `image_width` | |
+| `image_height` | 768 | `image_height` | |
+| `samples_per_pixel` | 256 | `samples_per_pixel` | |
+| `max_bounces` | 8 | `max_bounces` | Camera path |
+| `min_bounces_rr` | 3 | `min_bounces_rr` | Before Russian roulette kicks in |
+| `rr_threshold` | 0.95 | `rr_threshold` | |
+| `max_specular_chain` | 8 | `max_specular_chain` | |
+| `max_bounce_contribution` | 1e4 | `max_bounce_contribution` | Per-bounce f·cos/pdf clamp |
+| `max_path_throughput` | 1e4 | `max_path_throughput` | Per-path throughput clamp (--no-path-clamp → 1e30) |
+| `max_nee_contribution` | 1e4 | `max_nee_contribution` | NEE radiance clamp |
+| `max_sample_luminance` | 10000 | `max_sample_luminance` | Final sample luminance clamp |
+| `num_global_photons` | 2000000 | `num_global_photons` | |
+| `num_caustic_photons` | 2000000 | `num_caustic_photons` | |
+| `photon_max_bounces` | 12 | `photon_max_bounces` | |
+| `photon_min_bounces_rr` | 3 | `photon_min_bounces_rr` | |
+| `photon_rr_threshold` | 0.95 | `photon_rr_threshold` | |
+| `guide_enabled` | false | `guide_enabled` | SD-tree guided path tracing |
+| `guide_fraction` | 0.5 | `guide_fraction` | Fraction of guided vs BSDF samples |
+| `guide_remap_interval` | 250 | `guide_remap_interval` | |
+| `nee_light_samples` | 4 | `nee_light_samples` | |
+| `nee_coverage_fraction` | 0.3 | `nee_coverage_fraction` | |
+| `knn_k` | 100 | `knn_k` | Photon gather neighbors |
+| `gather_radius` | 0.05 | `gather_radius` | |
+| `caustic_radius` | 0.025 | `caustic_radius` | |
+| `adaptive_sampling` | false | `adaptive_sampling` | |
+| `exposure` | 1.0 | `exposure` | |
+| `light_scale` | 1.0 | `light_scale` | |
+| `denoiser_enabled` | true | `denoiser_enabled` | OptiX AI denoiser |
+| `denoiser_guide_albedo` | true | `denoiser_guide_albedo` | |
+| `denoiser_guide_normal` | true | `denoiser_guide_normal` | |
+| `denoiser_blend` | 0.0 | `denoiser_blend` | 0 = full denoise, 1 = original |
+| `dof_enabled` | false | `dof_enabled` | |
+## Config Presets
+
+| Parameter | Preview | Quality | Reference |
+|-----------|---------|---------|-----------|
+| `max_bounces` | 2 | 8 (auto-tuned by scene) | 12 |
+| `samples_per_pixel` | progressive (1+) | 256 | 4096 |
+| `guide_enabled` | false | true | true |
+| `guide_fraction` | — | 0.5 (auto-tuned) | 0.5 |
+| `num_global_photons` | 0 | 1-4M (auto-tuned) | 4M |
+| `denoiser_enabled` | true | true | false |
+| `firefly_enabled` | true | true | false |
+| `rr_threshold` | 0.90 | 0.95 | 0.99 |
+
+## Gate Checks
+
+| Stage | Gate | Verification |
+|-------|------|-------------|
+| `ppt_analyze` | Valid JSON on stdout | Parse output, check `scene_metrics.num_triangles > 0` |
+| `photon_tracer` | `output.exr` written | File exists, dimensions match config |
+| `ppt_diagnose` | Valid JSON on stdout | Parse output, check `quality.noise_level` exists |
+
+## Key Source Files
+
+| File | Role |
+|------|------|
+| `src/renderer/main.cpp` | Renderer entry: CLI → scene load → analyze → render → output |
+| `src/renderer/app/render_session.h` | GPU pipeline: `init()`, `render_frame()`, `train_guide()`, `apply_postfx()` |
+| `src/renderer/app/render_config.h` | `RenderConfig` struct — all runtime params |
+| `src/renderer/app/viewer.h` | GLFW window, progressive render loop |
+| `src/core/config.h` | Compile-time defaults |
+| `src/analyze/scene_profile_applicator.h` | SceneProfile → RenderConfig mapping |
+
+## Convergence Sweep Strategy
+
+For diagnosing noise reduction techniques, the orchestrator can render at multiple SPP checkpoints and measure how noise decreases. This reveals whether a change actually improves convergence or just masks noise at a single sample count.
+
+### When to Use
+
+- Comparing two rendering configurations (A/B test across SPP levels)
+- Diagnosing slow convergence or stalled noise reduction
+- Validating that a noise reduction technique (guide, photon map, clamping) actually improves the convergence rate, not just the appearance at one SPP level
+- Measuring the effectiveness of firefly filtering, path guiding, or photon mapping changes
+- Checking for energy loss introduced by aggressive clamping — luminance should stay stable across SPP levels
+
+### CLI
+
+```
+photon_tracer --sweep [SPP,SPP,...] [--config profile.json] scene.pbrt
+```
+
+`--sweep` implies `--headless`. Default SPP levels: **16, 64, 256, 512, 1024, 2048**.
+
+Custom levels example:
+```
+photon_tracer --sweep 16,64,256,512,1024,2048,4096 scene.pbrt
+```
+
+### Outputs
+
+| File | Content |
+|------|---------|
+| `output/render_sppNNNN.png` | Tonemapped PNG at each checkpoint SPP |
+| `output/render_sweep.json` | JSON report: per-level noise, mean luminance, convergence rate |
+
+### Sweep Report JSON
+
+```json
+{
+  "sweep_points": [
+    { "spp": 16,   "noise": 0.04231, "mean_lum": 0.1823 },
+    { "spp": 64,   "noise": 0.02114, "mean_lum": 0.1819 },
+    { "spp": 256,  "noise": 0.01052, "mean_lum": 0.1821 },
+    { "spp": 1024, "noise": 0.00526, "mean_lum": 0.1820 }
+  ]
+}
+```
+
+### Interpreting Results
+
+| Convergence rate α | Interpretation | Action |
+|--------------------|---------------|--------|
+| 0.8–1.2 | Normal MC convergence | No issues |
+| < 0.3 | Stalled — noise not decreasing | Check guide/photon/NEE settings; likely a single dominant noise source |
+| 0.3–0.8 | Slow — sub-optimal variance reduction | Try increasing guide_fraction, photon budget, or adjusting clamping |
+| > 1.2 | Suspiciously fast — possible bias | Verify energy conservation (mean_lum should be stable across SPP levels) |
+
+**Energy conservation check**: If `mean_lum` varies significantly across SPP levels (> 5%), over-clamping or bias is likely.
+
+### A/B Comparison Workflow
+
+```
+# Baseline render
+photon_tracer --sweep --config baseline.json scene.pbrt --output output/baseline.png
+
+# Modified render (e.g., different guide_fraction)
+photon_tracer --sweep --config modified.json scene.pbrt --output output/modified.png
+
+# Compare sweep reports — examine convergence rate α and noise reduction per level
+```
+
+Compare the convergence rate α between runs. A technique that improves α (closer to 1.0) reduces noise faster and is genuinely better, not just lucky at one sample count.
+
+### Integration with Feedback Loop
+
+```
+for iteration in 1..3:
+    profile = ppt_analyze(scene)
+    sweep_report = photon_tracer --sweep --config profile scene
+    if sweep_report.convergence_rate > 0.8: break
+    diagnose = ppt_diagnose(sweep_report)
+    apply diagnose.corrections to profile
+```
+
+## Single-Variable Isolation Strategy
+
+When diagnosing an artifact or evaluating an improvement, **never change multiple parameters at once**. Changing several things simultaneously makes it impossible to attribute the result to any single cause. Instead, follow a disciplined isolation workflow.
+
+### Core Principle
+
+One variable at a time. Render, measure, compare. Then move to the next variable.
+
+### Workflow
+
+```
+1. Establish baseline
+   photon_tracer --sweep --config baseline.json scene.pbrt --output output/baseline.png
+
+2. Pick ONE parameter to investigate (e.g., guide_fraction)
+   For each candidate value, render a sweep:
+     photon_tracer --sweep --guide-fraction 0.0  scene.pbrt --output output/gf_00.png
+     photon_tracer --sweep --guide-fraction 0.3  scene.pbrt --output output/gf_03.png
+     photon_tracer --sweep --guide-fraction 0.5  scene.pbrt --output output/gf_05.png
+     photon_tracer --sweep --guide-fraction 0.7  scene.pbrt --output output/gf_07.png
+
+3. Compare sweep reports → identify best value for this parameter
+
+4. Lock that parameter, pick the NEXT parameter to investigate
+   Repeat steps 2–3 with the new parameter
+
+5. Only after individual effects are understood, combine the best
+   values into a final config and verify with one more sweep
+```
+
+### Parameter Investigation Order
+
+Start with parameters that have the largest expected impact, then move to finer controls:
+
+| Priority | Parameter | Why first |
+|----------|-----------|----------|
+| 1 | `guide_enabled` / `guide_fraction` | Largest variance reduction lever for indirect lighting |
+| 2 | `num_global_photons` | Dominant for caustics and SDS paths |
+| 3 | `max_bounce_contribution` / `max_sample_luminance` | Controls firefly vs energy trade-off |
+| 4 | `max_bounces` / `rr_threshold` | Path length vs bias |
+| 5 | `nee_light_samples` / `nee_coverage_fraction` | Direct lighting quality |
+| 6 | `denoiser_blend` / `postfx` | Cosmetic — only after underlying quality is understood |
+
+### What to Compare Across Runs
+
+| Metric | What it reveals |
+|--------|----------------|
+| Convergence rate α | Whether the parameter actually reduces variance (not just appearance) |
+| Noise at each SPP | Absolute noise improvement at low and high sample counts |
+| Mean luminance stability | Whether the parameter introduces energy loss (clamping too aggressive) |
+| Artifact presence | Whether the parameter fixes one artifact but introduces another |
+
+### Anti-Patterns
+
+- **Changing guide_fraction + photon budget + clamping together** — if quality improves, you don't know which change helped. If it regresses, you don't know which change broke it.
+- **Skipping the baseline** — without a baseline sweep, you have no reference point.
+- **Jumping to combined configs** — combining untested parameter values can mask individual regressions.
+- **Testing only at one SPP** — a parameter may look good at 256 SPP but stall convergence at higher counts. Always use `--sweep`.
+
+## Diagnosing "Overall Too Dark" Images
+
+When the rendered image is uniformly too dark compared to a reference or expected appearance, follow this systematic procedure. The issue can originate from multiple independent causes, so **test each in isolation** using the single-variable strategy above.
+
+### Symptom Detection
+
+An image is "overall too dark" when:
+- `[HDR Stats] mean_lum` is significantly lower than expected (e.g., 0.04 when reference shows 0.3–0.5)
+- Walls, floors, diffuse surfaces appear nearly black despite non-zero Kd
+- The reference image (e.g., Tungsten BDPT) shows much brighter diffuse illumination
+- PrePass reports very high `zero` path percentage (>90%) or very low `NEE hit` (<1%)
+
+### Diagnostic Tiers (ordered by expected impact)
+
+Work through these tiers top-to-bottom. Each tier contains a **diagnostic test** and a **fix action**. Stop when the root cause is found.
+
+#### Tier 1: Exposure and Post-Processing (seconds to verify)
+
+Exposure is applied as a multiplier during tonemapping. A wrong default can dim the entire image.
+
+```
+# Test: render with explicit exposure boost
+photon_tracer --headless --spp 100 --exposure 2.0 scene.pbrt --output output/exposure_test.png
+
+# Test: disable ACES tonemapping (linear output)
+photon_tracer --headless --spp 100 --no-aces scene.pbrt --output output/linear_test.png
+```
+
+**Check**: Compare `[HDR Stats] mean_lum` between runs. If mean_lum is the same but the image looks different, the issue is purely in tonemapping/exposure. If mean_lum is low regardless, the issue is in light transport (proceed to Tier 2).
+
+#### Tier 2: Light Source Intensities (minutes to verify)
+
+Light intensities may be wrong due to parsing, normalization, or unit mismatch. Use `--light-scale` to scale light intensity without affecting tonemapping.
+
+```
+# Diagnostic: boost light intensity to simulate stronger lights
+photon_tracer --headless --spp 100 --light-scale 2.0  scene.pbrt --output output/ls2.png
+photon_tracer --headless --spp 100 --light-scale 5.0  scene.pbrt --output output/ls5.png
+photon_tracer --headless --spp 100 --light-scale 10.0 scene.pbrt --output output/ls10.png
+```
+
+**Check**: If `--light-scale 10` produces an image matching the reference in brightness, the scene's Le values are ~10× too low. Investigate:
+- Scene normalization: `normalize_to_reference()` scales geometry but Le (radiance, W/m²/sr) must NOT be scaled
+- PBRT parser: verify `AreaLightSource "diffuse" "rgb L" [...]` values are loaded correctly
+- Unit conversion: PBRT v4 uses radiometric units — verify no accidental conversion to photometric
+
+**Code locations**: `src/scene/scene.h` (`normalize_to_reference()`), `src/scene/pbrt/pbrt_loader.cpp` (Le parsing), `src/scene/scene.h` (`build_emissive_distribution()`)
+
+#### Tier 3: NEE (Next Event Estimation) Failures (minutes to verify)
+
+If shadow rays consistently fail to reach lights, direct illumination is lost. This is the most common cause of 10×+ dimming.
+
+```
+# Diagnostic: render direct-only to isolate NEE
+photon_tracer --headless --spp 256 --mode direct scene.pbrt --output output/direct_only.png
+
+# Diagnostic: render indirect-only to check BSDF paths
+photon_tracer --headless --spp 256 --mode indirect scene.pbrt --output output/indirect_only.png
+```
+
+**Check**: If direct-only is very dark but indirect-only shows some illumination, NEE is broken. Common causes:
+- **One-sided emitter normals**: Light geometry normal points away from the room. NEE rejects samples with `cos_light ≤ 0`. Fix: use `fabsf()` for cos_light or flip light normal toward shading point. **Key file**: `src/renderer/lighting/optix_nee.cuh` (`dev_nee_evaluate_triangle`)
+- **Shadow ray self-intersection**: `NEE_RAY_EPSILON` too large or too small. File: `src/renderer/lighting/nee_shared.h`
+- **Emissive triangle not registered**: Check `[Scene] Emissive distribution:` log output — all emissive triangles should appear
+
+**PrePass diagnostic**: The `[PrePass] NEE hit=X%` metric directly measures shadow ray success rate. Values below 1% for scenes with visible area lights strongly suggest a bug.
+
+#### Tier 4: Bounce Depth (SPP sweep, minutes)
+
+Insufficient bounce depth causes energy loss in scenes with many inter-reflections.
+
+```
+# SPP sweep at different bounce depths
+photon_tracer --sweep 64,256,1024 --bounces 2  scene.pbrt --output output/b2.png
+photon_tracer --sweep 64,256,1024 --bounces 4  scene.pbrt --output output/b4.png
+photon_tracer --sweep 64,256,1024 --bounces 8  scene.pbrt --output output/b8.png
+photon_tracer --sweep 64,256,1024 --bounces 16 scene.pbrt --output output/b16.png
+```
+
+**Check**: Compare `mean_lum` across bounce depths. If mean_lum increases significantly from bounces=4 to bounces=8, the scene depends on multiple bounces (common in Cornell box-type interiors). If mean_lum plateaus at bounces=4, bounce depth is not the issue.
+
+**Typical values**: Most scenes converge by bounces=8. Glass/water scenes need 12+. Simple outdoor scenes need only 2–4.
+
+Also check Russian roulette: aggressive RR (low `rr_threshold`) terminates paths early, losing energy at higher bounces. Default 0.95 is conservative; lower values save time but lose energy.
+
+#### Tier 5: Material Colors and Absorption (code inspection)
+
+If Tiers 1–4 don't explain the dimming, material BSDFs may be losing energy.
+
+**Lambertian check** (most impactful — majority of surfaces):
+- `dev_bsdf_evaluate` must return `Kd / π` (not `Kd / 2π` or just `Kd`)
+- `dev_bsdf_sample` must use cosine-weighted hemisphere sampling
+- `dev_bsdf_pdf` must return `cos(θ) / π`
+- Verify: `f * cos(θ) / pdf = Kd` exactly (energy-conserving throughput for cosine sampling)
+
+**Key file**: `src/renderer/integrator/path_tracer.cuh` (all BSDF implementations)
+
+**GGX/conductor check**:
+- Fresnel values: verify F0 is computed from scene's eta/k values, not hardcoded
+- GGX VNDF sampling: `ggx_sample_halfvector()` must use Heitz 2018 VNDF
+- Smith G term: verify denominator includes both G1(wo) and G1(wi)
+
+**Glass/dielectric check**:
+- `refract_local()`: refracted ray z-component must use `copysignf(cos_t, -wo.z)` to always cross the surface (not always negative)
+- Fresnel probability: pdf must match the stochastic reflection/refraction choice (F or 1-F)
+- Total internal reflection: must be handled correctly (at critical angle, F=1)
+
+**Diagnostic render**: Use `--mode material` to visualize material IDs as false color — confirms materials are assigned to the right geometry.
+
+### Diagnosis Flowchart
+
+```
+Image too dark
+│
+├─ HDR mean_lum low? ──────── YES ──→ Light transport issue (Tiers 2–5)
+│   │
+│   └─ NO ──→ Exposure/tonemapping (Tier 1)
+│
+├─ --mode direct is dark? ── YES ──→ NEE broken (Tier 3)
+│   │
+│   └─ NO (direct bright, combined dark) ──→ MIS weighting bug or indirect energy loss (Tier 5)
+│
+├─ --bounces 2 vs 16 differ? YES ──→ Multi-bounce scene, need more bounces (Tier 4)
+│   │
+│   └─ NO ──→ Issue is in direct lighting or first bounce (Tier 3)
+│
+└─ All above OK, still dark? ──→ Scene Le values incorrect (Tier 2, code inspection)
+```
+
+### PTX Rebuild Caveat
+
+When modifying `.cuh` header files used by OptiX programs, the PTX custom build command may NOT automatically detect header changes (ninja tracks only `optix_programs.cu` as a source dependency). **Always touch the .cu file** to force PTX recompilation:
+
+```
+# Windows
+copy /b src\renderer\accel\optix_programs.cu +,, src\renderer\accel\optix_programs.cu
+
+# Then rebuild
+ninja photon_tracer
+```
+
+Verify PTX actually changed by checking the file size or timestamp of `build/ptx_v5/optix_programs.ptx`. If the PTX size is identical, the change was NOT picked up.

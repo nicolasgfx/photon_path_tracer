@@ -1,0 +1,20 @@
+{
+  "position":      [0.491318, -0.076064, 0.021432],
+  "look_at":       [-0.448300, -0.054066, -0.320086],
+  "fov_deg":       70.000000,
+  "yaw":           -1.222177,
+  "pitch":         0.022000,
+  "roll":          0.000000,
+  "light_scale":   1.000000,
+  "dof_enabled":   false,
+  "dof_focus_dist": 0.196944,
+  "dof_f_number":  8.000000,
+  "sensor_height": 0.024000,
+  "dof_focus_range": 0.050000,
+  "bloom_enabled":   false,
+  "bloom_intensity": 0.500000,
+  "bloom_radius_h":  15.000000,
+  "bloom_radius_v":  15.000000,
+  "firefly_enabled": true,
+  "firefly_threshold": 4.0000
+}

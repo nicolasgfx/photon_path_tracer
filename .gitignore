@@ -1,0 +1,62 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+# Note: *.obj excluded below but scene .obj files are in scenes/
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# Renderer output
+*.ppm
+*.hdr
+*.exr
+
+# Large test data binary files (exceed GitHub 100MB limit)
+tests/data/*.bin
+
+# Exclude test data and output
+tests/data/
+tests/output/
+
+# Debug data
+output/
