@@ -7,7 +7,11 @@
   <img src="doc/gallery/render0.png" alt="Zero Day" width="100%"/>
 </p>
 <p align="center">
-  <img src="doc/gallery/render9.png" alt="Cornellbox glass cubes" width="100%"/>
+  <img src="doc/gallery/render11.png" alt="Hornet" width="100%"/>
+</p>
+<p align="center">
+  <img src="doc/gallery/render12.png" alt="Monster under Bed" width="49%"/>
+  <img src="doc/gallery/render9.png" alt="Class Cubes" width="49%"/>
 </p>
 <p align="center">
   <img src="doc/gallery/render1.png" alt="Bedroom" width="49%"/>
@@ -27,6 +31,7 @@
   This project also uses the <i>Classroom</i> scene from <a href="https://www.blender.org/download/demo-files/#cycles">Blender demo files</a>, authored by Christophe Seux.
   This project also uses the <i>Zero Day</i> scene from <a href="https://github.com/mmp/pbrt-v4-scenes?tab=readme-ov-file">pbrt-v4-scenes</a>, based on project files from <a href="https://www.beeple-crap.com/resources">Beeple's resources page</a> and originally authored by <a href="https://www.beeple-crap.com/about">Mike Winkelmann (Beeple)</a>.
   This repository includes the Cornell Box, Cornell Glass Boxes, Veach Bidir, Staircase, and Staircase 2 scenes; see <a href="CREDITS.md">credits</a> for bundled third-party scene attribution and license details.
+  The <i>Hornet</i> render uses the <a href="https://sketchfab.com/3d-models/silksong-hornet-fanart-57d431b977c841ef8c117af82f109890">Silksong Hornet Fanart</a> model by <a href="https://sketchfab.com/dark_igorek">dark_igorek</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; scene setup and lighting were applied during rendering.
 </sub></p>
 
 <p align="center">

@@ -111,3 +111,16 @@ This repository includes the pbrt-v3 version of *Modern Hall* under
 The version referenced by this project comes from the pbrt-v4-scenes conversion
 of frames from Beeple's *Zero-Day* animation, based on Cinema4D files
 downloaded from Beeple's resources page.
+
+---
+
+## Silksong Hornet Fanart
+
+- **License:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+- **Author:** [dark_igorek](https://sketchfab.com/dark_igorek)
+- **Original title:** Silksong || Hornet Fanart
+- **Source:** https://sketchfab.com/3d-models/silksong-hornet-fanart-57d431b977c841ef8c117af82f109890
+
+3D model of Hornet from *Hollow Knight: Silksong* by dark_igorek, licensed under CC BY 4.0.
+Used as a rendering subject; changes were made (scene import and lighting setup) for this
+path tracer. *Hollow Knight* and *Silksong* characters are property of Team Cherry.
