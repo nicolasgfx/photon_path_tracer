@@ -10,6 +10,10 @@
   <img src="doc/gallery/render11.png" alt="Hornet" width="100%"/>
 </p>
 <p align="center">
+  <img src="doc/gallery/render14.png" alt="Gummy Bears" width="49%"/>
+  <img src="doc/gallery/render13.png" alt="Milk" width="49%"/>
+</p>
+<p align="center">
   <img src="doc/gallery/render12.png" alt="Monster under Bed" width="49%"/>
   <img src="doc/gallery/render9.png" alt="Class Cubes" width="49%"/>
 </p>
